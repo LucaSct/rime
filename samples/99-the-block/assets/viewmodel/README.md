@@ -1,11 +1,15 @@
 # Held weapon art for `--play`
 
 `the_block --play` draws a SCAR-H (`1`), M4A1 (`2`), or Remington MSR with a Schmidt & Bender
-5–25×56 PM II (`3`). Hold `Q` or right mouse with captured cursor to aim. The optical view is
+5–25×56 PM II (`3`). Hold `Q` or right mouse to aim (also during drag-look fallback). The optical view is
 5×; only the physical scope lens magnifies, and the surrounding view keeps its normal FOV.
 The models are third-party [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/) work by four Sketchfab
 creators; **they are not in this repository**, and `.gitignore` here keeps them out. Attribution,
 original links and the exact modifications are in [ASSET-LICENSES.md](ASSET-LICENSES.md).
+
+All three weapons have separate aim poses and authored opposed thumbs/finger curls. The optical
+camera is calibrated through the physical ocular for an apparent 5× image; a fivefold feed focal
+ratio alone would only appear about 2.36× through this aperture. Rifles retain normal magnification.
 
 ## Without the art
 

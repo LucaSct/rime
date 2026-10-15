@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <limits>
 
+#include "play_environment.hpp"
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ground/surface.hpp"
@@ -298,10 +299,13 @@ bool PlayWorld::recenter(core::Vec3 eye) {
         if (find(key)) {
             continue;
         }
-        const auto asset = assets::generate_procedural_tile(config_, key.x, key.z, key.lod);
+        auto asset = assets::generate_procedural_tile(config_, key.x, key.z, key.lod);
         if (!asset) {
             ++stats_.refusals;
             return false;
+        }
+        if (dressed_surface_) {
+            PlayEnvironment::paint_terrain(*asset, config_);
         }
         const auto bytes = render::TerrainPass::predicted_tile_bytes(*asset, false);
         if (stats_.resident >= kMaxGpuSlots || stats_.gpu_bytes + bytes > kMaxGpuBytes) {
@@ -313,7 +317,8 @@ bool PlayWorld::recenter(core::Vec3 eye) {
             ++stats_.refusals;
             return false;
         }
-        const auto tile = pass_->upload(*asset);
+        const auto tile =
+            dressed_surface_ ? pass_->upload(*asset, surface_palette_) : pass_->upload(*asset);
         if (tile == render::kInvalidTerrainTile) {
             (void)slots_.abandon(*slot);
             ++stats_.refusals;

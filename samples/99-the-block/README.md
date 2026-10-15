@@ -19,22 +19,37 @@ build/dev/bin/the_block --headless --ticks 1100   # run the script past where CI
 
 `--play` controls: **WASD** move · **mouse** to look, or hold **right-drag** when the window could
 not lock the cursor · **left click** fires · **F** detonates the charge on the hero building ·
-**1** selects the SCAR-H · **2** selects the M4A1 · **Esc** exits.
+**1** selects the SCAR-H · **2** selects the M4A1 · **3** selects the MSR ·
+**hold right mouse or Q** aims (also during drag-look) · **Esc** exits.
 
 Live play starts at sunset and waits for **F** before detonating the scripted charge. Seeded
 terrain extends beyond the original street: nearby collision is installed before simulation,
 and six moving LOD rings keep ground visible in the distance. Generated tiles are released as
 they leave the resident region and are never cached to disk. The GPU ring holds 304 tiles
-(about 7.8 MiB of tile resources); this excludes the rest of the renderer and physics memory.
+(about 9 MiB of dressed tile resources); this excludes the rest of the renderer and physics memory.
 
-Live play draws a camera-attached SCAR-H by default. Keys **1/2** switch between the two
-prepared, textured viewmodels without changing the replicated weapon or movement input. Their
+Live play draws a camera-attached SCAR-H by default. Keys **1/2/3** switch between the three
+prepared viewmodels without changing the replicated weapon or movement input. The MSR's German
+Schmidt & Bender optic uses a separate camera for apparent 5× magnification inside its lens;
+the outer view keeps its field of view. Rifle aim has no optical magnification. Weighted arms
+solve full wrist frames after weapon motion; fingers retain separately authored grip poses. Their
 meshes and normal/metal-roughness textures are cooked once from
-`assets/viewmodel/held-scar-h.glb` and `held-m4a1.glb` into the build tree; building `the_block`
+`assets/viewmodel/held-scar-h.glb`, `held-m4a1.glb` and `held-msr.glb` into the build tree; building `the_block`
 automatically runs `the_block_viewmodel_cook` when either source changes. Source downloads under
 `assets/viewmodel/source/` are references only and are not cooked. `--viewmodel-smoke` renders
-both guns offscreen, checks visible image coverage and the swap, and checks that mesh, material
+all three guns offscreen, checks held input/aim, real apparent zoom, visible coverage and swaps, and checks that mesh, material
 and texture counts stay resident. Headless/world-smoke paths do not load the models.
+
+The playable environment needs no external art: weathered wall maps, normal/roughness detail,
+grass/dirt terrain and verges, 26 trees, grass tufts, seven puddles, a park pool and clouds are
+generated once from fixed seeds. Water uses screen-space reflections and environment fallback;
+it is opaque and has no refraction. Decorative trees do not add collision bodies. The local GI
+volume fades continuously into sky lighting and retraces fixed world-probe ray sets to avoid
+stationary noise and abrupt edge-probe relighting. See [ADR-0084](../../docs/adr/0084-local-gi-support-and-play-environment.md).
+
+`--environment-smoke --ppm /path/preview` renders street, puddle and park captures, and checks
+texture/reflection/cloud sensitivity above unchanged controls. This proof runs on clean clones
+without the optional weapon art. Headless and performance workloads retain their authored scene.
 
 This prototype returns the player to a supported spawn beyond eight kilometres on either
 horizontal axis or below its recovery floor. Recentring currently waits for old GPU readers,

@@ -312,8 +312,10 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     // These weapon-local sight lines are authored in metres: SCAR rear iron, M4 sight tube,
     // and PM II ocular. Translate each line onto the eye without changing the world camera.
     // Rifle aim has no magnification; only the sniper owns a second optical camera.
+    // Keep rifle butts about 23 cm from the eye: at the old +6 cm Z offset the rear stock
+    // was only 9 cm away and filled the lower view through perspective, despite clear sights.
     constexpr std::array<core::Vec3, 3> aim_offsets{
-        {{-.14f, .09f, .06f}, {-.1378f, .1097f, .06f}, {-.14f, .118f, -.005f}}};
+        {{-.14f, .09f, -.08f}, {-.1378f, .1097f, -.08f}, {-.14f, .118f, -.005f}}};
     local.translation = local.translation + aim_offsets[static_cast<unsigned>(selected_)] * aim_;
     local.rotation = core::quat_from_euler(
         recoil_ * .8f, .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount, 0.0f);

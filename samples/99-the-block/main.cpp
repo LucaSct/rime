@@ -79,6 +79,7 @@
 #include <utility>
 #include <vector>
 
+#include "play_environment.hpp"
 #include "play_sunset.hpp"
 #include "play_viewmodel.hpp"
 #include "play_world.hpp"
@@ -1779,10 +1780,13 @@ struct Visuals {
 struct Demo {
     app::Application app;
     Session session{0x13B10Cull};
+    std::unique_ptr<block_play::PlayEnvironment> environment;
     std::unique_ptr<Visuals> visuals;
     std::unique_ptr<block_play::PlayWorld> play_world;
     std::unique_ptr<block_play::PlayViewmodel> viewmodel;
     bool streamed_world = false;
+    bool environment_enabled = false; // the playable art layer, also exercised without weapon art
+    bool development_hud = true;
     bool viewmodel_enabled = false;  // explicit --play/--viewmodel-smoke only
     float scope_transmission = 1.0f; // real optical-input sensitivity control in the art proof
 
@@ -1977,6 +1981,27 @@ struct Demo {
                     return false;
                 }
             }
+        }
+        if (environment_enabled && visuals && play_world) {
+            environment = std::make_unique<block_play::PlayEnvironment>(*app.device());
+            if (!environment->build(session.client.world,
+                                    visuals->meshes,
+                                    visuals->materials,
+                                    visuals->palette,
+                                    play_world->config())) {
+                std::fprintf(stderr, "99-the-block: environment art generation failed\n");
+                return false;
+            }
+            play_world->set_surface_palette(environment->terrain_palette());
+            auto lighting = visuals->renderer.lighting();
+            lighting.ddgi_volume_fade = true;
+            lighting.ddgi_stable_rays = true;
+            // 28 m wide so the finite support still reaches the 12 m street's facades. All 512
+            // probes fit the existing per-frame budget; 128 fixed rays reduce quadrature bias.
+            lighting.ddgi_probe_count_y = 8;
+            lighting.ddgi_probe_spacing = 4;
+            lighting.ddgi_rays_per_probe = 128;
+            visuals->renderer.set_lighting(lighting);
         }
         if (viewmodel_enabled) {
             if (!visuals)
@@ -2182,6 +2207,8 @@ struct Demo {
         using render::text::HudRenderer;
         render::text::HudRenderer& hud = visuals->hud;
         hud.begin(ctx.extent);
+        if (!development_hud)
+            return;
         if (viewmodel_enabled && viewmodel && viewmodel->scoped() &&
             viewmodel->aim_fraction() > .5f)
             return; // keep the optic and reticle clear of the development statistics panel
@@ -3946,6 +3973,7 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     // the atmosphere kills transmittance for rays that hit the planet -- across the frame. That
     // reads as a rendering bug and is really a weapon proof measuring a world no player sees.
     demo.streamed_world = true;
+    demo.environment_enabled = true;
     if (!demo.app.device()) {
         std::fprintf(stderr, "viewmodel-smoke: no Vulkan device — skipped\n");
         return std::getenv("RIME_REQUIRE_VULKAN") != nullptr ? 1 : 0;
@@ -4277,6 +4305,182 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     return okay ? 0 : 1;
 }
 
+// The playable environment is repository-native content, so unlike the optional weapon art this
+// proof runs on every clone. Perturb actual material/sky/reflection inputs after settling TAA;
+// counts alone would pass if every new mesh were behind the camera or every texture stayed unbound.
+int run_environment_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
+    constexpr std::uint32_t kW = 640, kH = 360;
+    app::AppConfig cfg{};
+    cfg.gpu = true;
+    cfg.render_extent = {kW, kH};
+    Demo demo(cfg);
+    demo.scripted_charge = false;
+    demo.streamed_world = true;
+    demo.environment_enabled = true;
+    demo.development_hud = false;
+    if (!demo.app.device())
+        return std::getenv("RIME_REQUIRE_VULKAN") ? 1 : 0;
+    if (!demo.start(cooked, scene_path) || !demo.environment)
+        return 1;
+    for (int i = 0; i < 30; ++i)
+        demo.step_sim({});
+    play_sunset::apply(demo.session.client.world);
+    play_sunset::apply(demo.session.server.world);
+    if (auto* c = demo.session.client.world.get<render::Camera>(demo.visuals->camera))
+        play_sunset::configure_camera(*c);
+    demo.visuals->renderer.set_sky(play_sunset::sky(Visuals::authored_sky()));
+    demo.use_authored_camera = true;
+    demo.app.on_render([&](app::FrameContext& ctx) { demo.render(ctx); });
+    auto pose = [&](core::Vec3 at, float yaw, float pitch) {
+        gameplay::FirstPersonView view{};
+        view.eye_height = 0;
+        view.yaw = yaw;
+        view.pitch = pitch;
+        demo.visuals->authored_camera = gameplay::eye_transform(view, at);
+    };
+    auto capture = [&]() {
+        demo.app.run_frames(48);
+        const auto tex = demo.app.graph()->physical(demo.visuals->last_ldr);
+        auto px = read_rgba8(*demo.app.device(), tex, kW, kH);
+        demo.app.finish_gpu();
+        return px;
+    };
+    bool okay = true;
+    auto check = [&](bool value, const char* label) {
+        if (!value) {
+            std::fprintf(stderr, "environment-smoke: FAILED %s\n", label);
+            okay = false;
+        }
+    };
+    auto changed = [&](const auto& a, const auto& b) {
+        std::size_t n = 0;
+        if (a.size() != kW * kH * 4 || b.size() != a.size())
+            return n;
+        for (std::size_t i = 0; i < a.size(); i += 4) {
+            int delta = 0;
+            for (unsigned c = 0; c < 3; ++c)
+                delta = std::max(delta, std::abs(static_cast<int>(a[i + c]) - b[i + c]));
+            n += delta > 5 ? 1 : 0;
+        }
+        return n;
+    };
+    const auto& s = demo.environment->stats();
+    check(s.trees == 26 && s.grass_tufts > 3000 && s.grass_tufts <= 3600 && s.puddles == 7 &&
+              s.ponds == 1 && s.wall_materials == 8 && s.textures == 24,
+          "bounded complete content");
+    pose({-6, 1.85f, 0}, play_sunset::kViewYaw, -.05f);
+    const auto street = capture();
+    const auto control = capture();
+    check(street.size() == kW * kH * 4, "street readback");
+    if (!g_ppm.empty())
+        write_ppm((g_ppm + ".street.ppm").c_str(), street, kW, kH);
+
+    std::vector<std::pair<render::MaterialId, render::PbrMaterialDesc>> walls;
+    for (unsigned t = 0; t < blockkit::kTintCount; ++t) {
+        for (auto id : {demo.visuals->palette.facade[t], demo.visuals->palette.band[t]}) {
+            auto d = demo.visuals->materials.get(id);
+            walls.emplace_back(id, d);
+            d.base_color_texture = {};
+            d.normal_texture = {};
+            d.metallic_roughness_texture = {};
+            demo.visuals->materials.update(id, d);
+        }
+    }
+    const auto plain = capture();
+    const auto texture_effect = changed(street, plain), static_control = changed(street, control);
+    check(texture_effect > 1000 && texture_effect > static_control * 3,
+          "visible wall textures exceed settled drift");
+    for (const auto& [id, d] : walls)
+        demo.visuals->materials.update(id, d);
+
+    pose({-3, 2.5f, -2}, play_sunset::kViewYaw, -.32f);
+    const auto wet = capture();
+    const auto wet_control = capture();
+    auto lighting = demo.visuals->renderer.lighting();
+    const auto original = lighting;
+    lighting.ssr_enabled = false;
+    demo.visuals->renderer.set_lighting(lighting);
+    const auto no_ssr = capture();
+    demo.visuals->renderer.set_lighting(original);
+    const auto water_id = demo.environment->water_material();
+    const auto water_desc = demo.visuals->materials.get(water_id);
+    auto rough_water = water_desc;
+    rough_water.roughness = 1;
+    rough_water.normal_texture = {};
+    rough_water.metallic_roughness_texture = {};
+    demo.visuals->materials.update(water_id, rough_water);
+    const auto no_gloss = capture();
+    demo.visuals->materials.update(water_id, water_desc);
+    if (wet.size() != kW * kH * 4 || wet_control.size() != wet.size() ||
+        no_ssr.size() != wet.size() || no_gloss.size() != wet.size()) {
+        check(false, "water control readbacks");
+        return 1;
+    }
+    // Isolate pixels known to belong to the first puddle. Comparing the whole scene could be
+    // satisfied by the existing asphalt reflection even if the new water never drew. The core
+    // circle fits INSIDE every rotated outline. Invert each pixel ray onto the known water
+    // plane, so each counted sample is a unique pixel, not several projections onto one pixel.
+    // Its response must also survive the water-material-only sensitivity check.
+    const auto inv_vp = core::inverse(demo.visuals->renderer.view_proj_unjittered());
+    const auto eye = demo.visuals->authored_camera.translation;
+    std::size_t water_pixels = 0, reflection_pixels = 0, water_drift = 0;
+    for (unsigned y = 0; y < kH; ++y) {
+        for (unsigned x = 0; x < kW; ++x) {
+            const core::Vec4 p =
+                inv_vp * core::Vec4{(x + .5f) * 2 / kW - 1, (y + .5f) * 2 / kH - 1, .5f, 1};
+            const core::Vec3 ray = core::Vec3{p.x / p.w, p.y / p.w, p.z / p.w} - eye;
+            if (ray.y >= -1e-6f)
+                continue;
+            const auto point = eye + ray * ((.022f - eye.y) / ray.y);
+            const float dx = point.x - 1, dz = point.z + 2.6f;
+            if (dx * dx + dz * dz > .3f * .3f)
+                continue;
+            const auto i = (static_cast<std::size_t>(y) * kW + x) * 4;
+            int d = 0, c = 0, m = 0;
+            for (unsigned k = 0; k < 3; ++k) {
+                d = std::max(d, std::abs(static_cast<int>(wet[i + k]) - no_ssr[i + k]));
+                c = std::max(c, std::abs(static_cast<int>(wet[i + k]) - wet_control[i + k]));
+                m = std::max(m, std::abs(static_cast<int>(wet[i + k]) - no_gloss[i + k]));
+            }
+            ++water_pixels;
+            reflection_pixels += d > 5 && m > 5 ? 1 : 0;
+            water_drift += c > 5 ? 1 : 0;
+        }
+    }
+    check(water_pixels > 100 && reflection_pixels > water_pixels / 5 &&
+              reflection_pixels > water_drift * 3,
+          "puddle reflection responds above unchanged control");
+    if (!g_ppm.empty())
+        write_ppm((g_ppm + ".puddles.ppm").c_str(), wet, kW, kH);
+
+    pose({15, 2.8f, 26}, play_sunset::kViewYaw, -.14f);
+    const auto park = capture();
+    if (!g_ppm.empty())
+        write_ppm((g_ppm + ".park.ppm").c_str(), park, kW, kH);
+    const auto sky = demo.visuals->renderer.sky();
+    auto clear = sky;
+    clear.clouds_enabled = false;
+    demo.visuals->renderer.set_sky(clear);
+    const auto cloudless = capture();
+    const auto cloud_effect = changed(park, cloudless);
+    check(cloud_effect > 1000, "visible cloud layer responds to its input");
+    check(demo.play_world->stats().refusals == 0 && !demo.session.world_stopped,
+          "textured terrain remains resident and valid");
+    std::printf("environment-smoke: textures %zu px / static %zu; water reflections %zu/%zu / "
+                "static %zu; clouds %zu; trees %u grass %u puddles %u ponds %u\n",
+                texture_effect,
+                static_control,
+                reflection_pixels,
+                water_pixels,
+                water_drift,
+                cloud_effect,
+                s.trees,
+                s.grass_tufts,
+                s.puddles,
+                s.ponds);
+    return okay ? 0 : 1;
+}
+
 // ── --play: walk around it ──────────────────────────────────────────────────────────────────────
 int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
@@ -4290,6 +4494,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     Demo demo(cfg);
     demo.scripted_charge = false; // interactive: wait for F, not the tape
     demo.streamed_world = true;
+    demo.environment_enabled = true;
     demo.viewmodel_enabled = true;
     if (demo.app.device() == nullptr) {
         std::fprintf(stderr, "99-the-block: --play needs a Vulkan device\n");
@@ -4424,7 +4629,8 @@ int main(int argc, char** argv) {
         Perf,
         WorldSmoke,
         WorldGpuSmoke,
-        ViewmodelSmoke
+        ViewmodelSmoke,
+        EnvironmentSmoke
     } mode = Mode::Headless;
     PerfOptions perf{};
     std::filesystem::path cooked = RIME_BLOCK_COOKED_DIR;
@@ -4442,6 +4648,8 @@ int main(int argc, char** argv) {
             mode = Mode::WorldGpuSmoke;
         } else if (a == "--viewmodel-smoke") {
             mode = Mode::ViewmodelSmoke;
+        } else if (a == "--environment-smoke") {
+            mode = Mode::EnvironmentSmoke;
         } else if (a == "--perf") {
             mode = Mode::Perf;
         } else if (a == "--frames" && i + 1 < argc) {
@@ -4504,6 +4712,9 @@ int main(int argc, char** argv) {
     }
     if (mode == Mode::ViewmodelSmoke) {
         return run_viewmodel_smoke(cooked, scene_path);
+    }
+    if (mode == Mode::EnvironmentSmoke) {
+        return run_environment_smoke(cooked, scene_path);
     }
     return run_headless(cooked, scene_path);
 }

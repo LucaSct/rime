@@ -240,6 +240,12 @@ Entries are grouped roughly by area and kept short on purpose.
   direction (an *octahedral*-mapped image, not one number), updated a little every frame by
   casting a fresh batch of rays and blending the result in with *hysteresis*. See
   [math/ddgi.md](math/ddgi.md) §2–§6.
+- **Quadrature.** Approximating an integral with a finite set of weighted samples. Stable DDGI
+  quadrature keeps ray directions fixed per world probe while retracing changing geometry;
+  it trades temporal noise for spatial sampling bias. [ADR-0084](adr/0084-local-gi-support-and-play-environment.md).
+- **GI support envelope.** The continuous region where a finite local probe field influences
+  surfaces. Fading against the moving camera rather than snapped atlas bounds avoids a lighting
+  jump at recenter; outside it the renderer uses its environment fallback.
 - **Octahedral mapping.** A bijection between the unit sphere and a small square image (Cigolle et
   al., 2014) — one flat 2-D tile stores a function over every direction, no cube-map's six faces or
   a lat-long image's pole singularities. Bilinear filtering right at a tile's edge needs a
