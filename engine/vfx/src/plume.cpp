@@ -93,6 +93,7 @@ bool PlumeEmitter::update(ParticleField& field,
 
 void PlumeEmitter::reset() noexcept {
     fractional_debt_ = 0.0;
+    add_saturating(stats_.discarded_on_reset, stats_.deferred_particles);
     stats_.deferred_particles = 0;
     add_saturating(stats_.resets, 1);
 }

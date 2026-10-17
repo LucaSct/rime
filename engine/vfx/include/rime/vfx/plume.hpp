@@ -18,6 +18,7 @@ struct PlumeStats {
     std::uint64_t emitted_particles = 0;   // forwarded to ParticleField (it may drop at capacity)
     std::uint64_t dropped_particles = 0;   // overflow beyond finite deferred storage
     std::uint64_t deferred_particles = 0;  // current whole-particle debt, a gauge
+    std::uint64_t discarded_on_reset = 0;  // debt deliberately cleared by reset()
     std::uint64_t rejected_updates = 0;
     std::uint64_t capped_updates = 0;
     std::uint64_t resets = 0;

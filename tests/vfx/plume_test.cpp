@@ -58,7 +58,8 @@ TEST_CASE("plume cap conserves bounded work and reset discards debt") {
     CHECK(field.count() == 3);
     CHECK(plume.stats().requested_particles ==
           plume.stats().emitted_particles + plume.stats().dropped_particles +
-              plume.stats().deferred_particles + 3); // reset discarded three particles
+              plume.stats().deferred_particles + plume.stats().discarded_on_reset);
+    CHECK(plume.stats().discarded_on_reset == 3);
 }
 
 TEST_CASE("plume pool capacity is accounted by the field") {
