@@ -101,6 +101,7 @@ void PlumeEmitter::reset() noexcept {
 void PlumeEmitter::reset_stats() noexcept {
     const std::uint64_t debt = stats_.deferred_particles;
     stats_ = {};
+    stats_.carried_in_particles = debt;
     stats_.deferred_particles = debt;
 }
 

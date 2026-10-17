@@ -14,6 +14,9 @@ namespace rime::vfx {
 // The same valid call sequence is deterministic. Different dt partitions can produce different
 // scatter/particle ages and are not promised to have identical visual state.
 struct PlumeStats {
+    // For unsaturated counters: carried_in + requested = emitted + dropped + deferred +
+    // discarded_on_reset. reset_stats() starts a new interval with existing whole debt carried in.
+    std::uint64_t carried_in_particles = 0;
     std::uint64_t requested_particles = 0; // whole particles accrued from accepted time steps
     std::uint64_t emitted_particles = 0;   // forwarded to ParticleField (it may drop at capacity)
     std::uint64_t dropped_particles = 0;   // overflow beyond finite deferred storage
@@ -33,6 +36,7 @@ public:
     // dt, rate and intensity must be finite and positive; bounds must be finite, ordered and
     // representable by ParticleField. Rejected calls leave debt and the field RNG unchanged.
     // A valid update forwards at most max_per_update particles, independent of elapsed dt.
+    // To turn a source off, call reset() rather than update with a zero rate or intensity.
     [[nodiscard]] bool update(ParticleField& field,
                               core::Vec3 bounds_min,
                               core::Vec3 bounds_max,
@@ -46,6 +50,7 @@ public:
 
     [[nodiscard]] const PlumeStats& stats() const noexcept { return stats_; }
 
+    // Starts a new accounting interval while preserving deferred and fractional debt.
     void reset_stats() noexcept;
 
 private:
