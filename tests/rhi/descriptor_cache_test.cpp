@@ -158,7 +158,9 @@ void check_px(const Target& t, std::uint32_t x, std::uint32_t y, Rgba want) {
 
 // Runs every scenario against a fresh device created under the CURRENT environment.
 void run_scenarios(bool cache_on) {
-    auto device = create_device({});
+    DeviceDesc desc{};
+    desc.enable_validation = true; // Exercise dynamic offsets under validation even in Release.
+    auto device = create_device(desc);
     if (!device) {
         if (vulkan_required()) {
             FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
