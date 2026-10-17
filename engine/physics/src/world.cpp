@@ -1050,6 +1050,28 @@ void PhysicsWorld::destroy_body(BodyId id) {
     // increment.
     const ShapeDesc released_shape = p.shape[d];
 
+    // Removing a collider can remove a sleeper's support without creating an awake contact.
+    // Island propagation alone cannot notice that: the remaining island is still wholly asleep
+    // and skips gravity forever. Wake only sleeping dynamics in the old fat-AABB neighborhood
+    // before removing the proxy. The broadphase margin includes resting/speculative contacts;
+    // conservative extra neighbors are harmless, and the next step propagates through their
+    // remaining contact islands. Each wake is independent, so tree traversal order is irrelevant.
+    // Sensors never supported anything. Querying in place needs no temporary neighbor roster.
+    if (p.sensor[d] == 0) {
+        const Aabb removed_bounds = p.tree_for(p.motion[d]).proxy_aabb(p.proxy[d]);
+        p.dynamic_tree.query(removed_bounds, [&](std::uint32_t slot) {
+            if (slot == id.index) {
+                return;
+            }
+            const std::uint32_t neighbor = p.slots[slot].dense;
+            if (p.motion[neighbor] == static_cast<std::uint8_t>(MotionType::Dynamic) &&
+                p.sensor[neighbor] == 0 && p.asleep[neighbor] != 0) {
+                p.asleep[neighbor] = 0;
+                p.clear_rest(neighbor);
+            }
+        });
+    }
+
     // Drop this body's broadphase proxy first (its tree is chosen by the current motion type).
     p.tree_for(p.motion[d]).destroy_proxy(p.proxy[d]);
 

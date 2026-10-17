@@ -301,6 +301,15 @@ public:
     // a settled piece stays on the roster.
     [[nodiscard]] std::size_t debris_count() const noexcept;
 
+    // Cumulative count of stale Settled labels the budget pass repaired from body state because
+    // the physics event stream could not report the wake. PhysicsWorld snapshots sleep flags at
+    // the top of step() and diffs them at the tail, so a wake that happens BETWEEN steps --
+    // destroy_body's neighbour wake, wake_body, set_body_state -- lands before the snapshot and
+    // is invisible to the diff permanently, not merely late. Exposed so a test can assert this
+    // stays ZERO when nothing wakes between steps: a non-zero reading there would mean the
+    // repair is duplicating work the event path already did.
+    [[nodiscard]] std::uint64_t reconciled_wake_count() const noexcept;
+
     // Debris #i's physics body / source instance / member part ids (cook order, ascending). A
     // one-part island is a hull body; a multi-part island is a runtime dynamic compound (ADR-0029
     // §2). Null / empty for an out-of-range index.

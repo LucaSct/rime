@@ -388,3 +388,71 @@ TEST_CASE("the pose route does not let a steadily DRIFTING body sleep") {
     CHECK_FALSE(drifting_body_sleeps_within(just_over, 300));
     CHECK(drifting_body_sleeps_within(just_under, 300)); // the speed route still works
 }
+
+// Collider removal has no incoming impact to wake a stack. It must invalidate the sleep
+// assertion locally, including when a fracture replaces a static remainder or reclaims rubble.
+TEST_CASE("support removal wakes a sleeping stack without waking distant islands") {
+    for (const auto motion : {physics::MotionType::Static, physics::MotionType::Dynamic}) {
+        CAPTURE(static_cast<unsigned>(motion));
+        physics::PhysicsWorld w;
+        add_ground(w);
+        physics::BodyDesc desc;
+        desc.motion = motion;
+        desc.shape = box({0.5f, 0.5f, 0.5f});
+        desc.position = {0.0f, 0.5f, 0.0f};
+        const auto support = w.create_body(desc);
+        const auto lower = add_dynamic(w, desc.shape, {0.0f, 1.5f, 0.0f});
+        const auto upper = add_dynamic(w, desc.shape, {0.0f, 2.5f, 0.0f});
+        const auto distant = add_dynamic(w, desc.shape, {10.0f, 0.5f, 0.0f});
+        for (int i = 0; i < 360; ++i) {
+            w.step(kDt);
+        }
+        REQUIRE(w.is_asleep(lower));
+        REQUIRE(w.is_asleep(upper));
+        REQUIRE(w.is_asleep(distant));
+
+        w.destroy_body(support);
+        CHECK_FALSE(w.is_asleep(lower));
+        CHECK(w.is_asleep(distant));
+        w.step(kDt);
+        CHECK_FALSE(w.is_asleep(upper)); // the remaining contact island propagates the wake
+        for (int i = 0; i < 120; ++i) {
+            w.step(kDt);
+        }
+        physics::BodyState lower_state{}, upper_state{};
+        REQUIRE(w.get_body_state(lower, lower_state));
+        REQUIRE(w.get_body_state(upper, upper_state));
+        CHECK(lower_state.position.y == doctest::Approx(0.5f).epsilon(0.05f));
+        CHECK(upper_state.position.y == doctest::Approx(1.5f).epsilon(0.05f));
+        CHECK(w.is_asleep(distant));
+    }
+}
+
+TEST_CASE("support removal respects stale generations and sensor-only neighbors") {
+    physics::PhysicsWorld w;
+    add_ground(w);
+    const auto stale = add_static(w, box({0.5f, 0.5f, 0.5f}), {100.0f, 0.5f, 0.0f});
+    w.destroy_body(stale);
+    const auto replacement = add_static(w, box({0.5f, 0.5f, 0.5f}), {0.0f, 0.5f, 0.0f});
+    REQUIRE(replacement.index == stale.index);
+    REQUIRE(replacement.generation != stale.generation);
+    const auto sleeper = add_dynamic(w, box({0.5f, 0.5f, 0.5f}), {0.0f, 1.5f, 0.0f});
+    physics::BodyDesc sensor;
+    sensor.motion = physics::MotionType::Static;
+    sensor.shape = box({0.5f, 0.5f, 0.5f});
+    sensor.position = {0.0f, 1.5f, 0.0f};
+    sensor.sensor = true;
+    const auto trigger = w.create_body(sensor);
+    for (int i = 0; i < 240; ++i) {
+        w.step(kDt);
+    }
+    REQUIRE(w.is_asleep(sleeper));
+    w.destroy_body(stale);
+    w.destroy_body({});
+    CHECK(w.is_alive(replacement));
+    CHECK(w.is_asleep(sleeper));
+    w.destroy_body(trigger);
+    CHECK(w.is_asleep(sleeper));
+    w.destroy_body(replacement);
+    CHECK_FALSE(w.is_asleep(sleeper));
+}
