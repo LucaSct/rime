@@ -97,6 +97,7 @@ private:
         ecs::Entity entity{};
         float age = kCaseLifetime;
         bool bounced = false;
+        bool settled = false;
     };
 
     void show(ecs::World& world,

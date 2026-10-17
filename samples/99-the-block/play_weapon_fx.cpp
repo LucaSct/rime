@@ -173,7 +173,7 @@ void PlayWeaponFx::advance(float dt) noexcept {
         if (casing.age >= kCaseLifetime)
             continue;
         casing.age = std::min(casing.age + dt, kCaseLifetime);
-        if (casing.age >= kCaseLifetime)
+        if (casing.age >= kCaseLifetime || casing.settled)
             continue;
         casing.previous = casing.position;
         casing.position += casing.velocity * dt + core::Vec3{0, -4.905f * dt * dt, 0};
@@ -251,6 +251,7 @@ void PlayWeaponFx::pose(ecs::World& world,
             casing.rotation = along_z(forward);
             casing.age = 0.0f;
             casing.bounced = false;
+            casing.settled = false;
         }
     }
     for (auto& shot : shots_) {
@@ -337,7 +338,7 @@ void PlayWeaponFx::pose(ecs::World& world,
     }
     for (auto& casing : cases_) {
         const bool active = casing.age < kCaseLifetime;
-        if (active && physics && !casing.bounced) {
+        if (active && physics && !casing.settled) {
             const auto travel = casing.position - casing.previous;
             const float length = core::length(travel);
             if (length > 1e-5f) {
@@ -346,11 +347,17 @@ void PlayWeaponFx::pose(ecs::World& world,
                 scenery.dynamics = false; // avoid the shooter's own moving capsule
                 if (physics->raycast({casing.previous, travel, length}, hit, scenery)) {
                     casing.position = hit.point + hit.normal * .006f;
-                    const float into = core::dot(casing.velocity, hit.normal);
-                    if (into < 0.0f)
-                        casing.velocity -= hit.normal * (1.3f * into);
-                    casing.velocity *= .55f;
-                    casing.bounced = true;
+                    if (casing.bounced) {
+                        // One visible bounce, then rest instead of sinking through the floor.
+                        casing.velocity = {};
+                        casing.settled = true;
+                    } else {
+                        const float into = core::dot(casing.velocity, hit.normal);
+                        if (into < 0.0f)
+                            casing.velocity -= hit.normal * (1.3f * into);
+                        casing.velocity *= .55f;
+                        casing.bounced = true;
+                    }
                 }
             }
         }

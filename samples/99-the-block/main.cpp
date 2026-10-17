@@ -1946,15 +1946,22 @@ struct Demo {
                          "99-the-block: building support: loaded=%d all_supported=%d buildings=%u "
                          "quarantined=%u nodes=%u roots=%u bond_edges=%u contact_edges=%u "
                          "unreachable=%u missing_geometry=%u\n",
-                         loaded ? 1 : 0, built ? 1 : 0, bs.buildings, bs.quarantined_buildings,
-                         bs.nodes, bs.roots, bs.bond_edges, bs.contact_edges,
-                         bs.initial_unreachable_parts, bs.missing_geometry);
+                         loaded ? 1 : 0,
+                         built ? 1 : 0,
+                         bs.buildings,
+                         bs.quarantined_buildings,
+                         bs.nodes,
+                         bs.roots,
+                         bs.bond_edges,
+                         bs.contact_edges,
+                         bs.initial_unreachable_parts,
+                         bs.missing_geometry);
             session.building_support = building_support.get();
         }
         if (visuals) {
             visuals->dress(session.client.world);
             if (session.client.city) {
-                city_dresser.init(visuals->palette, visuals->materials);
+                city_dresser.init(visuals->palette, visuals->materials, visuals->meshes);
             }
             if (visuals->camera == ecs::kNullEntity) {
                 std::fprintf(stderr, "99-the-block: the block's scene carries no camera\n");
@@ -2174,6 +2181,8 @@ struct Demo {
                                 shot.normal,
                                 shot.body,
                                 &session.server.physics);
+                if (!viewmodel || !viewmodel->scoped())
+                    weapon_fx->queue_case();
             }
         }
         if (session.world_stopped) {
@@ -2272,7 +2281,6 @@ struct Demo {
         ecs::World& world = session.client.world;
         if (weapon_fx) {
             weapon_fx->advance(static_cast<float>(ctx.frame_dt));
-            weapon_fx->pose(world, &session.server.physics);
         }
         if (auto* tf = world.get<ecs::WorldTransform>(visuals->camera)) {
             tf->value =
@@ -2298,6 +2306,24 @@ struct Demo {
             visuals->renderer.set_first_person_draws(viewmodel->pose(eye),
                                                      viewmodel->identity_epoch());
             visuals->renderer.set_first_person_deformations(viewmodel->deformations());
+            if (weapon_fx) {
+                // Pose the gun before its live flash. Fixed-tick shot positions lag the
+                // predicted camera during movement; only accepted world paths stay there.
+                const auto direction = core::rotate(eye.rotation, core::Vec3{0, 0, -1});
+                const auto right = core::rotate(eye.rotation, core::Vec3{1, 0, 0});
+                const auto up = core::rotate(eye.rotation, core::Vec3{0, 1, 0});
+                const auto velocity = session.client.predictor.seeded()
+                                          ? session.client.predictor.state().velocity
+                                          : core::Vec3{};
+                const auto muzzle = viewmodel->muzzle_world(eye);
+                const block_play::PlayWeaponFx::ViewPose view{eye.translation,
+                                                              direction,
+                                                              muzzle,
+                                                              muzzle - direction * .32f +
+                                                                  right * .075f - up * .025f,
+                                                              velocity};
+                weapon_fx->pose(world, &session.server.physics, &view);
+            }
             if (viewmodel->scoped()) {
                 // Each optical view owns its history. The main camera is never mutated,
                 // and both views read the same replicated world and streamed terrain.
@@ -2353,6 +2379,8 @@ struct Demo {
                 visuals->renderer.set_first_person_scope({}, viewmodel->lens(), params);
             }
         }
+        if (weapon_fx && (!viewmodel || !viewmodel_enabled))
+            weapon_fx->pose(world, &session.server.physics);
         visuals->renderer.reset_cull_stats();
         visuals->last_ldr = visuals->renderer.render(*ctx.graph, world, ctx.extent, true).ldr;
         visuals->cull = visuals->renderer.cull_stats();
@@ -2377,9 +2405,9 @@ struct Demo {
             return; // keep every aiming sight clear of the development statistics panel
 
         if (player_help && viewmodel) {
-            constexpr std::array names{"1 SCAR-H | RMB: holographic sight | LMB: fire",
-                                       "2 M4A1 | RMB: iron sights | LMB: fire",
-                                       "3 MSR / PM II | hold RMB: 5x scope | LMB: fire"};
+            constexpr std::array names{"1 SCAR-H | RMB: sight | hold LMB: fire | R: reload",
+                                       "2 M4A1 | RMB: sight | hold LMB: fire | R: reload",
+                                       "3 MSR / PM II | RMB: scope | click LMB: fire | R: reload"};
             hud.text(st::kPadding,
                      static_cast<float>(ctx.extent.height) - 24.0f,
                      names[static_cast<unsigned>(viewmodel->selected())],
@@ -4891,19 +4919,18 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         const platform::CursorMode cursor =
             demo.app.window()->set_cursor_mode(platform::CursorMode::Locked);
         bindings.look_requires_drag = gameplay::look_requires_drag_for(cursor);
-        std::printf(
-            "99-the-block: presenting in a window.\n"
-            "  WASD move · %s to look · HOLD LEFT MOUSE for automatic fire\n"
-            "  1 SCAR-H · 2 M4A1 · 3 MSR / Schmidt & Bender PM II\n"
-            "  Hold Q or RIGHT MOUSE to aim (also while dragging) · F detonates · ESC exits\n",
-            bindings.look_requires_drag
-                // Not "this display cannot lock": at startup the pointer is usually not
-                // over the window yet, and on Wayland that alone is enough to refuse. The
-                // scheme switches by itself the moment the lock is granted, so the text
-                // says what is true now and what will change rather than diagnosing the
-                // platform from one early answer.
-                ? "hold RIGHT-DRAG (free look engages if the cursor locks)"
-                : "MOVE THE MOUSE");
+        std::printf("99-the-block: presenting in a window.\n"
+                    "  WASD move · %s to look · LEFT MOUSE fires (rifles hold, sniper click)\n"
+                    "  1 SCAR-H · 2 M4A1 · 3 MSR / Schmidt & Bender PM II\n"
+                    "  Q / RIGHT MOUSE aims · R reload animation · F detonates · ESC exits\n",
+                    bindings.look_requires_drag
+                        // Not "this display cannot lock": at startup the pointer is usually not
+                        // over the window yet, and on Wayland that alone is enough to refuse. The
+                        // scheme switches by itself the moment the lock is granted, so the text
+                        // says what is true now and what will change rather than diagnosing the
+                        // platform from one early answer.
+                        ? "hold RIGHT-DRAG (free look engages if the cursor locks)"
+                        : "MOVE THE MOUSE");
     } else {
         std::printf("99-the-block: no display available; running the script headless instead.\n");
     }
@@ -4917,7 +4944,23 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     const float look_sensitivity = demo.session.client.view.sensitivity;
 
     demo.app.add_sim_stage(app::Application::SimStage::PreSim, [&](ecs::World&, double) {
-        demo.step_sim(gameplay_net::to_input_command(live.tick()));
+        auto input = live.tick();
+        if (demo.viewmodel) {
+            const auto selected = demo.viewmodel->selected();
+            // This local play session owns one authoritative weapon. Selection configures
+            // its existing trigger contract; it does not invent a replicated inventory.
+            demo.session.server.weapon.automatic =
+                selected != block_play::PlayViewmodel::Weapon::Sniper;
+            demo.session.server.weapon.cooldown_ticks =
+                selected == block_play::PlayViewmodel::Weapon::Sniper ? 72u
+                : selected == block_play::PlayViewmodel::Weapon::Scar ? 8u
+                                                                      : 7u;
+            if (demo.viewmodel->busy()) {
+                input.held &= ~gameplay::kActionFire;
+                input.pressed &= ~gameplay::kActionFire;
+            }
+        }
+        demo.step_sim(gameplay_net::to_input_command(input));
     });
     demo.app.on_render([&](app::FrameContext& ctx) {
         // The look scheme follows the cursor mode the window ACTUALLY holds, every frame. It is
@@ -4953,6 +4996,8 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
                                       : core::Vec3{};
             demo.viewmodel->advance(
                 static_cast<float>(ctx.frame_dt), velocity, demo.shot_presented);
+            if (demo.weapon_fx && demo.viewmodel->take_case_ejection())
+                demo.weapon_fx->queue_case();
             demo.shot_presented = false;
         }
         demo.render(ctx);
