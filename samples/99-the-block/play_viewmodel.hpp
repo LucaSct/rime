@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "play_arm_ik.hpp"
+#include "play_weapon_motion.hpp"
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/manifest.hpp"
 #include "rime/core/math/transform.hpp"
@@ -47,6 +48,18 @@ public:
     void select(Weapon weapon) noexcept;
     void advance(float frame_dt, core::Vec3 actual_velocity, bool fired) noexcept;
     void observe_camera(core::Vec3 eye) noexcept;
+
+    [[nodiscard]] bool begin_reload() noexcept {
+        return motion_.begin_reload(static_cast<PlayWeaponMotion::Weapon>(selected_));
+    }
+
+    [[nodiscard]] bool reloading() const noexcept { return motion_.reloading(); }
+
+    [[nodiscard]] bool cycling() const noexcept { return motion_.cycling(); }
+
+    [[nodiscard]] bool busy() const noexcept { return motion_.busy(); }
+
+    [[nodiscard]] bool take_case_ejection() noexcept { return motion_.take_case_ejection(); }
 
     // Consumes the already-folded frame levels/selection edges. A right drag can look and aim
     // together when pointer capture is unavailable; capture must never disable the aim button.
@@ -139,6 +152,7 @@ private:
     float gait_phase_ = 0.0f;
     float bob_amount_ = 0.0f;
     float recoil_ = 0.0f;
+    PlayWeaponMotion motion_;
     bool aiming_ = false;
     float aim_ = 0.0f;
     render::DrawItem lens_{};

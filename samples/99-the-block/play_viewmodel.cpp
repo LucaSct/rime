@@ -386,6 +386,7 @@ void PlayViewmodel::select(Weapon weapon) noexcept {
         gait_phase_ = 0.0f;
         recoil_ = 0.0f;
         aim_ = 0.0f;
+        motion_.cancel(static_cast<PlayWeaponMotion::Weapon>(weapon));
         for (auto& model : models_)
             model.history = false;
     }
@@ -411,7 +412,11 @@ void PlayViewmodel::apply_controls(const platform::Input& devices,
             select(Weapon::M4);
         if (event.key.key == platform::Key::Num3)
             select(Weapon::Sniper);
+        if (event.key.key == platform::Key::R)
+            (void)begin_reload();
     }
+    if (devices.key_pressed(platform::Key::R))
+        (void)begin_reload();
     set_aiming(devices.key_down(platform::Key::Q) ||
                devices.mouse_down(platform::MouseButton::Right));
 }
@@ -438,15 +443,17 @@ bool PlayViewmodel::scope_feed_visible(const core::Transform& eye) const noexcep
 }
 
 void PlayViewmodel::advance(float frame_dt, core::Vec3 actual_velocity, bool fired) noexcept {
-    const float dt = std::clamp(frame_dt, 0.0f, 0.05f);
+    // Animation time uses the entire finite frame; a slow frame must not extend a reload.
+    const float dt = std::isfinite(frame_dt) && frame_dt >= 0.0f ? frame_dt : 0.0f;
+    motion_.advance(frame_dt, static_cast<PlayWeaponMotion::Weapon>(selected_), fired);
     const float speed =
         std::sqrt(actual_velocity.x * actual_velocity.x + actual_velocity.z * actual_velocity.z);
     gait_phase_ += std::min(speed, 10.0f) * dt * 1.6f;
     bob_amount_ = std::clamp(speed / 6.0f, 0.0f, 1.0f);
     if (fired)
-        recoil_ = std::min(recoil_ + 0.012f, 0.035f);
+        recoil_ = std::min(recoil_ + (scoped() ? 0.028f : 0.012f), 0.06f);
     recoil_ *= std::exp(-14.0f * dt);
-    const float target_aim = aiming_ ? 1.0f : 0.0f;
+    const float target_aim = aiming_ && !motion_.busy() ? 1.0f : 0.0f;
     aim_ += (target_aim - aim_) * (1.0f - std::exp(-16.0f * dt));
 }
 
@@ -466,6 +473,7 @@ void PlayViewmodel::observe_camera(core::Vec3 eye) noexcept {
 
 std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& camera) {
     draws_.clear();
+    const auto motion_pose = motion_.pose();
     core::Transform local{};
     local.translation = {0.006f * std::sin(gait_phase_) * bob_amount_,
                          0.008f * std::sin(2.0f * gait_phase_) * bob_amount_ - recoil_,
@@ -480,15 +488,33 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     const auto index = static_cast<unsigned>(selected_);
     local.translation =
         local.translation + kAimOffsets[index] * aim_ + kHipOffsets[index] * (1 - aim_);
-    local.rotation = core::quat_from_euler(
-        recoil_ * .8f, .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount, 0.0f);
+    // The whole gun lowers and rolls during reload; there is no separate animated magazine.
+    local.translation = local.translation + core::Vec3{0.02f * motion_pose.lower,
+                                                       -0.12f * motion_pose.lower,
+                                                       0.09f * motion_pose.lower};
+    local.rotation =
+        core::quat_from_euler(recoil_ * .8f + 0.10f * motion_pose.lower,
+                              .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount,
+                              0.22f * motion_pose.tilt);
     const core::Mat4 camera_matrix = core::to_matrix(camera);
     const core::Mat4 weapon_local = core::to_matrix(local) * sight_alignment(index, aim_);
     weapon_local_ = weapon_local;
     const core::Mat4 model = camera_matrix * weapon_local;
     auto& selected = models_[static_cast<unsigned>(selected_)];
-    const auto vertices = selected.arms.solve(
-        selected.arms_from_camera * weapon_local, selected.grips, selected.elbow_poles);
+    auto grips = selected.grips;
+    // Slot zero is the support left hand; slot one is the firing right hand. Moving
+    // wrist targets leaves the shoulder anchors fixed and uses the existing CPU IK mesh.
+    grips[0] = core::mat4_translation({0.035f * motion_pose.left_magazine,
+                                       -0.095f * motion_pose.left_magazine,
+                                       0.10f * motion_pose.left_magazine}) *
+               grips[0];
+    grips[1] =
+        core::mat4_translation({0.025f * motion_pose.right_bolt,
+                                0.035f * motion_pose.right_bolt,
+                                -0.11f * motion_pose.right_bolt + 0.095f * motion_pose.bolt_pull}) *
+        grips[1];
+    const auto vertices =
+        selected.arms.solve(selected.arms_from_camera * weapon_local, grips, selected.elbow_poles);
     for (std::size_t i = 0; i < vertices.size(); ++i) {
         const core::Vec3 current{vertices[i].px, vertices[i].py, vertices[i].pz};
         selected.previous[i] = selected.history ? selected.last[i] : current;
