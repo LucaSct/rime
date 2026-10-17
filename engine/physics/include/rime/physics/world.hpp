@@ -266,8 +266,11 @@ struct IslandSolveCost {
 
 // Optional, per-world diagnostic for the most recent contact build. Counts describe work; times
 // are wall-clock samples and must never enter simulation state or world_hash(). The time buckets
-// are disjoint: heightfield_ns includes terrain's cache lookups and speculative routine, while
-// warmcache_ns covers only plain and compound contacts. Exact calls count collide_shapes;
+// are disjoint: compound_midphase_ns is whole compound child-loop time less the separately timed
+// exact, speculative, and cache regions. Its remainder includes AABB testing, loop overhead,
+// manifold setup, feature folding, and output append. heightfield_ns includes terrain's cache
+// lookups and speculative routine, while warmcache_ns covers only plain and compound contacts.
+// Exact calls count collide_shapes;
 // speculative calls count both convex and terrain attempts. Posed children include the one
 // surrogate child of a plain side of a compound pair. Gaps are dispatch and clock overhead.
 struct ContactProfile {
@@ -288,7 +291,7 @@ struct ContactProfile {
     std::uint64_t plain_exact_ns = 0;
     std::uint64_t plain_speculative_ns = 0;
     std::uint64_t compound_pose_ns = 0;
-    std::uint64_t compound_cull_ns = 0;
+    std::uint64_t compound_midphase_ns = 0;
     std::uint64_t compound_exact_ns = 0;
     std::uint64_t compound_speculative_ns = 0;
     std::uint64_t heightfield_ns = 0;

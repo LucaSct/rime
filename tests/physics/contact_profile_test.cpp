@@ -122,7 +122,7 @@ TEST_CASE("contact profile counts all dispatch arms without changing contact res
         CHECK(profile.pair_query_ns > 0);
         CHECK(profile.pair_canonicalize_ns > 0);
         CHECK(profile.compound_pose_ns > 0);
-        CHECK(profile.compound_cull_ns > 0);
+        CHECK(profile.compound_midphase_ns > 0);
         CHECK(profile.plain_exact_ns > 0);
         CHECK(profile.compound_exact_ns > 0);
         CHECK(profile.heightfield_ns > 0);
@@ -154,6 +154,12 @@ TEST_CASE("contact profile counts all dispatch arms without changing contact res
         check_manifolds(manifolds_a, manifolds_b);
         CHECK(on.contact_profile().produced_manifolds == manifolds_a.size());
         CHECK(on.contact_profile().speculative_calls == 0); // dt=0 inspection seam
+        const auto pair_count = on.contact_profile().unique_pairs;
+        const auto query_time = on.contact_profile().pair_query_ns;
+        std::vector<physics::Pair> pairs;
+        on.compute_pairs(pairs); // a standalone broadphase query must not overwrite the build
+        CHECK(on.contact_profile().unique_pairs == pair_count);
+        CHECK(on.contact_profile().pair_query_ns == query_time);
         CHECK(off.contact_profile().raw_candidate_keys == 0);
         CHECK(off.contact_profile().pair_query_ns == 0);
     }
