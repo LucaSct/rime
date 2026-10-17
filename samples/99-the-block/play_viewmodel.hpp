@@ -123,6 +123,10 @@ public:
 
     [[nodiscard]] float magazine_contact_gap() const noexcept { return magazine_contact_gap_; }
 
+    [[nodiscard]] bool magazine_grasped() const noexcept {
+        return motion_.reloading() && motion_.pose().left_magazine >= .99999f;
+    }
+
     // Shoulder-to-wrist distance limits of the selected rig, MEASURED at load through the real
     // solver, not re-derived from bone lengths: {near, far} per side, metres.
     [[nodiscard]] std::array<std::array<float, 2>, 2> reach_limits() const noexcept {

@@ -211,6 +211,11 @@ set_tests_properties(the_block_environment_smoke PROPERTIES
     FIXTURES_REQUIRED block_demo_cook
     TIMEOUT 1800)
 
+add_test(NAME the_block_effects_smoke COMMAND the_block --effects-smoke)
+set_tests_properties(the_block_effects_smoke PROPERTIES
+    FIXTURES_REQUIRED block_demo_cook
+    TIMEOUT 1800)
+
 # Registered only when the art is here; the binary itself skips the mode rather than failing, so
 # running it by hand on a clean clone is harmless too.
 if(BLOCK_HAVE_VIEWMODEL_ART)

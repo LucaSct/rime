@@ -24,7 +24,7 @@ rime_add_test(rime_gameplay_tests
     ../../samples/99-the-block/play_arm_ik.cpp)
 
 target_link_libraries(rime_gameplay_tests
-    PRIVATE rime::gameplay rime::physics rime::assets rime::render rime::vfx)
+    PRIVATE rime::gameplay rime::physics rime::assets rime::render rime::vfx rime::destruction)
 
 # The shared fixture header (character_fixture.hpp) lives beside these sources.
 target_include_directories(rime_gameplay_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}

@@ -209,8 +209,7 @@ bool split_magazine(render::CpuMesh& body, unsigned weapon, MagazineSplit& out) 
 
 std::uint64_t geometry_fingerprint(const render::CpuMesh& mesh) {
     // Stable FNV-1a over authored topology and position bits, independent of host byte order.
-    // The expected hashes are calibrated from cooked assets in a hardware-capable run; until
-    // then printing the observed value is evidence, not a same-count art-change guard.
+    // Calibrated from the optional cooked assets, then pinned before enabling their split.
     std::uint64_t hash = 14695981039346656037ull;
     const auto word = [&](std::uint32_t value) {
         for (unsigned byte = 0; byte < 4; ++byte) {
@@ -446,6 +445,14 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
         const std::uint32_t original_triangles =
             static_cast<std::uint32_t>(geometry.indices.size() / 3);
         const std::uint64_t fingerprint = i < 3 ? geometry_fingerprint(geometry) : 0;
+        constexpr std::array<std::uint64_t, 3> expected_geometry{
+            0x4c74aa9179600ebaull, 0x57fbe42330511e32ull, 0xc50f3118a2bb7efaull};
+        if (i < 3 && fingerprint != expected_geometry[i]) {
+            std::fprintf(stderr,
+                         "99-the-block: %s geometry changed; recalibrate authored magazine\n",
+                         kSources[i]);
+            return false;
+        }
         MagazineSplit magazine;
         if (i < 3) {
             if (!split_magazine(geometry, static_cast<unsigned>(i), magazine)) {
@@ -774,18 +781,30 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     const auto index = static_cast<unsigned>(selected_);
     local.translation =
         local.translation + kAimOffsets[index] * aim_ + kHipOffsets[index] * (1 - aim_);
-    // Bring the magazine action upward and left in the viewport while preserving the
-    // reachable gun depth. Moving the whole gun forward extended both base wrists past
-    // their measured limit, where shortening the support-hand offset cannot help.
-    local.translation = local.translation + core::Vec3{-0.16f * motion_pose.lower,
-                                                       0.14f * motion_pose.lower,
-                                                       0.04f * motion_pose.lower};
+    // Rotate about the stock: lifting/translating a shouldered butt across the eye filled the
+    // viewport with near-clipped faces even when all projected magazine targets were valid.
+    const bool reload = motion_.reloading();
+    constexpr std::array<core::Vec3, 3> reload_offsets{
+        {{-.08f, 0, -.10f}, {-.08f, .03f, 0}, {.04f, .03f, -.10f}}};
+    constexpr std::array<float, 3> reload_pitch{.50f, .35f, .35f};
+    constexpr std::array<float, 3> reload_roll{.20f, .20f, -.20f};
+    const core::Vec3 action_offset = reload ? reload_offsets[index] : core::Vec3{-.16f, .14f, .04f};
+    local.translation = local.translation + action_offset * motion_pose.lower;
     local.rotation =
-        core::quat_from_euler(recoil_ * .8f + 0.07f * motion_pose.lower,
+        core::quat_from_euler(recoil_ * .8f + (reload ? 0.0f : .07f) * motion_pose.lower,
                               .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount,
-                              0.24f * motion_pose.tilt);
+                              (reload ? 0.0f : .24f) * motion_pose.tilt);
     const core::Mat4 camera_matrix = core::to_matrix(camera);
-    const core::Mat4 weapon_local = core::to_matrix(local) * sight_alignment(index, aim_);
+    const core::Vec3 pivot = models_[index].stock;
+    const core::Mat4 reload_rotation =
+        reload ? core::mat4_translation(pivot) *
+                     core::to_mat4(core::quat_from_euler(reload_pitch[index] * motion_pose.lower,
+                                                         0,
+                                                         reload_roll[index] * motion_pose.tilt)) *
+                     core::mat4_translation(-pivot)
+               : core::Mat4{};
+    const core::Mat4 weapon_local =
+        core::to_matrix(local) * reload_rotation * sight_alignment(index, aim_);
     weapon_local_ = weapon_local;
     const core::Mat4 model = camera_matrix * weapon_local;
     auto& selected = models_[static_cast<unsigned>(selected_)];

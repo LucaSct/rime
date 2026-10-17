@@ -113,6 +113,8 @@ public:
     // the byte-identical note above; the caller does not need to branch, and more importantly a
     // caller that forgets to branch still gets the baseline.
     //
+    // Submit at most one enabled, nonempty add per frame on this pass instance; the
+    // ring is sized for frames in flight, not multiple submissions within one frame.
     // `particles` is consumed HERE (copied into this add's ring slot during this call), not at
     // record time, so the caller may let its CPU field change or die immediately afterwards. That
     // is the opposite of the graph's usual defer-to-record-time discipline and it is deliberate:

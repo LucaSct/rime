@@ -105,7 +105,7 @@ public:
             // magazine share magazine_pull while gripped; idle and completed reloads are zero.
             return {window(t, 0.0f, 0.18f, 0.75f, 1.0f),
                     window(t, 0.04f, 0.24f, 0.72f, 0.97f),
-                    window(t, 0.10f, 0.30f, 0.76f, 0.94f),
+                    window(t, 0.10f, 0.30f, 0.80f, 0.94f),
                     window(t, 0.34f, 0.48f, 0.61f, 0.77f),
                     0.0f,
                     0.0f};

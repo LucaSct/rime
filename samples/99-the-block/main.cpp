@@ -81,6 +81,7 @@
 
 #include "play_building_support.hpp"
 #include "play_city.hpp"
+#include "play_effects.hpp"
 #include "play_environment.hpp"
 #include "play_input.hpp"
 #include "play_sunset.hpp"
@@ -201,6 +202,7 @@ std::uint64_t g_ticks = kDefaultTicks;
 // --ppm <file>: write the intact frame the render claims are made about, so a human can look at the
 // thing the counters are describing.
 std::string g_ppm;
+bool g_effects_preview = false;
 
 // --island-profile: per-island solve TIMING (#311). Off by default because it reads a clock once
 // per active island -- off the per-constraint path and tiny, but not free, so A RUN TAKEN WITH THIS
@@ -1821,6 +1823,10 @@ struct Demo {
     app::Application app;
     Session session{0x13B10Cull};
     std::unique_ptr<block_play::PlayEnvironment> environment;
+    std::unique_ptr<block_play::PlayEffects> effects;
+    std::vector<render::GpuParticle> smoke_particles;
+    ecs::Entity fire_light = ecs::kNullEntity;
+    bool effects_visible = true;
     block_play::city::Dresser city_dresser; // per-part lamp/barrier look, fed by sync() each tick
     std::unique_ptr<Visuals> visuals;
     std::unique_ptr<block_play::PlayWorld> play_world;
@@ -2084,6 +2090,15 @@ struct Demo {
             if (!weapon_fx->initialize())
                 return false;
         }
+        if (g_effects_preview && environment_enabled && visuals) {
+            // Scripted presentation sources, deliberately opt-in while M18 is over budget.
+            // Their particles and light never decide damage, ignition or gameplay visibility.
+            effects = std::make_unique<block_play::PlayEffects>(core::Vec3{4, .25f, -1.5f});
+            render::PointLight light{};
+            light.intensity = 0;
+            fire_light = session.client.world.spawn_with(ecs::WorldTransform{}, light);
+            smoke_particles.reserve(block_play::PlayEffects::kParticleCapacity);
+        }
         if (viewmodel_enabled) {
             if (!visuals)
                 return false;
@@ -2119,6 +2134,12 @@ struct Demo {
                 *app.device(), visuals->meshes, visuals->materials);
             visuals->scope_renderer->set_frames_in_flight(app.frames_in_flight());
             visuals->seed_field(*visuals->scope_renderer, session.client.world);
+            if (effects) {
+                render::FxSettings settings{};
+                settings.enabled = effects_visible;
+                settings.max_particles = block_play::PlayEffects::kParticleCapacity;
+                visuals->scope_renderer->set_smoke_particles(smoke_particles, settings);
+            }
         }
     }
 
@@ -2184,6 +2205,9 @@ struct Demo {
     // One simulation tick, plus everything downstream of it that is not drawing.
     void step_sim(const replication::InputCommand& intent) {
         session.tick(intent);
+        if (effects)
+            (void)effects->tick(
+                session.tick_index, session.client.destruction.events(), static_cast<float>(kDt));
         // Session::tick has joined both jobs: these are accepted authoritative shots, including
         // misses. Rejected cooldown inputs produce neither recoil nor visual feedback.
         for (const auto& shot : session.server.gameplay.shots()) {
@@ -2303,6 +2327,54 @@ struct Demo {
             return;
         }
         ecs::World& world = session.client.world;
+        if (effects) {
+            smoke_particles.clear();
+            const auto fire = effects_visible ? effects->light() : std::nullopt;
+            auto* light = world.get<render::PointLight>(fire_light);
+            auto* transform = world.get<ecs::WorldTransform>(fire_light);
+            if (light && transform) {
+                light->intensity = fire ? fire->intensity * 6.0f : 0;
+                if (fire) {
+                    transform->value.translation = fire->position;
+                    light->color_r = fire->color.x;
+                    light->color_g = fire->color.y;
+                    light->color_b = fire->color.z;
+                    light->radius = fire->radius * 4.0f;
+                }
+                world.mark_changed<ecs::WorldTransform>(fire_light);
+                world.mark_changed<render::PointLight>(fire_light);
+            }
+            if (effects_visible) {
+                for (const auto& particle : effects->field().particles()) {
+                    render::GpuParticle p{};
+                    p.position_size[0] = particle.position.x;
+                    p.position_size[1] = particle.position.y;
+                    p.position_size[2] = particle.position.z;
+                    p.position_size[3] = particle.size;
+                    // Approximate incident light at the billboard centre. This shares the fire
+                    // light's hue/range; it is not volumetric scattering or self-shadowing.
+                    float warm = 0;
+                    if (fire) {
+                        const float range = fire->radius * 4.0f;
+                        const float falloff = std::max(
+                            0.0f, 1.0f - core::length(particle.position - fire->position) / range);
+                        warm = falloff * falloff * fire->intensity * .35f;
+                    }
+                    p.color_alpha[0] = .12f + warm;
+                    p.color_alpha[1] = .13f + warm * .35f;
+                    p.color_alpha[2] = .14f + warm * .08f;
+                    const float life = particle.age / particle.lifetime;
+                    p.color_alpha[3] = .45f * std::min(particle.age * 6, 1.0f) * (1 - life);
+                    smoke_particles.push_back(p);
+                }
+            }
+            render::FxSettings settings{};
+            settings.enabled = effects_visible;
+            settings.max_particles = block_play::PlayEffects::kParticleCapacity;
+            visuals->renderer.set_smoke_particles(smoke_particles, settings);
+            if (visuals->scope_renderer)
+                visuals->scope_renderer->set_smoke_particles(smoke_particles, settings);
+        }
         if (weapon_fx) {
             weapon_fx->advance(static_cast<float>(ctx.frame_dt));
         }
@@ -4533,7 +4605,7 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     check(demo.viewmodel->identity_epoch() > initial_epoch &&
               demo.viewmodel->selected_draw_count() > 0,
           "M4 swap invalidates first-person history and draws");
-    check(meshes == 8 && materials >= 2 && textures >= 4 &&
+    check(meshes == 11 && materials >= 2 && textures >= 4 &&
               demo.viewmodel->resident_meshes() == meshes &&
               demo.viewmodel->resident_materials() == materials &&
               demo.viewmodel->resident_textures() == textures,
@@ -4690,6 +4762,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         // The reach limiter's own record: frames it shortened a hand path, the smallest share of
         // the authored path kept, and the longest hand travel actually applied (weapon metres).
         int limited = 0;
+        int contact_frames = 0;
+        float contact_gap = 0;
         float retained[2]{1.0f, 1.0f}, hand_travel[2]{};
     };
 
@@ -4710,6 +4784,10 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
             r.busy += demo.viewmodel->busy() ? 1 : 0;
             (void)demo.viewmodel->pose(camera);
             const auto& st = demo.viewmodel->arm_stats();
+            if (demo.viewmodel->magazine_grasped()) {
+                ++r.contact_frames;
+                r.contact_gap = std::max(r.contact_gap, demo.viewmodel->magazine_contact_gap());
+            }
             r.invalid += st.valid_input ? 0 : 1;
             if (st.clamped_targets != 0) {
                 ++r.clamped;
@@ -4788,6 +4866,12 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         report_sweep("reload", weapon, reload);
         check(reload.invalid == 0 && reload.clamped == 0,
               "every reload frame keeps both hands on reachable, valid targets");
+        std::printf("viewmodel-smoke: %s magazine contact %d frames, max gap %.3f mm\n",
+                    weapon_name(weapon),
+                    reload.contact_frames,
+                    reload.contact_gap * 1000);
+        check(reload.contact_frames > 30 && reload.contact_gap < 1e-4f,
+              "support wrist follows the detached magazine throughout grasp and reseating");
         check(reload.busy >= static_cast<int>(reload_seconds * 60.0f) - 1 &&
                   !demo.viewmodel->busy() && reload.arm_delta > .03f && reload.muzzle_delta > .05f,
               "the swept reload moves both the weapon and the skinned arms, then ends");
@@ -4813,8 +4897,9 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     }
     // Exercise actions through the real rig and uploaded deformation stream. The pure timeline
     // tests cannot detect a reload that advances correctly but never reaches rendered vertices.
-    for (const auto weapon :
-         {block_play::PlayViewmodel::Weapon::Scar, block_play::PlayViewmodel::Weapon::Sniper}) {
+    for (const auto weapon : {block_play::PlayViewmodel::Weapon::Scar,
+                              block_play::PlayViewmodel::Weapon::M4,
+                              block_play::PlayViewmodel::Weapon::Sniper}) {
         demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
         demo.viewmodel->select(weapon);
         demo.viewmodel->set_aiming(false);
@@ -4836,18 +4921,31 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
                 const float x = clip.x / clip.w;
                 const float y = clip.y / clip.w;
                 std::printf("viewmodel-smoke: %s reload projected x %.3f y %.3f depth %.3f m\n",
-                            weapon_name(weapon), x, y, clip.w);
+                            weapon_name(weapon),
+                            x,
+                            y,
+                            clip.w);
                 // Vulkan's projection flips Y: positive NDC Y is below the screen centre.
                 return std::isfinite(x) && std::isfinite(y) && std::abs(x) < max_x && y > -.45f &&
                        y < .92f;
             };
-            return in_lower_view(demo.viewmodel->muzzle_world(eye_pose), .95f) &&
+            // Reference reloads can put the muzzle outside the frame. The magazine and actual
+            // manipulating hand are the action that must remain visible.
+            return in_lower_view(demo.viewmodel->magazine_contact_world(), .9f) &&
                    in_lower_view(demo.viewmodel->wrist_world()[0], .9f);
         };
         bool framed_action = projected_action();
+        unsigned phase = 0;
         for (const float step : {.45f, .45f}) {
             demo.viewmodel->advance(step, {}, false);
-            (void)capture();
+            const auto phase_pixels = capture();
+            if (!g_ppm.empty())
+                write_ppm((g_ppm + "." + weapon_name(weapon) + "-reload-phase-" +
+                           std::to_string(++phase) + ".ppm")
+                              .c_str(),
+                          phase_pixels,
+                          kW,
+                          kH);
             framed_action = framed_action && projected_action();
         }
         // Every term of the claim below, so a failure names itself instead of needing a rerun.
@@ -4865,14 +4963,15 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
                   arms.max_vertex_displacement > .001f && changed(idle_action, reload_action) > 100,
               "reload visibly moves the actual weapon and reachable skinned arms");
         check(framed_action,
-              "reload weapon and support wrist stay in the lower viewport across the action");
+              "reload magazine and support wrist stay in the lower viewport across the action");
         if (!g_ppm.empty())
-            write_ppm(
-                (g_ppm + (demo.viewmodel->scoped() ? ".sniper-reload.ppm" : ".scar-reload.ppm"))
-                    .c_str(),
-                reload_action,
-                kW,
-                kH);
+            write_ppm((g_ppm + (weapon == VmWeapon::Sniper ? ".sniper-reload.ppm"
+                                : weapon == VmWeapon::M4   ? ".m4-reload.ppm"
+                                                           : ".scar-reload.ppm"))
+                          .c_str(),
+                      reload_action,
+                      kW,
+                      kH);
         demo.viewmodel->advance(3.0f, {}, false);
         check(!demo.viewmodel->busy(), "reload finishes in elapsed time");
     }
@@ -5395,6 +5494,100 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
 }
 
 // ── --play: walk around it ──────────────────────────────────────────────────────────────────────
+// A separate opt-in proof freezes simulation while toggling its presentation. It exercises the
+// same consumer/render path as play; the existing environment proof keeps its original inputs.
+int run_effects_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
+    constexpr std::uint32_t width = 640, height = 360;
+    app::AppConfig cfg{};
+    cfg.gpu = true;
+    cfg.render_extent = {width, height};
+    g_effects_preview = true;
+    Demo demo(cfg);
+    demo.scripted_charge = false;
+    demo.streamed_world = true;
+    demo.environment_enabled = true;
+    demo.development_hud = false;
+    if (!demo.app.device())
+        return std::getenv("RIME_REQUIRE_VULKAN") ? 1 : 0;
+    if (!demo.start(cooked, scene_path) || !demo.effects)
+        return 1;
+    play_sunset::apply(demo.session.client.world);
+    play_sunset::apply(demo.session.server.world);
+    demo.use_authored_camera = true;
+    gameplay::FirstPersonView view{};
+    view.eye_height = 0;
+    view.yaw = play_sunset::kViewYaw;
+    view.pitch = -.03f;
+    demo.visuals->authored_camera = gameplay::eye_transform(view, {-6, 1.85f, 0});
+    demo.visuals->renderer.set_taa_resolve_enabled(false);
+    std::vector<double> smoke_gpu_ms;
+    demo.app.on_frame_timings(
+        [&](std::uint64_t, std::span<const render::RenderGraph::PassTiming> timings) {
+            for (const auto& timing : timings)
+                if (timing.name == "fx-smoke")
+                    smoke_gpu_ms.push_back(timing.gpu_ms);
+        });
+    demo.app.on_render([&](app::FrameContext& ctx) { demo.render(ctx); });
+    for (int i = 0; i < 180; ++i)
+        demo.step_sim({});
+    const auto capture = [&]() {
+        demo.app.run_frames(24);
+        auto pixels = read_rgba8(
+            *demo.app.device(), demo.app.graph()->physical(demo.visuals->last_ldr), width, height);
+        demo.app.finish_gpu();
+        return pixels;
+    };
+    const auto server_hash = demo.session.server.physics.world_hash();
+    const auto client_hash = demo.session.client.physics.world_hash();
+    demo.effects_visible = false;
+    const auto off = capture();
+    const auto control = capture();
+    demo.effects_visible = true;
+    const auto on = capture();
+    std::sort(smoke_gpu_ms.begin(), smoke_gpu_ms.end());
+    if (!smoke_gpu_ms.empty())
+        std::printf("effects-smoke: diagnostic GPU fx-smoke %zu frames p50 %.6f p99 %.6f ms\n",
+                    smoke_gpu_ms.size(),
+                    smoke_gpu_ms[smoke_gpu_ms.size() / 2],
+                    smoke_gpu_ms.back());
+    const auto difference = [&](const auto& a, const auto& b) {
+        std::size_t n = 0;
+        if (a.size() != width * height * 4 || b.size() != a.size())
+            return n;
+        for (std::size_t i = 0; i < a.size(); i += 4) {
+            int d = 0;
+            for (unsigned c = 0; c < 3; ++c)
+                d = std::max(d, std::abs(static_cast<int>(a[i + c]) - b[i + c]));
+            n += d > 5 ? 1u : 0u;
+        }
+        return n;
+    };
+    const auto changed = difference(on, control), drift = difference(off, control);
+    const auto& particles = demo.effects->field();
+    const bool okay = changed > drift + 100 && particles.count() > 0 &&
+                      particles.count() <= block_play::PlayEffects::kParticleCapacity &&
+                      demo.visuals->renderer.smoke_particles_dropped() == 0 &&
+                      demo.session.server.physics.world_hash() == server_hash &&
+                      demo.session.client.physics.world_hash() == client_hash;
+    std::printf("effects-smoke: changed=%zu drift=%zu live=%zu requested=%llu spawned=%llu "
+                "capacity-drops=%llu render-drops=%llu state-unchanged=%d result=%s\n",
+                changed,
+                drift,
+                particles.count(),
+                static_cast<unsigned long long>(particles.stats().requested_particles),
+                static_cast<unsigned long long>(particles.stats().spawned_particles),
+                static_cast<unsigned long long>(particles.stats().dropped_capacity),
+                static_cast<unsigned long long>(demo.visuals->renderer.smoke_particles_dropped()),
+                demo.session.server.physics.world_hash() == server_hash &&
+                    demo.session.client.physics.world_hash() == client_hash,
+                okay ? "PASS" : "FAIL");
+    if (!g_ppm.empty()) {
+        write_ppm((g_ppm + ".off.ppm").c_str(), control, width, height);
+        write_ppm((g_ppm + ".on.ppm").c_str(), on, width, height);
+    }
+    return okay ? 0 : 1;
+}
+
 int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
     cfg.gpu = true;
@@ -5564,7 +5757,8 @@ int main(int argc, char** argv) {
         WorldSmoke,
         WorldGpuSmoke,
         ViewmodelSmoke,
-        EnvironmentSmoke
+        EnvironmentSmoke,
+        EffectsSmoke
     } mode = Mode::Headless;
     PerfOptions perf{};
     std::filesystem::path cooked = RIME_BLOCK_COOKED_DIR;
@@ -5584,6 +5778,10 @@ int main(int argc, char** argv) {
             mode = Mode::ViewmodelSmoke;
         } else if (a == "--environment-smoke") {
             mode = Mode::EnvironmentSmoke;
+        } else if (a == "--effects-smoke") {
+            mode = Mode::EffectsSmoke;
+        } else if (a == "--effects-preview") {
+            g_effects_preview = true;
         } else if (a == "--perf") {
             mode = Mode::Perf;
         } else if (a == "--frames" && i + 1 < argc) {
@@ -5649,6 +5847,9 @@ int main(int argc, char** argv) {
     }
     if (mode == Mode::EnvironmentSmoke) {
         return run_environment_smoke(cooked, scene_path);
+    }
+    if (mode == Mode::EffectsSmoke) {
+        return run_effects_smoke(cooked, scene_path);
     }
     return run_headless(cooked, scene_path);
 }
