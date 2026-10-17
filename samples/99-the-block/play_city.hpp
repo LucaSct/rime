@@ -54,6 +54,7 @@ inline constexpr std::uint64_t kBarrierAsset = 0x4241'5252ull;
 // the REPLICATED role can still find "lamp number i" without any extra component or channel.
 inline constexpr std::uint32_t kLampTag = 0xC17A'0000u;
 inline constexpr std::uint32_t kBarrierTag = 0xC17B'0000u;
+inline constexpr std::uint32_t kLampDiffuserTag = 0xC17C'0000u;
 inline constexpr std::uint32_t kTagMask = 0xFFFF'0000u;
 
 // Part indices of the lamp pattern, in cook order.
@@ -107,9 +108,10 @@ struct SyncStats {
 
 class Dresser {
 public:
-    // Adds one material (the dark, unlit luminaire shown once the fixture is broken) to
-    // `materials`; everything else reuses the block palette.
-    void init(const blockkit::BlockPalette& palette, render::MaterialRegistry& materials);
+    // Adds dark housing and warm diffuser materials and one shared diffuser mesh.
+    void init(const blockkit::BlockPalette& palette,
+              render::MaterialRegistry& materials,
+              render::MeshRegistry& meshes);
 
     [[nodiscard]] bool ready() const noexcept { return ready_; }
 
@@ -123,6 +125,9 @@ public:
 private:
     blockkit::BlockPalette palette_{};
     render::MaterialId dead_head_ = render::kInvalidMaterialId;
+    render::MaterialId diffuser_ = render::kInvalidMaterialId;
+    render::MeshId diffuser_mesh_ = render::kInvalidMeshId;
+    core::Vec3 diffuser_offset_{};
     bool ready_ = false;
     SyncStats last_{};
 };

@@ -155,7 +155,8 @@ constexpr Vec3 kArmStart{0.0f, 3.78f, 0.075f};
 constexpr Vec3 kArmEnd{0.0f, 4.20f, 1.30f};
 constexpr float kArmHalf = 0.04f;
 constexpr Vec3 kHeadCentre{0.0f, 4.13f, 1.28f};
-constexpr Vec3 kHeadHalf{0.15f, 0.035f, 0.28f};
+constexpr Vec3 kHeadHalf{0.19f, 0.055f, 0.30f};
+constexpr Vec3 kDiffuserOffset{0.0f, -0.057f, 0.0f};
 constexpr Vec3 kLightOffset{0.0f, 4.08f, 1.28f}; // just under the luminaire
 
 [[nodiscard]] core::Quat yaw(float radians) {
@@ -219,18 +220,15 @@ assets::DestructibleAsset make_lamp_asset() {
         a.parts.push_back(make_part(
             loft(square_ring(kArmStart, dir, kArmHalf), square_ring(kArmEnd, dir, kArmHalf))));
     }
-    // Luminaire: a thin slab hung under the arm's end. Thin on purpose: it is the part a bullet
-    // is most likely to find, and it should be cheap to knock out.
-    a.parts.push_back(make_part(loft(rect_ring(kHeadCentre.x - kHeadHalf.x,
-                                               kHeadCentre.x + kHeadHalf.x,
-                                               kHeadCentre.z - kHeadHalf.z,
-                                               kHeadCentre.z + kHeadHalf.z,
-                                               kHeadCentre.y - kHeadHalf.y),
-                                     rect_ring(kHeadCentre.x - kHeadHalf.x,
-                                               kHeadCentre.x + kHeadHalf.x,
-                                               kHeadCentre.z - kHeadHalf.z,
-                                               kHeadCentre.z + kHeadHalf.z,
-                                               kHeadCentre.y + kHeadHalf.y))));
+    // A shallow tapered metal canopy. The underside narrows around the separate inset diffuser;
+    // this remains one convex destructible head with exactly the original part index and bonds.
+    a.parts.push_back(
+        make_part(loft(rect_ring(-0.14f, 0.14f, 1.02f, 1.54f, kHeadCentre.y - kHeadHalf.y),
+                       rect_ring(-kHeadHalf.x,
+                                 kHeadHalf.x,
+                                 kHeadCentre.z - kHeadHalf.z,
+                                 kHeadCentre.z + kHeadHalf.z,
+                                 kHeadCentre.y + kHeadHalf.y))));
 
     // A chain pole -- arm -- head. Bond strength is informational in this engine (the support
     // solve is pure connectivity), so it is the shared-face area, as the cook writes it.
@@ -344,6 +342,11 @@ ExpandStats expand(ecs::World& world) {
         (void)world.spawn_with(LocalTransform{tf},
                                SlabRole{kLampTag | static_cast<std::uint32_t>(i), 0, sk::kCrate, 0},
                                destruction::Destructible{kLampAsset});
+        // One persistent visual per lamp. Dresser poses it from the accepted head leaf; it has
+        // no authored mesh or light and therefore adds no replication or local-light cost.
+        (void)world.spawn_with(
+            LocalTransform{tf},
+            SlabRole{kLampDiffuserTag | static_cast<std::uint32_t>(i), 0, sk::kLight, 0});
 
         // Re-aim the spot light that stood on this mast: nearest light in plan view.
         std::size_t best = lights.size();
@@ -387,16 +390,15 @@ ExpandStats expand(ecs::World& world) {
 
     // ── 4. The new buildings ──────────────────────────────────────────────────────────────────
     // Same prefab as the street: hollow slabs from the existing background cooks, a doorway
-    // gap in the ground storey, two storeys instead of three. NO interior point lights: each
-    // light is a per-pixel cost on every cluster it touches, 24 buildings x 2 would add 48 for
-    // rooms nobody sees into, and that is exactly the kind of growth that brings frame stalls
-    // back. Interiors of background buildings are dark by design.
+    // gap in the ground storey, with a measured 2/3/4-storey rhythm and two landmarks. NO interior
+    // point lights: each light is a per-pixel cost on every cluster it touches, 24 buildings x 2
+    // would add 48 for rooms nobody sees into, and that is exactly the kind of growth that brings
+    // frame stalls back. Interiors of background buildings are dark by design.
     const blockkit::CookSpec* wall = blockkit::find_cook("wall_bg");
     const blockkit::CookSpec* side = blockkit::find_cook("side_bg");
     const blockkit::CookSpec* floor = blockkit::find_cook("floor_bg");
     const blockkit::CookSpec* half = blockkit::find_cook("half_bg");
 
-    constexpr std::uint32_t kStoreys = 2;
     const float half_f = p.footprint * 0.5f;
     const float inset = half_f - p.slab_thickness * 0.5f;
     const float half_wall_width = (p.footprint - p.doorway_width) * 0.5f;
@@ -417,6 +419,9 @@ ExpandStats expand(ecs::World& world) {
                 continue;
             }
             const std::uint32_t b = p.building_count() + built;
+            const std::uint32_t storeys = built == 7    ? 5u
+                                          : built == 19 ? 6u
+                                                        : 2u + (built * 7u) % 3u;
             core::Transform frame;
             frame.translation = {x, 0.0f, z};
             frame.rotation = yaw(z < 0.0f ? 0.0f : kPi);
@@ -430,7 +435,7 @@ ExpandStats expand(ecs::World& world) {
                                        SlabRole{b, storey, kind, tint},
                                        destruction::Destructible{spec.asset});
             };
-            for (std::uint32_t s = 0; s < kStoreys; ++s) {
+            for (std::uint32_t s = 0; s < storeys; ++s) {
                 const float wall_y =
                     static_cast<float>(s) * p.storey_height + p.storey_height * 0.5f;
                 if (s == 0) {
@@ -456,13 +461,10 @@ ExpandStats expand(ecs::World& world) {
                     slab(t, s, sk::kSideWall, *side);
                 }
                 {
-                    const bool roof = s + 1u == kStoreys;
+                    const bool roof = s + 1u == storeys;
                     core::Transform t;
                     t.translation = {0.0f, static_cast<float>(s + 1) * p.storey_height, 0.0f};
-                    slab(t,
-                         roof ? blockkit::kRoofStorey : s + 1u,
-                         roof ? sk::kRoof : sk::kFloor,
-                         *floor);
+                    slab(t, s + 1u, roof ? sk::kRoof : sk::kFloor, *floor);
                 }
             }
             max_x = std::max(max_x, x + half_f);
@@ -531,14 +533,32 @@ bool register_patterns(destruction::DestructionWorld& destruction,
     return true;
 }
 
-void Dresser::init(const blockkit::BlockPalette& palette, render::MaterialRegistry& materials) {
+void Dresser::init(const blockkit::BlockPalette& palette,
+                   render::MaterialRegistry& materials,
+                   render::MeshRegistry& meshes) {
     palette_ = palette;
-    // The luminaire after it is broken: the same dark housing, with the glow taken out. Without
-    // this a knocked-off head would lie in the road still shining like a lit lamp.
+    // Palette values are linear RGB. The canopy stays dark brushed metal even while lit;
+    // emission is confined to the warm inset lens below it, with no extra light source.
     render::PbrMaterialDesc dead = materials.get(palette.lamp_head);
+    dead.base_color[0] = 0.055f;
+    dead.base_color[1] = 0.065f;
+    dead.base_color[2] = 0.072f;
+    dead.metallic = 0.7f;
+    dead.roughness = 0.42f;
     dead.emissive[0] = dead.emissive[1] = dead.emissive[2] = 0.0f;
     dead_head_ = materials.add(dead);
-    ready_ = true;
+    render::PbrMaterialDesc lens{};
+    lens.base_color[0] = 0.8f;
+    lens.base_color[1] = 0.55f;
+    lens.base_color[2] = 0.28f;
+    lens.roughness = 0.82f;
+    lens.emissive[0] = 1.8f;
+    lens.emissive[1] = 1.1f;
+    lens.emissive[2] = 0.48f;
+    diffuser_ = materials.add(lens);
+    diffuser_mesh_ = meshes.add(render::make_box({0.115f, 0.008f, 0.22f}), "play-lamp-diffuser");
+    diffuser_offset_ = kHeadCentre + kDiffuserOffset - make_lamp_asset().parts[kLampHead].com;
+    ready_ = meshes.contains(diffuser_mesh_);
 }
 
 SyncStats Dresser::sync(ecs::World& world,
@@ -551,6 +571,8 @@ SyncStats Dresser::sync(ecs::World& world,
     // client waiting for replication keeps the authored light rather than blinking it off).
     std::array<std::uint8_t, 0x100> lit{};
     lit.fill(2);
+    std::array<ecs::Entity, 0x100> heads{};
+    heads.fill(ecs::kNullEntity);
 
     const auto paint = [&](ecs::Entity leaf, render::MaterialId m) {
         if (leaf == ecs::kNullEntity) {
@@ -581,8 +603,9 @@ SyncStats Dresser::sync(ecs::World& world,
                 const bool head_up = destruction.part_alive(inst, kLampHead);
                 paint(parts[kLampPole], palette_.lamp_mast);
                 paint(parts[kLampArm], palette_.lamp_mast);
-                paint(parts[kLampHead], head_up ? palette_.lamp_head : dead_head_);
+                paint(parts[kLampHead], dead_head_);
                 lit[index] = head_up ? 1 : 0;
+                heads[index] = parts[kLampHead];
                 ++s.lamps_seen;
                 s.heads_broken += head_up ? 0u : 1u;
             } else {
@@ -592,6 +615,35 @@ SyncStats Dresser::sync(ecs::World& world,
                 ++s.barriers_seen;
             }
         });
+
+    // A detached live head carries its inset along with the accepted part placement. Once the
+    // accepted state marks it broken, remove only the fixed visual's MeshRef; no entity churn.
+    std::vector<ecs::Entity> diffusers;
+    world.query<SlabRole>().for_each([&](ecs::Entity e, SlabRole& role) {
+        if ((role.building & kTagMask) == kLampDiffuserTag) {
+            diffusers.push_back(e);
+        }
+    });
+    for (const ecs::Entity e : diffusers) {
+        const auto* role = world.get<SlabRole>(e);
+        const std::uint32_t index = role->building & 0xFFu;
+        const bool visible = lit[index] == 1 && heads[index] != ecs::kNullEntity;
+        if (visible) {
+            if (const auto* head = world.get<ecs::WorldTransform>(heads[index])) {
+                core::Transform offset;
+                offset.translation = diffuser_offset_;
+                if (auto* at = world.get<ecs::WorldTransform>(e)) {
+                    at->value = head->value * offset;
+                }
+            }
+            if (!world.has<render::MeshRef>(e)) {
+                (void)world.add_component(e, render::MeshRef{diffuser_mesh_});
+                (void)world.add_component(e, render::MaterialRef{diffuser_});
+            }
+        } else if (world.has<render::MeshRef>(e)) {
+            (void)world.remove_component<render::MeshRef>(e);
+        }
+    }
 
     // The lights are level geometry each peer holds itself, so they are found by the tag the
     // authoring step wrote on them. Removing the component, rather than zeroing its intensity,
