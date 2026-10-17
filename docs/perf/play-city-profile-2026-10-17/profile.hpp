@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <string>
 #include <thread>
@@ -22,14 +23,36 @@ using Clock = std::chrono::steady_clock;
 struct CpuRow { std::uint64_t frame; std::string name; double ms; std::uint64_t candidates; std::uint64_t draws; };
 struct GpuRow { std::uint64_t frame; std::string name; double ms; };
 struct StageRow { std::uint64_t frame; std::string name; double ms; };
-struct FrameRow { std::uint64_t frame; std::uint64_t main_considered, main_submitted, main_culled;
+struct PhysicsRow {
+    std::uint32_t bodies = 0, dynamic = 0, awake = 0, sleeping = 0;
+    std::uint32_t pairs = 0, manifolds = 0, contact_points = 0;
+    std::uint32_t islands = 0, active_islands = 0, largest_active_island = 0;
+};
+template <class Stats> inline void physics(PhysicsRow& row, const Stats& s) {
+    row.bodies = s.body_count; row.dynamic = s.dynamic_bodies;
+    row.awake = s.awake_bodies; row.sleeping = s.sleeping_bodies;
+    row.pairs = s.broadphase_pairs; row.manifolds = s.manifolds;
+    row.contact_points = s.contact_points; row.islands = s.islands;
+    row.active_islands = s.active_islands;
+    row.largest_active_island = s.largest_active_island;
+}
+struct FrameRow { std::uint64_t frame;
+    std::uint64_t ticks = 0, damage_ops = 0, committed_ops = 0;
+    std::uint64_t server_debris = 0, client_debris = 0;
+    std::uint64_t charge_targets = 0;
+    bool charge_requested = false, charge_fired = false;
+    double frame_cpu_ms = 0, pre_sim_ms = 0, post_session_ms = 0;
+    double session_post_sim_ms = 0, server_ms = 0, client_ms = 0, join_ms = 0;
+    PhysicsRow server_physics{}, client_physics{}; std::uint64_t main_considered, main_submitted, main_culled;
     std::uint64_t optic_considered, optic_submitted, optic_culled;
     std::uint64_t main_shadow_rendered, main_shadow_reused, optic_shadow_rendered, optic_shadow_reused;
     std::uint64_t graph_passes, executed_passes, timed_passes; bool overflow, gpu_present; };
 struct Context {
     std::thread::id owner{};
     std::uint64_t frame = 0, warmup = 60;
-    bool recording = false, ads = false, control = false;
+    bool recording = false, ads = false, control = false, collapse = false;
+    std::uint64_t charge_targets = 0;
+    double session_post_sim_ms = 0, post_session_ms = 0;
     const char* prefix = "";
     CpuRow* current = nullptr;
     std::vector<CpuRow> cpu;
@@ -79,6 +102,7 @@ inline bool parse_cli(int argc, char** argv, std::filesystem::path& output, std:
         else if (flag == "--hip") config.ads = false;
         else if (flag == "--control") config.control = true;
         else if (flag == "--city") config.control = false;
+        else if (flag == "--collapse") config.collapse = true;
         else if (flag == "--out-dir") {
             if (++i >= argc || !*argv[i] || std::string_view(argv[i]).starts_with("--")) return false;
             output = argv[i];
@@ -88,6 +112,7 @@ inline bool parse_cli(int argc, char** argv, std::filesystem::path& output, std:
             if (++i >= argc || !parse_count(argv[i], frames, true)) return false;
         } else return false;
     }
+    if (config.collapse && (frames < 120 || frames > 360 || config.warmup > 600)) return false;
     if (frames > std::numeric_limits<std::uint64_t>::max() - config.warmup) return false;
     std::error_code error;
     std::filesystem::create_directories(output, error);
@@ -100,8 +125,30 @@ inline void write(const std::filesystem::path& dir) {
         file.flush(); if (!file) throw std::runtime_error(name);
     };
     auto frames = open("frames.csv");
-    frames << "frame,main_considered,main_submitted,main_culled,optic_considered,optic_submitted,optic_culled,main_shadow_rendered,main_shadow_reused,optic_shadow_rendered,optic_shadow_reused,graph_passes,executed_passes,timed_passes,overflow,gpu_present\n";
-    for (const auto& r : config.frames) frames << r.frame << ',' << r.main_considered << ',' << r.main_submitted << ',' << r.main_culled << ',' << r.optic_considered << ',' << r.optic_submitted << ',' << r.optic_culled << ',' << r.main_shadow_rendered << ',' << r.main_shadow_reused << ',' << r.optic_shadow_rendered << ',' << r.optic_shadow_reused << ',' << r.graph_passes << ',' << r.executed_passes << ',' << r.timed_passes << ',' << r.overflow << ',' << r.gpu_present << '\n';
+    frames << "frame,main_considered,main_submitted,main_culled,optic_considered,optic_submitted,optic_culled,main_shadow_rendered,main_shadow_reused,optic_shadow_rendered,optic_shadow_reused,graph_passes,executed_passes,timed_passes,overflow,gpu_present,ticks,frame_cpu_ms,pre_sim_ms,post_session_ms,session_post_sim_ms,server_ms,client_ms,join_ms,charge_requested,charge_fired,charge_targets,damage_ops,committed_ops,server_debris,client_debris";
+    for (const char* side : {"server", "client"})
+        for (const char* field : {"bodies", "dynamic", "awake", "sleeping", "pairs", "manifolds", "contact_points", "islands", "active_islands", "largest_active_island"})
+            frames << ',' << side << '_' << field;
+    frames << '\n';
+    auto write_physics = [&](const PhysicsRow& p) {
+        frames << ',' << p.bodies << ',' << p.dynamic << ',' << p.awake << ',' << p.sleeping
+               << ',' << p.pairs << ',' << p.manifolds << ',' << p.contact_points
+               << ',' << p.islands << ',' << p.active_islands << ',' << p.largest_active_island;
+    };
+    for (const auto& r : config.frames) {
+        frames << r.frame << ',' << r.main_considered << ',' << r.main_submitted << ',' << r.main_culled
+               << ',' << r.optic_considered << ',' << r.optic_submitted << ',' << r.optic_culled
+               << ',' << r.main_shadow_rendered << ',' << r.main_shadow_reused
+               << ',' << r.optic_shadow_rendered << ',' << r.optic_shadow_reused << ',' << r.graph_passes
+               << ',' << r.executed_passes << ',' << r.timed_passes << ',' << r.overflow << ',' << r.gpu_present
+               << ',' << r.ticks << ',' << r.frame_cpu_ms << ',' << r.pre_sim_ms
+               << ',' << r.post_session_ms << ',' << r.session_post_sim_ms << ',' << r.server_ms
+               << ',' << r.client_ms << ',' << r.join_ms << ',' << r.charge_requested
+               << ',' << r.charge_fired << ',' << r.charge_targets << ',' << r.damage_ops
+               << ',' << r.committed_ops << ',' << r.server_debris << ',' << r.client_debris;
+        write_physics(r.server_physics); write_physics(r.client_physics);
+        frames << '\n';
+    }
     finish(frames, "frames.csv");
     auto cpu = open("cpu-passes.csv"); cpu << "frame,name,ms,mesh_candidates,mesh_indexed_draws\n";
     for (const auto& r : config.cpu) cpu << r.frame << ',' << r.name << ',' << r.ms << ',' << r.candidates << ',' << r.draws << '\n';
