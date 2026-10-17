@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -55,6 +56,17 @@ namespace {
 // this is belt-and-braces against a kissing contact being culled by a rounding ulp) while still
 // culling essentially every genuinely separated child pair.
 constexpr float kChildCullMargin = 1e-3f;
+
+// The existing compound child cull uses this same 1 mm guard. GJK's contact fast path is at
+// 1e-5 m and clipping keeps 1e-5 m, so a truly separated tight AABB pair beyond the guard cannot
+// produce an exact manifold. At large world coordinates float ULPs can exceed the guard; fail
+// open there rather than making a claim about cancellation in rotated bounds.
+[[nodiscard]] bool reliable_tight_bound(const Aabb& b) noexcept {
+    const auto finite_small = [](float x) { return std::isfinite(x) && std::fabs(x) <= 512.0f; };
+    return finite_small(b.min.x) && finite_small(b.min.y) && finite_small(b.min.z) &&
+           finite_small(b.max.x) && finite_small(b.max.y) && finite_small(b.max.z) &&
+           b.min.x <= b.max.x && b.min.y <= b.max.y && b.min.z <= b.max.z;
+}
 
 using ContactClock = std::chrono::steady_clock;
 
@@ -323,6 +335,9 @@ struct PhysicsWorld::Impl {
     mutable std::uint32_t broadphase_pairs_last = 0;
     bool contact_profile_enabled = false;
     mutable ContactProfile contact_profile_last{};
+    bool plain_contact_cull_enabled = false;
+    mutable std::vector<Aabb> plain_tight_bounds;
+    mutable std::vector<std::uint8_t> plain_tight_valid;
 
     // Simulation events (M7.9, events.hpp). step() emits contact and sleep events as a pure READ of
     // the just-solved state, in the sequential tail — so events never write body state, never
@@ -572,6 +587,13 @@ void PhysicsWorld::Impl::compute_pairs(std::vector<Pair>& out, bool profile) con
 void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) const {
     out.clear();
     contact_profile_last = {};
+    if (plain_contact_cull_enabled) {
+        // Dense indices and poses may have changed since the preceding build. Reuse storage, but
+        // never a cached bound: even compute_contacts() may follow a teleport or slot recycle.
+        plain_tight_bounds.resize(count());
+        plain_tight_valid.resize(count());
+        std::fill(plain_tight_valid.begin(), plain_tight_valid.end(), std::uint8_t{0});
+    }
 
     // Broadphase first: the candidate pairs are canonical (a.index < b.index), deterministically
     // sorted, and already exclude both-static pairs. A fat-AABB overlap is only a *candidate* — the
@@ -616,6 +638,30 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
 
         if (contact_profile_enabled) {
             ++contact_profile_last.plain_pairs;
+        }
+
+        if (plain_contact_cull_enabled && !(dt > 0.0f && (ccd[da] != 0 || ccd[db] != 0))) {
+            const auto tight_bound = [&](std::uint32_t dense) -> const Aabb& {
+                if (plain_tight_valid[dense] == 0) {
+                    plain_tight_bounds[dense] =
+                        aabb_of(shape[dense], position[dense], orientation[dense]);
+                    plain_tight_valid[dense] = 1;
+                }
+                return plain_tight_bounds[dense];
+            };
+            const Aabb& aa = tight_bound(da);
+            const Aabb& bb = tight_bound(db);
+            if (reliable_tight_bound(aa) && reliable_tight_bound(bb)) {
+                if (contact_profile_enabled) {
+                    ++contact_profile_last.plain_tight_tests;
+                }
+                if (!overlaps(expanded(aa, kChildCullMargin), bb)) {
+                    if (contact_profile_enabled) {
+                        ++contact_profile_last.plain_tight_rejections;
+                    }
+                    continue;
+                }
+            }
         }
 
         Manifold m;
@@ -2139,6 +2185,14 @@ bool PhysicsWorld::contact_profile_enabled() const noexcept {
 
 const ContactProfile& PhysicsWorld::contact_profile() const noexcept {
     return impl_->contact_profile_last;
+}
+
+void PhysicsWorld::set_plain_contact_cull_enabled(bool enabled) noexcept {
+    impl_->plain_contact_cull_enabled = enabled;
+}
+
+bool PhysicsWorld::plain_contact_cull_enabled() const noexcept {
+    return impl_->plain_contact_cull_enabled;
 }
 
 std::size_t PhysicsWorld::islands_last() const noexcept {
