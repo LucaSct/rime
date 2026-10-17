@@ -192,7 +192,7 @@ struct LightingSettings {
 
     // Cull only directional-cascade casters outside that cascade's light frustum. Kept
     // independent of shadows_enabled for an explicit on/off proof; local maps are unchanged.
-    bool shadow_caster_culling = true;
+    bool shadow_caster_culling = false;
 };
 
 } // namespace rime::render

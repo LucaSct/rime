@@ -78,6 +78,8 @@ def instrument_passes(text, header):
 def instrument_main(text, header, out):
     text = exactly(text, 'namespace {', '#include ' + json.dumps(str(header)) + '\n\nnamespace {')
     text = region(text, '    void render(app::FrameContext& ctx) {', '\n    void draw_hud(', [
+        ('                    scope_lighting.shadow_caster_culling = true;',
+         '                    scope_lighting.shadow_caster_culling = city_profile::config.shadow_caster_culling;'),
         ('                    const auto scoped =\n                        optical.render(*ctx.graph, world, {512, 512}, true, &camera);',
          '                    optical.reset_cull_stats();\n'
          '                    city_profile::Prefix optic_prefix("optic/");\n'
@@ -137,8 +139,8 @@ def instrument_main(text, header, out):
          '        const auto damage_before = demo.session.damage_ops;\n'
          '        const auto committed_before = demo.session.total_ops;\n'
          '        auto input = live.tick();'),
-        ('        demo.step_sim(gameplay_net::to_input_command(input));',
-         '        demo.step_sim(gameplay_net::to_input_command(input));\n'
+        ('        demo.step_play(input);',
+         '        demo.step_play(input);\n'
          '        if (city_profile::active()) {\n'
          '            auto& row = city_profile::config.frames.back();\n'
          '            ++row.ticks; row.pre_sim_ms += city_profile::elapsed_ms(diagnostic_start);\n'
@@ -165,7 +167,7 @@ def instrument_main(text, header, out):
          '            demo.viewmodel->set_aiming(city_profile::config.ads);'),
         ('        demo.render(ctx);',
          '        auto diagnostic_lighting = demo.visuals->renderer.lighting();\n'
-         '        diagnostic_lighting.shadow_caster_culling = city_profile::config.shadow_caster_culling;\n'
+         '        diagnostic_lighting.shadow_caster_culling = false;\n'
          '        demo.visuals->renderer.set_lighting(diagnostic_lighting);\n'
          '        demo.render(ctx);\n'
          '        if (city_profile::active()) city_profile::config.frames.back().graph_passes = ctx.graph->pass_count();'),

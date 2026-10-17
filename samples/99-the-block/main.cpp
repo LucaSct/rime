@@ -2131,7 +2131,9 @@ struct Demo {
             return false;
         ensure_scope_renderer();
         auto& optical = *visuals->scope_renderer;
-        optical.set_lighting(visuals->renderer.lighting());
+        auto scope_lighting = visuals->renderer.lighting();
+        scope_lighting.shadow_caster_culling = true;
+        optical.set_lighting(scope_lighting);
         optical.set_sky(visuals->renderer.sky());
         const bool taa = optical.taa_resolve_enabled();
         optical.set_taa_resolve_enabled(false);
@@ -2156,6 +2158,27 @@ struct Demo {
         // Warm resources, not a stale aiming image: first actual ADS starts with no TAA history.
         optical.set_taa_resolve_enabled(taa);
         return true;
+    }
+
+    // The shared live-input seam is also exercised by the accepted-shot smoke proof.
+    void step_play(gameplay::CharacterInput input) {
+        if (viewmodel) {
+            // This local play session owns one authoritative weapon. Selection configures
+            // its existing trigger contract; it does not invent a replicated inventory.
+            block_play::configure_selected_weapon(
+                session.server.weapon,
+                static_cast<block_play::PlayWeaponMotion::Weapon>(viewmodel->selected()));
+            // GameplayServer reads the avatar component, not the spawn template above.
+            // Updating only that template would leave an already-spawned sniper automatic.
+            for (const auto avatar : session.server.avatars)
+                if (auto* weapon = session.server.world.get<gameplay::WeaponConfig>(avatar))
+                    block_play::configure_selected_weapon(
+                        *weapon,
+                        static_cast<block_play::PlayWeaponMotion::Weapon>(viewmodel->selected()));
+            input = block_play::filter_busy_fire(
+                input, viewmodel->busy(), session.server.weapon.fire_bit);
+        }
+        step_sim(gameplay_net::to_input_command(input));
     }
 
     // One simulation tick, plus everything downstream of it that is not drawing.
@@ -2338,7 +2361,11 @@ struct Demo {
                 visuals->last_scope_ldr = {};
                 if (feed_visible) {
                     auto& optical = *visuals->scope_renderer;
-                    optical.set_lighting(visuals->renderer.lighting());
+                    auto scope_lighting = visuals->renderer.lighting();
+                    // Measured wins belong to the narrow optical view: the main cascades
+                    // enclose this entire city, so their per-draw tests only add CPU cost.
+                    scope_lighting.shadow_caster_culling = true;
+                    optical.set_lighting(scope_lighting);
                     optical.set_sky(visuals->renderer.sky());
                     if (play_world)
                         optical.set_terrain_draws(play_world->pass(), play_world->draws());
@@ -2453,14 +2480,15 @@ struct Demo {
         row("debris", buf, st::kText);
         std::snprintf(buf, sizeof(buf), "%zu", visuals->leaf_stats.leaves_live);
         row("leaves", buf, st::kText);
-        // The convergence claim, on screen: the two hashes are the peers agreeing or not.
-        // With a play_world the server instantiated block physics BEFORE terrain tiles, so the two
-        // peers' BodyIds differ though their destruction facts agree: compare content, not handles.
-        const bool agree = session.play_world
-                               ? session.client.destruction.replicated_content_hash() ==
-                                     session.server.destruction.replicated_content_hash()
-                               : session.client.destruction.state_hash() ==
-                                     session.server.destruction.state_hash();
+        // Compare by wire identity, just like the headless convergence proof. Local instance
+        // allocation order can differ as well as BodyIds: dropping handles from a local-order
+        // hash still falsely labels an undamaged city as divergent.
+        const bool agree = destruction_net::shared_state_hash(session.client.world,
+                                                              session.client.replicator->map(),
+                                                              session.client.destruction) ==
+                           destruction_net::shared_state_hash(session.server.world,
+                                                              session.server.replicator->map(),
+                                                              session.server.destruction);
         row("peers", agree ? "in sync" : "DIVERGED", agree ? st::kText : st::kWarn);
         std::snprintf(buf, sizeof(buf), "%zu", mixer.voice_count());
         row("voices", buf, st::kText);
@@ -4805,6 +4833,42 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
               demo.viewmodel->resident_materials() == materials &&
               demo.viewmodel->resident_textures() == textures,
           "actions reuse resident resources and valid deformation uploads");
+    // Use the SAME live tick seam as --play, through its real transport and GameplayServer.
+    // A pure WeaponConfig test cannot catch configuring the spawn template while the live
+    // avatar keeps its old automatic component. Disable damage only after the visual proofs.
+    for (const auto avatar : demo.session.server.avatars)
+        if (auto* weapon = demo.session.server.world.get<gameplay::WeaponConfig>(avatar)) {
+            weapon->damage = 0;
+            weapon->impulse = 0;
+        }
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Sniper);
+    const auto live_tick = [&](bool held, bool pressed) {
+        gameplay::CharacterInput input{};
+        input.pitch = 1.3f; // skyward; this witness must not collapse the already-verified scene
+        input.held = held ? gameplay::kActionFire : 0;
+        input.pressed = pressed ? gameplay::kActionFire : 0;
+        demo.step_play(input);
+        demo.viewmodel->advance(1.0f / 60.0f, {}, demo.shot_presented);
+        demo.shot_presented = false;
+    };
+    const auto accepted_before = demo.session.shots_fired;
+    for (int i = 0; i < 120; ++i)
+        live_tick(true, i == 0);
+    check(demo.session.shots_fired == accepted_before + 1,
+          "live sniper accepts only one shot while the trigger stays held for two seconds");
+    for (unsigned i = 0; i < Demo::kSettleRounds; ++i)
+        live_tick(false, false);
+    for (unsigned i = 0; i < Demo::kSettleRounds; ++i)
+        live_tick(true, i == 0);
+    check(demo.session.shots_fired == accepted_before + 2,
+          "a fresh sniper press after cooldown accepts the next shot");
+    demo.viewmodel->advance(2.0f, {}, false);
+    check(demo.viewmodel->begin_reload(), "live sniper starts a reload after bolt completion");
+    for (int i = 0; i < 60; ++i)
+        live_tick(true, i == 0);
+    check(demo.viewmodel->reloading() && demo.session.shots_fired == accepted_before + 2,
+          "live reload blocks held and pressed fire through the server transport");
     demo.app.finish_gpu();
     return okay ? 0 : 1;
 }
@@ -5124,6 +5188,7 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
                 &fx_physics);
         fx.pose(fx_world, &fx_physics, &view_a);
         const auto flash_a = find_by_material(flash_mat);
+        const auto flash_pos_a = transform_of(flash_a);
         const auto tracer_pos_a = transform_of(find_by_material(tracer_mat));
         const auto impact_pos_a = transform_of(find_by_material(impact_mat));
         check(flash_a != ecs::Entity{} && finite3(transform_of(flash_a)),
@@ -5131,13 +5196,15 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         check(fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount,
               "weapon fx probe: the first pose binds exactly the fixed resident pool");
 
-        // Advance well under 40 ms and re-pose under a SECOND, displaced view -- the viewmodel's
-        // next frame, not a new shot. The accepted hit and tracer's world path must not move with
-        // the camera; only the muzzle flash/light (and its WorldTransform) may. 5 ms, not the
-        // full 16 ms frame: the tracer's head races toward `distance` at 800 m/s
-        // (play_weapon_fx.cpp), so a longer step can run it past `distance` and hide it before this
-        // check reads it.
-        fx.advance(0.005f);
+        ecs::Entity muzzle_light{};
+        fx_world.query<ecs::WorldTransform, render::PointLight>().for_each(
+            [&](ecs::Entity e, ecs::WorldTransform& at, render::PointLight& light) {
+                if (light.intensity > 0 && core::length(at.value.translation - flash_pos_a) < 1e-4f)
+                    muzzle_light = e;
+            });
+        check(muzzle_light.is_valid(), "weapon fx probe: a live light accompanies the flash");
+        // Change only the view at a fixed shot age. Advancing time here would also move the
+        // tracer along its world path, confounding camera motion with projectile presentation.
         block_play::PlayWeaponFx::ViewPose view_b = view_a;
         view_b.eye.x += 0.3f;
         view_b.muzzle = {0.5f, 1.15f, -3.85f};
@@ -5146,17 +5213,22 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         const auto flash_pos_b = transform_of(find_by_material(flash_mat));
         const auto tracer_pos_b = transform_of(find_by_material(tracer_mat));
         const auto impact_pos_b = transform_of(find_by_material(impact_mat));
-        const float flash_moved = core::length(flash_pos_b - transform_of(flash_a));
+        const float flash_moved = core::length(flash_pos_b - flash_pos_a);
         check(flash_moved > 0.1f,
               "weapon fx probe: flash follows the moved view pose within one 16 ms frame");
         check(core::length(tracer_pos_b - tracer_pos_a) < 1e-4f,
               "weapon fx probe: accepted tracer world path is unaffected by the view move");
         check(core::length(impact_pos_b - impact_pos_a) < 1e-4f,
               "weapon fx probe: accepted impact world position is unaffected by the view move");
-        // The point-light-follows-flash contract is covered by `flash_moved` above: show() writes
-        // the SAME flash.translation into the muzzle light's own WorldTransform
-        // (play_weapon_fx.cpp's part==3 branch), so testing the light separately would only
-        // re-measure a translation this check already read.
+        check(core::length(transform_of(muzzle_light) - flash_pos_b) < 1e-4f,
+              "weapon fx probe: the live light follows the current flash pose");
+        fx.advance(.005f);
+        fx.pose(fx_world, &fx_physics, &view_b);
+        const auto travelled = transform_of(find_by_material(tracer_mat)) - tracer_pos_b;
+        const auto accepted_path = core::normalize(core::Vec3{4, 1, 0} - view_a.muzzle);
+        check(core::dot(travelled, accepted_path) > 1.0f &&
+                  core::length(core::cross(travelled, accepted_path)) < 1e-4f,
+              "weapon fx probe: elapsed time advances the tracer along its accepted world path");
 
         // Case ejection: one queued case, posed under a view with real velocity/ejection data. Its
         // first pose must land exactly at the ejection point with a velocity that carries the
@@ -5354,23 +5426,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
 
     demo.app.add_sim_stage(app::Application::SimStage::PreSim, [&](ecs::World&, double) {
         auto input = live.tick();
-        if (demo.viewmodel) {
-            // This local play session owns one authoritative weapon. Selection configures
-            // its existing trigger contract; it does not invent a replicated inventory.
-            block_play::configure_selected_weapon(
-                demo.session.server.weapon,
-                static_cast<block_play::PlayWeaponMotion::Weapon>(demo.viewmodel->selected()));
-            // GameplayServer reads the avatar component, not the spawn template above.
-            // Updating only that template would leave an already-spawned sniper automatic.
-            for (const auto avatar : demo.session.server.avatars)
-                if (auto* weapon = demo.session.server.world.get<gameplay::WeaponConfig>(avatar))
-                    block_play::configure_selected_weapon(
-                        *weapon, static_cast<block_play::PlayWeaponMotion::Weapon>(
-                                     demo.viewmodel->selected()));
-            input = block_play::filter_busy_fire(
-                input, demo.viewmodel->busy(), demo.session.server.weapon.fire_bit);
-        }
-        demo.step_sim(gameplay_net::to_input_command(input));
+        demo.step_play(input);
     });
     demo.app.on_render([&](app::FrameContext& ctx) {
         // The look scheme follows the cursor mode the window ACTUALLY holds, every frame. It is
