@@ -58,6 +58,7 @@ struct Context {
     bool recording = false, ads = false, control = false, collapse = false, multi_collapse = false;
     bool multi_missing_target = false;
     std::array<std::uint64_t, 3> multi_targets{};
+    std::array<std::uint64_t, 3> multi_alive_before{}, multi_alive_after{};
     std::array<bool, 3> multi_effects{};
     bool shadow_caster_culling = true, ppm_written = false;
     std::filesystem::path ppm;

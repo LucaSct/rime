@@ -488,8 +488,10 @@ void run_scenarios(bool cache_on) {
     {
         INFO("more distinct sets than the cache holds: evictions never corrupt recorded draws");
         // 300 columns, each with its own descriptor contents (a distinct explicit range), drawn
-        // twice in one encoder: row 0 in order, row 1 in reverse. 300 > the 256-entry cache, and
-        // > the 256 sets of one transient pool, so this crosses both capacities.
+        // twice in one encoder: row 0 in order, row 1 in reverse. 300 > the 256-entry cache.
+        // Pool maxSets is not a portable allocation-failure boundary on Vulkan 1.1+:
+        // https://docs.vulkan.org/refpages/latest/refpages/source/vkAllocateDescriptorSets.html
+        // Drivers may satisfy these allocations in one pool; assert cache eviction and pixels.
         constexpr std::uint32_t kCols = 300;
         const auto color = [](std::uint32_t i) {
             return Rgba{static_cast<int>((i & 15u) * 16u + 8u),
@@ -529,7 +531,7 @@ void run_scenarios(bool cache_on) {
             check_px(t, x, 1, color(kCols - 1 - x));
         }
         CHECK(stat(line, "binds") == 2 * kCols);
-        CHECK(stat(line, "pools") >= 2);
+        CHECK(stat(line, "pools") >= 1);
         if (cache_on) {
             CHECK(stat(line, "allocations") >= kCols);
             CHECK(stat(line, "evictions") >= 1);
