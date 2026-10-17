@@ -132,11 +132,13 @@ def instrument_main(text, header, out):
          '        for (auto& row : city_profile::config.frames) if (row.frame == index) { row.gpu_present = !timings.empty(); break; }\n'
          '    });\n'
          '    block_play::PlayInput live;'),
-        ('        demo.step_sim(gameplay_net::to_input_command(live.tick()));',
+        ('        auto input = live.tick();',
          '        const auto diagnostic_start = city_profile::Clock::now();\n'
          '        const auto damage_before = demo.session.damage_ops;\n'
          '        const auto committed_before = demo.session.total_ops;\n'
-         '        demo.step_sim(gameplay_net::to_input_command(live.tick()));\n'
+         '        auto input = live.tick();'),
+        ('        demo.step_sim(gameplay_net::to_input_command(input));',
+         '        demo.step_sim(gameplay_net::to_input_command(input));\n'
          '        if (city_profile::active()) {\n'
          '            auto& row = city_profile::config.frames.back();\n'
          '            ++row.ticks; row.pre_sim_ms += city_profile::elapsed_ms(diagnostic_start);\n'
