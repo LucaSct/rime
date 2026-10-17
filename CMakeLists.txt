@@ -392,6 +392,7 @@ add_subdirectory(engine/assets)   # cooked-asset loading: RMA1 reader, registry,
 add_subdirectory(engine/destruction) # part-based destruction: patterns, instances, fracture (M8, ADR-0029)
 add_subdirectory(engine/audio)    # audio seam: play(sound, position, gain) + null backend (M8.4)
 add_subdirectory(engine/vfx)      # destruction dust stub: CPU billboard particles (M8.4, fx1 replaces)
+add_subdirectory(engine/fluids)   # removable CPU buoyancy exchange seam; no water solver yet
 add_subdirectory(engine/render)   # render graph + high-level renderer (M5)
 add_subdirectory(engine/stream)   # graphics streaming: frame capture → encode → transport (Track S)
 add_subdirectory(engine/editorhost) # editor-as-client host: serve the world over the channel (M9, ADR-0031)
@@ -485,4 +486,4 @@ if(NOT RIME_SANITIZER STREQUAL "off")
 else()
     message(STATUS "Rime: RIME_SANITIZER=off")
 endif()
-message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_physics, rime_assets, rime_destruction, rime_audio, rime_vfx, rime_render, rime_stream, rime_editorhost, rime_scene, rime_app, rime_net, rime_replication, rime_destruction_net, rime_gameplay, rime_gameplay_net, rime_destruction_render, rime_blockkit, rime_capi, rime_hello.")
+message(STATUS "Rime ${PROJECT_VERSION} — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_physics, rime_assets, rime_destruction, rime_audio, rime_vfx, rime_fluids, rime_render, rime_stream, rime_editorhost, rime_scene, rime_app, rime_net, rime_replication, rime_destruction_net, rime_gameplay, rime_gameplay_net, rime_destruction_render, rime_blockkit, rime_capi, rime_hello.")
