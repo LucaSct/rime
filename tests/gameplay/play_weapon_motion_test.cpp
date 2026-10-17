@@ -87,3 +87,35 @@ TEST_CASE("invalid time leaves presentation and ejection unchanged") {
     CHECK(motion.elapsed() == elapsed);
     CHECK_FALSE(motion.take_case_ejection());
 }
+
+TEST_CASE("invalid time still honours a weapon change and an accepted sniper shot") {
+    using Weapon = PlayWeaponMotion::Weapon;
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+    PlayWeaponMotion motion;
+    REQUIRE(motion.begin_reload(Weapon::Scar));
+    motion.advance(0.4f, Weapon::Scar, false);
+    // A switch on a bad-clock frame still cancels: the old gun's reload must not survive onto
+    // the new one just because the frame time was unusable.
+    motion.advance(kNaN, Weapon::M4, false);
+    CHECK_FALSE(motion.busy());
+    CHECK(motion.elapsed() == 0.0f);
+    CHECK(motion.begin_reload(Weapon::M4));
+    motion.advance(-0.5f, Weapon::Sniper, false);
+    CHECK_FALSE(motion.busy());
+
+    // The shot itself is authoritative, so the bolt starts; time does not advance until valid.
+    motion.advance(kNaN, Weapon::Sniper, true);
+    REQUIRE(motion.cycling());
+    CHECK(motion.elapsed() == 0.0f);
+    motion.advance(std::numeric_limits<float>::infinity(), Weapon::Sniper, false);
+    CHECK(motion.elapsed() == 0.0f);
+    CHECK_FALSE(motion.take_case_ejection());
+    motion.advance(PlayWeaponMotion::kExtractionSeconds, Weapon::Sniper, false);
+    CHECK(motion.take_case_ejection());
+    CHECK_FALSE(motion.take_case_ejection());
+
+    // A rifle's accepted shot on a bad frame never starts a cycle.
+    motion.cancel(Weapon::Scar);
+    motion.advance(kNaN, Weapon::Scar, true);
+    CHECK_FALSE(motion.busy());
+}

@@ -4609,6 +4609,120 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         write_ppm((g_ppm + ".target-scoped.ppm").c_str(), scoped_target, kW, kH);
     }
     (void)demo.session.client.world.despawn(target_entity);
+    // Sweep every frame of each action through the REAL rig before any image is read. One
+    // rendered sample can say only that a claim failed; this says which term and when. The arm
+    // solve and the weapon pose are camera-local, so pose() with an identity camera needs no GPU
+    // and measures exactly what render() hands the renderer.
+    //
+    // The deltas are against the idle pose solved immediately before the action, NOT against
+    // the bind mesh: PlayArmIk's max_vertex_displacement is measured from bind on every solve,
+    // so it is already large at idle (the rig is re-seated on the shoulder) and cannot by itself
+    // show that an action moved anything. The idle CONTROL sweep -- the same clock with no
+    // action -- must read zero, which proves the action deltas are motion and not noise.
+    using VmWeapon = block_play::PlayViewmodel::Weapon;
+    const auto weapon_name = [](VmWeapon w) {
+        return w == VmWeapon::Scar ? "SCAR" : w == VmWeapon::M4 ? "M4" : "MSR";
+    };
+
+    struct ActionSweep {
+        int frames = 0, busy = 0, invalid = 0, clamped = 0;
+        float first_clamp = -1.0f; // seconds into the action
+        float wrist_miss[2]{};     // requested-vs-reached wrist, metres; above zero only if clamped
+        float min_skin = 1e9f, arm_delta = 0.0f, muzzle_delta = 0.0f;
+    };
+
+    const auto sweep = [&](float seconds, bool fire_first, float measure_from) {
+        ActionSweep r;
+        const core::Transform camera{};
+        (void)demo.viewmodel->pose(camera);
+        std::vector<render::MeshVertex> idle;
+        if (!demo.viewmodel->deformations().empty()) {
+            const auto v = demo.viewmodel->deformations().front().current;
+            idle.assign(v.begin(), v.end());
+        }
+        const auto idle_muzzle = demo.viewmodel->muzzle_world(camera);
+        constexpr float dt = 1.0f / 60.0f;
+        for (; static_cast<float>(r.frames) * dt < seconds; ++r.frames) {
+            demo.viewmodel->advance(dt, {}, fire_first && r.frames == 0);
+            const float t = static_cast<float>(r.frames + 1) * dt; // action time after advance
+            r.busy += demo.viewmodel->busy() ? 1 : 0;
+            (void)demo.viewmodel->pose(camera);
+            const auto& st = demo.viewmodel->arm_stats();
+            r.invalid += st.valid_input ? 0 : 1;
+            if (st.clamped_targets != 0) {
+                ++r.clamped;
+                if (r.first_clamp < 0.0f)
+                    r.first_clamp = t;
+            }
+            for (unsigned side = 0; side < 2; ++side)
+                r.wrist_miss[side] = std::max(r.wrist_miss[side], st.wrist_position_error[side]);
+            r.min_skin = std::min(r.min_skin, st.max_vertex_displacement);
+            if (t < measure_from || demo.viewmodel->deformations().empty())
+                continue;
+            const auto v = demo.viewmodel->deformations().front().current;
+            for (std::size_t i = 0; i < std::min(v.size(), idle.size()); ++i)
+                r.arm_delta = std::max(r.arm_delta,
+                                       core::length(core::Vec3{v[i].px - idle[i].px,
+                                                               v[i].py - idle[i].py,
+                                                               v[i].pz - idle[i].pz}));
+            r.muzzle_delta = std::max(
+                r.muzzle_delta, core::length(demo.viewmodel->muzzle_world(camera) - idle_muzzle));
+        }
+        return r;
+    };
+    const auto report_sweep = [&](const char* what, VmWeapon w, const ActionSweep& r) {
+        std::printf("viewmodel-smoke: %s %s sweep %d frames, busy %d, invalid %d, clamped %d "
+                    "(first %.3f s), wrist miss L %.2f R %.2f mm, min bind skin %.4f m, arm "
+                    "delta %.4f m, muzzle delta %.4f m\n",
+                    weapon_name(w),
+                    what,
+                    r.frames,
+                    r.busy,
+                    r.invalid,
+                    r.clamped,
+                    r.first_clamp,
+                    r.wrist_miss[0] * 1000.0f,
+                    r.wrist_miss[1] * 1000.0f,
+                    r.min_skin,
+                    r.arm_delta,
+                    r.muzzle_delta);
+    };
+    for (const auto weapon : {VmWeapon::Scar, VmWeapon::M4, VmWeapon::Sniper}) {
+        demo.viewmodel->select(weapon == VmWeapon::M4 ? VmWeapon::Scar : VmWeapon::M4);
+        demo.viewmodel->select(weapon);
+        demo.viewmodel->set_aiming(false);
+        demo.viewmodel->advance(1.0f, {}, false);
+        const auto control = sweep(.5f, false, 0.0f);
+        report_sweep("idle-control", weapon, control);
+        check(control.busy == 0 && control.invalid == 0 && control.clamped == 0 &&
+                  control.arm_delta < 1e-6f && control.muzzle_delta < 1e-6f,
+              "idle control sweep reads no action motion");
+        check(demo.viewmodel->begin_reload(), "idle weapon accepts a swept reload");
+        const float reload_seconds = weapon == VmWeapon::Sniper
+                                         ? block_play::PlayWeaponMotion::kSniperReloadSeconds
+                                         : block_play::PlayWeaponMotion::kRifleReloadSeconds;
+        const auto reload = sweep(reload_seconds + .2f, false, 0.0f);
+        report_sweep("reload", weapon, reload);
+        check(reload.invalid == 0 && reload.clamped == 0,
+              "every reload frame keeps both hands on reachable, valid targets");
+        check(reload.busy >= static_cast<int>(reload_seconds * 60.0f) - 1 &&
+                  !demo.viewmodel->busy() && reload.arm_delta > .03f && reload.muzzle_delta > .05f,
+              "the swept reload moves both the weapon and the skinned arms, then ends");
+    }
+    // The bolt is measured only after the shot's recoil has decayed (exp(-14 t) is under 0.4%
+    // by 0.4 s), so what remains is the right hand's reach to the bolt and its pull. Sniper is
+    // still selected and idle after the loop above.
+    {
+        const auto bolt = sweep(block_play::PlayWeaponMotion::kBoltSeconds + .1f, true, .4f);
+        report_sweep("bolt", VmWeapon::Sniper, bolt);
+        check(bolt.invalid == 0 && bolt.clamped == 0,
+              "every bolt frame keeps both hands on reachable, valid targets");
+        check(bolt.busy >=
+                      static_cast<int>(block_play::PlayWeaponMotion::kBoltSeconds * 60.0f) - 1 &&
+                  !demo.viewmodel->busy() && bolt.arm_delta > .03f &&
+                  demo.viewmodel->take_case_ejection() && !demo.viewmodel->take_case_ejection(),
+              "the swept bolt moves the skinned right arm, ends, and ejects exactly one case");
+    }
     // Exercise actions through the real rig and uploaded deformation stream. The pure timeline
     // tests cannot detect a reload that advances correctly but never reaches rendered vertices.
     for (const auto weapon :
@@ -4623,6 +4737,17 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         demo.viewmodel->advance(.8f, {}, false);
         const auto reload_action = capture();
         const auto& arms = demo.viewmodel->arm_stats();
+        // Every term of the claim below, so a failure names itself instead of needing a rerun.
+        std::printf("viewmodel-smoke: %s rendered reload: reloading %d, valid %d, clamped %u, "
+                    "bind skin %.4f m, wrist miss L %.2f R %.2f mm, changed %zu px\n",
+                    weapon_name(weapon),
+                    demo.viewmodel->reloading() ? 1 : 0,
+                    arms.valid_input ? 1 : 0,
+                    static_cast<unsigned>(arms.clamped_targets),
+                    arms.max_vertex_displacement,
+                    arms.wrist_position_error[0] * 1000.0f,
+                    arms.wrist_position_error[1] * 1000.0f,
+                    static_cast<std::size_t>(changed(idle_action, reload_action)));
         check(demo.viewmodel->reloading() && arms.valid_input && arms.clamped_targets == 0 &&
                   arms.max_vertex_displacement > .001f && changed(idle_action, reload_action) > 100,
               "reload visibly moves the actual weapon and reachable skinned arms");

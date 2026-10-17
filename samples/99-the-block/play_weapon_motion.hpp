@@ -41,12 +41,15 @@ public:
     void advance(float dt, Weapon weapon, bool fired) noexcept {
         if (weapon != weapon_)
             cancel(weapon);
-        if (!std::isfinite(dt) || dt < 0.0f)
-            return;
+        // The shot was already accepted by the authoritative weapon, so its bolt cycle starts even
+        // on a frame whose clock is unusable; only the ADVANCE of time is refused. Checking dt
+        // first silently dropped a real shot's bolt and case.
         if (fired && weapon == Weapon::Sniper && !busy()) {
             action_ = Action::Bolt;
             elapsed_ = 0.0f;
         }
+        if (!std::isfinite(dt) || dt < 0.0f)
+            return;
         if (!busy())
             return;
         const float prior = elapsed_;
