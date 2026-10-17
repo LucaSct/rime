@@ -104,9 +104,10 @@ public:
     FxParticlePass(const FxParticlePass&) = delete;
     FxParticlePass& operator=(const FxParticlePass&) = delete;
 
-    // Allocate frames_in_flight+1 instance buffers. Call before the first add().
+    // Allocate frames_in_flight+1 buffers. Returns false after a submitted add or if n+1
+    // overflows. Disabled, empty and zero-budget add() calls do not lock the configuration.
     // Default is three slots, matching SceneRenderer's default two frames in flight.
-    void set_frames_in_flight(std::uint32_t frames);
+    [[nodiscard]] bool set_frames_in_flight(std::uint32_t frames);
 
     // Declare the pass. **A no-op when `settings.enabled` is false or `particles` is empty** — see
     // the byte-identical note above; the caller does not need to branch, and more importantly a
@@ -142,7 +143,7 @@ private:
     FxBlendMode blend_;
     std::uint32_t capacity_;
     std::uint32_t next_slot_ = 0;
-    bool added_ = false;
+    bool submitted_ = false;
     std::uint64_t dropped_ = 0;
     std::uint64_t drawn_ = 0;
 };

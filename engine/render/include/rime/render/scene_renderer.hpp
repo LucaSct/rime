@@ -503,8 +503,9 @@ public:
     // TAA can ghost moving puffs. No vfx module dependency is implied.
     void set_smoke_particles(std::span<const GpuParticle> particles, FxSettings settings);
 
+    // Cumulative rejects from the owned-list cap and FxParticlePass validation/draw budget.
     [[nodiscard]] std::uint64_t smoke_particles_dropped() const noexcept {
-        return smoke_particles_dropped_;
+        return smoke_particles_dropped_ + (smoke_pass_ ? smoke_pass_->particles_dropped() : 0);
     }
 
     // Where per-submesh materials come from (m16.3). Null — the default — means every submesh uses

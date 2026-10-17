@@ -1104,7 +1104,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     if (smoke_settings_.enabled && !smoke_particles_.empty()) {
         if (!smoke_pass_) {
             smoke_pass_ = std::make_unique<FxParticlePass>(device_, 4096, FxBlendMode::SmokeAlpha);
-            smoke_pass_->set_frames_in_flight(static_cast<std::uint32_t>(frame_ubos_.size() - 1));
+            (void)smoke_pass_->set_frames_in_flight(
+                static_cast<std::uint32_t>(frame_ubos_.size() - 1));
         }
         FxView smoke_view{};
         smoke_view.view_proj = fu.view_proj;

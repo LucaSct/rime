@@ -5,14 +5,21 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <vector>
 
 #include "render_test_support.hpp"
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/vec.hpp"
+#include "rime/ecs/transform.hpp"
+#include "rime/ecs/world.hpp"
+#include "rime/render/components.hpp"
 #include "rime/render/fx_pass.hpp"
+#include "rime/render/material.hpp"
+#include "rime/render/mesh.hpp"
 #include "rime/render/passes.hpp"
 #include "rime/render/render_graph.hpp"
+#include "rime/render/scene_renderer.hpp"
 #include "rime/vfx/dust.hpp"
 
 // m13.1a — Track FX brick fx1a's proof, and the one M8.4 deferred.
@@ -467,4 +474,117 @@ TEST_CASE("smoke graph declaration is gated and a zero budget counts all particl
     on.max_particles = 2;
     pass.add(graph, hdr, depth, {&grey, 1}, view, on);
     CHECK(graph.pass_count() == 1);
+}
+
+TEST_CASE("smoke rejects invalid particles without changing valid pixels") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass pass(*device, 8, FxBlendMode::SmokeAlpha);
+    FxSettings on{};
+    on.enabled = true;
+    const GpuParticle valid = smoke(0.0f, 0.4f, 0.4f, 0.4f);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    GpuParticle bad_position = valid;
+    bad_position.position_size[2] = nan;
+    GpuParticle bad_size = valid;
+    bad_size.position_size[3] = -1.0f;
+    GpuParticle bad_color = valid;
+    bad_color.color_alpha[3] = nan;
+    const auto reference = render_frame(*device, pass, {&valid, 1}, on);
+    const std::vector<GpuParticle> mixed{bad_position, valid, bad_size, bad_color};
+    const auto before = pass.particles_dropped();
+    const auto filtered = render_frame(*device, pass, mixed, on);
+    CHECK(filtered.bytes == reference.bytes);
+    CHECK(pass.particles_dropped() - before == 3);
+
+    RenderGraph graph(*device);
+    const RGTexture hdr = graph.create_texture({{kSize, kSize}, kHdrFormat, "invalid-view-hdr"});
+    const RGTexture depth =
+        graph.create_texture({{kSize, kSize}, kDepthFormat, "invalid-view-depth"});
+    FxView bad_view = make_view().fx;
+    bad_view.up = bad_view.right;
+    const auto before_view = pass.particles_dropped();
+    pass.add(graph, hdr, depth, {&valid, 1}, bad_view, on);
+    CHECK(graph.pass_count() == 0);
+    CHECK(pass.particles_dropped() - before_view == 1);
+    on.intensity = nan;
+    const auto before_intensity = pass.particles_dropped();
+    pass.add(graph, hdr, depth, {&valid, 1}, make_view().fx, on);
+    CHECK(graph.pass_count() == 0);
+    CHECK(pass.particles_dropped() - before_intensity == 1);
+    CHECK_FALSE(pass.set_frames_in_flight(2)); // a prior submitted add owns ring slots
+}
+
+TEST_CASE("smoke ring can be configured after a gated add") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass pass(*device, 2, FxBlendMode::SmokeAlpha);
+    RenderGraph graph(*device);
+    const RGTexture hdr = graph.create_texture({{kSize, kSize}, kHdrFormat, "ring-hdr"});
+    const RGTexture depth = graph.create_texture({{kSize, kSize}, kDepthFormat, "ring-depth"});
+    const GpuParticle grey = smoke(0.0f, 0.4f, 0.4f, 0.4f);
+    pass.add(graph, hdr, depth, {&grey, 1}, make_view().fx, FxSettings{});
+    CHECK(pass.set_frames_in_flight(9)); // no arbitrary eight-frame ceiling
+    CHECK_FALSE(pass.set_frames_in_flight(std::numeric_limits<std::uint32_t>::max()));
+}
+
+TEST_CASE("SceneRenderer declares smoke only when enabled, after SSR and before TAA") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    MaterialRegistry materials;
+    const MeshId cube = meshes.add(make_cube(0.5f), "smoke-scene-cube");
+    const MaterialId mat = materials.add({{1.0f, 1.0f, 1.0f, 1.0f}, 0.0f, 0.5f});
+    ecs::World world;
+    register_render_components(world);
+    (void)world.spawn_with(ecs::WorldTransform{}, Camera{});
+    core::Transform tf{};
+    tf.translation = {0.0f, 0.0f, -6.0f};
+    (void)world.spawn_with(ecs::WorldTransform{tf}, MeshRef{cube}, MaterialRef{mat});
+    SceneRenderer renderer(*device, meshes, materials);
+    LightingSettings lighting{};
+    lighting.ssr_enabled = true;
+    renderer.set_lighting(lighting);
+    const GpuParticle grey = smoke(-2.0f, 0.3f, 0.3f, 0.3f);
+    FxSettings on{};
+    on.enabled = true;
+    on.max_particles = 1;
+    const std::vector<GpuParticle> three{grey, grey, grey};
+    renderer.set_smoke_particles(three, on);
+    RenderGraph enabled(*device);
+    const auto output = renderer.render(enabled, world, {kSize, kSize}, true);
+    REQUIRE(output.ldr.is_valid());
+    std::size_t ssr_index = enabled.pass_count();
+    std::size_t smoke_index = enabled.pass_count();
+    std::size_t taa_index = enabled.pass_count();
+    for (std::size_t i = 0; i < enabled.pass_count(); ++i) {
+        const auto& name = enabled.pass_name(static_cast<std::uint32_t>(i));
+        if (name == "ssr-resolve")
+            ssr_index = i;
+        if (name == "fx-smoke")
+            smoke_index = i;
+        if (name == "taa-resolve")
+            taa_index = i;
+    }
+    CHECK(ssr_index < smoke_index);
+    CHECK(smoke_index < taa_index);
+    CHECK(renderer.smoke_particles_dropped() == 2);
+
+    renderer.set_smoke_particles({&grey, 1}, FxSettings{});
+    RenderGraph disabled(*device);
+    (void)renderer.render(disabled, world, {kSize, kSize}, true);
+    for (std::size_t i = 0; i < disabled.pass_count(); ++i)
+        CHECK(disabled.pass_name(static_cast<std::uint32_t>(i)) != "fx-smoke");
 }

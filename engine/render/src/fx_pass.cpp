@@ -3,7 +3,9 @@
 #include "rime/render/fx_pass.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 #include "particle.frag.spv.h"
@@ -77,12 +79,12 @@ FxParticlePass::FxParticlePass(rhi::Device& device, std::uint32_t max_particles,
     pd.debug_name = blend_ == FxBlendMode::SmokeAlpha ? "fx-smoke" : "fx-particles";
     pipeline_ = device.create_graphics_pipeline(pd);
 
-    set_frames_in_flight(2);
+    (void)set_frames_in_flight(2);
 }
 
-void FxParticlePass::set_frames_in_flight(std::uint32_t frames) {
-    if (added_ || frames > 8)
-        return;
+bool FxParticlePass::set_frames_in_flight(std::uint32_t frames) {
+    if (submitted_ || frames == std::numeric_limits<std::uint32_t>::max())
+        return false;
     for (rhi::BufferHandle instance : instances_)
         device_.destroy(instance);
     instances_.clear();
@@ -97,6 +99,7 @@ void FxParticlePass::set_frames_in_flight(std::uint32_t frames) {
     bd.debug_name = "fx-particle-instances";
     for (std::uint32_t i = 0; i < frames + 1; ++i)
         instances_.push_back(device_.create_buffer(bd));
+    return true;
 }
 
 FxParticlePass::~FxParticlePass() {
@@ -117,47 +120,81 @@ void FxParticlePass::add(RenderGraph& graph,
     // barrier, and no attachment load — so `enabled = false` leaves the frame byte-identical to a
     // build without this file in it. A pass that ran and drew zero instances would be *almost*
     // that, and a regression bridge cannot be built on almost (ADR-0032 §11, ADR-0035 §5).
-    added_ = true;
     if (!settings.enabled || particles.empty()) {
         return;
     }
 
     const std::uint32_t budget = std::min(capacity_, settings.max_particles);
-    const std::uint32_t count = static_cast<std::uint32_t>(
-        std::min<std::size_t>(particles.size(), static_cast<std::size_t>(budget)));
-    if (particles.size() > count) {
-        // Counted, never silent: a truncated draw looks exactly like a small puff.
-        dropped_ += particles.size() - count;
-    }
-    if (count == 0)
-        return;
-
     // The global intensity is folded in HERE rather than in the shader, so the shader stays a pure
     // function of what it is handed and the CPU keeps one place where "how bright is FX" is
     // decided. `intensity = 0` therefore draws the pass with black particles — which is
     // deliberately NOT the same as the gate being off, and the proof tells the two apart.
-    std::vector<GpuParticle> scaled(count);
+    std::vector<GpuParticle> scaled;
+    scaled.reserve(std::min<std::size_t>(particles.size(), budget));
     const float scale = std::max(settings.intensity, 0.0f);
-    for (std::uint32_t i = 0; i < count; ++i) {
-        scaled[i] = particles[i];
-        scaled[i].color_alpha[0] *= scale;
-        scaled[i].color_alpha[1] *= scale;
-        scaled[i].color_alpha[2] *= scale;
-    }
     if (blend_ == FxBlendMode::SmokeAlpha) {
         const core::Vec3 back = core::cross(view.right, view.up);
+        const auto finite3 = [](core::Vec3 v) {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+        };
+        const double back_length_sq = static_cast<double>(back.x) * back.x +
+                                      static_cast<double>(back.y) * back.y +
+                                      static_cast<double>(back.z) * back.z;
+        if (!finite3(view.right) || !finite3(view.up) || !finite3(back) ||
+            !(back_length_sq > 1.0e-12) || !std::isfinite(settings.intensity)) {
+            dropped_ += particles.size();
+            return;
+        }
+        for (const GpuParticle& particle : particles) {
+            bool valid =
+                std::isfinite(particle.position_size[3]) && particle.position_size[3] >= 0.0f;
+            for (float value : particle.position_size)
+                valid = valid && std::isfinite(value);
+            for (float value : particle.color_alpha)
+                valid = valid && std::isfinite(value);
+            if (!valid || scaled.size() == budget) {
+                ++dropped_;
+                continue;
+            }
+            GpuParticle candidate = particle;
+            candidate.color_alpha[0] *= scale;
+            candidate.color_alpha[1] *= scale;
+            candidate.color_alpha[2] *= scale;
+            if (!std::isfinite(candidate.color_alpha[0]) ||
+                !std::isfinite(candidate.color_alpha[1]) ||
+                !std::isfinite(candidate.color_alpha[2])) {
+                ++dropped_;
+                continue;
+            }
+            scaled.push_back(candidate);
+        }
         std::stable_sort(
             scaled.begin(), scaled.end(), [back](const GpuParticle& a, const GpuParticle& b) {
                 const auto projection = [back](const GpuParticle& p) {
-                    return p.position_size[0] * back.x + p.position_size[1] * back.y +
-                           p.position_size[2] * back.z;
+                    return static_cast<double>(p.position_size[0]) * back.x +
+                           static_cast<double>(p.position_size[1]) * back.y +
+                           static_cast<double>(p.position_size[2]) * back.z;
                 };
                 return projection(a) < projection(b);
             });
+    } else {
+        const std::uint32_t count = static_cast<std::uint32_t>(
+            std::min<std::size_t>(particles.size(), static_cast<std::size_t>(budget)));
+        dropped_ += particles.size() - count;
+        scaled.assign(particles.begin(), particles.begin() + count);
+        for (GpuParticle& particle : scaled) {
+            particle.color_alpha[0] *= scale;
+            particle.color_alpha[1] *= scale;
+            particle.color_alpha[2] *= scale;
+        }
     }
+    if (scaled.empty())
+        return;
+    const std::uint32_t count = static_cast<std::uint32_t>(scaled.size());
     const rhi::BufferHandle instances = instances_[next_slot_];
     next_slot_ = (next_slot_ + 1) % static_cast<std::uint32_t>(instances_.size());
     device_.write_buffer(instances, scaled.data(), scaled.size() * sizeof(GpuParticle), 0);
+    submitted_ = true;
     drawn_ += count;
 
     FxPush push{};
