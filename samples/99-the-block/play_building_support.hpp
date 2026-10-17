@@ -64,8 +64,9 @@ public:
 
     struct Stats {
         std::uint32_t buildings = 0;
-        std::uint32_t quarantined_buildings = 0; // initial graph did not reach ground: never stepped
-        std::uint32_t nodes = 0;                 // parts across supported (non-quarantined) buildings
+        std::uint32_t quarantined_buildings =
+            0;                   // initial graph did not reach ground: never stepped
+        std::uint32_t nodes = 0; // parts across supported (non-quarantined) buildings
         std::uint32_t bond_edges = 0;
         std::uint32_t contact_edges = 0;
         std::uint32_t roots = 0;
@@ -83,10 +84,12 @@ public:
     // Two constructors rather than `Config = {}`: a defaulted argument of a nested type with
     // member initialisers is ill-formed inside the enclosing class (the type is not yet complete).
     PlayBuildingSupport() = default;
+
     explicit PlayBuildingSupport(const Config& config) : config_(config) {}
 
     // Copy the cooked COM/AABB/bond data for one asset. False for an empty or non-finite asset.
-    [[nodiscard]] bool register_geometry(std::uint64_t asset_id, const assets::DestructibleAsset& asset);
+    [[nodiscard]] bool register_geometry(std::uint64_t asset_id,
+                                         const assets::DestructibleAsset& asset);
 
     // Convenience: read every blockkit cook from `cooked` and register it. False on any failure.
     [[nodiscard]] bool register_cooked_dir(const std::filesystem::path& cooked);
@@ -101,6 +104,7 @@ public:
     void step(destruction::DestructionWorld& destruction);
 
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
+
     [[nodiscard]] bool active() const noexcept { return !buildings_.empty(); }
 
 private:
@@ -110,6 +114,7 @@ private:
             core::Vec3 bmin;
             core::Vec3 bmax;
         };
+
         std::vector<Part> parts;
         std::vector<std::pair<std::uint32_t, std::uint32_t>> bonds;
     };

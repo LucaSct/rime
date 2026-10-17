@@ -88,13 +88,18 @@ bool PlayBuildingSupport::build(ecs::World& world, destruction::DestructionWorld
         std::uint64_t asset;
         bool unit_scale;
     };
+
     std::vector<Slab> slabs;
-    world.query<destruction::Destructible, destruction::DestructibleInstanceRef, blockkit::SlabRole>()
+    world
+        .query<destruction::Destructible,
+               destruction::DestructibleInstanceRef,
+               blockkit::SlabRole>()
         .for_each([&](ecs::Entity e,
                       destruction::Destructible& d,
                       destruction::DestructibleInstanceRef& ref,
                       blockkit::SlabRole& role) {
-            if (role.building == blockkit::kNoBuilding || ref.instance == destruction::kUnboundInstance ||
+            if (role.building == blockkit::kNoBuilding ||
+                ref.instance == destruction::kUnboundInstance ||
                 !blockkit::slab_kind::is_destructible(role.kind) ||
                 role.kind == blockkit::slab_kind::kCrate) {
                 return;
@@ -132,8 +137,7 @@ bool PlayBuildingSupport::build(ecs::World& world, destruction::DestructionWorld
             }
             const Geometry& g = it->second;
             const destruction::InstanceId inst{slabs[s].instance, 0};
-            if (!slabs[s].unit_scale ||
-                destruction.instance_part_count(inst) != g.parts.size()) {
+            if (!slabs[s].unit_scale || destruction.instance_part_count(inst) != g.parts.size()) {
                 // Non-unit scale or a pattern/geometry mismatch: world bounds below would be
                 // wrong, and a wrong bound could demolish a building. Refuse, do not guess.
                 refuse = true;
@@ -153,8 +157,10 @@ bool PlayBuildingSupport::build(ecs::World& world, destruction::DestructionWorld
                                             (c & 2) ? gp.bmax.y : gp.bmin.y,
                                             (c & 4) ? gp.bmax.z : gp.bmin.z};
                     const core::Vec3 r = core::rotate(
-                        pl.rotation, core::Vec3{corner.x - gp.com.x, corner.y - gp.com.y, corner.z - gp.com.z});
-                    const core::Vec3 w{pl.translation.x + r.x, pl.translation.y + r.y, pl.translation.z + r.z};
+                        pl.rotation,
+                        core::Vec3{corner.x - gp.com.x, corner.y - gp.com.y, corner.z - gp.com.z});
+                    const core::Vec3 w{
+                        pl.translation.x + r.x, pl.translation.y + r.y, pl.translation.z + r.z};
                     lo = {std::min(lo.x, w.x), std::min(lo.y, w.y), std::min(lo.z, w.z)};
                     hi = {std::max(hi.x, w.x), std::max(hi.y, w.y), std::max(hi.z, w.z)};
                 }
@@ -190,8 +196,11 @@ bool PlayBuildingSupport::build(ecs::World& world, destruction::DestructionWorld
                 for (std::size_t t = s + 1; t < j; ++t) {
                     for (std::size_t x = slab_first[s - i]; x < slab_first[s - i + 1]; ++x) {
                         for (std::size_t y = slab_first[t - i]; y < slab_first[t - i + 1]; ++y) {
-                            if (boxes_touch(b.nodes[x].bmin, b.nodes[x].bmax, b.nodes[y].bmin,
-                                            b.nodes[y].bmax, config_.contact_tolerance)) {
+                            if (boxes_touch(b.nodes[x].bmin,
+                                            b.nodes[x].bmax,
+                                            b.nodes[y].bmin,
+                                            b.nodes[y].bmax,
+                                            config_.contact_tolerance)) {
                                 link(x, y, stats_.contact_edges);
                             }
                         }
@@ -211,8 +220,7 @@ bool PlayBuildingSupport::build(ecs::World& world, destruction::DestructionWorld
         if (refuse || got != b.nodes.size()) {
             b.quarantined = true;
             ++stats_.quarantined_buildings;
-            stats_.initial_unreachable_parts +=
-                static_cast<std::uint32_t>(b.nodes.size()) - got;
+            stats_.initial_unreachable_parts += static_cast<std::uint32_t>(b.nodes.size()) - got;
             all_ok = false;
         } else {
             stats_.nodes += static_cast<std::uint32_t>(b.nodes.size());
