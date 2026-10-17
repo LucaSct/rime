@@ -114,12 +114,13 @@ bool split_magazine(render::CpuMesh& body, unsigned weapon, MagazineSplit& out) 
     // Source GLBs measured in prepared weapon-local metres. M4's authored material slot is a
     // clean magazine. SCAR and MSR share materials with their receivers: classify WHOLE
     // index-connected pieces by bounds, never triangles clipped along an arbitrary plane.
+    // MSR also gates material slots: slot 7 overlaps its box but is receiver geometry.
     // Exact triangle totals make changed artwork fail closed instead of moving receiver faces.
-    constexpr std::array<core::Vec3, 2> lo{{{.120f, -.349f, -.620f}, {}}};
-    constexpr std::array<core::Vec3, 2> hi{{{.157f, -.187f, -.534f}, {}}};
-    constexpr std::array<std::uint32_t, 2> expected{1152, 664};
-    // MSR remains a single body until its UV-split source magazine has an unambiguous component
-    // set; a coordinate triangle cut would produce floating receiver faces.
+    constexpr std::array<core::Vec3, 3> lo{
+        {{.120f, -.349f, -.620f}, {}, {.1255f, -.308f, -.3282f}}};
+    constexpr std::array<core::Vec3, 3> hi{
+        {{.157f, -.187f, -.534f}, {}, {.1545f, -.204f, -.2165f}}};
+    constexpr std::array<std::uint32_t, 3> expected{1152, 664, 918};
     if (weapon >= expected.size())
         return false;
     std::vector<std::uint32_t> parent(body.vertices.size());
@@ -161,13 +162,19 @@ bool split_magazine(render::CpuMesh& body, unsigned weapon, MagazineSplit& out) 
     };
     out.magazine.vertices = body.vertices; // preserve positions, normals, UVs and tangents
     std::vector<std::uint32_t> kept;
+    std::array<std::uint32_t, 12> magazine_by_material{};
     core::Vec3 contact_sum{};
     std::uint32_t contact_vertices = 0;
     for (auto& range : body.submeshes) {
         const auto body_begin = static_cast<std::uint32_t>(kept.size());
         const auto mag_begin = static_cast<std::uint32_t>(out.magazine.indices.size());
         for (std::size_t t = range.first_index; t < range.first_index + range.index_count; t += 3) {
-            const bool mag = weapon == 1 ? range.material_slot == 2 : inside(body.indices[t]);
+            const bool msr_material = range.material_slot == 6 || range.material_slot == 8 ||
+                                      range.material_slot == 9 || range.material_slot == 10;
+            const bool mag = weapon == 1 ? range.material_slot == 2
+                                         : inside(body.indices[t]) && (weapon == 0 || msr_material);
+            if (mag && range.material_slot < magazine_by_material.size())
+                ++magazine_by_material[range.material_slot];
             auto& target = mag ? out.magazine.indices : kept;
             for (unsigned j = 0; j < 3; ++j) {
                 const auto source = body.indices[t + j];
@@ -188,6 +195,9 @@ bool split_magazine(render::CpuMesh& body, unsigned weapon, MagazineSplit& out) 
     }
     out.triangles = static_cast<std::uint32_t>(out.magazine.indices.size() / 3);
     if (out.triangles != expected[weapon])
+        return false;
+    if (weapon == 2 && (magazine_by_material[6] != 282 || magazine_by_material[8] != 156 ||
+                        magazine_by_material[9] != 432 || magazine_by_material[10] != 48))
         return false;
     body.indices = std::move(kept);
     // The palm aims at the magazine's centre near its upper socket. The articulated fingers in
@@ -437,7 +447,7 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             static_cast<std::uint32_t>(geometry.indices.size() / 3);
         const std::uint64_t fingerprint = i < 3 ? geometry_fingerprint(geometry) : 0;
         MagazineSplit magazine;
-        if (i < 2) {
+        if (i < 3) {
             if (!split_magazine(geometry, static_cast<unsigned>(i), magazine)) {
                 std::fprintf(
                     stderr,
@@ -471,7 +481,7 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             return false;
         ++resident_meshes_;
         render::MeshId magazine_id = render::kInvalidMeshId;
-        if (i < 2) {
+        if (i < 3) {
             magazine_id = meshes.add(magazine.magazine, "held detachable magazine");
             if (!meshes.contains(magazine_id))
                 return false;
@@ -556,7 +566,7 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
                                                 false,
                                                 static_cast<std::uint8_t>(i),
                                                 static_cast<std::uint32_t>(j)});
-            if (i < 2) {
+            if (i < 3) {
                 const auto& mag_range = magazine_ranges[j];
                 if (mag_range.index_count != 0)
                     models_[i].parts.push_back({magazine_id,
@@ -785,7 +795,7 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     // Target the measured magazine body, then translate the wrist and detached mesh together.
     // Approach reach and pull reach are solved separately. Once the wrist reaches the socket,
     // any pull limit scales BOTH wrist and mesh displacement; otherwise the magazine stays seated
-    // and magazine_contact_gap reports the missed contact. MSR has no safe magazine split yet.
+    // and magazine_contact_gap reports the missed contact on all three authored guns.
     const core::Vec3 pull{0.0f, -0.11f, 0.035f};
     const core::Vec3 support_grip = core::transform_point(grips[0], {});
     const core::Vec3 approach =

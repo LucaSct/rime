@@ -68,6 +68,16 @@ TEST_CASE("magazine reload reaches contact before extraction and reseats before 
     CHECK(motion.pose().left_magazine == 0.0f);
 }
 
+TEST_CASE("sniper bolt cycle never moves its seated magazine") {
+    using Weapon = PlayWeaponMotion::Weapon;
+    PlayWeaponMotion motion;
+    motion.advance(0.0f, Weapon::Sniper, true, false);
+    REQUIRE(motion.cycling());
+    motion.advance(0.5f, Weapon::Sniper, false, false);
+    CHECK(motion.pose().magazine_pull == 0.0f);
+    CHECK(motion.pose().left_magazine == 0.0f);
+}
+
 TEST_CASE("only accepted sniper shots cycle and emit one extraction event") {
     using Weapon = PlayWeaponMotion::Weapon;
     PlayWeaponMotion motion;
