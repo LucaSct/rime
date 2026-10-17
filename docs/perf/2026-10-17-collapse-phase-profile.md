@@ -63,3 +63,9 @@ provenance](collapse-scaling-2026-10-17/verification/checked-inverse-provenance.
 explicitly labels this as a checked-inverse diagnostic, **not an ASan build**.
 The production smoke also checks the transform determinant condition in Release.
 Fresh ASan CI is still required; the earlier failure is not called a flake.
+
+
+The standard 1080p gate was retried after the functional runs, on clean city-only
+tracked tree `184a9b4`. It again refused with exit 4 because background Python
+processes were at 101% CPU. The [refusal log](collapse-scaling-2026-10-17/verification/perf-final-attempt.log)
+is retained; no busy-box override or qualified performance JSON was produced.
