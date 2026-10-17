@@ -79,6 +79,7 @@
 #include <utility>
 #include <vector>
 
+#include "play_building_support.hpp"
 #include "play_city.hpp"
 #include "play_environment.hpp"
 #include "play_input.hpp"
@@ -723,6 +724,9 @@ struct Session {
     ServerPeer server;
     ClientPeer client;
     block_play::PlayWorld* play_world = nullptr; // owned by Demo; active in --play/--world-smoke
+    // Owned by Demo; non-null ONLY in --play. The authored/headless/perf paths never set it, so
+    // they run exactly as before. Stepped on the authoritative peer just before its update.
+    block_play::PlayBuildingSupport* building_support = nullptr;
     bool world_stopped = false;
 
     std::uint64_t now_ms = 0;
@@ -1223,6 +1227,9 @@ struct Session {
                     server.destruction.apply_damage(
                         instance, shot.point, shot.damage_radius, shot.damage, shot.impulse);
                     ++damage_ops;
+                }
+                if (building_support != nullptr) {
+                    building_support->step(server.destruction);
                 }
                 server.destruction.update(server.physics);
                 last_server_ms = server_watch.elapsed_ms();
@@ -1816,6 +1823,8 @@ struct Demo {
     block_play::city::Dresser city_dresser; // per-part lamp/barrier look, fed by sync() each tick
     std::unique_ptr<Visuals> visuals;
     std::unique_ptr<block_play::PlayWorld> play_world;
+    std::unique_ptr<block_play::PlayBuildingSupport> building_support;
+    bool building_support_enabled = false; // set by run_play only
     std::unique_ptr<block_play::PlayViewmodel> viewmodel;
     std::unique_ptr<block_play::PlayWeaponFx> weapon_fx;
     bool shot_presented = false;
@@ -1926,6 +1935,21 @@ struct Demo {
                 std::fprintf(stderr, "99-the-block: spawn terrain could not be installed\n");
                 return false;
             }
+        }
+        if (building_support_enabled) {
+            building_support = std::make_unique<block_play::PlayBuildingSupport>();
+            const bool loaded = building_support->register_cooked_dir(cooked);
+            const bool built =
+                loaded && building_support->build(session.server.world, session.server.destruction);
+            const auto& bs = building_support->stats();
+            std::fprintf(stderr,
+                         "99-the-block: building support: loaded=%d all_supported=%d buildings=%u "
+                         "quarantined=%u nodes=%u roots=%u bond_edges=%u contact_edges=%u "
+                         "unreachable=%u missing_geometry=%u\n",
+                         loaded ? 1 : 0, built ? 1 : 0, bs.buildings, bs.quarantined_buildings,
+                         bs.nodes, bs.roots, bs.bond_edges, bs.contact_edges,
+                         bs.initial_unreachable_parts, bs.missing_geometry);
+            session.building_support = building_support.get();
         }
         if (visuals) {
             visuals->dress(session.client.world);
@@ -4807,6 +4831,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     demo.scripted_charge = false; // interactive: wait for F, not the tape
     demo.session.server.weapon.automatic = true;
     demo.streamed_world = true;
+    demo.building_support_enabled = true;
     demo.environment_enabled = true;
     demo.viewmodel_enabled = true;
     demo.player_help = true;
