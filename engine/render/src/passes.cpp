@@ -85,7 +85,9 @@ void record_draws(rhi::CommandBuffer& cmd,
                   bool bind_material_textures,
                   std::uint32_t flag_filter = 0,
                   std::uint32_t flag_match = 0,
-                  bool velocity = false) {
+                  bool velocity = false,
+                  const std::optional<Frustum>& caster_frustum = std::nullopt,
+                  CullStats* caster_stats = nullptr) {
     // Binding 0 is FrameUniforms at data.frame_ubo_offset — 0 for the camera pass, cascade c's
     // 256-byte view_proj slice for a CSM depth pass (m10.1). depth_only.vert / the forward shaders
     // read only the leading members of whatever block sits there, so one loop serves every view.
@@ -95,6 +97,20 @@ void record_draws(rhi::CommandBuffer& cmd,
         if ((item.flags & flag_filter) != flag_match) {
             continue; // belongs to the other partition
         }
+        if (caster_frustum && !item.vertex_override.is_valid() &&
+            !item.velocity_vertex_override.is_valid()) {
+            // Keep original i for UBO/material arrays. Whole-mesh bounds are conservative for
+            // submeshes; deformed streams fail open because registry bounds may be stale.
+            const GpuMesh& bounds = data.meshes->get(item.mesh);
+            if (!shadow_caster_aabb_in_frustum(
+                    *caster_frustum, item.model, bounds.local_min, bounds.local_max)) {
+                if (caster_stats)
+                    ++caster_stats->culled;
+                continue;
+            }
+        }
+        if (caster_stats)
+            ++caster_stats->submitted;
         const GpuMesh& mesh = data.meshes->get(item.mesh);
         if (velocity && item.velocity_vertex_override.is_valid())
             cmd.bind_vertex_buffer(item.velocity_vertex_override,
@@ -206,7 +222,9 @@ void DepthPrepass::add(RenderGraph& graph,
                        RGTexture depth,
                        const SceneDrawData& data,
                        std::uint32_t layer,
-                       std::string_view label) const {
+                       std::string_view label,
+                       std::optional<Frustum> caster_frustum,
+                       std::shared_ptr<CullStats> caster_stats) const {
     // Clear to the far plane, STORE the result — the whole point is that the forward pass (or, for
     // a CSM cascade, the shadow sample) loads this depth back. `layer` aims the pass at one cascade
     // of a layered depth target (m10.1); 0 is the ordinary single-layer case.
@@ -219,7 +237,10 @@ void DepthPrepass::add(RenderGraph& graph,
     RenderGraph::RasterPassDesc desc{};
     desc.depth = &depth_att;
     graph.add_raster_pass(
-        label, desc, [pipe = pipeline_, masked = masked_pipeline_, data](rhi::CommandBuffer& cmd) {
+        label,
+        desc,
+        [pipe = pipeline_, masked = masked_pipeline_, data, caster_frustum, caster_stats](
+            rhi::CommandBuffer& cmd) {
             // Two partitions, one pipeline switch. Opaque first (the overwhelming majority, and
             // the byte-identical old path), then the masked draws through the alpha-testing
             // variant. Without the second half, depth is written for texels the forward pass
@@ -235,13 +256,19 @@ void DepthPrepass::add(RenderGraph& graph,
                          data,
                          /*bind_material_textures=*/false,
                          DrawItem::AlphaMasked | DrawItem::DoubleSided,
-                         0);
+                         0,
+                         false,
+                         caster_frustum,
+                         caster_stats.get());
             cmd.set_cull_mode(rhi::CullMode::None);
             record_draws(cmd,
                          data,
                          /*bind_material_textures=*/false,
                          DrawItem::AlphaMasked | DrawItem::DoubleSided,
-                         DrawItem::DoubleSided);
+                         DrawItem::DoubleSided,
+                         false,
+                         caster_frustum,
+                         caster_stats.get());
             cmd.bind_pipeline(masked);
             // Masked geometry is overwhelmingly foliage, which is also where double-sided lives —
             // so the depth pass honours the same cull flag. A card whose back face is culled here
@@ -251,13 +278,19 @@ void DepthPrepass::add(RenderGraph& graph,
                          data,
                          /*bind_material_textures=*/true,
                          DrawItem::AlphaMasked | DrawItem::DoubleSided,
-                         DrawItem::AlphaMasked);
+                         DrawItem::AlphaMasked,
+                         false,
+                         caster_frustum,
+                         caster_stats.get());
             cmd.set_cull_mode(rhi::CullMode::None);
             record_draws(cmd,
                          data,
                          /*bind_material_textures=*/true,
                          DrawItem::AlphaMasked | DrawItem::DoubleSided,
-                         DrawItem::AlphaMasked | DrawItem::DoubleSided);
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided,
+                         false,
+                         caster_frustum,
+                         caster_stats.get());
         });
 }
 

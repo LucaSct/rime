@@ -2,7 +2,9 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <memory>
 
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/vec.hpp"
@@ -91,10 +93,18 @@ public:
     // placeholder array.
     [[nodiscard]] ShadowBinding empty_binding(RenderGraph& graph, rhi::TextureHandle dummy);
 
+    // Updated when the graph executes. Each add() owns a fresh array; deferred passes retain
+    // shared ownership so a second declaration cannot overwrite the first frame's counters.
+    [[nodiscard]] const std::array<CullStats, kMaxCascades>& caster_stats() const noexcept {
+        return *caster_stats_;
+    }
+
 private:
     rhi::Device& device_;
     rhi::SamplerHandle compare_sampler_; // sampler2DArrayShadow: LessEqual hardware PCF
     std::uint32_t resolution_ = 0;       // the array texture's current per-cascade size
+    std::shared_ptr<std::array<CullStats, kMaxCascades>> caster_stats_ =
+        std::make_shared<std::array<CullStats, kMaxCascades>>();
 };
 
 } // namespace rime::render

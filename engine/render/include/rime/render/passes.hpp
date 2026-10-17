@@ -4,11 +4,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
 
 #include "rime/core/math/mat.hpp"
+#include "rime/render/culling.hpp"
 #include "rime/render/lighting/sky.hpp"
 #include "rime/render/material.hpp"
 #include "rime/render/mesh.hpp"
@@ -318,7 +321,9 @@ public:
              RGTexture depth,
              const SceneDrawData& data,
              std::uint32_t layer = 0,
-             std::string_view label = "depth-prepass") const;
+             std::string_view label = "depth-prepass",
+             std::optional<Frustum> caster_frustum = std::nullopt,
+             std::shared_ptr<CullStats> caster_stats = {}) const;
 
 private:
     rhi::Device& device_;
