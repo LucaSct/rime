@@ -43,6 +43,7 @@ add_subdirectory(physics) # rigid-body core: pure-CPU, GPU-free — always built
 add_subdirectory(destruction) # part-based destruction runtime: pure-CPU, GPU-free (M8)
 add_subdirectory(audio)  # audio seam: null backend logs play() calls — GPU-free (M8.4)
 add_subdirectory(vfx)    # destruction dust stub: CPU particle sim — GPU-free (M8.4)
+add_subdirectory(fluids) # analytic buoyancy and public physics impulse integration — GPU-free
 add_subdirectory(platform)
 add_subdirectory(assets) # RMA1 reader + registry + manifest: fully GPU-free (in-memory buffers)
 add_subdirectory(viewer) # viewer-side render math (orbit camera, …); pure rime::core, no GPU needed
