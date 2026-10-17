@@ -184,3 +184,12 @@ or prove eventual convergence. It also does not establish that every mismatch is
 the previously reproduced burst defect. The existing 96-support-releases-per-tick
 workaround remains unchanged. Profiling the large contact islands and checking
 peer convergence after quiescence are follow-up engine work; #331 stays in draft.
+
+## Standard 1080p gate attempt
+
+After the diagnostics and tests finished, `scripts/perf.sh --preset release
+--sample the-block --frames 600 --width 1920 --height 1080 --commit` was attempted
+on clean tracked tree `c6f5d91`. It refused with exit 4: a Python process was using
+101% CPU. The [refusal log](play-city-profile-2026-10-17/verification/perf-gate-final.log)
+is retained. No busy-box override, CPU-affinity substitution, performance JSON or
+new qualified baseline was produced. The mandatory hardware gate remains open.
