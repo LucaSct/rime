@@ -5034,6 +5034,219 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         demo.step_sim(gameplay_net::to_input_command(trigger));
     check(demo.session.shots_fired == automatic_before + 3,
           "held trigger fires three accepted rounds in 18 ticks, then release stops fire");
+
+    // ── PlayWeaponFx invariants, on a throwaway ECS world + physics world ──────────────────────
+    // The pixel checks above prove something drew; they cannot tell a camera-following flash from
+    // an orphaned one, or prove a case actually falls. This block drives a second, isolated
+    // PlayWeaponFx instance (so it cannot perturb the live demo world/entity-pool checks already
+    // run above) against real WorldTransform/MeshRef/PointLight state and a real raycast, reusing
+    // the live app's device and the demo's visuals registries as the spec asks rather than opening
+    // a second GPU mesh registry for two low-poly shapes nobody else needs.
+    {
+        ecs::World fx_world;
+        ecs::register_transform_components(fx_world);
+        render::register_render_components(fx_world);
+
+        // A minimal physics world: one static floor for the casing raycast and one static target
+        // for the impact decal's body-relative anchor. No network, no bodies the real scene owns.
+        physics::PhysicsWorld fx_physics;
+        physics::BodyDesc floor_desc{};
+        floor_desc.motion = physics::MotionType::Static;
+        floor_desc.shape.type = physics::ShapeType::Box;
+        floor_desc.shape.half_extents = {50.0f, 0.5f, 50.0f};
+        floor_desc.position = {0.0f, -0.5f, 0.0f};
+        const auto floor_body = fx_physics.create_body(floor_desc);
+        physics::BodyDesc target_desc{};
+        target_desc.motion = physics::MotionType::Static;
+        target_desc.shape.type = physics::ShapeType::Box;
+        target_desc.shape.half_extents = {1.0f, 1.0f, 1.0f};
+        target_desc.position = {4.0f, 1.0f, 0.0f};
+        const auto target_body = fx_physics.create_body(target_desc);
+        check(floor_body.is_valid() && target_body.is_valid(),
+              "weapon fx probe: isolated bodies created");
+
+        // Materials are the stable key into a known entity's role: fire()/pose() assign
+        // material_ids_[0..4] to flash/tracer/spark/impact/case respectively (play_weapon_fx.cpp),
+        // and MaterialRegistry::add is a plain push_back, so the five ids this fresh instance mints
+        // are exactly the next five indices after whatever the live demo already registered. That
+        // is read off material.hpp's `add`, not guessed, and it is the "helper via ECS snapshot"
+        // the spec allows in place of exposing new API purely for this test.
+        const auto first_fx_material =
+            static_cast<render::MaterialId>(demo.visuals->materials.size());
+        block_play::PlayWeaponFx fx(
+            *demo.app.device(), demo.visuals->meshes, demo.visuals->materials);
+        check(fx.initialize(), "weapon fx probe: isolated instance initializes");
+        const render::MaterialId flash_mat = first_fx_material + 0;
+        const render::MaterialId tracer_mat = first_fx_material + 1;
+        const render::MaterialId spark_mat = first_fx_material + 2;
+        const render::MaterialId impact_mat = first_fx_material + 3;
+        const render::MaterialId case_mat = first_fx_material + 4;
+
+        // Find the one active entity wearing a given material, if any -- a query over the fixed
+        // pool rather than reaching into PlayWeaponFx's private Shot/Impact/Case arrays, which the
+        // spec asks to avoid touching.
+        auto find_by_material = [&](render::MaterialId wanted) {
+            ecs::Entity found{};
+            fx_world.query<ecs::WorldTransform, render::MeshRef, render::MaterialRef>().for_each(
+                [&](ecs::Entity e,
+                    ecs::WorldTransform&,
+                    render::MeshRef& mesh,
+                    render::MaterialRef& mat) {
+                    if (mat.material == wanted && mesh.mesh != render::kInvalidMeshId)
+                        found = e;
+                });
+            return found;
+        };
+        auto transform_of = [&](ecs::Entity e) {
+            auto* t = fx_world.get<ecs::WorldTransform>(e);
+            return t ? t->value.translation : core::Vec3{std::nanf(""), 0, 0};
+        };
+        auto finite3 = [](core::Vec3 v) {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+        };
+
+        block_play::PlayWeaponFx::ViewPose view_a{};
+        view_a.eye = {0, 1.2f, -4};
+        view_a.direction = {1, 0, 0.1f};
+        view_a.muzzle = {0.2f, 1.1f, -3.9f};
+        view_a.ejection_point = {-0.05f, 1.05f, -3.95f};
+        view_a.velocity = {2, 0, 0}; // the player's own motion, carried into the case's launch
+
+        // One accepted shot that both hits a surface (spark + impact) and names the target body,
+        // posed once under view_a.
+        fx.fire(view_a.eye,
+                view_a.direction,
+                view_a.muzzle,
+                {4, 1.0f, 0},
+                true,
+                {-1, 0, 0},
+                target_body,
+                &fx_physics);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        const auto flash_a = find_by_material(flash_mat);
+        const auto tracer_pos_a = transform_of(find_by_material(tracer_mat));
+        const auto impact_pos_a = transform_of(find_by_material(impact_mat));
+        check(flash_a != ecs::Entity{} && finite3(transform_of(flash_a)),
+              "weapon fx probe: flash entity is live under the first view pose");
+        check(fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount,
+              "weapon fx probe: the first pose binds exactly the fixed resident pool");
+
+        // Advance well under 40 ms and re-pose under a SECOND, displaced view -- the viewmodel's
+        // next frame, not a new shot. The accepted hit and tracer's world path must not move with
+        // the camera; only the muzzle flash/light (and its WorldTransform) may. 5 ms, not the
+        // full 16 ms frame: the tracer's head races toward `distance` at 800 m/s
+        // (play_weapon_fx.cpp), so a longer step can run it past `distance` and hide it before this
+        // check reads it.
+        fx.advance(0.005f);
+        block_play::PlayWeaponFx::ViewPose view_b = view_a;
+        view_b.eye.x += 0.3f;
+        view_b.muzzle = {0.5f, 1.15f, -3.85f};
+        view_b.direction = {1, 0, 0.2f};
+        fx.pose(fx_world, &fx_physics, &view_b);
+        const auto flash_pos_b = transform_of(find_by_material(flash_mat));
+        const auto tracer_pos_b = transform_of(find_by_material(tracer_mat));
+        const auto impact_pos_b = transform_of(find_by_material(impact_mat));
+        const float flash_moved = core::length(flash_pos_b - transform_of(flash_a));
+        check(flash_moved > 0.1f,
+              "weapon fx probe: flash follows the moved view pose within one 16 ms frame");
+        check(core::length(tracer_pos_b - tracer_pos_a) < 1e-4f,
+              "weapon fx probe: accepted tracer world path is unaffected by the view move");
+        check(core::length(impact_pos_b - impact_pos_a) < 1e-4f,
+              "weapon fx probe: accepted impact world position is unaffected by the view move");
+        // The point-light-follows-flash contract is covered by `flash_moved` above: show() writes
+        // the SAME flash.translation into the muzzle light's own WorldTransform
+        // (play_weapon_fx.cpp's part==3 branch), so testing the light separately would only
+        // re-measure a translation this check already read.
+
+        // Case ejection: one queued case, posed under a view with real velocity/ejection data. Its
+        // first pose must land exactly at the ejection point with a velocity that carries the
+        // player's own motion (view->velocity), not just the weapon's local kick. Deliberately the
+        // FIRST case this isolated instance ever ejects: every case entity shares `case_mat` (all
+        // 32 ring slots do), so `find_by_material` can only name ONE of them unambiguously while
+        // exactly one is active -- this must run before the overflow stress below puts several
+        // more into flight.
+        fx.queue_case();
+        fx.pose(fx_world, &fx_physics, &view_a);
+        const auto case_entity = find_by_material(case_mat);
+        check(case_entity != ecs::Entity{} &&
+                  core::length(transform_of(case_entity) - view_a.ejection_point) < 1e-4f,
+              "weapon fx probe: a queued case is ejected at the view's ejection point");
+        const float start_height = transform_of(case_entity).y;
+        const float floor_top = floor_desc.position.y + floor_desc.shape.half_extents.y;
+        float min_height = start_height;
+        // Fall under gravity, bounce once off the floor, then settle -- never sink through it. The
+        // view's +2.2 m/s vertical kick (play_weapon_fx.cpp's `pose`) makes it rise ~0.25 m before
+        // falling, so a worked trajectory (v0=2.2, g=9.81, drop to y=0 from y=1.05) puts first
+        // contact at ~0.74 s and the settle a few tenths later; 100 ticks at 16 ms (1.6 s) covers
+        // both bounces with margin and stays well under kCaseLifetime's 3 s, so age never expires
+        // the mesh before it settles.
+        bool saw_descent = false, saw_rise_after_floor = false;
+        for (int tick = 0; tick < 100; ++tick) {
+            fx.advance(0.016f);
+            fx.pose(fx_world, &fx_physics, &view_a);
+            const float y = transform_of(case_entity).y;
+            saw_descent |= y < start_height - 0.02f;
+            min_height = std::min(min_height, y);
+            if (y > min_height + 0.002f && min_height < start_height - 0.02f)
+                saw_rise_after_floor = true; // the one visible bounce
+        }
+        check(saw_descent, "weapon fx probe: the ejected case falls under gravity");
+        check(min_height > floor_top - 0.01f,
+              "weapon fx probe: the case never sinks through the floor");
+        check(saw_rise_after_floor,
+              "weapon fx probe: the case bounces once off the floor before settling");
+        const auto settled_height = transform_of(case_entity).y;
+        fx.advance(0.1f);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        check(
+            std::fabs(transform_of(case_entity).y - settled_height) < 1e-4f,
+            "weapon fx probe: a settled case stays at rest rather than sinking through the floor");
+
+        // Pool growth: fire far past the ring size, and queue far past the case ring size WITHOUT a
+        // valid-view pose to drain it (the 2-arg `pose()` overload -- no view at all, the
+        // documented fallback for "old callers"). `queue_case()` clamps at kCaseSlots rather than
+        // growing, and neither overflow may add a single entity/mesh/material to the fixed pool.
+        for (std::size_t i = 0; i < block_play::PlayWeaponFx::kSlots * 3; ++i)
+            fx.fire(view_a.eye, view_a.direction, view_a.muzzle, {4, 1, 0}, false);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        for (std::size_t i = 0; i < block_play::PlayWeaponFx::kCaseSlots * 2; ++i)
+            fx.queue_case();
+        fx.pose(fx_world, &fx_physics); // no view: queued cases stay queued, not ejected
+        check(fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount,
+              "weapon fx probe: burst overflow and a flooded, undrained case queue grow no pool");
+
+        // Expiry: run the clock past every shot lifetime and re-pose; the flash/tracer/spark
+        // entities must drop back to kInvalidMeshId rather than keep showing a stale pose. (This
+        // valid-view pose also drains the queue above -- harmless, nothing after this reads a case
+        // by material again.)
+        fx.advance(block_play::PlayWeaponFx::kSparkLifetime + 0.01f);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        check(find_by_material(flash_mat) == ecs::Entity{} &&
+                  find_by_material(tracer_mat) == ecs::Entity{} &&
+                  find_by_material(spark_mat) == ecs::Entity{},
+              "weapon fx probe: expired shot parts hide their mesh");
+
+        // Invalid dt/view handling: neither may propagate a NaN into any posed transform. advance()
+        // guards dt with isfinite()+>0 (negative/zero/NaN are all no-ops); a NaN view fails
+        // pose()'s own `valid_view` check and falls back to each shot's recorded muzzle/direction
+        // instead.
+        fx.advance(std::nanf(""));
+        fx.advance(-1.0f);
+        fx.advance(0.0f);
+        block_play::PlayWeaponFx::ViewPose bad_view = view_a;
+        bad_view.eye.x = std::nanf("");
+        fx.pose(fx_world, &fx_physics, &bad_view);
+        bool any_nan = false;
+        fx_world.query<ecs::WorldTransform>().for_each(
+            [&](ecs::WorldTransform& t) { any_nan |= !finite3(t.value.translation); });
+        check(!any_nan, "weapon fx probe: a NaN view/dt never reaches a posed WorldTransform");
+
+        std::printf("environment-smoke: weapon fx probe flash-move %.3f m / case fall %.3f m, "
+                    "min height %.3f\n",
+                    static_cast<double>(flash_moved),
+                    static_cast<double>(start_height - min_height),
+                    static_cast<double>(min_height));
+    }
     return okay ? 0 : 1;
 }
 

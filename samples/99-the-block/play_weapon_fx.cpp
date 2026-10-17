@@ -364,7 +364,11 @@ void PlayWeaponFx::pose(ecs::World& world,
         core::Transform transform{};
         transform.translation = casing.position;
         transform.rotation = casing.rotation;
-        transform.scale = {.0048f, .0048f, .0095f};
+        // 9.6 mm diameter x 26 mm length -- the mesh's radius and half-height are both 1, so this
+        // scale IS the case's half-dimensions. The old .0095 half-length (19 mm total) read as a
+        // pistol case; the held weapon art here is the sniper/rifle pair, so a slightly longer
+        // case (still a few cm, not a "giant bullet") reads correctly at ejection distance.
+        transform.scale = {.0048f, .0048f, .013f};
         show(world, casing.entity, active ? brass_ : render::kInvalidMeshId, transform);
     }
 }
