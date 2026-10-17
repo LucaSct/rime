@@ -165,3 +165,29 @@ Document licenses/notices, platform fit and measured benefit before any import.
 An old foundational paper can still be useful; current available code and
 production tradeoffs are checked separately instead of calling every old method
 the latest technique.
+
+## Next-brick progress, 2026-10-17
+
+The initial seams now have working, default-off successors:
+
+* **M-FX1:** bounded continuous `PlumeEmitter`; a sorted alpha smoke mode in the
+  existing FX pass; a copied SceneRenderer input with capped, observable drops.
+  RGB approximates caller-supplied incident light. There are no soft intersections,
+  self-shadowing, density grid or temporal smoke motion vectors yet.
+* **M-FX2:** a sample-owned immutable-event consumer deduplicates source identities
+  per tick, emits for zero-impulse detachments, and caps bursts and the shared pool.
+  Live peer/relevance churn and a collapse smoke hardware ledger remain open.
+* **M-FL1:** a bounded flat-bed conservative CPU basin uses shared Rusanov fluxes,
+  reflective ghost states, explicit CFL substeps and atomic refusal. Tests cover
+  10,000 steps of mass conservation, dry shores and surface sample ticks. Dry cells
+  return no sample, preventing phantom lift. This is numerically diffusive reference
+  water, with no bathymetry, visible dynamic surface or two-way displacement yet.
+* **M-FX3:** a bounded source consumes monotonic ignition snapshots, drives shared
+  smoke and exposes one light contribution. The demo source is scripted cosmetic
+  fire, not combustion, fuel consumption, spreading or damage.
+
+`the_block --play --effects-preview` enables the ambient plume, scripted warm light
+and smoke, and destruction adapter together. Ordinary play leaves these off.
+`--effects-smoke` freezes simulation while toggling presentation and measures a
+visible delta against a drift control. The static pond still represents authored
+reflective art; these CPU basin tests do not turn it into simulated water.
