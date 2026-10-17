@@ -278,8 +278,6 @@ struct ContactProfile {
     std::uint64_t unique_pairs = 0;
     std::uint64_t duplicate_keys = 0;
     std::uint64_t plain_pairs = 0;
-    std::uint64_t plain_tight_tests = 0; // non-CCD plain candidates checked against tight bounds
-    std::uint64_t plain_tight_rejections = 0; // candidates skipped before collide_shapes
     std::uint64_t compound_pairs = 0;
     std::uint64_t posed_children = 0;
     std::uint64_t tested_child_pairs = 0;
@@ -450,11 +448,6 @@ public:
     void set_contact_profile_enabled(bool enabled) noexcept;
     [[nodiscard]] bool contact_profile_enabled() const noexcept;
     [[nodiscard]] const ContactProfile& contact_profile() const noexcept;
-
-    // Experimental broadphase refinement for plain non-CCD pairs. Disabled by default; compare
-    // world_hash and manifolds against the ordinary path before enabling in a shipped scene.
-    void set_plain_contact_cull_enabled(bool enabled) noexcept;
-    [[nodiscard]] bool plain_contact_cull_enabled() const noexcept;
 
     // Whether a body is currently asleep (deactivated): skipped by integration and the solver until
     // something wakes it — a moving body colliding into its island, wake_body(), or sleeping being
