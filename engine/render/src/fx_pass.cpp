@@ -74,7 +74,7 @@ FxParticlePass::FxParticlePass(rhi::Device& device, std::uint32_t max_particles,
     // statically but vkCmdPushConstants was not called", which points at the call site rather than
     // at the missing declaration.)
     pd.push_constant_size = sizeof(FxPush);
-    pd.debug_name = "fx-particles";
+    pd.debug_name = blend_ == FxBlendMode::SmokeAlpha ? "fx-smoke" : "fx-particles";
     pipeline_ = device.create_graphics_pipeline(pd);
 
     set_frames_in_flight(2);
@@ -186,15 +186,17 @@ void FxParticlePass::add(RenderGraph& graph,
 
     const rhi::PipelineHandle pipeline = pipeline_;
     const std::uint32_t instance_count = count;
-    graph.add_raster_pass(
-        "fx-particles", desc, [pipeline, instances, instance_count, push](rhi::CommandBuffer& cmd) {
-            cmd.bind_pipeline(pipeline);
-            cmd.bind_storage_buffer(0, instances);
-            cmd.push_constants(&push, sizeof(push));
-            // Six vertices synthesised per particle; the vertex stage reads the array by
-            // gl_InstanceIndex. No vertex buffer is bound because there is nothing to bind.
-            cmd.draw(6, instance_count);
-        });
+    graph.add_raster_pass(blend_ == FxBlendMode::SmokeAlpha ? "fx-smoke" : "fx-particles",
+                          desc,
+                          [pipeline, instances, instance_count, push](rhi::CommandBuffer& cmd) {
+                              cmd.bind_pipeline(pipeline);
+                              cmd.bind_storage_buffer(0, instances);
+                              cmd.push_constants(&push, sizeof(push));
+                              // Six vertices synthesised per particle; the vertex stage reads the
+                              // array by gl_InstanceIndex. No vertex buffer is bound because there
+                              // is nothing to bind.
+                              cmd.draw(6, instance_count);
+                          });
 }
 
 } // namespace rime::render
