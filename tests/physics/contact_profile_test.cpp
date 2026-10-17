@@ -156,7 +156,7 @@ TEST_CASE("contact profile counts all dispatch arms without changing contact res
         CHECK(on.contact_profile().speculative_calls == 0); // dt=0 inspection seam
         const auto pair_count = on.contact_profile().unique_pairs;
         const auto query_time = on.contact_profile().pair_query_ns;
-        std::vector<physics::Pair> pairs;
+        std::vector<physics::PhysicsWorld::Pair> pairs;
         on.compute_pairs(pairs); // a standalone broadphase query must not overwrite the build
         CHECK(on.contact_profile().unique_pairs == pair_count);
         CHECK(on.contact_profile().pair_query_ns == query_time);
