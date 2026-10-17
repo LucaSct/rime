@@ -13,6 +13,7 @@ add_executable(the_block
     play_arm_ik.cpp
     play_building_support.cpp
     play_city.cpp
+    play_effects.cpp
     play_environment.cpp
     play_viewmodel.cpp
     play_weapon_fx.cpp
@@ -38,6 +39,7 @@ target_link_libraries(the_block
             rime::platform
             rime::ecs
             rime::core)
+target_link_libraries(the_block PRIVATE rime::vfx)
 
 rime_apply_common_target_options(the_block)
 
