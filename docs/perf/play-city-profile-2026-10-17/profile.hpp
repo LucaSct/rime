@@ -23,6 +23,7 @@ using Clock = std::chrono::steady_clock;
 struct CpuRow { std::uint64_t frame; std::string name; double ms; std::uint64_t candidates; std::uint64_t draws; };
 struct GpuRow { std::uint64_t frame; std::string name; double ms; };
 struct StageRow { std::uint64_t frame; std::string name; double ms; };
+struct CasterRow { std::uint64_t frame, cascade, considered, submitted, culled; const char* view; };
 struct PhysicsRow {
     std::uint32_t bodies = 0, dynamic = 0, awake = 0, sleeping = 0;
     std::uint32_t pairs = 0, manifolds = 0, contact_points = 0;
@@ -51,6 +52,8 @@ struct Context {
     std::thread::id owner{};
     std::uint64_t frame = 0, warmup = 60;
     bool recording = false, ads = false, control = false, collapse = false;
+    bool shadow_caster_culling = true, ppm_written = false;
+    std::filesystem::path ppm;
     std::uint64_t charge_targets = 0;
     double session_post_sim_ms = 0, post_session_ms = 0;
     const char* prefix = "";
@@ -58,6 +61,7 @@ struct Context {
     std::vector<CpuRow> cpu;
     std::vector<GpuRow> gpu;
     std::vector<StageRow> stages;
+    std::vector<CasterRow> casters;
     std::vector<FrameRow> frames;
     Context() { cpu.reserve(60000); gpu.reserve(20000); stages.reserve(1000); frames.reserve(256); }
 };
@@ -85,6 +89,14 @@ struct PassTimer {
 inline void draws(std::uint64_t candidates, std::uint64_t actual) {
     if (active() && config.current) { config.current->candidates += candidates; config.current->draws += actual; }
 }
+template <class StatsArray> inline void capture_casters(std::uint64_t frame,
+                                                     const char* view,
+                                                     const StatsArray& stats) {
+    for (std::size_t cascade = 0; cascade < stats.size(); ++cascade) {
+        const auto& s = stats[cascade];
+        config.casters.push_back({frame, cascade, s.considered(), s.submitted, s.culled, view});
+    }
+}
 inline void stage(const char* name, Clock::time_point start) {
     if (active()) config.stages.push_back({config.frame, name, elapsed_ms(start)});
 }
@@ -103,6 +115,12 @@ inline bool parse_cli(int argc, char** argv, std::filesystem::path& output, std:
         else if (flag == "--control") config.control = true;
         else if (flag == "--city") config.control = false;
         else if (flag == "--collapse") config.collapse = true;
+        else if (flag == "--shadow-culling-off") config.shadow_caster_culling = false;
+        else if (flag == "--shadow-culling-on") config.shadow_caster_culling = true;
+        else if (flag == "--ppm") {
+            if (++i >= argc || !*argv[i] || std::string_view(argv[i]).starts_with("--")) return false;
+            config.ppm = argv[i];
+        }
         else if (flag == "--out-dir") {
             if (++i >= argc || !*argv[i] || std::string_view(argv[i]).starts_with("--")) return false;
             output = argv[i];
@@ -159,5 +177,11 @@ inline void write(const std::filesystem::path& dir) {
     auto stages = open("graph-stages.csv"); stages << "frame,name,ms\n";
     for (const auto& r : config.stages) stages << r.frame << ',' << r.name << ',' << r.ms << '\n';
     finish(stages, "graph-stages.csv");
+    auto casters = open("shadow-casters.csv");
+    casters << "frame,view,cascade,considered,submitted,culled\n";
+    for (const auto& r : config.casters)
+        casters << r.frame << ',' << r.view << ',' << r.cascade << ',' << r.considered
+                << ',' << r.submitted << ',' << r.culled << '\n';
+    finish(casters, "shadow-casters.csv");
 }
 } // namespace city_profile

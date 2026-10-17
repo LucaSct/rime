@@ -164,6 +164,9 @@ def instrument_main(text, header, out):
          '            demo.viewmodel->apply_controls(demo.session.client.devices, ctx.input);\n'
          '            demo.viewmodel->set_aiming(city_profile::config.ads);'),
         ('        demo.render(ctx);',
+         '        auto diagnostic_lighting = demo.visuals->renderer.lighting();\n'
+         '        diagnostic_lighting.shadow_caster_culling = city_profile::config.shadow_caster_culling;\n'
+         '        demo.visuals->renderer.set_lighting(diagnostic_lighting);\n'
          '        demo.render(ctx);\n'
          '        if (city_profile::active()) city_profile::config.frames.back().graph_passes = ctx.graph->pass_count();'),
         ('    if (demo.app.windowed()) {\n        (void)demo.app.run();\n    } else {\n        demo.app.run_frames(static_cast<int>(g_ticks));\n    }',
@@ -183,11 +186,32 @@ def instrument_main(text, header, out):
          '            row.charge_targets = city_profile::config.charge_targets;\n'
          '        }\n'
          '        (void)demo.app.step(1.0 / 60.0);\n'
-         '        if (city_profile::active())\n'
+         '        if (city_profile::active()) {\n'
          '            city_profile::config.frames.back().frame_cpu_ms = city_profile::elapsed_ms(diagnostic_frame_start);\n'
+         '            city_profile::capture_casters(city_profile::config.frame, "main",\n'
+         '                demo.visuals->renderer.csm_caster_stats());\n'
+         '            if (demo.visuals->scope_renderer && demo.visuals->last_scope_ldr.is_valid())\n'
+         '                city_profile::capture_casters(city_profile::config.frame, "optic",\n'
+         '                    demo.visuals->scope_renderer->csm_caster_stats());\n'
+         '        }\n'
          '    }\n'
          '    city_profile::config.recording = false;'),
         ('    demo.app.finish_gpu(); // first-person resources retire before Visuals and their registries',
+         '    // Readback and file I/O happen after the timed loop, before the graph retires.\n'
+         '    if (!city_profile::config.ppm.empty() && demo.app.graph()) {\n'
+         '        const auto tex = demo.app.graph()->physical(demo.visuals->last_ldr);\n'
+         '        if (tex.is_valid()) {\n'
+         '            const auto pixels = read_rgba8(*demo.app.device(), tex, kWidth, kHeight);\n'
+         '            std::error_code error;\n'
+         '            std::filesystem::remove(city_profile::config.ppm, error);\n'
+         '            if (!error) {\n'
+         '                write_ppm(city_profile::config.ppm.string().c_str(), pixels, kWidth, kHeight);\n'
+         '                const auto bytes = std::filesystem::file_size(city_profile::config.ppm, error);\n'
+         '                city_profile::config.ppm_written = !error && bytes >=\n'
+         '                    static_cast<std::uintmax_t>(kWidth) * kHeight * 3;\n'
+         '            }\n'
+         '        }\n'
+         '    }\n'
          '    demo.app.finish_gpu(); // first-person resources retire before Visuals and their registries\n'
          '    city_profile::write(diagnostic_out);\n'
          '    std::ofstream summary(diagnostic_out / "summary.json");\n'
@@ -213,12 +237,15 @@ def instrument_main(text, header, out):
          '            << ",\\"gpu_present\\":" << (gpu_present ? "true" : "false")\n'
          '            << ",\\"overflow\\":" << (overflow ? "true" : "false")\n'
          '            << ",\\"pass_mismatch\\":" << (pass_mismatch ? "true" : "false")\n'
+         '            << ",\\"shadow_caster_culling\\":" << (city_profile::config.shadow_caster_culling ? "true" : "false")\n'
+         '            << ",\\"ppm_written\\":" << (city_profile::config.ppm_written ? "true" : "false")\n'
          '            << ",\\"collapse_requested\\":" << (city_profile::config.collapse ? "true" : "false")\n'
          '            << ",\\"collapse_effect_seen\\":" << (collapse_effect_seen ? "true" : "false")\n'
          '            << ",\\"charge_targets\\":" << city_profile::config.charge_targets\n'
          '            << ",\\"perf_gate_pass\\":null}" << std::endl;\n'
          '    summary.flush(); if (!summary) throw std::runtime_error("summary.json write failed");\n'
          '    if (!count_ok || !gpu_present || overflow || pass_mismatch || !ticks_present || !physics_present ||\n'
+         '        (!city_profile::config.ppm.empty() && !city_profile::config.ppm_written) ||\n'
          '        (city_profile::config.collapse && (charge_requests != 1 || !demo.charge_fired ||\n'
          '         city_profile::config.charge_targets == 0 || !collapse_effect_seen))) return 5;')])
     text = exactly(text, 'session.server.city = session.client.city = environment_enabled && scene_path.empty();',
@@ -278,7 +305,7 @@ def main():
                        '; const auto generated_out = diagnostic_out' +
                        '; if (!city_profile::parse_cli(argc, argv, diagnostic_out, diagnostic_frames)) { '
                        'std::fputs("usage: profile_play [--out-dir DIR] [--ads|--hip] [--control|--city] '
-                       '[--warmup N] [--frames N] [--collapse]\\n", stderr); return 2; } '
+                       '[--warmup N] [--frames N] [--collapse] [--shadow-culling-off|--shadow-culling-on] [--ppm PATH]\\n", stderr); return 2; } '
                        'if (generated_out != diagnostic_out) { std::error_code error; '
                        'std::filesystem::copy_file(generated_out / "provenance.json", '
                        'diagnostic_out / "provenance.json", '
