@@ -80,6 +80,22 @@ TEST_CASE("dry shore wets without negative depth or lost volume") {
     CHECK(std::abs(basin->total_volume_m3() - initial_volume) < 1.0e-11);
 }
 
+TEST_CASE("mirrored wall momentum damps incoming flow without moving water through the wall") {
+    auto basin = Basin::create(config(1, 1));
+    REQUIRE(basin);
+    REQUIRE(basin->set_cell(0, 0, {1.0, 0.5, -0.25}));
+    const double initial_volume = basin->total_volume_m3();
+    const double x_speed = 0.5 + std::sqrt(9.81);
+    const double z_speed = 0.25 + std::sqrt(9.81);
+    REQUIRE(basin->advance(0.01) == BasinStepStatus::Accepted);
+    const auto after = basin->cell(0, 0);
+    REQUIRE(after);
+    CHECK(after->depth_metres == 1.0);
+    CHECK(basin->total_volume_m3() == initial_volume);
+    CHECK(after->momentum_x == doctest::Approx(0.5 - 0.01 * 2.0 * x_speed * 0.5));
+    CHECK(after->momentum_z == doctest::Approx(-0.25 - 0.01 * 2.0 * z_speed * -0.25));
+}
+
 TEST_CASE("configuration, state, and dt refusals preserve snapshots") {
     auto c = config();
     c.width = 257;
@@ -93,6 +109,16 @@ TEST_CASE("configuration, state, and dt refusals preserve snapshots") {
     CHECK_FALSE(Basin::create(c));
     c = config();
     c.max_substeps = 0;
+    CHECK_FALSE(Basin::create(c));
+    c = config();
+    c.cell_spacing_metres = 1.0e-200;
+    CHECK_FALSE(Basin::create(c));
+    c = config();
+    c.origin_x_metres = 1.0e20;
+    CHECK_FALSE(Basin::create(c));
+    c = config();
+    c.cell_spacing_metres = 1.0e153;
+    c.initial_depth_metres = 1.0e3;
     CHECK_FALSE(Basin::create(c));
     c = config();
     c.max_substeps = 1;
@@ -130,12 +156,32 @@ TEST_CASE("surface sample carries cell height, flow, density, and accepted tick"
     CHECK(wet->velocity_m_s.z == -0.25f);
     CHECK(wet->density_kg_m3 == 1000.0f);
     CHECK(wet->authoritative_tick == 0);
-    const auto dry = basin->sample(4.5, -3.5);
-    REQUIRE(dry);
-    CHECK(dry->height_metres == -2.0f);
-    CHECK(dry->velocity_m_s.x == 0.0f);
+    CHECK_FALSE(basin->sample(4.5, -3.5));
+    CHECK(basin->cell(1, 0)->depth_metres == 0.0);
     CHECK_FALSE(basin->sample(5.0, -3.5));
     CHECK_FALSE(basin->sample(3.5, -4.1));
     REQUIRE(basin->advance(0.01) == BasinStepStatus::Accepted);
     CHECK(basin->sample(3.5, -3.5)->authoritative_tick == 1);
+}
+
+TEST_CASE("dry surface cannot create a buoyancy impulse below the bed") {
+    auto basin = Basin::create(config(2, 1));
+    REQUIRE(basin);
+    BasinCell dry{};
+    REQUIRE(basin->set_cell(1, 0, dry));
+    BuoyancyProbe probe{};
+    probe.radius_metres = 0.5f;
+    probe.center_world = {4.5f, -2.2f, -3.5f};
+    const auto dry_surface = basin->sample(4.5, -3.5);
+    CHECK_FALSE(dry_surface);
+    std::optional<BuoyancyExchange> dry_exchange;
+    if (dry_surface)
+        dry_exchange = evaluate_buoyancy(*dry_surface, probe, 9.81f, 0.01f);
+    CHECK_FALSE(dry_exchange);
+    probe.center_world.x = 3.5f;
+    const auto wet_surface = basin->sample(3.5, -3.5);
+    REQUIRE(wet_surface);
+    const auto wet_exchange = evaluate_buoyancy(*wet_surface, probe, 9.81f, 0.01f);
+    REQUIRE(wet_exchange);
+    CHECK(wet_exchange->body_impulse.y > 0.0f);
 }

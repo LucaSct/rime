@@ -13,8 +13,10 @@ namespace rime::fluids {
 
 // Teaching note: the cell state is U=(h,hu,hv). Each interior face computes one
 // local Lax-Friedrichs/Rusanov flux from its two cells, then each cell subtracts
-// the outgoing flux divergence. Reflective walls have zero normal mass flux and
-// hydrostatic normal pressure. A donor limiter scales a shared face flux when
+// the outgoing flux divergence. A wall mirrors its interior normal momentum:
+// normal mass/tangent flux are zero, while normal momentum flux is
+// h*u_n^2 + g*h^2/2 +/- (|u_n|+sqrt(g*h))*h*u_n (minus at low X/Z,
+// plus at high X/Z). A donor limiter scales a shared face flux when
 // the requested outgoing water exceeds its depth, retaining nonnegative h and
 // equal-and-opposite mass transfer. Explicit substeps obey
 // dt <= CFL*dx/max_cells(|u|+|v|+2*sqrt(g*h)), with CFL <= 0.5.
@@ -65,8 +67,8 @@ public:
     [[nodiscard]] std::optional<BasinCell> cell(std::size_t x, std::size_t z) const noexcept;
     // Refuses non-finite values, negative depth, or momentum in a dry cell.
     [[nodiscard]] bool set_cell(std::size_t x, std::size_t z, BasinCell value) noexcept;
-    // Cell-center snapshot; nullopt outside the half-open horizontal grid bounds.
-    // Dry cells return bed height and zero flow. Sampling never changes the state.
+    // Cell-center snapshot; nullopt outside the half-open grid or for dry cells.
+    // Inspect cell() for dry depth/bed geometry. Sampling never changes the state.
     [[nodiscard]] std::optional<WaterSurfaceSample> sample(double x_metres,
                                                            double z_metres) const noexcept;
     [[nodiscard]] double total_volume_m3() const noexcept;

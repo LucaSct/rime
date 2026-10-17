@@ -32,11 +32,19 @@ std::optional<Basin> Basin::create(const BasinConfig& c) {
         !std::isfinite(c.gravity_m_s2) || c.gravity_m_s2 <= 0.0 ||
         !std::isfinite(c.density_kg_m3) || c.density_kg_m3 <= 0.0 || !std::isfinite(c.cfl) ||
         c.cfl <= 0.0 || c.cfl > 0.5 ||
-        !std::isfinite(c.origin_x_metres + c.width * c.cell_spacing_metres) ||
-        !std::isfinite(c.origin_z_metres + c.height * c.cell_spacing_metres) ||
         !std::isfinite(c.bed_height_metres + c.initial_depth_metres) ||
-        !std::isfinite(c.cell_spacing_metres * c.cell_spacing_metres) ||
         !std::isfinite(c.gravity_m_s2 * c.initial_depth_metres))
+        return std::nullopt;
+    const double x_extent = c.width * c.cell_spacing_metres;
+    const double z_extent = c.height * c.cell_spacing_metres;
+    const double area = c.cell_spacing_metres * c.cell_spacing_metres;
+    const double initial_volume = c.initial_depth_metres * area * (c.width * c.height);
+    if (!std::isfinite(x_extent) || !std::isfinite(z_extent) ||
+        !std::isfinite(c.origin_x_metres + x_extent) ||
+        !std::isfinite(c.origin_z_metres + z_extent) ||
+        c.origin_x_metres + x_extent == c.origin_x_metres ||
+        c.origin_z_metres + z_extent == c.origin_z_metres || !std::isfinite(area) || area == 0.0 ||
+        !std::isfinite(initial_volume) || (c.initial_depth_metres > 0.0 && initial_volume == 0.0))
         return std::nullopt;
     return Basin(c);
 }
@@ -78,6 +86,8 @@ std::optional<WaterSurfaceSample> Basin::sample(double x, double z) const noexce
           gz < static_cast<double>(config_.height)))
         return std::nullopt;
     const auto& c = cells_[index(static_cast<std::size_t>(gx), static_cast<std::size_t>(gz))];
+    if (c.depth_metres <= dry_depth_metres)
+        return std::nullopt;
     const double height = config_.bed_height_metres + c.depth_metres;
     const double vx = velocity(c.momentum_x, c.depth_metres);
     const double vz = velocity(c.momentum_z, c.depth_metres);
@@ -133,11 +143,23 @@ bool Basin::substep(const std::vector<BasinCell>& from,
     // Rusanov flux: (F(L)+F(R)-a*(R-L))/2, a=max(|u_n|+sqrt(g*h)).
     // The same face value enters both neighbours with opposite signs.
     for (std::size_t z = 0; z < h; ++z) {
-        x_flux_[z * (w + 1)] = {
-            0.0, 0.5 * g * from[index(0, z)].depth_metres * from[index(0, z)].depth_metres, 0.0};
+        const auto& left = from[index(0, z)];
+        const auto& right = from[index(w - 1, z)];
+        const double left_u = velocity(left.momentum_x, left.depth_metres);
+        const double right_u = velocity(right.momentum_x, right.depth_metres);
+        const double left_a = std::abs(left_u) + std::sqrt(g * left.depth_metres);
+        const double right_a = std::abs(right_u) + std::sqrt(g * right.depth_metres);
+        // Rusanov with a ghost whose normal momentum is negated. The low wall
+        // subtracts a*hu; the high wall adds it. Both have exactly zero mass flux.
+        x_flux_[z * (w + 1)] = {0.0,
+                                left.momentum_x * left_u +
+                                    0.5 * g * left.depth_metres * left.depth_metres -
+                                    left_a * left.momentum_x,
+                                0.0};
         x_flux_[z * (w + 1) + w] = {0.0,
-                                    0.5 * g * from[index(w - 1, z)].depth_metres *
-                                        from[index(w - 1, z)].depth_metres,
+                                    right.momentum_x * right_u +
+                                        0.5 * g * right.depth_metres * right.depth_metres +
+                                        right_a * right.momentum_x,
                                     0.0};
         for (std::size_t x = 1; x < w; ++x) {
             const auto& l = from[index(x - 1, z)];
@@ -159,12 +181,21 @@ bool Basin::substep(const std::vector<BasinCell>& from,
         }
     }
     for (std::size_t x = 0; x < w; ++x) {
-        z_flux_[x] = {
-            0.0, 0.0, 0.5 * g * from[index(x, 0)].depth_metres * from[index(x, 0)].depth_metres};
+        const auto& low = from[index(x, 0)];
+        const auto& high = from[index(x, h - 1)];
+        const double low_v = velocity(low.momentum_z, low.depth_metres);
+        const double high_v = velocity(high.momentum_z, high.depth_metres);
+        const double low_a = std::abs(low_v) + std::sqrt(g * low.depth_metres);
+        const double high_a = std::abs(high_v) + std::sqrt(g * high.depth_metres);
+        z_flux_[x] = {0.0,
+                      0.0,
+                      low.momentum_z * low_v + 0.5 * g * low.depth_metres * low.depth_metres -
+                          low_a * low.momentum_z};
         z_flux_[h * w + x] = {0.0,
                               0.0,
-                              0.5 * g * from[index(x, h - 1)].depth_metres *
-                                  from[index(x, h - 1)].depth_metres};
+                              high.momentum_z * high_v +
+                                  0.5 * g * high.depth_metres * high.depth_metres +
+                                  high_a * high.momentum_z};
     }
     for (std::size_t z = 1; z < h; ++z) {
         for (std::size_t x = 0; x < w; ++x) {
