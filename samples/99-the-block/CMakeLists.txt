@@ -4,8 +4,17 @@
 #
 # It links nearly the whole engine, which is the point — this is the first binary that holds M8, M10,
 # M11, M12 and M13 at once.
-add_executable(the_block main.cpp play_world.cpp play_viewmodel.cpp play_arm_ik.cpp
-                         play_environment.cpp play_weapon_fx.cpp)
+# ONE SOURCE PER LINE, kept alphabetical after main.cpp. This is a seam, not a style
+# preference: when several bricks are built in parallel, each one adds a leaf here, and a
+# wrapped list makes every brick edit the SAME line -- which is a guaranteed conflict in
+# the one file whose merge mistakes are hardest to spot. A line each, and git merges them.
+add_executable(the_block
+    main.cpp
+    play_arm_ik.cpp
+    play_environment.cpp
+    play_viewmodel.cpp
+    play_weapon_fx.cpp
+    play_world.cpp)
 
 target_link_libraries(the_block
     PRIVATE rime::app
