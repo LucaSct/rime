@@ -126,27 +126,42 @@ def instrument_main(text, header, out):
          '            demo.viewmodel->apply_controls(demo.session.client.devices, ctx.input);\n'
          '            demo.viewmodel->set_aiming(city_profile::config.ads);'),
         ('        demo.render(ctx);',
-         '        if (city_profile::active()) city_profile::config.frames.push_back({city_profile::config.frame});\n'
+         '        if (city_profile::active()) {\n'
+         '            city_profile::FrameRow row{}; row.frame = city_profile::config.frame;\n'
+         '            city_profile::config.frames.push_back(row);\n'
+         '        }\n'
          '        demo.render(ctx);\n'
          '        if (city_profile::active()) city_profile::config.frames.back().graph_passes = ctx.graph->pass_count();'),
         ('    if (demo.app.windowed()) {\n        (void)demo.app.run();\n    } else {\n        demo.app.run_frames(static_cast<int>(g_ticks));\n    }',
          '    for (std::uint64_t i = 0; i < city_profile::config.warmup + diagnostic_frames; ++i) {\n'
          '        city_profile::config.frame = demo.app.frame_index();\n'
          '        city_profile::config.recording = i >= city_profile::config.warmup;\n'
-         '        demo.app.step(1.0 / 60.0);\n'
+         '        (void)demo.app.step(1.0 / 60.0);\n'
          '    }\n'
          '    city_profile::config.recording = false;'),
         ('    demo.app.finish_gpu(); // first-person resources retire before Visuals and their registries',
          '    demo.app.finish_gpu(); // first-person resources retire before Visuals and their registries\n'
          '    city_profile::write(diagnostic_out);\n'
          '    std::ofstream summary(diagnostic_out / "summary.json");\n'
-         '    const bool gpu_present = !city_profile::config.gpu.empty();\n'
-         '    bool overflow = false; for (const auto& f : city_profile::config.frames) overflow |= f.overflow;\n'
-         '    summary << "{\\"measured_frames\\":" << city_profile::config.frames.size()\n'
+         '    if (!summary) throw std::runtime_error("summary.json open failed");\n'
+         '    bool overflow = false, gpu_present = true, pass_mismatch = false;\n'
+         '    for (const auto& f : city_profile::config.frames) {\n'
+         '        overflow |= f.overflow; gpu_present &= f.gpu_present;\n'
+         '        pass_mismatch |= f.executed_passes == 0 ||\n'
+         '            f.timed_passes != std::min<std::uint64_t>(f.executed_passes, render::RenderGraph::max_timed_passes());\n'
+         '    }\n'
+         '    const bool count_ok = city_profile::config.frames.size() == diagnostic_frames;\n'
+         '    summary << "{\\"ads\\":" << (city_profile::config.ads ? "true" : "false")\n'
+         '            << ",\\"control\\":" << (city_profile::config.control ? "true" : "false")\n'
+         '            << ",\\"warmup\\":" << city_profile::config.warmup\n'
+         '            << ",\\"requested_frames\\":" << diagnostic_frames\n'
+         '            << ",\\"measured_frames\\":" << city_profile::config.frames.size()\n'
          '            << ",\\"gpu_present\\":" << (gpu_present ? "true" : "false")\n'
          '            << ",\\"overflow\\":" << (overflow ? "true" : "false")\n'
+         '            << ",\\"pass_mismatch\\":" << (pass_mismatch ? "true" : "false")\n'
          '            << ",\\"perf_gate_pass\\":null}" << std::endl;\n'
-         '    if (!gpu_present || overflow) return 5;')])
+         '    summary.flush(); if (!summary) throw std::runtime_error("summary.json write failed");\n'
+         '    if (!count_ok || !gpu_present || overflow || pass_mismatch) return 5;')])
     text = exactly(text, 'session.server.city = session.client.city = environment_enabled && scene_path.empty();',
                    'session.server.city = session.client.city = environment_enabled && scene_path.empty() && !city_profile::config.control;')
     text = exactly(text, 'int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {',
@@ -196,12 +211,21 @@ def main():
     generated['passes'].write_text(instrument_passes(source_paths['passes'].read_text(), header))
     wrapper = out / 'wrapper.cpp'
     wrapper.write_text('#define main rime_embedded_sample_main\n#include ' + json.dumps(str(generated['main'])) +
-                       '\n#undef main\nint main() { city_profile::config.ads = ' + ('true' if args.ads else 'false') +
+                       '\n#undef main\nint main(int argc, char** argv) { city_profile::config.ads = ' + ('true' if args.ads else 'false') +
                        '; city_profile::config.control = ' + ('true' if args.control else 'false') +
                        '; city_profile::config.warmup = ' + str(args.warmup) +
                        '; diagnostic_frames = ' + str(args.frames) +
                        '; diagnostic_out = ' + json.dumps(str(out)) +
-                       '; return run_play(RIME_BLOCK_COOKED_DIR, {}); }\n')
+                       '; const auto generated_out = diagnostic_out' +
+                       '; if (!city_profile::parse_cli(argc, argv, diagnostic_out, diagnostic_frames)) { '
+                       'std::fputs("usage: profile_play [--out-dir DIR] [--ads|--hip] [--control|--city] '
+                       '[--warmup N] [--frames N]\\n", stderr); return 2; } '
+                       'if (generated_out != diagnostic_out) { std::error_code error; '
+                       'std::filesystem::copy_file(generated_out / "provenance.json", '
+                       'diagnostic_out / "provenance.json", '
+                       'std::filesystem::copy_options::overwrite_existing, error); '
+                       'if (error) { std::fputs("provenance copy failed\\n", stderr); return 2; } } '
+                       'return run_play(RIME_BLOCK_COOKED_DIR, {}); }\n')
     entries = json.loads((build / 'compile_commands.json').read_text())
     sample_entries = [e for e in entries if pathlib.Path(e['file']).as_posix().endswith('/' + SOURCES['main'])]
     if len(sample_entries) != 1: raise ValueError('expected one sample compile entry')
