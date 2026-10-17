@@ -231,3 +231,23 @@ found separate CI workloads; high whole-desktop CPU is not necessarily the game.
   Clang syntax checks earlier in this integration; removed experimental tests do
   not ship. Full CTest, qualified perf attempt and backup status follow below.
 - All coding agents completed; no subagents or agent builds remain running.
+
+- **Full CTest passed: 89/89**, software Vulkan, 286.97 seconds. Long cases:
+  viewmodel 283.97 s, environment 201.71 s, effects 30.90 s (parallel functional
+  checks, not performance measurements). Full log is committed with the evidence.
+- **Standard hardware performance gate FAILED**, source stamp `b376d15`, Release,
+  1920x1080, 600 measured frames. Sim.block p99 7.397 ms exceeds 6.000 ms budget;
+  old baseline driver 615.71.09 differs from current 615.78.08, so regression
+  comparison was refused; graphics clocks varied 210–1935 MHz (93.9% spread), so
+  automatic filing was refused. No override. See `delivery-perf.log` and
+  `unqualified-1080p-b376d15.json` under the committed evidence directory. This is
+  not a valid baseline, an established regression, or a passing delivery gate.
+- The final push backs up `integration/environment-preview` on origin. Verify
+  `git rev-parse HEAD` against `git ls-remote origin refs/heads/integration/environment-preview`
+  before resuming. No additional preview PR is opened during this wrap; #331/#332
+  remain drafts. The push queues fresh self-hosted CI; results are not awaited
+  under the wrap request and no fresh green/sanitizer result is claimed.
+- The desktop launcher uses `--play --effects-preview`. Inspect `demo-pid`,
+  `demo.log` and `demo-exit` in the report directory for current process state.
+  Starting CI after the final push may again compete for desktop CPU; do not
+  interpret that concurrent demo as a clean performance capture.

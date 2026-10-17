@@ -83,3 +83,19 @@ requested/spawned particles, zero capacity/render drops and unchanged physics
 hashes. Its 24 GPU smoke samples have p50 0.004096 ms and p99/max 0.382976 ms;
 the short capture includes startup/upload effects. These are not a collapse cost
 or an uninstrumented 1080p budget. Logs accompany these observations.
+
+## Final wrap gate results
+
+All 89 CTests passed on software Vulkan in 286.97 seconds, including the new
+smoke proof and expanded viewmodel proof. Final Release build, exact pinned
+format, SPDX and diff checks passed. Fresh sanitizer and cross-OS CI is pending.
+
+The standard `scripts/perf.sh --sample the-block --commit` attempt on `b376d15`
+failed and correctly refused automatic filing. The diagnostic is retained here as
+`unqualified-1080p-b376d15.json`, not as a qualified baseline. At 1920x1080/600
+frames, sim.block p99 was 7.397 ms against the 6.000 ms budget. Comparison was
+refused because the current NVIDIA 615.78.08 driver differs from baseline
+615.71.09. Graphics clock spread was 93.9% (210–1935 MHz); the clock-stability
+gate also failed. No busy-box override or gate relaxation was used. This does
+not establish a measured regression or a pass. Do not rebaseline merely to erase
+the failure. Stabilize hardware and compare deliberately before merging.
