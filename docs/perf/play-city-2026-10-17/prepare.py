@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""Generate an external 451-frame native play capture; compile only on request."""
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 The Rime Engine Authors.
+"""Generate an external 1981-frame native play capture; compile only on request."""
 import argparse
 import hashlib
 import json
@@ -37,7 +39,7 @@ def instrument(source, csv_path, header_path, disable_city):
     def change(old, new):
         nonlocal play
         play = exactly(play, old, new)
-    change('    block_play::PlayInput live;', '    window_diag::Capture capture;\n    if (!demo.app.windowed()) return 3;\n    block_play::PlayInput live;')
+    change('    block_play::PlayInput live;', '    window_diag::Capture capture;\n    if (!demo.app.windowed() || !demo.viewmodel || !demo.play_world) return 3;\n    block_play::PlayInput live;')
     change('demo.app.on_render([&](app::FrameContext& ctx) {', 'demo.app.on_render([&](app::FrameContext& ctx) {\n        capture.begin(ctx);')
     change('const gameplay::FrameIntent intent = gameplay::map_frame_input(', 'gameplay::FrameIntent intent = gameplay::map_frame_input(')
     change('        live.frame(intent.character, ctx.input, bindings.fire, gameplay::kActionFire);',
@@ -127,6 +129,9 @@ def main():
     if not (root / REL_MAIN).is_file() or not (build / 'compile_commands.json').is_file():
         ap.error('source main.cpp or build/compile_commands.json missing')
     out.mkdir(parents=True, exist_ok=True)
+    # A failed or interrupted replacement capture must not inherit an older CSV or binary.
+    for name in ('capture_play', 'capture.frames.csv', 'capture.summary.json', 'capture.intervals.csv'):
+        (out / name).unlink(missing_ok=True)
     source_path = root / REL_MAIN
     source = source_path.read_text()
     (out / 'source-main.cpp').write_text(source)
@@ -147,6 +152,12 @@ def main():
             'wrapper_sha256': sha(wrapper), 'capture_header_sha256': sha(header),
             'disable_city': args.disable_city, 'compile_command': compile_cmd, 'link_command': link_cmd,
             'binary_sha256': None, 'csv_path': str(csv_path)}
+    info['linked_inputs_sha256'] = {}
+    for token in link_cmd:
+        path = pathlib.Path(token)
+        if path.suffix in ('.a', '.o', '.so') and path != out / 'capture_wrapper.o':
+            path = path if path.is_absolute() else build / path
+            info['linked_inputs_sha256'][str(path)] = sha(path)
     cache = build / 'CMakeCache.txt'
     info['cmake_build_type'] = next((s.split('=', 1)[1] for s in cache.read_text().splitlines()
                                      if s.startswith('CMAKE_BUILD_TYPE:STRING=')), None) if cache.exists() else None

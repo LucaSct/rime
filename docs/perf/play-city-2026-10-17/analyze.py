@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 The Rime Engine Authors.
 """Validate and summarize an external native play capture CSV."""
 import argparse
 from collections import Counter
 import csv
+import gzip
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -26,9 +30,9 @@ def finite(row, field, positive=False):
 
 
 def phase(frame):
-    return ('warmup' if frame < 30 else 'hip' if frame < 150 else
-            'settle_ads' if frame < 180 else 'ads' if frame < 300 else
-            'settle_turn' if frame < 330 else 'turning' if frame < 450 else 'finish')
+    return ('warmup' if frame < 60 else 'hip' if frame < 660 else
+            'settle_ads' if frame < 720 else 'ads' if frame < 1320 else
+            'settle_turn' if frame < 1380 else 'turning' if frame < 1980 else 'finish')
 
 
 def stats(rows):
@@ -48,18 +52,19 @@ def stats(rows):
 
 
 def analyze(path):
-    with path.open(newline='') as stream:
+    opener = gzip.open if path.suffix == '.gz' else open
+    with opener(path, 'rt', newline='') as stream:
         reader = csv.DictReader(stream)
         if reader.fieldnames is None or set(REQUIRED) - set(reader.fieldnames):
             raise ValueError('capture CSV missing required columns')
         raw = list(reader)
-    if len(raw) != 451:
-        raise ValueError(f'expected 451 complete frames, found {len(raw)}')
+    if len(raw) != 1981:
+        raise ValueError(f'expected 1981 complete frames, found {len(raw)}')
     for i, row in enumerate(raw):
         if None in row or None in row.values():
             raise ValueError(f'frame {i}: truncated or extra CSV columns')
         if int(row['frame']) != i:
-            raise ValueError(f'frame IDs must be contiguous 0..450; row {i} has {row["frame"]}')
+            raise ValueError(f'frame IDs must be contiguous 0..1980; row {i} has {row["frame"]}')
         if row['render_phase'] != phase(i) or row['interval_phase'] != phase(i-1 if i else 0):
             raise ValueError(f'frame {i}: unexpected phase alignment')
         for field in ('dt_ms', 'aim', 'yaw', 'pitch', *ZONES):
@@ -90,8 +95,8 @@ def analyze(path):
         joined.append(row)
     grouped = {p: [r for r in joined if r['phase'] == p] for p in PHASES[:-1]}
     for p in ('hip', 'ads', 'turning'):
-        if len(grouped[p]) < 120:
-            raise ValueError(f'{p} has {len(grouped[p])} intervals; requires at least 120')
+        if len(grouped[p]) < 600:
+            raise ValueError(f'{p} has {len(grouped[p])} intervals; requires at least 600')
     steady = [r for r in joined if r['phase'] in ('hip', 'ads', 'turning')]
     summary = {'status': 'descriptive_only', 'baseline_proven': False, 'perf_gate_pass': None,
                'recorded': len(raw), 'joined': len(joined), 'contiguous_ids': True,
@@ -120,17 +125,31 @@ def analyze(path):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument('--root', type=Path, required=True, help='source checkout used by prepare.py')
-    ap.add_argument('--build-dir', type=Path, required=True, help='build directory used by prepare.py')
-    ap.add_argument('--out-dir', type=Path, required=True, help='capture output directory')
+    ap.add_argument('--root', type=Path, help='source checkout used by prepare.py')
+    ap.add_argument('--build-dir', type=Path, help='build directory used by prepare.py')
+    ap.add_argument('--out-dir', type=Path, help='capture output directory')
     ap.add_argument('--csv', type=Path, help='input CSV; defaults to OUT-DIR/capture.frames.csv')
+    ap.add_argument('--csv-archive', type=Path, help='validate a retained CSV or CSV.GZ without the original executable; print descriptive statistics')
     args = ap.parse_args()
+    if args.csv_archive:
+        archive = args.csv_archive.expanduser().resolve()
+        summary, _ = analyze(archive)
+        summary['archive_sha256'] = hashlib.sha256(archive.read_bytes()).hexdigest()
+        summary['binary_verified'] = False
+        print(json.dumps(summary, indent=2))
+        return
+    if not all((args.root, args.build_dir, args.out_dir)):
+        ap.error('--root, --build-dir and --out-dir are required for a live capture')
     root, build, out = (p.expanduser().resolve() for p in (args.root, args.build_dir, args.out_dir))
     csv_path = args.csv.expanduser().resolve() if args.csv else out / 'capture.frames.csv'
     provenance = json.loads((out / 'provenance.json').read_text())
     if provenance['source_root'] != str(root) or provenance['build_dir'] != str(build):
         ap.error('root/build-dir differ from prepare provenance')
     summary, joined = analyze(csv_path)
+    binary = out / 'capture_play'
+    if not provenance.get('binary_sha256') or hashlib.sha256(binary.read_bytes()).hexdigest() != provenance['binary_sha256']:
+        ap.error('capture binary missing or changed since compilation')
+    summary['csv_sha256'] = hashlib.sha256(csv_path.read_bytes()).hexdigest()
     summary['provenance'] = provenance
     summary['csv_path'] = str(csv_path)
     out.mkdir(parents=True, exist_ok=True)

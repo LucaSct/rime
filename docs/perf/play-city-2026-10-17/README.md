@@ -1,6 +1,6 @@
 # Native city play capture
 
-This is an external, bounded diagnostic of the live `run_play` path. It generates a copied main source and a wrapper, records 451 rendered frames in a native window, then exits. The existing app, sample, and engine sources are not edited. The run uses 30 warmup frames, 120 hip frames, 30 aim settling frames, 120 ADS frames, 30 turn settling frames, 120 turning frames, and one final frame. Frame intervals are attributed to the preceding render. Owner-thread zones are `frame.pump`, `sim.tick`, `frame.acquire`, `frame.declare`, `frame.execute`, and `frame.present`.
+This is an external, bounded diagnostic of the live `run_play` path. It generates a copied main source and a wrapper, records 1981 rendered frames in a native window, then exits. The existing app, sample, and engine sources are not edited. The run uses 60 warmup frames, 600 hip frames, 60 aim settling frames, 600 ADS frames, 60 turn settling frames, 600 turning frames, and one final frame. Frame intervals are attributed to the preceding render. Owner-thread zones are `frame.pump`, `sim.tick`, `frame.acquire`, `frame.declare`, `frame.execute`, and `frame.present`.
 
 From this checkout, with an existing Ninja build that already contains the required engine and sample objects:
 
@@ -18,3 +18,27 @@ For the eight-building city control, use a distinct output directory and append 
 `prepare.py` only compiles and links when `--compile` is passed. It never launches the window. It derives compilation from the `samples/99-the-block/main.cpp` entry in `compile_commands.json` and linking from the last `ninja -t commands bin/the_block` command, preserving its other leaf objects. Its output includes the original source, instrumented source, wrapper, header, exact command arrays, logs, hashes, both checkout Git states, and the actual CMake build type. The build directory may be absolute and separate from the source checkout. It must be compatible with the requested source; this harness does not rebuild engine libraries or sample support objects.
 
 `analyze.py` reads `capture.frames.csv` by default, or `--csv PATH`. It rejects absent, truncated, noncontiguous, nonfinite, nonpositive interval, wrong phase, changing extent, or short steady-phase captures. It writes `capture.summary.json` and `capture.intervals.csv`. The summary is descriptive and explicitly reports `baseline_proven: false` and no perf-gate pass. It records observed shots and charge; it does not script firing or destruction. Display refresh, compositor, driver, scene assets, source/build compatibility, and run-to-run variance affect the result. A single run cannot establish a performance regression or pass a gate.
+
+The capture requires cooked viewmodel art and streamed terrain; missing resources fail with exit 3. Preparing a capture removes old run data and its binary before generating replacements. Provenance hashes linked object/library inputs, and analysis checks the binary hash and records the CSV hash.
+
+The measured result is [documented here](../2026-10-17-play-city.md). It blocks
+landing the city; these files are retained observations, outside the eligible
+baseline pool.
+
+Reanalyze a committed capture without its original executable:
+
+```sh
+python3 docs/perf/play-city-2026-10-17/analyze.py \
+  --csv-archive docs/perf/play-city-2026-10-17/city-1.frames.csv.gz
+```
+
+Archive mode validates the frame/phase/extent invariants and reports descriptive
+statistics with `binary_verified: false`. It does not reconstruct or certify the
+captured executable. `manifest.json` records compressed and uncompressed CSV hashes;
+the per-run provenance files record the actual source, library, object, and binary
+hashes. Original generated sources and executables are retained under
+`/home/next/reports/rime-city-perf-2026-10-17/{city,control}/` on the measurement host.
+
+On the measured Hyprland Lua API, a per-launch floating rule kept the initial and
+subsequent window extents equal: `hl.exec_cmd(command, {float=true,
+size="1280 720", center=true})`. No persistent desktop rules were changed.
