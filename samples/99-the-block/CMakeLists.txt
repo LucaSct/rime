@@ -11,6 +11,7 @@
 add_executable(the_block
     main.cpp
     play_arm_ik.cpp
+    play_city.cpp
     play_environment.cpp
     play_viewmodel.cpp
     play_weapon_fx.cpp
