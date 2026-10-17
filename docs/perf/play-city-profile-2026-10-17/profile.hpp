@@ -40,9 +40,9 @@ struct IslandRow {
 };
 struct StepKey { std::uint64_t frame, step; const char* world; };
 struct ContactRow {
-    std::uint64_t frame, step;
+    std::uint64_t frame, step, world_hash;
     std::string world;
-    std::array<std::uint64_t, 22> values;
+    std::array<std::uint64_t, 24> values;
 };
 
 // The zone sink runs on both the caller and the server job. Keep its frame window,
@@ -80,13 +80,14 @@ public:
                                 cost.constraints, cost.solve_ns, cost.warm_ns, cost.velocity_ns,
                                 cost.store_ns, cost.position_ns});
     }
-    template <class Profile> void contact(StepKey key, const Profile& p) {
+    template <class Profile> void contact(StepKey key, const Profile& p, std::uint64_t world_hash) {
         // Copy on the world's stepping thread, while its last build still belongs to this step.
         // The sink's mutex serializes publication with the other world's callback.
         const std::lock_guard lock(mutex_);
-        contacts_.push_back({key.frame, key.step, key.world,
+        contacts_.push_back({key.frame, key.step, world_hash, key.world,
             {p.raw_candidate_keys, p.unique_pairs, p.duplicate_keys, p.plain_pairs,
-             p.compound_pairs, p.posed_children, p.tested_child_pairs, p.culled_child_pairs,
+             p.plain_tight_tests, p.plain_tight_rejections, p.compound_pairs, p.posed_children,
+             p.tested_child_pairs, p.culled_child_pairs,
              p.exact_narrowphase_calls, p.speculative_calls, p.heightfield_pairs,
              p.produced_manifolds, p.pair_query_ns, p.pair_canonicalize_ns, p.plain_exact_ns,
              p.plain_speculative_ns, p.compound_pose_ns, p.compound_midphase_ns,
@@ -118,13 +119,13 @@ public:
             if (contacts_.size() != static_cast<std::size_t>(step_rows))
                 throw std::runtime_error("contact profile rows do not match physics step zones");
             auto contacts = open("contact-profile.csv");
-            contacts << "frame,world,step,raw_candidate_keys,unique_pairs,duplicate_keys,plain_pairs,compound_pairs,posed_children,tested_child_pairs,culled_child_pairs,exact_narrowphase_calls,speculative_calls,heightfield_pairs,produced_manifolds,pair_query_ns,pair_canonicalize_ns,plain_exact_ns,plain_speculative_ns,compound_pose_ns,compound_midphase_ns,compound_exact_ns,compound_speculative_ns,heightfield_ns,warmcache_ns\n";
+            contacts << "frame,world,step,world_hash,raw_candidate_keys,unique_pairs,duplicate_keys,plain_pairs,plain_tight_tests,plain_tight_rejections,compound_pairs,posed_children,tested_child_pairs,culled_child_pairs,exact_narrowphase_calls,speculative_calls,heightfield_pairs,produced_manifolds,pair_query_ns,pair_canonicalize_ns,plain_exact_ns,plain_speculative_ns,compound_pose_ns,compound_midphase_ns,compound_exact_ns,compound_speculative_ns,heightfield_ns,warmcache_ns\n";
             for (const auto& row : contacts_) {
                 const auto& v = row.values;
-                if (v[0] != v[1] + v[2] || v[1] != v[3] + v[4] + v[10] ||
-                    v[7] > v[6])
+                if (v[0] != v[1] + v[2] || v[1] != v[3] + v[6] + v[12] ||
+                    v[9] > v[8] || v[5] > v[4])
                     throw std::runtime_error("contact profile pair accounting failed");
-                contacts << row.frame << ',' << row.world << ',' << row.step;
+                contacts << row.frame << ',' << row.world << ',' << row.step << ',' << row.world_hash;
                 for (auto value : v) contacts << ',' << value;
                 contacts << '\n';
             }
@@ -177,7 +178,7 @@ struct Context {
     std::thread::id owner{};
     std::uint64_t frame = 0, warmup = 60;
     bool recording = false, ads = false, control = false, collapse = false, multi_collapse = false;
-    bool physics_phases = false, contact_profile = false;
+    bool physics_phases = false, contact_profile = false, plain_contact_cull = false;
     bool multi_missing_target = false;
     std::array<std::uint64_t, 3> multi_targets{};
     std::array<std::uint64_t, 3> multi_alive_before{}, multi_alive_after{};
@@ -248,6 +249,7 @@ inline bool parse_cli(int argc, char** argv, std::filesystem::path& output, std:
         else if (flag == "--multi-collapse") { config.collapse = true; config.multi_collapse = true; }
         else if (flag == "--physics-phases") config.physics_phases = true;
         else if (flag == "--contact-profile") config.contact_profile = true;
+        else if (flag == "--plain-contact-cull") config.plain_contact_cull = true;
         else if (flag == "--shadow-culling-off") config.shadow_caster_culling = false;
         else if (flag == "--shadow-culling-on") config.shadow_caster_culling = true;
         else if (flag == "--ppm") {
