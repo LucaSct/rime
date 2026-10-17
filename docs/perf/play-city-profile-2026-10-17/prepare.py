@@ -134,7 +134,12 @@ def instrument_main(text, header, out):
          '    if (city_profile::config.physics_phases) {\n'
          '        demo.session.server.physics.set_island_profile_enabled(true);\n'
          '        demo.session.client.physics.set_island_profile_enabled(true);\n'
-         '        diagnostic_phase_sink.emplace([diagnostic_phases, &demo](std::string_view name, double ms) {\n'
+         '        if (city_profile::config.contact_profile) {\n'
+         '            demo.session.server.physics.set_contact_profile_enabled(true);\n'
+         '            demo.session.client.physics.set_contact_profile_enabled(true);\n'
+         '        }\n'
+         '        diagnostic_phase_sink.emplace([diagnostic_phases, &demo,\n'
+         '            capture_contacts = city_profile::config.contact_profile](std::string_view name, double ms) {\n'
          '            const auto key = diagnostic_phases->zone(name, ms);\n'
          '            if (!key) return;\n'
          '            // The outer step zone closes after stats and island costs are published.\n'
@@ -142,6 +147,7 @@ def instrument_main(text, header, out):
          '            const auto& world = std::string_view(key->world) == "server"\n'
          '                ? demo.session.server.physics : demo.session.client.physics;\n'
          '            diagnostic_phases->islands(*key, world.island_solve_profile_last());\n'
+         '            if (capture_contacts) diagnostic_phases->contact(*key, world.contact_profile());\n'
          '        });\n'
          '    }\n'
          '    demo.app.on_frame_timings([&](std::uint64_t index, std::span<const render::RenderGraph::PassTiming> timings) {\n'
@@ -260,7 +266,8 @@ def instrument_main(text, header, out):
          '    }\n'
          '    city_profile::config.recording = false;\n'
          '    diagnostic_phase_sink.reset(); // app.step joined server work; remove before Demo dies\n'
-         '    if (city_profile::config.physics_phases) diagnostic_phases->write(diagnostic_out);'),
+         '    if (city_profile::config.physics_phases)\n'
+         '        diagnostic_phases->write(diagnostic_out, city_profile::config.contact_profile);'),
         ('    demo.app.finish_gpu(); // first-person resources retire before Visuals and their registries',
          '    // Readback and file I/O happen after the timed loop, before the graph retires.\n'
          '    if (!city_profile::config.ppm.empty() && demo.app.graph()) {\n'
@@ -306,6 +313,8 @@ def instrument_main(text, header, out):
          '    summary << "{\\"ads\\":" << (city_profile::config.ads ? "true" : "false")\n'
          '            << ",\\"control\\":" << (city_profile::config.control ? "true" : "false")\n'
          '            << ",\\"physics_phases\\":" << (city_profile::config.physics_phases ? "true" : "false")\n'
+         '            << ",\\"contact_profile\\":" << (city_profile::config.contact_profile ? "true" : "false")\n'
+         '            << ",\\"contact_profile_rows\\":" << diagnostic_phases->contact_rows()\n'
          '            << ",\\"warmup\\":" << city_profile::config.warmup\n'
          '            << ",\\"requested_frames\\":" << diagnostic_frames\n'
          '            << ",\\"measured_frames\\":" << city_profile::config.frames.size()\n'
@@ -437,7 +446,7 @@ def main():
                        '; const auto generated_out = diagnostic_out' +
                        '; if (!city_profile::parse_cli(argc, argv, diagnostic_out, diagnostic_frames)) { '
                        'std::fputs("usage: profile_play [--out-dir DIR] [--ads|--hip] [--control|--city] '
-                       '[--warmup N] [--frames N] [--collapse|--multi-collapse] [--physics-phases] [--shadow-culling-off|--shadow-culling-on] [--ppm PATH]\\n", stderr); return 2; } '
+                       '[--warmup N] [--frames N] [--collapse|--multi-collapse] [--physics-phases] [--contact-profile] [--shadow-culling-off|--shadow-culling-on] [--ppm PATH]\\n", stderr); return 2; } '
                        'if (generated_out != diagnostic_out) { std::error_code error; '
                        'std::filesystem::copy_file(generated_out / "provenance.json", '
                        'diagnostic_out / "provenance.json", '
@@ -469,6 +478,7 @@ def main():
     link = [('-Wl,--dependency-file=' + str(out / 'profile_play.link.d')) if t.startswith('-Wl,--dependency-file=') else t for t in link]
     info = {'source_root': str(root), 'build_source_root': str(build_source_root), 'build_dir': str(build), 'ads': args.ads, 'control': args.control,
             'warmup': args.warmup, 'frames': args.frames,
+            'contact_profile_supported': True, 'contact_profile_requires_physics_phases': True,
             'source_sha256': {k: sha(p) for k, p in source_paths.items()},
             'generated_sha256': {k: sha(p) for k, p in generated.items()},
             'header_sha256': sha(header), 'wrapper_sha256': sha(wrapper),

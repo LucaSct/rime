@@ -39,6 +39,11 @@ struct IslandRow {
     std::uint64_t ns, warm_ns, velocity_ns, store_ns, position_ns;
 };
 struct StepKey { std::uint64_t frame, step; const char* world; };
+struct ContactRow {
+    std::uint64_t frame, step;
+    std::string world;
+    std::array<std::uint64_t, 22> values;
+};
 
 // The zone sink runs on both the caller and the server job. Keep its frame window,
 // per-world sequence, and output buffers behind one lock; never consult thread_local config here.
@@ -75,7 +80,23 @@ public:
                                 cost.constraints, cost.solve_ns, cost.warm_ns, cost.velocity_ns,
                                 cost.store_ns, cost.position_ns});
     }
-    void write(const std::filesystem::path& dir) const {
+    template <class Profile> void contact(StepKey key, const Profile& p) {
+        // Copy on the world's stepping thread, while its last build still belongs to this step.
+        // The sink's mutex serializes publication with the other world's callback.
+        const std::lock_guard lock(mutex_);
+        contacts_.push_back({key.frame, key.step, key.world,
+            {p.raw_candidate_keys, p.unique_pairs, p.duplicate_keys, p.plain_pairs,
+             p.compound_pairs, p.posed_children, p.tested_child_pairs, p.culled_child_pairs,
+             p.exact_narrowphase_calls, p.speculative_calls, p.heightfield_pairs,
+             p.produced_manifolds, p.pair_query_ns, p.pair_canonicalize_ns, p.plain_exact_ns,
+             p.plain_speculative_ns, p.compound_pose_ns, p.compound_midphase_ns,
+             p.compound_exact_ns, p.compound_speculative_ns, p.heightfield_ns, p.warmcache_ns}});
+    }
+    std::size_t contact_rows() const {
+        const std::lock_guard lock(mutex_);
+        return contacts_.size();
+    }
+    void write(const std::filesystem::path& dir, bool contact_profile) const {
         // Called only after app.step has joined all work and the sink has been removed.
         auto open = [&](const char* name) { std::ofstream file(dir / name); if (!file) throw std::runtime_error(name); return file; };
         auto phases = open("physics-phases.csv");
@@ -90,6 +111,25 @@ public:
                     << ',' << row.bodies << ',' << row.contacts << ',' << row.ns << ',' << row.warm_ns
                     << ',' << row.velocity_ns << ',' << row.store_ns << ',' << row.position_ns << '\n';
         islands.flush(); if (!islands) throw std::runtime_error("physics-islands.csv write failed");
+        if (contact_profile) {
+            const auto step_rows = std::count_if(phases_.begin(), phases_.end(), [](const auto& row) {
+                return row.name == "physics.server.step" || row.name == "physics.client.step";
+            });
+            if (contacts_.size() != static_cast<std::size_t>(step_rows))
+                throw std::runtime_error("contact profile rows do not match physics step zones");
+            auto contacts = open("contact-profile.csv");
+            contacts << "frame,world,step,raw_candidate_keys,unique_pairs,duplicate_keys,plain_pairs,compound_pairs,posed_children,tested_child_pairs,culled_child_pairs,exact_narrowphase_calls,speculative_calls,heightfield_pairs,produced_manifolds,pair_query_ns,pair_canonicalize_ns,plain_exact_ns,plain_speculative_ns,compound_pose_ns,compound_midphase_ns,compound_exact_ns,compound_speculative_ns,heightfield_ns,warmcache_ns\n";
+            for (const auto& row : contacts_) {
+                const auto& v = row.values;
+                if (v[0] != v[1] + v[2] || v[1] != v[3] + v[4] + v[10] ||
+                    v[7] > v[6])
+                    throw std::runtime_error("contact profile pair accounting failed");
+                contacts << row.frame << ',' << row.world << ',' << row.step;
+                for (auto value : v) contacts << ',' << value;
+                contacts << '\n';
+            }
+            contacts.flush(); if (!contacts) throw std::runtime_error("contact-profile.csv write failed");
+        }
     }
 private:
     mutable std::mutex mutex_;
@@ -98,6 +138,7 @@ private:
     std::array<std::uint64_t, 2> steps_{};
     std::vector<PhaseRow> phases_;
     std::vector<IslandRow> islands_;
+    std::vector<ContactRow> contacts_;
 };
 
 struct PhaseSinkGuard {
@@ -136,7 +177,7 @@ struct Context {
     std::thread::id owner{};
     std::uint64_t frame = 0, warmup = 60;
     bool recording = false, ads = false, control = false, collapse = false, multi_collapse = false;
-    bool physics_phases = false;
+    bool physics_phases = false, contact_profile = false;
     bool multi_missing_target = false;
     std::array<std::uint64_t, 3> multi_targets{};
     std::array<std::uint64_t, 3> multi_alive_before{}, multi_alive_after{};
@@ -206,6 +247,7 @@ inline bool parse_cli(int argc, char** argv, std::filesystem::path& output, std:
         else if (flag == "--collapse") config.collapse = true;
         else if (flag == "--multi-collapse") { config.collapse = true; config.multi_collapse = true; }
         else if (flag == "--physics-phases") config.physics_phases = true;
+        else if (flag == "--contact-profile") config.contact_profile = true;
         else if (flag == "--shadow-culling-off") config.shadow_caster_culling = false;
         else if (flag == "--shadow-culling-on") config.shadow_caster_culling = true;
         else if (flag == "--ppm") {
@@ -222,6 +264,7 @@ inline bool parse_cli(int argc, char** argv, std::filesystem::path& output, std:
         } else return false;
     }
     if (config.multi_collapse && (frames < 180 || frames > 360 || config.warmup > 600)) return false;
+    if (config.contact_profile && !config.physics_phases) return false;
     if (config.collapse && !config.multi_collapse && (frames < 120 || frames > 360 || config.warmup > 600)) return false;
     if (frames > std::numeric_limits<std::uint64_t>::max() - config.warmup) return false;
     std::error_code error;

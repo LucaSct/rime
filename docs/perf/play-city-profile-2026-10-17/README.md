@@ -33,6 +33,18 @@ Add `--physics-phases` to an executable run to enable per-island timing and two 
 
 Analyze each `(frame, world, step)` separately: sum its island `ns` values for total solve cost and take its maximum `ns` for the serial island cost. Divide that maximum by that same step's total only when the total is nonzero. Do not combine server and client, or take a maximum from one step over a total from another. The server and client run concurrently; physics subphases nest inside the outer `step` zone and may overlap work on other threads. Their durations therefore cannot be added to obtain frame time. The sink takes a mutex and island timing reads extra clocks, so use matching `--physics-phases` settings when comparing timed runs; this output is diagnostic rather than a baseline.
 
+Add `--contact-profile` alongside `--physics-phases` for one `contact-profile.csv` row per closed server or client physics step, including client catch-up steps:
+
+```sh
+/tmp/rime-city-ads/profile_play --out-dir /tmp/rime-city-ads/contact-collapse \
+  --city --hip --multi-collapse --warmup 60 --frames 240 \
+  --physics-phases --contact-profile
+```
+
+The option enables each world's `ContactProfile` after startup, before captured steps. It requires `--physics-phases` because the outer `physics.*.step` close is the safe point where that world's stepping thread copies the completed snapshot. Without the option, there is no contact CSV and no contact-profile clock reads. `summary.json` records `contact_profile` and the row count; `provenance.json` records tool support and the phase-recorder requirement. Capture validation requires one contact row per recorded step and checks `raw_candidate_keys = unique_pairs + duplicate_keys`, `unique_pairs = plain_pairs + compound_pairs + heightfield_pairs`, and `culled_child_pairs <= tested_child_pairs`.
+
+The CSV exports every count and nanosecond field of `ContactProfile`. `pair_query_ns` covers tree queries and raw key generation; `pair_canonicalize_ns` covers sorting, deduplication, and output pairs. `plain_exact_ns` and `plain_speculative_ns` time the convex routines for plain pairs. `compound_pose_ns` covers child pose and AABB preparation. `compound_midphase_ns` is whole child Cartesian-loop time after subtracting the separately timed compound exact, speculative, and warm-cache regions; it includes AABB rejections, loop overhead, manifold setup, feature folding, and output append. `heightfield_ns` includes terrain generation, terrain speculation, and terrain cache lookup. `warmcache_ns` covers only plain and compound cache lookups. These buckets are disjoint but do not sum to the outer `contacts` zone because dispatch, allocation, and clock overhead remain between scopes. The instrument adds clock reads around narrowphase calls, one read pair around each compound child loop, and mutex/CSV work; use it for attribution, not an unprofiled performance baseline.
+
 ## Directional caster A/B and image check
 
 Directional cascade caster culling is enabled by default for the optical view. The current play source fixes main-view culling off. Select the optical off control at runtime, keeping every other option and the source/build provenance equal:
