@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <vector>
 
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/vec.hpp"
@@ -38,10 +39,8 @@
 //
 // ── WHAT IS NOT HERE, AND WHY ─────────────────────────────────────────────────────────────────
 //
-//   * **No sorting.** Additive blending is commutative, so back-to-front ordering buys nothing;
-//     this is the one blend mode where the classic transparency problem does not arise. The moment
-//     a family wants alpha blending (smoke does, eventually) sorting becomes real work and its own
-//     decision.
+//   * **Sorting only for smoke.** Additive blending is commutative. Straight-alpha smoke is
+//     stably sorted back to front by billboard centre; intersecting quads remain approximate.
 //   * **No texture atlas.** The billboard's shape is computed in the fragment stage — see
 //     particle.frag. Cooking, streaming and binding an FX atlas is its own brick.
 //   * **No GPU simulation.** The sim stays on the CPU and deterministic, which is what keeps it
@@ -58,15 +57,15 @@ struct FxSettings {
     // which is the regression bridge every M5/M6/M10 pixel proof stands on.
     bool enabled = false;
 
-    // A global multiplier on every particle's radiance, for authoring and for the proof's negative
+    // A global multiplier on every particle's RGB, for authoring and for the proof's negative
     // control. 0 draws the pass with nothing visible, which is NOT the same as `enabled = false`:
     // the pass still runs, still binds, still blends. Keeping the two distinguishable is what lets
     // a test tell "the gate is off" from "the gate is on and the content is dark".
     float intensity = 1.0f;
 
-    // The draw budget. Particles past it are not drawn — the CPU sim has its own cap (vfx's
-    // DustField), and this is the render side's independent bound so a mis-sized field cannot
-    // turn into an unbounded draw. Exceeding it is counted, never silent.
+    // The draw budget. Zero submits no draw. Particles past it are not drawn — the CPU sim has its
+    // own cap (vfx's DustField), and this is the render side's independent bound so a mis-sized
+    // field cannot turn into an unbounded draw. Exceeding it is counted, never silent.
     std::uint32_t max_particles = 4096;
 };
 
@@ -79,7 +78,7 @@ struct FxSettings {
 // failing.
 struct GpuParticle {
     float position_size[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // xyz = world centre, w = half-size (m)
-    float color_alpha[4] = {0.0f, 0.0f, 0.0f, 0.0f};   // rgb = linear radiance, a = fade
+    float color_alpha[4] = {0.0f, 0.0f, 0.0f, 0.0f};   // additive radiance or smoke RGB; a = fade
 };
 
 static_assert(sizeof(GpuParticle) == 32, "GpuParticle must match particle.vert's std430 layout");
@@ -93,22 +92,30 @@ struct FxView {
     core::Vec3 up{0.0f, 1.0f, 0.0f};    // camera up, world space, unit
 };
 
+enum class FxBlendMode { Additive, SmokeAlpha };
+
 class FxParticlePass {
 public:
-    explicit FxParticlePass(rhi::Device& device, std::uint32_t max_particles = 4096);
+    explicit FxParticlePass(rhi::Device& device,
+                            std::uint32_t max_particles = 4096,
+                            FxBlendMode blend = FxBlendMode::Additive);
     ~FxParticlePass();
 
     FxParticlePass(const FxParticlePass&) = delete;
     FxParticlePass& operator=(const FxParticlePass&) = delete;
 
+    // Allocate frames_in_flight+1 instance buffers. Call before the first add().
+    // Default is three slots, matching SceneRenderer's default two frames in flight.
+    void set_frames_in_flight(std::uint32_t frames);
+
     // Declare the pass. **A no-op when `settings.enabled` is false or `particles` is empty** — see
     // the byte-identical note above; the caller does not need to branch, and more importantly a
     // caller that forgets to branch still gets the baseline.
     //
-    // `particles` is consumed HERE (copied into the GPU buffer during this call), not at record
-    // time, so the caller may let its CPU field change or die immediately afterwards. That is the
-    // opposite of the graph's usual defer-to-record-time discipline and it is deliberate: the
-    // alternative is holding a span into a simulation that is about to tick.
+    // `particles` is consumed HERE (copied into this add's ring slot during this call), not at
+    // record time, so the caller may let its CPU field change or die immediately afterwards. That
+    // is the opposite of the graph's usual defer-to-record-time discipline and it is deliberate:
+    // the alternative is holding a span into a simulation that is about to tick.
     void add(RenderGraph& graph,
              RGTexture hdr,
              RGTexture depth,
@@ -131,9 +138,11 @@ private:
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
     rhi::PipelineHandle pipeline_;
-    rhi::BufferHandle instances_;
+    std::vector<rhi::BufferHandle> instances_;
+    FxBlendMode blend_;
     std::uint32_t capacity_;
-    std::uint32_t pending_ = 0; // instances written this frame, read at record time
+    std::uint32_t next_slot_ = 0;
+    bool added_ = false;
     std::uint64_t dropped_ = 0;
     std::uint64_t drawn_ = 0;
 };

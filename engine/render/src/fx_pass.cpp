@@ -38,8 +38,8 @@ static_assert(sizeof(FxPush) == 96, "FxPush must match particle.vert's push_cons
 
 } // namespace
 
-FxParticlePass::FxParticlePass(rhi::Device& device, std::uint32_t max_particles)
-    : device_(device), capacity_(std::max(max_particles, 1u)) {
+FxParticlePass::FxParticlePass(rhi::Device& device, std::uint32_t max_particles, FxBlendMode blend)
+    : device_(device), blend_(blend), capacity_(max_particles) {
     vertex_shader_ = make_shader(device,
                                  rhi::ShaderStage::Vertex,
                                  particle_vert_spv,
@@ -58,13 +58,12 @@ FxParticlePass::FxParticlePass(rhi::Device& device, std::uint32_t max_particles)
     rhi::GraphicsPipelineDesc pd{};
     pd.vertex_shader = vertex_shader_;
     pd.fragment_shader = fragment_shader_;
-    pd.color_format = kHdrFormat;  // additive into HDR, before tonemap — see the header
+    pd.color_format = kHdrFormat;  // blend into HDR, before tonemap — see the header
     pd.cull = rhi::CullMode::None; // a billboard has no meaningful winding
-    pd.blend = rhi::BlendMode::Additive;
+    pd.blend = blend_ == FxBlendMode::SmokeAlpha ? rhi::BlendMode::Alpha : rhi::BlendMode::Additive;
     // TEST, DO NOT WRITE. Particles must be occluded by the world (a puff behind a wall is behind
-    // it) and must never occlude anything — including each other, which is what makes the lack of
-    // sorting sound: additive blending is commutative, so with depth writes off the result does
-    // not depend on the order the quads arrive in.
+    // it) and must never occlude anything. Smoke sorts its CPU instances back to front because
+    // alpha compositing depends on order; additive instances retain caller order.
     pd.depth_test = true;
     pd.depth_write = false;
     pd.depth_compare = rhi::CompareOp::LessEqual;
@@ -78,19 +77,31 @@ FxParticlePass::FxParticlePass(rhi::Device& device, std::uint32_t max_particles)
     pd.debug_name = "fx-particles";
     pipeline_ = device.create_graphics_pipeline(pd);
 
+    set_frames_in_flight(2);
+}
+
+void FxParticlePass::set_frames_in_flight(std::uint32_t frames) {
+    if (added_ || frames > 8)
+        return;
+    for (rhi::BufferHandle instance : instances_)
+        device_.destroy(instance);
+    instances_.clear();
+    next_slot_ = 0;
     rhi::BufferDesc bd{};
-    bd.size = static_cast<std::uint64_t>(capacity_) * sizeof(GpuParticle);
+    bd.size = static_cast<std::uint64_t>(std::max(capacity_, 1u)) * sizeof(GpuParticle);
     bd.usage = rhi::BufferUsage::Storage;
     // CpuToGpu: this buffer is rewritten wholesale every frame the pass runs, which is the case
     // host-visible memory exists for. A device-local buffer plus a staging copy would be faster to
     // read and slower to write, and the read side here is one fetch per particle per vertex.
     bd.memory = rhi::MemoryUsage::CpuToGpu;
     bd.debug_name = "fx-particle-instances";
-    instances_ = device.create_buffer(bd);
+    for (std::uint32_t i = 0; i < frames + 1; ++i)
+        instances_.push_back(device_.create_buffer(bd));
 }
 
 FxParticlePass::~FxParticlePass() {
-    device_.destroy(instances_);
+    for (rhi::BufferHandle instance : instances_)
+        device_.destroy(instance);
     device_.destroy(pipeline_);
     device_.destroy(fragment_shader_);
     device_.destroy(vertex_shader_);
@@ -106,18 +117,20 @@ void FxParticlePass::add(RenderGraph& graph,
     // barrier, and no attachment load — so `enabled = false` leaves the frame byte-identical to a
     // build without this file in it. A pass that ran and drew zero instances would be *almost*
     // that, and a regression bridge cannot be built on almost (ADR-0032 §11, ADR-0035 §5).
+    added_ = true;
     if (!settings.enabled || particles.empty()) {
-        pending_ = 0;
         return;
     }
 
-    const std::uint32_t budget = std::min(capacity_, std::max(settings.max_particles, 1u));
+    const std::uint32_t budget = std::min(capacity_, settings.max_particles);
     const std::uint32_t count = static_cast<std::uint32_t>(
         std::min<std::size_t>(particles.size(), static_cast<std::size_t>(budget)));
     if (particles.size() > count) {
         // Counted, never silent: a truncated draw looks exactly like a small puff.
         dropped_ += particles.size() - count;
     }
+    if (count == 0)
+        return;
 
     // The global intensity is folded in HERE rather than in the shader, so the shader stays a pure
     // function of what it is handed and the CPU keeps one place where "how bright is FX" is
@@ -131,8 +144,20 @@ void FxParticlePass::add(RenderGraph& graph,
         scaled[i].color_alpha[1] *= scale;
         scaled[i].color_alpha[2] *= scale;
     }
-    device_.write_buffer(instances_, scaled.data(), scaled.size() * sizeof(GpuParticle), 0);
-    pending_ = count;
+    if (blend_ == FxBlendMode::SmokeAlpha) {
+        const core::Vec3 back = core::cross(view.right, view.up);
+        std::stable_sort(
+            scaled.begin(), scaled.end(), [back](const GpuParticle& a, const GpuParticle& b) {
+                const auto projection = [back](const GpuParticle& p) {
+                    return p.position_size[0] * back.x + p.position_size[1] * back.y +
+                           p.position_size[2] * back.z;
+                };
+                return projection(a) < projection(b);
+            });
+    }
+    const rhi::BufferHandle instances = instances_[next_slot_];
+    next_slot_ = (next_slot_ + 1) % static_cast<std::uint32_t>(instances_.size());
+    device_.write_buffer(instances, scaled.data(), scaled.size() * sizeof(GpuParticle), 0);
     drawn_ += count;
 
     FxPush push{};
@@ -140,13 +165,14 @@ void FxParticlePass::add(RenderGraph& graph,
     push.right[0] = view.right.x;
     push.right[1] = view.right.y;
     push.right[2] = view.right.z;
+    push.right[3] = blend_ == FxBlendMode::SmokeAlpha ? 1.0f : 0.0f;
     push.up[0] = view.up.x;
     push.up[1] = view.up.y;
     push.up[2] = view.up.z;
 
-    // LOAD the HDR target — this pass adds to a frame the forward pass already shaded, so a Clear
-    // here would erase it. Depth is loaded READ-ONLY, which is what tells the graph this pass only
-    // tests against it and lets it order without a write-after-write barrier.
+    // LOAD the HDR target — this pass blends with a frame the forward pass already shaded, so a
+    // Clear here would erase it. Depth is loaded READ-ONLY, which is what tells the graph this pass
+    // only tests against it and lets it order without a write-after-write barrier.
     const RGColorAttachment colors[] = {{hdr, rhi::LoadOp::Load, rhi::StoreOp::Store, {}}};
     RGDepthAttachment depth_att{};
     depth_att.texture = depth;
@@ -158,9 +184,8 @@ void FxParticlePass::add(RenderGraph& graph,
     desc.colors = colors;
     desc.depth = &depth_att;
 
-    const rhi::BufferHandle instances = instances_;
     const rhi::PipelineHandle pipeline = pipeline_;
-    const std::uint32_t instance_count = pending_;
+    const std::uint32_t instance_count = count;
     graph.add_raster_pass(
         "fx-particles", desc, [pipeline, instances, instance_count, push](rhi::CommandBuffer& cmd) {
             cmd.bind_pipeline(pipeline);

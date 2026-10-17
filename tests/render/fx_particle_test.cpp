@@ -73,7 +73,8 @@ struct FrameResult {
                                        FxParticlePass& pass,
                                        std::span<const GpuParticle> particles,
                                        const FxSettings& settings,
-                                       float clear_depth = 1.0f) {
+                                       float clear_depth = 1.0f,
+                                       float clear_luminance = 0.0f) {
     RenderGraph graph(device);
     const RGTexture hdr = graph.create_texture({{kSize, kSize}, kHdrFormat, "fx-hdr"});
     const RGTexture depth = graph.create_texture({{kSize, kSize}, kDepthFormat, "fx-depth"});
@@ -83,7 +84,10 @@ struct FrameResult {
     // say "this is the frame before FX" and it is exactly the baseline the gate is measured
     // against.
     const RGColorAttachment clear_colors[] = {
-        {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
+        {hdr,
+         rhi::LoadOp::Clear,
+         rhi::StoreOp::Store,
+         {clear_luminance, clear_luminance, clear_luminance, 1.0f}}};
     RGDepthAttachment clear_depth_att{};
     clear_depth_att.texture = depth;
     clear_depth_att.load = rhi::LoadOp::Clear;
@@ -111,6 +115,17 @@ struct FrameResult {
         }
     }
     return result;
+}
+
+[[nodiscard]] GpuParticle smoke(float z, float r, float g, float b, float a = 1.0f) {
+    GpuParticle p{};
+    p.position_size[2] = z;
+    p.position_size[3] = 1.0f;
+    p.color_alpha[0] = r;
+    p.color_alpha[1] = g;
+    p.color_alpha[2] = b;
+    p.color_alpha[3] = a;
+    return p;
 }
 
 // The vfx field, as the GPU reads it. This is the glue a consumer writes — vfx knows nothing about
@@ -352,4 +367,104 @@ TEST_CASE("fx1a: the draw budget truncates loudly, never silently") {
     CHECK(pass.particles_drawn() == 3);
     // Still drew something — the budget clips, it does not disable.
     CHECK(clipped.total_radiance > 0.0f);
+}
+
+TEST_CASE("smoke alpha attenuates bright background and lights dark background") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass smoke_pass(*device, 8, FxBlendMode::SmokeAlpha);
+    FxParticlePass additive_pass(*device, 8);
+    FxSettings on{};
+    on.enabled = true;
+    const GpuParticle black = smoke(0.0f, 0.0f, 0.0f, 0.0f);
+    const auto bright = render_frame(*device, smoke_pass, {}, on, 1.0f, 1.0f);
+    const auto attenuated = render_frame(*device, smoke_pass, {&black, 1}, on, 1.0f, 1.0f);
+    const auto additive = render_frame(*device, additive_pass, {&black, 1}, on, 1.0f, 1.0f);
+    CHECK(attenuated.total_radiance < bright.total_radiance);
+    CHECK(additive.bytes == bright.bytes);
+
+    const GpuParticle grey = smoke(0.0f, 0.5f, 0.5f, 0.5f);
+    const auto dark = render_frame(*device, smoke_pass, {}, on);
+    const auto visible = render_frame(*device, smoke_pass, {&grey, 1}, on);
+    CHECK(visible.total_radiance > dark.total_radiance);
+}
+
+TEST_CASE("smoke sorting is input-order independent and overlapping layers matter") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass pass(*device, 8, FxBlendMode::SmokeAlpha);
+    FxSettings on{};
+    on.enabled = true;
+    const GpuParticle far = smoke(-1.0f, 0.9f, 0.1f, 0.1f);
+    const GpuParticle near = smoke(1.0f, 0.1f, 0.1f, 0.9f);
+    const std::vector<GpuParticle> front_first{near, far};
+    const std::vector<GpuParticle> back_first{far, near};
+    const auto ordered = render_frame(*device, pass, front_first, on);
+    const auto reversed = render_frame(*device, pass, back_first, on);
+    const auto single = render_frame(*device, pass, {&near, 1}, on);
+    CHECK(ordered.bytes == reversed.bytes);
+    CHECK(ordered.bytes != single.bytes);
+}
+
+TEST_CASE("smoke alpha zero, depth occlusion, disabled gate, and zero cap") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass pass(*device, 2, FxBlendMode::SmokeAlpha);
+    FxSettings off{};
+    FxSettings on{};
+    on.enabled = true;
+    const GpuParticle grey = smoke(0.0f, 0.4f, 0.4f, 0.4f);
+    const GpuParticle zero = smoke(0.0f, 0.4f, 0.4f, 0.4f, 0.0f);
+    const auto baseline = render_frame(*device, pass, {}, off, 1.0f, 0.8f);
+    CHECK(render_frame(*device, pass, {&grey, 1}, off, 1.0f, 0.8f).bytes == baseline.bytes);
+    CHECK(render_frame(*device, pass, {&zero, 1}, on, 1.0f, 0.8f).bytes == baseline.bytes);
+    CHECK(render_frame(*device, pass, {&grey, 1}, on, 0.0f, 0.8f).bytes == baseline.bytes);
+    on.max_particles = 0;
+    const std::vector<GpuParticle> three{grey, grey, grey};
+    const auto before = pass.particles_dropped();
+    CHECK(render_frame(*device, pass, three, on, 1.0f, 0.8f).bytes == baseline.bytes);
+    CHECK(pass.particles_dropped() - before == 3);
+    CHECK(pass.capacity() == 2);
+}
+
+TEST_CASE("smoke graph declaration is gated and a zero budget counts all particles") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass pass(*device, 2, FxBlendMode::SmokeAlpha);
+    RenderGraph graph(*device);
+    const RGTexture hdr = graph.create_texture({{kSize, kSize}, kHdrFormat, "smoke-graph-hdr"});
+    const RGTexture depth =
+        graph.create_texture({{kSize, kSize}, kDepthFormat, "smoke-graph-depth"});
+    const FxView view = make_view().fx;
+    const GpuParticle grey = smoke(0.0f, 0.4f, 0.4f, 0.4f);
+    FxSettings off{};
+    pass.add(graph, hdr, depth, {&grey, 1}, view, off);
+    CHECK(graph.pass_count() == 0);
+    FxSettings on{};
+    on.enabled = true;
+    pass.add(graph, hdr, depth, {}, view, on);
+    CHECK(graph.pass_count() == 0);
+    on.max_particles = 0;
+    pass.add(graph, hdr, depth, {&grey, 1}, view, on);
+    CHECK(graph.pass_count() == 0);
+    CHECK(pass.particles_dropped() == 1);
+    on.max_particles = 2;
+    pass.add(graph, hdr, depth, {&grey, 1}, view, on);
+    CHECK(graph.pass_count() == 1);
 }

@@ -17,6 +17,7 @@
 
 layout(location = 0) in vec2 in_uv;    // [-1,1]², the billboard's own space
 layout(location = 1) in vec4 in_color; // rgb = linear radiance, a = fade
+layout(location = 2) flat in int in_smoke;
 
 layout(location = 0) out vec4 out_color;
 
@@ -27,6 +28,13 @@ void main() {
     }
     const float falloff = 1.0 - r2;
     const float intensity = falloff * falloff * in_color.a;
+
+    if (in_smoke != 0) {
+        // Straight alpha: the RHI blends src_alpha*rgb + (1-src_alpha)*dst.
+        // RGB is caller-provided approximate incident lighting, not premultiplied here.
+        out_color = vec4(in_color.rgb, clamp(in_color.a, 0.0, 1.0) * falloff * falloff);
+        return;
+    }
 
     // ADDITIVE, so alpha is folded into rgb rather than left for the blend to apply. The pipeline
     // blends ONE·src + ONE·dst; premultiplying here is what makes `a` behave as a fade instead of

@@ -38,6 +38,7 @@ layout(push_constant) uniform Pc {
 
 layout(location = 0) out vec2 out_uv;
 layout(location = 1) out vec4 out_color;
+layout(location = 2) flat out int out_smoke;
 
 void main() {
     // Two triangles from six indices, in the corner order (-1,-1) (1,-1) (-1,1) / (-1,1) (1,-1)
@@ -60,4 +61,5 @@ void main() {
     gl_Position = pc.view_proj * vec4(world, 1.0);
     out_uv = corner;            // [-1,1]² — the fragment stage's radial falloff domain
     out_color = p.color_alpha;
+    out_smoke = pc.camera_right.w > 0.5 ? 1 : 0;
 }

@@ -340,6 +340,18 @@ void SceneRenderer::set_frames_in_flight(std::uint32_t frames) {
     }
 }
 
+void SceneRenderer::set_smoke_particles(std::span<const GpuParticle> particles,
+                                        FxSettings settings) {
+    smoke_settings_ = settings;
+    smoke_particles_.clear();
+    if (!settings.enabled || particles.empty())
+        return;
+    constexpr std::size_t kSmokeCapacity = 4096;
+    const std::size_t count = std::min(particles.size(), kSmokeCapacity);
+    smoke_particles_.assign(particles.begin(), particles.begin() + count);
+    smoke_particles_dropped_ += particles.size() - count;
+}
+
 void SceneRenderer::ensure_draw_capacity(std::uint32_t draw_count) {
     // Grows only THIS FRAME'S SLOT. That is what makes destroy-and-recreate safe again: the slot is
     // one the ring has come back round to, so its previous submission has already been waited on by
@@ -1087,6 +1099,20 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // validation barrier disagreement.
     if (sky_on) {
         sky_.note_skyview_state(rhi::ResourceState::ShaderRead);
+    }
+
+    if (smoke_settings_.enabled && !smoke_particles_.empty()) {
+        if (!smoke_pass_) {
+            smoke_pass_ = std::make_unique<FxParticlePass>(device_, 4096, FxBlendMode::SmokeAlpha);
+            smoke_pass_->set_frames_in_flight(static_cast<std::uint32_t>(frame_ubos_.size() - 1));
+        }
+        FxView smoke_view{};
+        smoke_view.view_proj = fu.view_proj;
+        smoke_view.right = {
+            scene.camera.view.at(0, 0), scene.camera.view.at(0, 1), scene.camera.view.at(0, 2)};
+        smoke_view.up = {
+            scene.camera.view.at(1, 0), scene.camera.view.at(1, 1), scene.camera.view.at(1, 2)};
+        smoke_pass_->add(graph, tonemap_src, depth, smoke_particles_, smoke_view, smoke_settings_);
     }
 
     // Preserve world radiance BEFORE first-person colour overwrites it. A 1x collimated sight

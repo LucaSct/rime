@@ -15,6 +15,7 @@
 #include "rime/render/components.hpp"
 #include "rime/render/culling.hpp"
 #include "rime/render/first_person_pass.hpp"
+#include "rime/render/fx_pass.hpp"
 #include "rime/render/lighting/clustered.hpp"
 #include "rime/render/lighting/ddgi.hpp"
 #include "rime/render/lighting/local_shadows.hpp"
@@ -496,6 +497,16 @@ public:
     // submit_blocking pay two extra small buffers and need not call it at all.
     void set_frames_in_flight(std::uint32_t frames);
 
+    // Copy a bounded caller-owned smoke list for subsequent render(). Off or empty clears it.
+    // RGB is approximate incident lighting in linear HDR, alpha is opacity. This billboard
+    // path has hard depth occlusion, no soft intersections, self-shadowing, or volumetrics;
+    // TAA can ghost moving puffs. No vfx module dependency is implied.
+    void set_smoke_particles(std::span<const GpuParticle> particles, FxSettings settings);
+
+    [[nodiscard]] std::uint64_t smoke_particles_dropped() const noexcept {
+        return smoke_particles_dropped_;
+    }
+
     // Where per-submesh materials come from (m16.3). Null — the default — means every submesh uses
     // its entity's single MaterialRef, which is what a world built by hand or by a pre-m16.3 path
     // wants. The GpuAssetBridge owns the registry; hand it over with
@@ -538,6 +549,10 @@ private:
     rhi::Extent2D previous_first_person_extent_{};
     std::vector<core::Mat4> previous_first_person_models_;
     std::unique_ptr<FirstPersonPass> first_person_pass_; // constructed only on first live draw
+    std::unique_ptr<FxParticlePass> smoke_pass_; // constructed only for nonempty enabled smoke
+    std::vector<GpuParticle> smoke_particles_;
+    FxSettings smoke_settings_{};
+    std::uint64_t smoke_particles_dropped_ = 0;
     std::vector<DrawItem> frame_first_person_draws_;
     std::vector<rhi::TextureHandle> first_person_base_color_;
     std::vector<rhi::TextureHandle> first_person_metallic_roughness_;
