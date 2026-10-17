@@ -23,6 +23,59 @@ core::Quat along_z(core::Vec3 unit) {
         return core::quat_from_axis_angle({0, 1, 0}, 3.14159265359f);
     return core::normalize(core::Quat{-unit.y, unit.x, 0.0f, 1.0f + unit.z});
 }
+
+render::CpuMesh case_mesh() {
+    // Unit-radius, unit-half-length eight-sided cylinder. The instance scale supplies actual
+    // 9 mm case dimensions; flat rings make its motion readable without a texture.
+    render::CpuMesh mesh;
+    constexpr int sides = 8;
+    constexpr float tau = 6.28318530718f;
+    for (int i = 0; i < sides; ++i) {
+        const float a = tau * static_cast<float>(i) / sides;
+        const float x = std::cos(a), y = std::sin(a);
+        for (float z : {-1.0f, 1.0f}) {
+            render::MeshVertex v{};
+            v.px = x;
+            v.py = y;
+            v.pz = z;
+            v.nx = x;
+            v.ny = y;
+            mesh.vertices.push_back(v);
+        }
+    }
+    for (int i = 0; i < sides; ++i) {
+        const auto lo = static_cast<std::uint32_t>(2 * i);
+        const auto next = static_cast<std::uint32_t>(2 * ((i + 1) % sides));
+        mesh.indices.insert(mesh.indices.end(), {lo, next, lo + 1, lo + 1, next, next + 1});
+    }
+    for (float z : {-1.0f, 1.0f}) {
+        const auto start = static_cast<std::uint32_t>(mesh.vertices.size());
+        for (int i = 0; i < sides; ++i) {
+            const float a = tau * static_cast<float>(i) / sides;
+            render::MeshVertex v{};
+            v.px = std::cos(a);
+            v.py = std::sin(a);
+            v.pz = z;
+            v.nx = 0;
+            v.ny = 0;
+            v.nz = z;
+            mesh.vertices.push_back(v);
+        }
+        for (int i = 1; i + 1 < sides; ++i) {
+            if (z > 0)
+                mesh.indices.insert(mesh.indices.end(),
+                                    {start,
+                                     start + static_cast<std::uint32_t>(i),
+                                     start + static_cast<std::uint32_t>(i + 1)});
+            else
+                mesh.indices.insert(mesh.indices.end(),
+                                    {start,
+                                     start + static_cast<std::uint32_t>(i + 1),
+                                     start + static_cast<std::uint32_t>(i)});
+        }
+    }
+    return mesh;
+}
 } // namespace
 
 PlayWeaponFx::PlayWeaponFx(rhi::Device&,
@@ -37,11 +90,9 @@ bool PlayWeaponFx::initialize() {
     // Low-poly solids work with the existing opaque/emissive path. They need no texture, alpha
     // blending, transient light, shader, or asset cook. Registry ownership covers GPU retirement.
     burst_ = meshes_.add(render::make_uv_sphere(1.0f, 4, 8), "weapon-feedback-burst");
-    // One mesh serves every effect. A low-band uv sphere scales into all four shapes we need:
-    // a round flash, an elongated bullet, a spark, and a disc-shaped surface mark. The cube that
-    // used to draw the streak is gone with it -- a bullet reads as a stretched ellipsoid, and an
-    // unreferenced mesh in the registry is just VRAM a reader has to account for.
-    if (!meshes_.contains(burst_))
+    brass_ = meshes_.add(case_mesh(), "weapon-feedback-case");
+    // The sphere serves flash, tracer, spark and marks; cases share one low-poly cylinder.
+    if (!meshes_.contains(burst_) || !meshes_.contains(brass_))
         return false;
     // These are LINEAR RADIANCE values fed straight to the ACES fit in tonemap.frag -- there is no
     // exposure system yet, so the curve is the only thing between these numbers and the screen.
@@ -52,16 +103,17 @@ bool PlayWeaponFx::initialize() {
     // of sRGB (1.0, 0.55, 0.15) gives green 0.18 and blue 0.02; red stays well above 1 so the core
     // still blows out and blooms, which is what reads as heat. Re-derive these if an exposure
     // system lands, because every one of them is relative to a curve with no exposure in front.
-    constexpr float colors[4][3] = {
-        {10.0f, 0.18f, 0.02f}, {0, 0, 0}, {8.0f, 0.14f, 0.015f}, {0, 0, 0}};
+    constexpr float colors[5][3] = {
+        {10.0f, 0.18f, 0.02f}, {0, 0, 0}, {8.0f, 0.14f, 0.015f}, {0, 0, 0}, {0, 0, 0}};
     for (std::size_t i = 0; i < material_ids_.size(); ++i) {
         render::PbrMaterialDesc material{};
+        const bool brass = i == 4;
         const bool dark = i == 1 || i == 3;
-        material.base_color[0] = dark ? .012f : .9f;
-        material.base_color[1] = dark ? .009f : .15f;
-        material.base_color[2] = dark ? .007f : .015f;
-        material.metallic = i == 1 ? .7f : 0;
-        material.roughness = i == 1 ? .35f : 1.0f;
+        material.base_color[0] = brass ? .55f : dark ? .012f : .9f;
+        material.base_color[1] = brass ? .31f : dark ? .009f : .15f;
+        material.base_color[2] = brass ? .065f : dark ? .007f : .015f;
+        material.metallic = brass ? .8f : i == 1 ? .7f : 0;
+        material.roughness = brass ? .32f : i == 1 ? .35f : 1.0f;
         std::copy(std::begin(colors[i]), std::end(colors[i]), material.emissive);
         material_ids_[i] = materials_.add(material);
     }
@@ -117,8 +169,25 @@ void PlayWeaponFx::advance(float dt) noexcept {
             shot.age = std::min(shot.age + dt, kSparkLifetime);
     for (auto& impact : impacts_)
         impact.age = std::min(impact.age + dt, kImpactLifetime);
+    for (auto& casing : cases_) {
+        if (casing.age >= kCaseLifetime)
+            continue;
+        casing.age = std::min(casing.age + dt, kCaseLifetime);
+        if (casing.age >= kCaseLifetime)
+            continue;
+        casing.previous = casing.position;
+        casing.position += casing.velocity * dt + core::Vec3{0, -4.905f * dt * dt, 0};
+        casing.velocity.y -= 9.81f * dt;
+        casing.rotation = core::normalize(core::quat_from_axis_angle({.6f, .3f, .7f}, 9.0f * dt) *
+                                          casing.rotation);
+    }
     // A shot accepted by the sim just before a slow render still gets one visible presentation.
     // After that, real elapsed time expires effects; no frame-rate-dependent age clamp.
+}
+
+void PlayWeaponFx::queue_case() noexcept {
+    if (ready_ && queued_cases_ < kCaseSlots)
+        ++queued_cases_;
 }
 
 void PlayWeaponFx::show(ecs::World& world,
@@ -138,7 +207,9 @@ void PlayWeaponFx::show(ecs::World& world,
         }
 }
 
-void PlayWeaponFx::pose(ecs::World& world, const physics::PhysicsWorld* physics) {
+void PlayWeaponFx::pose(ecs::World& world,
+                        const physics::PhysicsWorld* physics,
+                        const ViewPose* view) {
     if (!ready_ || (world_ && world_ != &world))
         return;
     if (!world_) {
@@ -157,17 +228,39 @@ void PlayWeaponFx::pose(ecs::World& world, const physics::PhysicsWorld* physics)
         for (auto& impact : impacts_)
             impact.entity = world.spawn_with(
                 ecs::WorldTransform{}, render::MeshRef{}, render::MaterialRef{material_ids_[3]});
+        for (auto& casing : cases_)
+            casing.entity = world.spawn_with(
+                ecs::WorldTransform{}, render::MeshRef{}, render::MaterialRef{material_ids_[4]});
+    }
+    const float view_dir_length = view ? core::length(view->direction) : 0.0f;
+    const bool valid_view = view && finite(view->eye) && finite(view->muzzle) &&
+                            finite(view->ejection_point) && finite(view->velocity) &&
+                            finite(view->direction) && std::isfinite(view_dir_length) &&
+                            view_dir_length > 1e-5f;
+    if (valid_view) {
+        const auto forward = view->direction / view_dir_length;
+        auto right = core::cross(forward, core::Vec3{0, 1, 0});
+        right = core::length(right) > 1e-5f ? core::normalize(right) : core::Vec3{1, 0, 0};
+        while (queued_cases_ > 0) {
+            auto& casing = cases_[next_case_];
+            next_case_ = (next_case_ + 1) % kCaseSlots;
+            --queued_cases_;
+            casing.position = casing.previous = view->ejection_point;
+            casing.velocity =
+                view->velocity + right * 2.1f + forward * .35f + core::Vec3{0, 2.2f, 0};
+            casing.rotation = along_z(forward);
+            casing.age = 0.0f;
+            casing.bounced = false;
+        }
     }
     for (auto& shot : shots_) {
         core::Transform flash{};
-        // 0.30 m, not the 0.07 m this used to use. The sphere is scaled in RADIUS, so the old
-        // 0.095 radius put its near face at -0.025 m -- behind the eye -- and the camera sat
-        // inside the flash, which is why it filled the frame as an octagon (you were looking at
-        // the inside of a 4x8 uv sphere). The muzzle is roughly at the eye in the environment
-        // smoke, which has no viewmodel to push it forward, so the offset has to carry it clear
-        // on its own rather than relying on a weapon being in the way.
-        flash.translation = shot.muzzle + shot.direction * 0.15f;
-        flash.rotation = along_z(shot.direction);
+        // Only live muzzle effects follow the latest camera/viewmodel pose. The fallback keeps
+        // old callers usable; neither path changes the accepted hit or tracer's world path.
+        const auto muzzle = valid_view ? view->muzzle : shot.muzzle;
+        const auto muzzle_dir = valid_view ? view->direction / view_dir_length : shot.direction;
+        flash.translation = muzzle + muzzle_dir * (valid_view ? .035f : .15f);
+        flash.rotation = along_z(muzzle_dir);
         const float flare = 1.0f - std::min(shot.age / kFlashLifetime, 1.0f);
         flash.scale = {0.02f + 0.03f * flare, 0.02f + 0.03f * flare, 0.06f * flare + 0.02f};
         show(world,
@@ -179,23 +272,20 @@ void PlayWeaponFx::pose(ecs::World& world, const physics::PhysicsWorld* physics)
         const auto path = shot.hit - shot.muzzle;
         const float distance = core::length(path);
         const auto direction = distance > 1e-5f ? path / distance : shot.direction;
+        const bool forward_path = core::dot(path, shot.direction) > .28f;
         // A short swept streak visualizes the already-resolved hitscan. Its travel time is
         // presentation only: it does not postpone damage, collision, or any ShotEvent.
-        // The bullet starts at 0.40 m, clear of the flash. Those two numbers are coupled: the
-        // flash sits at 0.15 m with a ~0.05 m radius, so it ends at 0.20, and a bullet spawning
-        // at 0.23 (the old 0.35 head minus its 0.12 length) was drawn INSIDE it -- a dark,
-        // non-emissive metallic body occluding the middle of the flare, which read as a hole
-        // punched in the muzzle fire. Keep the gap if either number moves.
-        const float head = std::min(distance, .40f + 800.0f * shot.age);
-        const float tail = std::max(0.0f, head - .12f);
+        // Scale is the sphere radius, so a 30 mm total length needs a 15 mm Z half-extent.
+        // Start beyond the live flare and suppress a pellet for a hit too close to the muzzle.
+        const float head = std::min(distance, .28f + 800.0f * shot.age);
+        const float tail = std::max(.25f, head - .03f);
         tracer.translation = shot.muzzle + direction * ((head + tail) * 0.5f);
         tracer.rotation = along_z(direction);
-        tracer.scale = {0.016f, 0.016f, std::max(head - tail, 0.001f)};
+        tracer.scale = {.003f, .003f, std::max((head - tail) * .5f, .001f)};
         show(world,
              shot.entities[1],
-             shot.age < kTracerLifetime && head < distance && distance > 0.01f
-                 ? burst_
-                 : render::kInvalidMeshId,
+             shot.age < kTracerLifetime && head < distance && forward_path ? burst_
+                                                                           : render::kInvalidMeshId,
              tracer);
 
         core::Transform spark{};
@@ -220,7 +310,7 @@ void PlayWeaponFx::pose(ecs::World& world, const physics::PhysicsWorld* physics)
             const float life = muzzle ? kFlashLifetime : kSparkLifetime;
             const float fade = 1 - std::min(shot.age / life, 1.0f);
             transform->value.translation =
-                muzzle ? shot.muzzle : shot.spark + (-shot.direction) * .08f;
+                muzzle ? flash.translation : shot.spark + (-shot.direction) * .08f;
             light->color_r = 1;
             light->color_g = .14f;
             light->color_b = .018f;
@@ -244,6 +334,31 @@ void PlayWeaponFx::pose(ecs::World& world, const physics::PhysicsWorld* physics)
             scar.scale = {.045f, .045f, .006f};
         }
         show(world, impact.entity, active ? burst_ : render::kInvalidMeshId, scar);
+    }
+    for (auto& casing : cases_) {
+        const bool active = casing.age < kCaseLifetime;
+        if (active && physics && !casing.bounced) {
+            const auto travel = casing.position - casing.previous;
+            const float length = core::length(travel);
+            if (length > 1e-5f) {
+                physics::RayHit hit{};
+                physics::QueryFilter scenery{};
+                scenery.dynamics = false; // avoid the shooter's own moving capsule
+                if (physics->raycast({casing.previous, travel, length}, hit, scenery)) {
+                    casing.position = hit.point + hit.normal * .006f;
+                    const float into = core::dot(casing.velocity, hit.normal);
+                    if (into < 0.0f)
+                        casing.velocity -= hit.normal * (1.3f * into);
+                    casing.velocity *= .55f;
+                    casing.bounced = true;
+                }
+            }
+        }
+        core::Transform transform{};
+        transform.translation = casing.position;
+        transform.rotation = casing.rotation;
+        transform.scale = {.0048f, .0048f, .0095f};
+        show(world, casing.entity, active ? brass_ : render::kInvalidMeshId, transform);
     }
 }
 
