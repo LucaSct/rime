@@ -114,3 +114,5 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0085](0085-multiplayer-development-and-shipment.md) — multiplayer-first development and shipment, native target artifacts, dedicated/browser profiles, and gated creator-enabled player authoring.
 - [ADR-0086](0086-play-sight-calibration-and-render-graph-scale.md) — right-eye rifle calibration, transparent collimated sights, exit-pupil rendering support, scalable pass-name indexing and complete streamed-view timing.
 - [ADR-0087](0087-verified-linux-development-bundle.md) — verified Linux development exports, build provenance, reviewed notices, isolated execution and retained CI artifacts.
+
+- [ADR-0088](0088-environment-effects-as-separate-milestones.md) — separate smoke, destruction smoke, water/buoyancy and fire milestones; initial CPU seams may start before M18, while enabled workloads retain their budget gates.
