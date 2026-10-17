@@ -1,0 +1,9 @@
+Test project /home/next/reports/rime-collapse-scaling-2026-10-17/environment-cpu-build
+    Start 6: rime_vfx_tests
+1/2 Test #6: rime_vfx_tests ...................   Passed    0.00 sec
+    Start 7: rime_fluids_tests
+2/2 Test #7: rime_fluids_tests ................   Passed    0.00 sec
+
+100% tests passed out of 2
+
+Total Test time (real) =   0.00 sec

@@ -70,6 +70,19 @@ struct EmitParams {
     Family family = Family::ImpactDust;
 };
 
+// Cumulative accounting since construction or reset_stats(). Requested particles are counted
+// after the intensity clamp and before the capacity clamp. Rejected calls request no particles;
+// capacity drops include a full field and a zero-capacity field. Retirement means simulate()
+// expired a particle; clear() removals have their own counter.
+struct EmissionStats {
+    std::uint64_t requested_particles = 0;
+    std::uint64_t spawned_particles = 0;
+    std::uint64_t dropped_capacity = 0;
+    std::uint64_t rejected_emissions = 0;
+    std::uint64_t retired_particles = 0;
+    std::uint64_t cleared_particles = 0;
+};
+
 // The three authored families. Free functions rather than constants so the numbers live beside
 // their reasoning in dust.cpp, where a reader looking for "why is smoke like that" will be.
 [[nodiscard]] const EmitParams& impact_dust() noexcept;
@@ -88,9 +101,8 @@ public:
                            std::uint64_t seed = 0x9E3779B97F4A7C15ull);
 
     // Bloom a puff for a break of `intensity` (~0..1+; scales particle count and initial speed)
-    // filling the world box [bounds_min, bounds_max]. Spawns into the remaining budget and silently
-    // drops the rest — never exceeds capacity(). A non-positive intensity or inverted box is a
-    // no-op.
+    // filling the world box [bounds_min, bounds_max]. Spawns into the remaining budget and counts
+    // overflow. Invalid inputs are rejected without advancing the scatter stream.
     //
     // This spelling emits IMPACT DUST — the M8.4 behaviour, unchanged, so every caller written
     // before families existed still means exactly what it meant.
@@ -115,6 +127,11 @@ public:
 
     [[nodiscard]] std::uint32_t capacity() const noexcept { return max_; }
 
+    [[nodiscard]] const EmissionStats& stats() const noexcept { return stats_; }
+
+    // Starts a new accounting interval without changing live particles or the scatter stream.
+    void reset_stats() noexcept { stats_ = {}; }
+
     // A cheap coverage proxy: Σ size²·alpha over live particles, alpha = 1 − age/lifetime. This is
     // the scalar the m8.6 GPU pass's coverage-delta pixel test confirms on screen — it JUMPS on a
     // burst (fresh particles at alpha≈1) and DECAYS to 0 as the puff ages out.
@@ -132,6 +149,7 @@ private:
     std::uint64_t rng_;
     std::uint32_t max_;
     std::vector<Particle> particles_;
+    EmissionStats stats_{};
 };
 
 // The M8.4 names, kept so every caller and test written before families existed compiles

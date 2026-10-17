@@ -14,6 +14,30 @@ shipment; its unfinished gates still block editing releases. See the
 [step-by-step plan and target evidence](design/multiplayer-shipping.md).
 The historical progress below remains evidence of what actually landed.
 
+**Current position (2026-10-17):** M19's terrain series has merged, and Linux export
+packaging (#329) and the automatic-fire repair (#330) are on `main`. The expanded
+city (#331) remains a draft: native ADS measurements exposed substantial CPU draw
+submission cost. Renderer submission has improved in native 720p captures; single-charge
+and three-building collapse diagnostics still expose a separate physics bottleneck
+and do not prove settled peer convergence. The complete performance gate remains open. The current
+playable repairs include weapon timing/presentation and city readability; these do
+not close M18's outstanding performance gate. The dated October 5 snapshot below
+is historical, including its then-unmerged M19 stack and older post-M19 ordering.
+
+Water, fire and smoke are planned simulation work, not completed by the present
+reflective pond or muzzle effects. [ADR-0042](adr/0042-fluids-track-reopened.md)
+orders destruction smoke/particle capacity (fx1b), heightfield water with two-way
+buoyancy (fl1a), then ignition, fire-driven lighting and smoke (fx1c), after the M18
+performance gate. [ADR-0085](adr/0085-multiplayer-development-and-shipment.md)
+also requires exported multiplayer and measured capacity in the shipment path.
+[ADR-0088](adr/0088-environment-effects-as-separate-milestones.md), following the
+owner's newer request, now separates these into four milestones and permits
+research, CPU oracles and default-off seams to start before M18 closes. The
+[small-brick plan](design/environment-effects-milestones.md) gives each a useful
+first release and independent exits. Enabled GPU workloads and completed
+simulation features still require the performance/authority proofs; there is no
+supported calendar date while those gates remain open.
+
 **How we use this roadmap.** These are *milestones* — the map, not the turn-by-turn
 directions. Each milestone is decomposed into small **bricks**, and every brick is
 planned again before it's built. A milestone is **"done" only when its proof runs** (a

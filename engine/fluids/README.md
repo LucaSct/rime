@@ -1,0 +1,7 @@
+# rime::fluids — buoyancy exchange seam
+
+This removable, CPU-only module currently evaluates buoyancy for one spherical probe against a caller-provided, locally horizontal water sample. It does **not** simulate a heightfield, update water, render water, or automatically couple a rigid body. The caller supplies the authoritative sample tick and stable body key, evaluates probes in canonical key order, and applies each returned `body_impulse` through physics on the appropriate thread before stepping. The opposite `water_reaction_impulse` is an accounting record for a future water solver; no wave or momentum-feedback claim follows from recording it.
+
+The submerged sphere-cap volume is analytic. Hydrostatic lift is `density * gravity * submerged_volume`. Optional quadratic drag uses relative water/body velocity and a projected area scaled by the submerged volume fraction. That area is an approximation suitable for a bounded pontoon, not a surface pressure integral. Probes should not overlap or their displaced volumes are counted twice. Dry probes produce a zero exchange. Invalid inputs and outputs outside finite `float` range are rejected.
+
+The module links only `rime::core` and exports `rime::fluids`. The test executable links `rime::physics` to prove that a consumer can apply the public impulse. Neither the module nor this test needs a GPU. A gameplay authority design must still decide how surface samples and resulting impulses agree across peers; a tick label alone does not establish determinism.
