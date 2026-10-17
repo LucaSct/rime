@@ -86,6 +86,7 @@
 #include "play_sunset.hpp"
 #include "play_viewmodel.hpp"
 #include "play_weapon_fx.hpp"
+#include "play_weapon_policy.hpp"
 #include "play_world.hpp"
 #include "rime/app/application.hpp"
 #include "rime/assets/asset_server.hpp"
@@ -5111,19 +5112,20 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     demo.app.add_sim_stage(app::Application::SimStage::PreSim, [&](ecs::World&, double) {
         auto input = live.tick();
         if (demo.viewmodel) {
-            const auto selected = demo.viewmodel->selected();
             // This local play session owns one authoritative weapon. Selection configures
             // its existing trigger contract; it does not invent a replicated inventory.
-            demo.session.server.weapon.automatic =
-                selected != block_play::PlayViewmodel::Weapon::Sniper;
-            demo.session.server.weapon.cooldown_ticks =
-                selected == block_play::PlayViewmodel::Weapon::Sniper ? 72u
-                : selected == block_play::PlayViewmodel::Weapon::Scar ? 8u
-                                                                      : 7u;
-            if (demo.viewmodel->busy()) {
-                input.held &= ~gameplay::kActionFire;
-                input.pressed &= ~gameplay::kActionFire;
-            }
+            block_play::configure_selected_weapon(
+                demo.session.server.weapon,
+                static_cast<block_play::PlayWeaponMotion::Weapon>(demo.viewmodel->selected()));
+            // GameplayServer reads the avatar component, not the spawn template above.
+            // Updating only that template would leave an already-spawned sniper automatic.
+            for (const auto avatar : demo.session.server.avatars)
+                if (auto* weapon = demo.session.server.world.get<gameplay::WeaponConfig>(avatar))
+                    block_play::configure_selected_weapon(
+                        *weapon, static_cast<block_play::PlayWeaponMotion::Weapon>(
+                                     demo.viewmodel->selected()));
+            input = block_play::filter_busy_fire(
+                input, demo.viewmodel->busy(), demo.session.server.weapon.fire_bit);
         }
         demo.step_sim(gameplay_net::to_input_command(input));
     });
