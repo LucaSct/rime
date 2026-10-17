@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -194,6 +195,43 @@ bool split_magazine(render::CpuMesh& body, unsigned weapon, MagazineSplit& out) 
     out.contact = contact_sum / static_cast<float>(contact_vertices);
     out.contact.y = std::min(out.contact.y + .04f, hi[weapon].y);
     return true;
+}
+
+std::uint64_t geometry_fingerprint(const render::CpuMesh& mesh) {
+    // Stable FNV-1a over authored topology and position bits, independent of host byte order.
+    // The expected hashes are calibrated from cooked assets in a hardware-capable run; until
+    // then printing the observed value is evidence, not a same-count art-change guard.
+    std::uint64_t hash = 14695981039346656037ull;
+    const auto word = [&](std::uint32_t value) {
+        for (unsigned byte = 0; byte < 4; ++byte) {
+            hash ^= (value >> (8 * byte)) & 0xffu;
+            hash *= 1099511628211ull;
+        }
+    };
+    word(static_cast<std::uint32_t>(mesh.vertices.size()));
+    word(static_cast<std::uint32_t>(mesh.indices.size()));
+    word(static_cast<std::uint32_t>(mesh.submeshes.size()));
+    for (const auto& v : mesh.vertices) {
+        word(std::bit_cast<std::uint32_t>(v.px));
+        word(std::bit_cast<std::uint32_t>(v.py));
+        word(std::bit_cast<std::uint32_t>(v.pz));
+    }
+    for (auto index : mesh.indices)
+        word(index);
+    for (const auto& range : mesh.submeshes) {
+        word(range.first_index);
+        word(range.index_count);
+        word(range.material_slot);
+    }
+    return hash;
+}
+
+void remove_empty_ranges(render::CpuMesh& mesh) {
+    mesh.submeshes.erase(
+        std::remove_if(mesh.submeshes.begin(),
+                       mesh.submeshes.end(),
+                       [](const render::SubmeshRange& range) { return range.index_count == 0; }),
+        mesh.submeshes.end());
 }
 
 struct TextureRefs {
@@ -395,6 +433,9 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
                 }
             models_[i].muzzle = muzzle / static_cast<float>(count);
         }
+        const std::uint32_t original_triangles =
+            static_cast<std::uint32_t>(geometry.indices.size() / 3);
+        const std::uint64_t fingerprint = i < 3 ? geometry_fingerprint(geometry) : 0;
         MagazineSplit magazine;
         if (i < 2) {
             if (!split_magazine(geometry, static_cast<unsigned>(i), magazine)) {
@@ -407,6 +448,24 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             models_[i].magazine_contact = magazine.contact;
             models_[i].magazine_triangles = magazine.triangles;
         }
+        if (i < 3) {
+            std::fprintf(
+                stderr,
+                "99-the-block: %s topology original=%u body=%zu magazine=%u fnv64=%016llx\n",
+                kSources[i],
+                original_triangles,
+                geometry.indices.size() / 3,
+                magazine.triangles,
+                static_cast<unsigned long long>(fingerprint));
+            if (original_triangles != geometry.indices.size() / 3 + magazine.triangles)
+                return false;
+        }
+        // Keep the authored range table for source material lookup. MeshRegistry intentionally
+        // discards zero-count ranges; filtering only the upload copies preserves source indices.
+        const auto authored_ranges = geometry.submeshes;
+        const auto magazine_ranges = magazine.magazine.submeshes;
+        remove_empty_ranges(geometry);
+        remove_empty_ranges(magazine.magazine);
         const render::MeshId mesh_id = meshes.add(geometry, kSources[i]);
         if (!meshes.contains(mesh_id))
             return false;
@@ -458,13 +517,12 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             model.previous.resize(mesh->vertex_count);
             model.last.resize(mesh->vertex_count);
         }
-        const auto& ranges = meshes.get(mesh_id).submeshes;
-        if (ranges.size() != mesh->submeshes.size())
+        if (authored_ranges.size() != mesh->submeshes.size())
             return false;
         int normal_mapped = 0;
         int metal_rough_mapped = 0;
-        for (std::size_t j = 0; j < ranges.size(); ++j) {
-            const auto& range = ranges[j];
+        for (std::size_t j = 0; j < authored_ranges.size(); ++j) {
+            const auto& range = authored_ranges[j];
             const std::string source =
                 entries[i]->source_path + "#material" + std::to_string(range.material_slot);
             const auto* material_entry = manifest_->find_by_source(source);
@@ -499,7 +557,7 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
                                                 static_cast<std::uint8_t>(i),
                                                 static_cast<std::uint32_t>(j)});
             if (i < 2) {
-                const auto& mag_range = magazine.magazine.submeshes[j];
+                const auto& mag_range = magazine_ranges[j];
                 if (mag_range.index_count != 0)
                     models_[i].parts.push_back({magazine_id,
                                                 render::kInvalidMaterialId,
@@ -725,45 +783,62 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     // Slot zero is the support left hand; slot one is the firing right hand. Moving
     // wrist targets leaves the shoulder anchors fixed and uses the existing CPU IK mesh.
     // Target the measured magazine body, then translate the wrist and detached mesh together.
-    // The same reach fraction limits both: moving only the wrist would visibly detach the palm
-    // from a magazine continuing on its full path. MSR has no safe magazine split yet.
+    // Approach reach and pull reach are solved separately. Once the wrist reaches the socket,
+    // any pull limit scales BOTH wrist and mesh displacement; otherwise the magazine stays seated
+    // and magazine_contact_gap reports the missed contact. MSR has no safe magazine split yet.
     const core::Vec3 pull{0.0f, -0.11f, 0.035f};
     const core::Vec3 support_grip = core::transform_point(grips[0], {});
     const core::Vec3 approach =
         selected.magazine_triangles != 0 ? selected.magazine_contact - support_grip : core::Vec3{};
     const float pull_amount = selected.magazine_triangles != 0 ? motion_pose.magazine_pull : 0.0f;
-    const std::array<core::Vec3, 2> offsets{
-        {approach * motion_pose.left_magazine + pull * pull_amount,
-         {0.025f * motion_pose.right_bolt,
-          0.035f * motion_pose.right_bolt,
-          -0.11f * motion_pose.right_bolt + 0.095f * motion_pose.bolt_pull}}};
+    const core::Vec3 right_offset{0.025f * motion_pose.right_bolt,
+                                  0.035f * motion_pose.right_bolt,
+                                  -0.11f * motion_pose.right_bolt + 0.095f * motion_pose.bolt_pull};
     const core::Mat4 arms_from_weapon = selected.arms_from_camera * weapon_local;
     const auto shoulders = selected.arms.bind_shoulders();
-    bool limited = false;
-    float support_fraction = 1.0f;
-    for (unsigned side = 0; side < 2; ++side) {
-        const float f = reachable_fraction(arms_from_weapon,
-                                           core::transform_point(grips[side], {}),
-                                           offsets[side],
-                                           shoulders[side],
-                                           selected.reach_near[side],
-                                           selected.reach_far[side]);
-        limited = limited || f < 1.0f;
-        if (side == 0)
-            support_fraction = f;
-        reach_stats_.retained[side] = f;
-        reach_stats_.applied_offset[side] = core::length(offsets[side]) * f;
-        grips[side] = core::mat4_translation(offsets[side] * f) * grips[side];
-        wrist_world_[side] = core::transform_point(model * grips[side], {});
-    }
-    const core::Mat4 magazine_local =
-        core::mat4_translation(pull * (pull_amount * support_fraction));
+    const core::Vec3 approach_path = approach * motion_pose.left_magazine;
+    const float approach_fraction = reachable_fraction(arms_from_weapon,
+                                                       support_grip,
+                                                       approach_path,
+                                                       shoulders[0],
+                                                       selected.reach_near[0],
+                                                       selected.reach_far[0]);
+    const core::Vec3 approached = approach_path * approach_fraction;
+    const float pull_fraction = approach_fraction == 1.0f
+                                    ? reachable_fraction(arms_from_weapon,
+                                                         support_grip + approached,
+                                                         pull * pull_amount,
+                                                         shoulders[0],
+                                                         selected.reach_near[0],
+                                                         selected.reach_far[0])
+                                    : 0.0f;
+    const core::Vec3 support_offset = approached + pull * (pull_amount * pull_fraction);
+    const core::Vec3 authored_support = approach_path + pull * pull_amount;
+    reach_stats_.retained[0] =
+        core::length(authored_support) > 0.0f
+            ? std::min(1.0f, core::length(support_offset) / core::length(authored_support))
+            : 1.0f;
+    reach_stats_.applied_offset[0] = core::length(support_offset);
+    grips[0] = core::mat4_translation(support_offset) * grips[0];
+    wrist_world_[0] = core::transform_point(model * grips[0], {});
+    const float right_fraction = reachable_fraction(arms_from_weapon,
+                                                    core::transform_point(grips[1], {}),
+                                                    right_offset,
+                                                    shoulders[1],
+                                                    selected.reach_near[1],
+                                                    selected.reach_far[1]);
+    reach_stats_.retained[1] = right_fraction;
+    reach_stats_.applied_offset[1] = core::length(right_offset) * right_fraction;
+    grips[1] = core::mat4_translation(right_offset * right_fraction) * grips[1];
+    wrist_world_[1] = core::transform_point(model * grips[1], {});
+    const core::Mat4 magazine_local = core::mat4_translation(pull * (pull_amount * pull_fraction));
     magazine_world_ = model * magazine_local;
     magazine_contact_world_ = core::transform_point(magazine_world_, selected.magazine_contact);
     magazine_contact_gap_ = selected.magazine_triangles != 0
                                 ? core::length(wrist_world_[0] - magazine_contact_world_)
                                 : 0.0f;
-    reach_stats_.limited_poses += limited ? 1u : 0u;
+    reach_stats_.limited_poses +=
+        approach_fraction < 1.0f || pull_fraction < 1.0f || right_fraction < 1.0f ? 1u : 0u;
     const auto vertices = selected.arms.solve(arms_from_weapon, grips, selected.elbow_poles);
     for (std::size_t i = 0; i < vertices.size(); ++i) {
         const core::Vec3 current{vertices[i].px, vertices[i].py, vertices[i].pz};
