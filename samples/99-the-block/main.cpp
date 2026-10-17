@@ -79,11 +79,14 @@
 #include <utility>
 #include <vector>
 
+#include "play_building_support.hpp"
+#include "play_city.hpp"
 #include "play_environment.hpp"
 #include "play_input.hpp"
 #include "play_sunset.hpp"
 #include "play_viewmodel.hpp"
 #include "play_weapon_fx.hpp"
+#include "play_weapon_policy.hpp"
 #include "play_world.hpp"
 #include "rime/app/application.hpp"
 #include "rime/assets/asset_server.hpp"
@@ -405,6 +408,11 @@ struct Peer {
     std::unordered_map<std::uint64_t, destruction::PatternId> patterns;
     MeasuredScene measured;
 
+    // The play-only city (play_city.hpp): 24 more buildings and destructible lamps and barriers.
+    // Set by Demo::start BEFORE patterns are registered, and only for the generated scene -- a
+    // `--scene` run keeps exactly the level it was handed.
+    bool city = false;
+
     // HAND THE PHYSICS A JOB SYSTEM (m17.5). Without this pointer `PhysicsWorld` takes the
     // sequential island solve — same answer, one thread — and it had been taking it here since the
     // demo was written: each peer owned a job system and spent it only on
@@ -458,6 +466,12 @@ struct Peer {
                 (void)leaves->register_pattern(id, *asset, meshes);
             }
         }
+        // The city's two generated patterns ride the same seam (null leaves/meshes on a server).
+        if (city &&
+            !block_play::city::register_patterns(destruction, physics, patterns, leaves, meshes)) {
+            std::fprintf(stderr, "99-the-block: physics rejected a city pattern\n");
+            return false;
+        }
         return true;
     }
 
@@ -510,6 +524,9 @@ struct Peer {
             blockkit::BlockParams params;
             params.ground_material = ground_material;
             (void)blockkit::assemble(authoring, params);
+            if (city) {
+                (void)block_play::city::expand(authoring);
+            }
             if (!scene::load_scene_from_string(world, scene::save_scene_to_string(authoring)).ok) {
                 std::fprintf(stderr,
                              "99-the-block: the block's own scene file did not load back\n");
@@ -708,6 +725,9 @@ struct Session {
     ServerPeer server;
     ClientPeer client;
     block_play::PlayWorld* play_world = nullptr; // owned by Demo; active in --play/--world-smoke
+    // Owned by Demo; non-null ONLY in --play. The authored/headless/perf paths never set it, so
+    // they run exactly as before. Stepped on the authoritative peer just before its update.
+    block_play::PlayBuildingSupport* building_support = nullptr;
     bool world_stopped = false;
 
     std::uint64_t now_ms = 0;
@@ -1208,6 +1228,9 @@ struct Session {
                     server.destruction.apply_damage(
                         instance, shot.point, shot.damage_radius, shot.damage, shot.impulse);
                     ++damage_ops;
+                }
+                if (building_support != nullptr) {
+                    building_support->step(server.destruction);
                 }
                 server.destruction.update(server.physics);
                 last_server_ms = server_watch.elapsed_ms();
@@ -1798,8 +1821,11 @@ struct Demo {
     app::Application app;
     Session session{0x13B10Cull};
     std::unique_ptr<block_play::PlayEnvironment> environment;
+    block_play::city::Dresser city_dresser; // per-part lamp/barrier look, fed by sync() each tick
     std::unique_ptr<Visuals> visuals;
     std::unique_ptr<block_play::PlayWorld> play_world;
+    std::unique_ptr<block_play::PlayBuildingSupport> building_support;
+    bool building_support_enabled = false; // set by run_play only
     std::unique_ptr<block_play::PlayViewmodel> viewmodel;
     std::unique_ptr<block_play::PlayWeaponFx> weapon_fx;
     bool shot_presented = false;
@@ -1865,6 +1891,9 @@ struct Demo {
     explicit Demo(const app::AppConfig& cfg) : app(cfg) {}
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked, std::string_view scene_path) {
+        // The city is the PLAYABLE street: the environment layer on a generated scene. Headless,
+        // perf and the authored `--scene` path never set it, so they stay byte-identical.
+        session.server.city = session.client.city = environment_enabled && scene_path.empty();
         if (app.device() != nullptr) {
             visuals = std::make_unique<Visuals>(*app.device());
         }
@@ -1908,8 +1937,33 @@ struct Demo {
                 return false;
             }
         }
+        if (building_support_enabled) {
+            building_support = std::make_unique<block_play::PlayBuildingSupport>();
+            const bool loaded = building_support->register_cooked_dir(cooked);
+            const bool built =
+                loaded && building_support->build(session.server.world, session.server.destruction);
+            const auto& bs = building_support->stats();
+            std::fprintf(stderr,
+                         "99-the-block: building support: loaded=%d all_supported=%d buildings=%u "
+                         "quarantined=%u nodes=%u roots=%u bond_edges=%u contact_edges=%u "
+                         "unreachable=%u missing_geometry=%u\n",
+                         loaded ? 1 : 0,
+                         built ? 1 : 0,
+                         bs.buildings,
+                         bs.quarantined_buildings,
+                         bs.nodes,
+                         bs.roots,
+                         bs.bond_edges,
+                         bs.contact_edges,
+                         bs.initial_unreachable_parts,
+                         bs.missing_geometry);
+            session.building_support = building_support.get();
+        }
         if (visuals) {
             visuals->dress(session.client.world);
+            if (session.client.city) {
+                city_dresser.init(visuals->palette, visuals->materials, visuals->meshes);
+            }
             if (visuals->camera == ecs::kNullEntity) {
                 std::fprintf(stderr, "99-the-block: the block's scene carries no camera\n");
                 return false;
@@ -2077,7 +2131,9 @@ struct Demo {
             return false;
         ensure_scope_renderer();
         auto& optical = *visuals->scope_renderer;
-        optical.set_lighting(visuals->renderer.lighting());
+        auto scope_lighting = visuals->renderer.lighting();
+        scope_lighting.shadow_caster_culling = true;
+        optical.set_lighting(scope_lighting);
         optical.set_sky(visuals->renderer.sky());
         const bool taa = optical.taa_resolve_enabled();
         optical.set_taa_resolve_enabled(false);
@@ -2104,6 +2160,27 @@ struct Demo {
         return true;
     }
 
+    // The shared live-input seam is also exercised by the accepted-shot smoke proof.
+    void step_play(gameplay::CharacterInput input) {
+        if (viewmodel) {
+            // This local play session owns one authoritative weapon. Selection configures
+            // its existing trigger contract; it does not invent a replicated inventory.
+            block_play::configure_selected_weapon(
+                session.server.weapon,
+                static_cast<block_play::PlayWeaponMotion::Weapon>(viewmodel->selected()));
+            // GameplayServer reads the avatar component, not the spawn template above.
+            // Updating only that template would leave an already-spawned sniper automatic.
+            for (const auto avatar : session.server.avatars)
+                if (auto* weapon = session.server.world.get<gameplay::WeaponConfig>(avatar))
+                    block_play::configure_selected_weapon(
+                        *weapon,
+                        static_cast<block_play::PlayWeaponMotion::Weapon>(viewmodel->selected()));
+            input = block_play::filter_busy_fire(
+                input, viewmodel->busy(), session.server.weapon.fire_bit);
+        }
+        step_sim(gameplay_net::to_input_command(input));
+    }
+
     // One simulation tick, plus everything downstream of it that is not drawing.
     void step_sim(const replication::InputCommand& intent) {
         session.tick(intent);
@@ -2128,6 +2205,8 @@ struct Demo {
                                 shot.normal,
                                 shot.body,
                                 &session.server.physics);
+                if (!viewmodel || !viewmodel->scoped())
+                    weapon_fx->queue_case();
             }
         }
         if (session.world_stopped) {
@@ -2203,6 +2282,10 @@ struct Demo {
         if (visuals) {
             visuals->leaf_stats = visuals->leaves.update(
                 session.client.world, session.client.destruction, session.client.physics);
+            if (city_dresser.ready()) {
+                (void)city_dresser.sync(
+                    session.client.world, session.client.destruction, visuals->leaves);
+            }
         }
     }
 
@@ -2222,7 +2305,6 @@ struct Demo {
         ecs::World& world = session.client.world;
         if (weapon_fx) {
             weapon_fx->advance(static_cast<float>(ctx.frame_dt));
-            weapon_fx->pose(world, &session.server.physics);
         }
         if (auto* tf = world.get<ecs::WorldTransform>(visuals->camera)) {
             tf->value =
@@ -2248,6 +2330,24 @@ struct Demo {
             visuals->renderer.set_first_person_draws(viewmodel->pose(eye),
                                                      viewmodel->identity_epoch());
             visuals->renderer.set_first_person_deformations(viewmodel->deformations());
+            if (weapon_fx) {
+                // Pose the gun before its live flash. Fixed-tick shot positions lag the
+                // predicted camera during movement; only accepted world paths stay there.
+                const auto direction = core::rotate(eye.rotation, core::Vec3{0, 0, -1});
+                const auto right = core::rotate(eye.rotation, core::Vec3{1, 0, 0});
+                const auto up = core::rotate(eye.rotation, core::Vec3{0, 1, 0});
+                const auto velocity = session.client.predictor.seeded()
+                                          ? session.client.predictor.state().velocity
+                                          : core::Vec3{};
+                const auto muzzle = viewmodel->muzzle_world(eye);
+                const block_play::PlayWeaponFx::ViewPose view{eye.translation,
+                                                              direction,
+                                                              muzzle,
+                                                              muzzle - direction * .32f +
+                                                                  right * .075f - up * .025f,
+                                                              velocity};
+                weapon_fx->pose(world, &session.server.physics, &view);
+            }
             if (viewmodel->scoped()) {
                 // Each optical view owns its history. The main camera is never mutated,
                 // and both views read the same replicated world and streamed terrain.
@@ -2261,7 +2361,11 @@ struct Demo {
                 visuals->last_scope_ldr = {};
                 if (feed_visible) {
                     auto& optical = *visuals->scope_renderer;
-                    optical.set_lighting(visuals->renderer.lighting());
+                    auto scope_lighting = visuals->renderer.lighting();
+                    // Measured wins belong to the narrow optical view: the main cascades
+                    // enclose this entire city, so their per-draw tests only add CPU cost.
+                    scope_lighting.shadow_caster_culling = true;
+                    optical.set_lighting(scope_lighting);
                     optical.set_sky(visuals->renderer.sky());
                     if (play_world)
                         optical.set_terrain_draws(play_world->pass(), play_world->draws());
@@ -2303,6 +2407,8 @@ struct Demo {
                 visuals->renderer.set_first_person_scope({}, viewmodel->lens(), params);
             }
         }
+        if (weapon_fx && (!viewmodel || !viewmodel_enabled))
+            weapon_fx->pose(world, &session.server.physics);
         visuals->renderer.reset_cull_stats();
         visuals->last_ldr = visuals->renderer.render(*ctx.graph, world, ctx.extent, true).ldr;
         visuals->cull = visuals->renderer.cull_stats();
@@ -2327,9 +2433,9 @@ struct Demo {
             return; // keep every aiming sight clear of the development statistics panel
 
         if (player_help && viewmodel) {
-            constexpr std::array names{"1 SCAR-H | RMB: holographic sight | LMB: fire",
-                                       "2 M4A1 | RMB: iron sights | LMB: fire",
-                                       "3 MSR / PM II | hold RMB: 5x scope | LMB: fire"};
+            constexpr std::array names{"1 SCAR-H | RMB: sight | hold LMB: fire | R: reload",
+                                       "2 M4A1 | RMB: sight | hold LMB: fire | R: reload",
+                                       "3 MSR / PM II | RMB: scope | click LMB: fire | R: reload"};
             hud.text(st::kPadding,
                      static_cast<float>(ctx.extent.height) - 24.0f,
                      names[static_cast<unsigned>(viewmodel->selected())],
@@ -2374,14 +2480,15 @@ struct Demo {
         row("debris", buf, st::kText);
         std::snprintf(buf, sizeof(buf), "%zu", visuals->leaf_stats.leaves_live);
         row("leaves", buf, st::kText);
-        // The convergence claim, on screen: the two hashes are the peers agreeing or not.
-        // With a play_world the server instantiated block physics BEFORE terrain tiles, so the two
-        // peers' BodyIds differ though their destruction facts agree: compare content, not handles.
-        const bool agree = session.play_world
-                               ? session.client.destruction.replicated_content_hash() ==
-                                     session.server.destruction.replicated_content_hash()
-                               : session.client.destruction.state_hash() ==
-                                     session.server.destruction.state_hash();
+        // Compare by wire identity, just like the headless convergence proof. Local instance
+        // allocation order can differ as well as BodyIds: dropping handles from a local-order
+        // hash still falsely labels an undamaged city as divergent.
+        const bool agree = destruction_net::shared_state_hash(session.client.world,
+                                                              session.client.replicator->map(),
+                                                              session.client.destruction) ==
+                           destruction_net::shared_state_hash(session.server.world,
+                                                              session.server.replicator->map(),
+                                                              session.server.destruction);
         row("peers", agree ? "in sync" : "DIVERGED", agree ? st::kText : st::kWarn);
         std::snprintf(buf, sizeof(buf), "%zu", mixer.voice_count());
         row("voices", buf, st::kText);
@@ -4531,6 +4638,293 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         write_ppm((g_ppm + ".target-scoped.ppm").c_str(), scoped_target, kW, kH);
     }
     (void)demo.session.client.world.despawn(target_entity);
+    // The accepted scoped shot retains the exact optic pose through a hold longer than the
+    // entire bolt timeline. Releasing aim starts the one deferred cycle and extraction.
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Sniper);
+    demo.viewmodel->set_aiming(true);
+    demo.viewmodel->advance(1.0f, {}, false);
+    (void)demo.viewmodel->pose(eye_pose);
+    const auto held_optic = demo.viewmodel->optic_world();
+    demo.viewmodel->advance(1.0f / 60.0f, {}, true);
+    demo.viewmodel->advance(2.0f, {}, false);
+    (void)demo.viewmodel->pose(eye_pose);
+    const auto held_eye = core::transform_point(held_optic, {});
+    const auto after_hold_eye = core::transform_point(demo.viewmodel->optic_world(), {});
+    const auto held_axis = core::transform_point(held_optic, {0, 0, -1});
+    const auto after_hold_axis = core::transform_point(demo.viewmodel->optic_world(), {0, 0, -1});
+    check(demo.viewmodel->busy() && !demo.viewmodel->cycling() &&
+              demo.viewmodel->aim_fraction() > .99f &&
+              core::length(after_hold_eye - held_eye) < .0001f &&
+              core::length(after_hold_axis - held_axis) < .0001f &&
+              demo.viewmodel->scope_feed_visible(eye_pose) && !demo.viewmodel->take_case_ejection(),
+          "accepted scoped shot holds optical focus without recoil, bolt or extraction");
+    demo.viewmodel->set_aiming(false);
+    demo.viewmodel->advance(0.0f, {}, false);
+    check(demo.viewmodel->cycling() && !demo.viewmodel->take_case_ejection(),
+          "scope release starts the deferred bolt exactly once");
+    demo.viewmodel->advance(block_play::PlayWeaponMotion::kExtractionSeconds, {}, false);
+    check(demo.viewmodel->take_case_ejection() && !demo.viewmodel->take_case_ejection(),
+          "deferred scoped bolt emits exactly one case at extraction");
+    demo.viewmodel->advance(2.0f, {}, false);
+    // Sweep every frame of each action through the REAL rig before any image is read. One
+    // rendered sample can say only that a claim failed; this says which term and when. The arm
+    // solve and the weapon pose are camera-local, so pose() with an identity camera needs no GPU
+    // and measures exactly what render() hands the renderer.
+    //
+    // The deltas are against the idle pose solved immediately before the action, NOT against
+    // the bind mesh: PlayArmIk's max_vertex_displacement is measured from bind on every solve,
+    // so it is already large at idle (the rig is re-seated on the shoulder) and cannot by itself
+    // show that an action moved anything. The idle CONTROL sweep -- the same clock with no
+    // action -- must read zero, which proves the action deltas are motion and not noise.
+    using VmWeapon = block_play::PlayViewmodel::Weapon;
+    const auto weapon_name = [](VmWeapon w) {
+        return w == VmWeapon::Scar ? "SCAR" : w == VmWeapon::M4 ? "M4" : "MSR";
+    };
+
+    struct ActionSweep {
+        int frames = 0, busy = 0, invalid = 0, clamped = 0;
+        float first_clamp = -1.0f; // seconds into the action
+        float wrist_miss[2]{};     // requested-vs-reached wrist, metres; above zero only if clamped
+        float min_skin = 1e9f, arm_delta = 0.0f, muzzle_delta = 0.0f;
+        // The reach limiter's own record: frames it shortened a hand path, the smallest share of
+        // the authored path kept, and the longest hand travel actually applied (weapon metres).
+        int limited = 0;
+        float retained[2]{1.0f, 1.0f}, hand_travel[2]{};
+    };
+
+    const auto sweep = [&](float seconds, bool fire_first, float measure_from) {
+        ActionSweep r;
+        const core::Transform camera{};
+        (void)demo.viewmodel->pose(camera);
+        std::vector<render::MeshVertex> idle;
+        if (!demo.viewmodel->deformations().empty()) {
+            const auto v = demo.viewmodel->deformations().front().current;
+            idle.assign(v.begin(), v.end());
+        }
+        const auto idle_muzzle = demo.viewmodel->muzzle_world(camera);
+        constexpr float dt = 1.0f / 60.0f;
+        for (; static_cast<float>(r.frames) * dt < seconds; ++r.frames) {
+            demo.viewmodel->advance(dt, {}, fire_first && r.frames == 0);
+            const float t = static_cast<float>(r.frames + 1) * dt; // action time after advance
+            r.busy += demo.viewmodel->busy() ? 1 : 0;
+            (void)demo.viewmodel->pose(camera);
+            const auto& st = demo.viewmodel->arm_stats();
+            r.invalid += st.valid_input ? 0 : 1;
+            if (st.clamped_targets != 0) {
+                ++r.clamped;
+                if (r.first_clamp < 0.0f)
+                    r.first_clamp = t;
+            }
+            for (unsigned side = 0; side < 2; ++side)
+                r.wrist_miss[side] = std::max(r.wrist_miss[side], st.wrist_position_error[side]);
+            r.min_skin = std::min(r.min_skin, st.max_vertex_displacement);
+            const auto& reach = demo.viewmodel->reach_stats();
+            r.limited += reach.retained[0] < 1.0f || reach.retained[1] < 1.0f ? 1 : 0;
+            for (unsigned side = 0; side < 2; ++side) {
+                r.retained[side] = std::min(r.retained[side], reach.retained[side]);
+                r.hand_travel[side] = std::max(r.hand_travel[side], reach.applied_offset[side]);
+            }
+            if (t < measure_from || demo.viewmodel->deformations().empty())
+                continue;
+            const auto v = demo.viewmodel->deformations().front().current;
+            for (std::size_t i = 0; i < std::min(v.size(), idle.size()); ++i)
+                r.arm_delta = std::max(r.arm_delta,
+                                       core::length(core::Vec3{v[i].px - idle[i].px,
+                                                               v[i].py - idle[i].py,
+                                                               v[i].pz - idle[i].pz}));
+            r.muzzle_delta = std::max(
+                r.muzzle_delta, core::length(demo.viewmodel->muzzle_world(camera) - idle_muzzle));
+        }
+        return r;
+    };
+    const auto report_sweep = [&](const char* what, VmWeapon w, const ActionSweep& r) {
+        std::printf("viewmodel-smoke: %s %s sweep %d frames, busy %d, invalid %d, clamped %d "
+                    "(first %.3f s), wrist miss L %.2f R %.2f mm, min bind skin %.4f m, arm "
+                    "delta %.4f m, muzzle delta %.4f m; reach-limited %d frames, path kept L %.3f "
+                    "R %.3f, hand travel L %.4f R %.4f m\n",
+                    weapon_name(w),
+                    what,
+                    r.frames,
+                    r.busy,
+                    r.invalid,
+                    r.clamped,
+                    r.first_clamp,
+                    r.wrist_miss[0] * 1000.0f,
+                    r.wrist_miss[1] * 1000.0f,
+                    r.min_skin,
+                    r.arm_delta,
+                    r.muzzle_delta,
+                    r.limited,
+                    r.retained[0],
+                    r.retained[1],
+                    r.hand_travel[0],
+                    r.hand_travel[1]);
+    };
+    for (const auto weapon : {VmWeapon::Scar, VmWeapon::M4, VmWeapon::Sniper}) {
+        demo.viewmodel->select(weapon == VmWeapon::M4 ? VmWeapon::Scar : VmWeapon::M4);
+        demo.viewmodel->select(weapon);
+        demo.viewmodel->set_aiming(false);
+        demo.viewmodel->advance(1.0f, {}, false);
+        const auto limits = demo.viewmodel->reach_limits();
+        std::printf("viewmodel-smoke: %s measured reach L %.4f..%.4f R %.4f..%.4f m\n",
+                    weapon_name(weapon),
+                    limits[0][0],
+                    limits[0][1],
+                    limits[1][0],
+                    limits[1][1]);
+        const auto control = sweep(.5f, false, 0.0f);
+        report_sweep("idle-control", weapon, control);
+        check(control.busy == 0 && control.invalid == 0 && control.clamped == 0 &&
+                  control.arm_delta < 1e-6f && control.muzzle_delta < 1e-6f &&
+                  control.limited == 0 && control.hand_travel[0] == 0.0f &&
+                  control.hand_travel[1] == 0.0f,
+              "idle control sweep reads no action motion");
+        check(demo.viewmodel->begin_reload(), "idle weapon accepts a swept reload");
+        const float reload_seconds = weapon == VmWeapon::Sniper
+                                         ? block_play::PlayWeaponMotion::kSniperReloadSeconds
+                                         : block_play::PlayWeaponMotion::kRifleReloadSeconds;
+        const auto reload = sweep(reload_seconds + .2f, false, 0.0f);
+        report_sweep("reload", weapon, reload);
+        check(reload.invalid == 0 && reload.clamped == 0,
+              "every reload frame keeps both hands on reachable, valid targets");
+        check(reload.busy >= static_cast<int>(reload_seconds * 60.0f) - 1 &&
+                  !demo.viewmodel->busy() && reload.arm_delta > .03f && reload.muzzle_delta > .05f,
+              "the swept reload moves both the weapon and the skinned arms, then ends");
+        // Non-vacuity of the reach limiter: a path shortened to nothing would satisfy the reach
+        // claim above by never moving the hand. The support hand must still travel 3 cm or more
+        // along its authored path toward the magazine, ON TOP of following the lowered gun.
+        check(reload.hand_travel[0] >= .03f,
+              "the support hand still visibly reaches toward the magazine within arm reach");
+    }
+    // The bolt is measured only after the shot's recoil has decayed (exp(-14 t) is under 0.4%
+    // by 0.4 s), so what remains is the right hand's reach to the bolt and its pull. Sniper is
+    // still selected and idle after the loop above.
+    {
+        const auto bolt = sweep(block_play::PlayWeaponMotion::kBoltSeconds + .1f, true, .4f);
+        report_sweep("bolt", VmWeapon::Sniper, bolt);
+        check(bolt.invalid == 0 && bolt.clamped == 0,
+              "every bolt frame keeps both hands on reachable, valid targets");
+        check(bolt.busy >=
+                      static_cast<int>(block_play::PlayWeaponMotion::kBoltSeconds * 60.0f) - 1 &&
+                  !demo.viewmodel->busy() && bolt.arm_delta > .03f && bolt.hand_travel[1] >= .03f &&
+                  demo.viewmodel->take_case_ejection() && !demo.viewmodel->take_case_ejection(),
+              "the swept bolt moves the skinned right arm, ends, and ejects exactly one case");
+    }
+    // Exercise actions through the real rig and uploaded deformation stream. The pure timeline
+    // tests cannot detect a reload that advances correctly but never reaches rendered vertices.
+    for (const auto weapon :
+         {block_play::PlayViewmodel::Weapon::Scar, block_play::PlayViewmodel::Weapon::Sniper}) {
+        demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+        demo.viewmodel->select(weapon);
+        demo.viewmodel->set_aiming(false);
+        demo.viewmodel->advance(1.0f, {}, false);
+        demo.app.run_frames(48);
+        const auto idle_action = capture();
+        check(demo.viewmodel->begin_reload(), "idle weapon accepts a reload action");
+        demo.viewmodel->advance(.8f, {}, false);
+        const auto reload_action = capture();
+        const auto& arms = demo.viewmodel->arm_stats();
+        // Project the real action wrist and weapon with the viewport camera used by the
+        // rendered frame. Image differences alone also pass when the action leaves the screen.
+        const auto projected_action = [&]() {
+            const auto& vp = demo.visuals->renderer.view_proj_unjittered();
+            const auto in_lower_view = [&](core::Vec3 world, float max_x) {
+                const auto clip = vp * core::Vec4{world.x, world.y, world.z, 1.0f};
+                if (!(clip.w > 0.0f))
+                    return false;
+                const float x = clip.x / clip.w;
+                const float y = clip.y / clip.w;
+                std::printf("viewmodel-smoke: %s reload projected x %.3f y %.3f depth %.3f m\n",
+                            weapon_name(weapon), x, y, clip.w);
+                // Vulkan's projection flips Y: positive NDC Y is below the screen centre.
+                return std::isfinite(x) && std::isfinite(y) && std::abs(x) < max_x && y > -.45f &&
+                       y < .92f;
+            };
+            return in_lower_view(demo.viewmodel->muzzle_world(eye_pose), .95f) &&
+                   in_lower_view(demo.viewmodel->wrist_world()[0], .9f);
+        };
+        bool framed_action = projected_action();
+        for (const float step : {.45f, .45f}) {
+            demo.viewmodel->advance(step, {}, false);
+            (void)capture();
+            framed_action = framed_action && projected_action();
+        }
+        // Every term of the claim below, so a failure names itself instead of needing a rerun.
+        std::printf("viewmodel-smoke: %s rendered reload: reloading %d, valid %d, clamped %u, "
+                    "bind skin %.4f m, wrist miss L %.2f R %.2f mm, changed %zu px\n",
+                    weapon_name(weapon),
+                    demo.viewmodel->reloading() ? 1 : 0,
+                    arms.valid_input ? 1 : 0,
+                    static_cast<unsigned>(arms.clamped_targets),
+                    arms.max_vertex_displacement,
+                    arms.wrist_position_error[0] * 1000.0f,
+                    arms.wrist_position_error[1] * 1000.0f,
+                    static_cast<std::size_t>(changed(idle_action, reload_action)));
+        check(demo.viewmodel->reloading() && arms.valid_input && arms.clamped_targets == 0 &&
+                  arms.max_vertex_displacement > .001f && changed(idle_action, reload_action) > 100,
+              "reload visibly moves the actual weapon and reachable skinned arms");
+        check(framed_action,
+              "reload weapon and support wrist stay in the lower viewport across the action");
+        if (!g_ppm.empty())
+            write_ppm(
+                (g_ppm + (demo.viewmodel->scoped() ? ".sniper-reload.ppm" : ".scar-reload.ppm"))
+                    .c_str(),
+                reload_action,
+                kW,
+                kH);
+        demo.viewmodel->advance(3.0f, {}, false);
+        check(!demo.viewmodel->busy(), "reload finishes in elapsed time");
+    }
+    demo.viewmodel->advance(.35f, {}, true);
+    const auto bolt_action = capture();
+    check(demo.viewmodel->cycling() && demo.viewmodel->arm_stats().valid_input &&
+              demo.viewmodel->arm_stats().clamped_targets == 0 &&
+              demo.viewmodel->take_case_ejection() && !demo.viewmodel->take_case_ejection(),
+          "accepted sniper shot reaches bolt extraction with exactly one case");
+    if (!g_ppm.empty())
+        write_ppm((g_ppm + ".sniper-bolt.ppm").c_str(), bolt_action, kW, kH);
+    check(demo.visuals->renderer.rejected_first_person_deformations() == 0 &&
+              demo.viewmodel->resident_meshes() == meshes &&
+              demo.viewmodel->resident_materials() == materials &&
+              demo.viewmodel->resident_textures() == textures,
+          "actions reuse resident resources and valid deformation uploads");
+    // Use the SAME live tick seam as --play, through its real transport and GameplayServer.
+    // A pure WeaponConfig test cannot catch configuring the spawn template while the live
+    // avatar keeps its old automatic component. Disable damage only after the visual proofs.
+    for (const auto avatar : demo.session.server.avatars)
+        if (auto* weapon = demo.session.server.world.get<gameplay::WeaponConfig>(avatar)) {
+            weapon->damage = 0;
+            weapon->impulse = 0;
+        }
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Sniper);
+    const auto live_tick = [&](bool held, bool pressed) {
+        gameplay::CharacterInput input{};
+        input.pitch = 1.3f; // skyward; this witness must not collapse the already-verified scene
+        input.held = held ? gameplay::kActionFire : 0;
+        input.pressed = pressed ? gameplay::kActionFire : 0;
+        demo.step_play(input);
+        demo.viewmodel->advance(1.0f / 60.0f, {}, demo.shot_presented);
+        demo.shot_presented = false;
+    };
+    const auto accepted_before = demo.session.shots_fired;
+    for (int i = 0; i < 120; ++i)
+        live_tick(true, i == 0);
+    check(demo.session.shots_fired == accepted_before + 1,
+          "live sniper accepts only one shot while the trigger stays held for two seconds");
+    for (unsigned i = 0; i < Demo::kSettleRounds; ++i)
+        live_tick(false, false);
+    for (unsigned i = 0; i < Demo::kSettleRounds; ++i)
+        live_tick(true, i == 0);
+    check(demo.session.shots_fired == accepted_before + 2,
+          "a fresh sniper press after cooldown accepts the next shot");
+    demo.viewmodel->advance(2.0f, {}, false);
+    check(demo.viewmodel->begin_reload(), "live sniper starts a reload after bolt completion");
+    for (int i = 0; i < 60; ++i)
+        live_tick(true, i == 0);
+    check(demo.viewmodel->reloading() && demo.session.shots_fired == accepted_before + 2,
+          "live reload blocks held and pressed fire through the server transport");
     demo.app.finish_gpu();
     return okay ? 0 : 1;
 }
@@ -4760,6 +5154,243 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         demo.step_sim(gameplay_net::to_input_command(trigger));
     check(demo.session.shots_fired == automatic_before + 3,
           "held trigger fires three accepted rounds in 18 ticks, then release stops fire");
+
+    // ── PlayWeaponFx invariants, on a throwaway ECS world + physics world ──────────────────────
+    // The pixel checks above prove something drew; they cannot tell a camera-following flash from
+    // an orphaned one, or prove a case actually falls. This block drives a second, isolated
+    // PlayWeaponFx instance (so it cannot perturb the live demo world/entity-pool checks already
+    // run above) against real WorldTransform/MeshRef/PointLight state and a real raycast, reusing
+    // the live app's device and the demo's visuals registries as the spec asks rather than opening
+    // a second GPU mesh registry for two low-poly shapes nobody else needs.
+    {
+        ecs::World fx_world;
+        ecs::register_transform_components(fx_world);
+        render::register_render_components(fx_world);
+
+        // A minimal physics world: one static floor for the casing raycast and one static target
+        // for the impact decal's body-relative anchor. No network, no bodies the real scene owns.
+        physics::PhysicsWorld fx_physics;
+        physics::BodyDesc floor_desc{};
+        floor_desc.motion = physics::MotionType::Static;
+        floor_desc.shape.type = physics::ShapeType::Box;
+        floor_desc.shape.half_extents = {50.0f, 0.5f, 50.0f};
+        floor_desc.position = {0.0f, -0.5f, 0.0f};
+        const auto floor_body = fx_physics.create_body(floor_desc);
+        physics::BodyDesc target_desc{};
+        target_desc.motion = physics::MotionType::Static;
+        target_desc.shape.type = physics::ShapeType::Box;
+        target_desc.shape.half_extents = {1.0f, 1.0f, 1.0f};
+        target_desc.position = {4.0f, 1.0f, 0.0f};
+        const auto target_body = fx_physics.create_body(target_desc);
+        check(floor_body.is_valid() && target_body.is_valid(),
+              "weapon fx probe: isolated bodies created");
+
+        // Materials are the stable key into a known entity's role: fire()/pose() assign
+        // material_ids_[0..4] to flash/tracer/spark/impact/case respectively (play_weapon_fx.cpp),
+        // and MaterialRegistry::add is a plain push_back, so the five ids this fresh instance mints
+        // are exactly the next five indices after whatever the live demo already registered. That
+        // is read off material.hpp's `add`, not guessed, and it is the "helper via ECS snapshot"
+        // the spec allows in place of exposing new API purely for this test.
+        const auto first_fx_material =
+            static_cast<render::MaterialId>(demo.visuals->materials.size());
+        block_play::PlayWeaponFx fx(
+            *demo.app.device(), demo.visuals->meshes, demo.visuals->materials);
+        check(fx.initialize(), "weapon fx probe: isolated instance initializes");
+        const render::MaterialId flash_mat = first_fx_material + 0;
+        const render::MaterialId tracer_mat = first_fx_material + 1;
+        const render::MaterialId spark_mat = first_fx_material + 2;
+        const render::MaterialId impact_mat = first_fx_material + 3;
+        const render::MaterialId case_mat = first_fx_material + 4;
+
+        // Find the one active entity wearing a given material, if any -- a query over the fixed
+        // pool rather than reaching into PlayWeaponFx's private Shot/Impact/Case arrays, which the
+        // spec asks to avoid touching.
+        auto find_by_material = [&](render::MaterialId wanted) {
+            ecs::Entity found{};
+            fx_world.query<ecs::WorldTransform, render::MeshRef, render::MaterialRef>().for_each(
+                [&](ecs::Entity e,
+                    ecs::WorldTransform&,
+                    render::MeshRef& mesh,
+                    render::MaterialRef& mat) {
+                    if (mat.material == wanted && mesh.mesh != render::kInvalidMeshId)
+                        found = e;
+                });
+            return found;
+        };
+        auto transform_of = [&](ecs::Entity e) {
+            auto* t = fx_world.get<ecs::WorldTransform>(e);
+            return t ? t->value.translation : core::Vec3{std::nanf(""), 0, 0};
+        };
+        auto finite3 = [](core::Vec3 v) {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+        };
+        const auto inverse_safe_effects = [&]() {
+            bool safe = true;
+            fx_world.query<ecs::WorldTransform, render::MeshRef>().for_each(
+                [&](ecs::Entity, ecs::WorldTransform& transform, render::MeshRef& mesh) {
+                    if (mesh.mesh == render::kInvalidMeshId)
+                        return;
+                    // The renderer computes inverse-transpose normal matrices. Keep this
+                    // checked-build contract visible in Release too: millimetre geometry is
+                    // valid, but a tiny instance determinant trips the inverse's guard.
+                    const float det = core::determinant(core::to_matrix(transform.value));
+                    safe &= std::isfinite(det) && std::abs(det) > core::kEpsilon;
+                });
+            return safe;
+        };
+
+        block_play::PlayWeaponFx::ViewPose view_a{};
+        view_a.eye = {0, 1.2f, -4};
+        view_a.direction = {1, 0, 0.1f};
+        view_a.muzzle = {0.2f, 1.1f, -3.9f};
+        view_a.ejection_point = {-0.05f, 1.05f, -3.95f};
+        view_a.velocity = {2, 0, 0}; // the player's own motion, carried into the case's launch
+
+        // One accepted shot that both hits a surface (spark + impact) and names the target body,
+        // posed once under view_a.
+        fx.fire(view_a.eye,
+                view_a.direction,
+                view_a.muzzle,
+                {4, 1.0f, 0},
+                true,
+                {-1, 0, 0},
+                target_body,
+                &fx_physics);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        check(inverse_safe_effects(), "weapon fx probe: shot transforms satisfy checked inverse");
+        const auto flash_a = find_by_material(flash_mat);
+        const auto flash_pos_a = transform_of(flash_a);
+        const auto tracer_pos_a = transform_of(find_by_material(tracer_mat));
+        const auto impact_pos_a = transform_of(find_by_material(impact_mat));
+        check(flash_a != ecs::Entity{} && finite3(transform_of(flash_a)),
+              "weapon fx probe: flash entity is live under the first view pose");
+        check(fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount,
+              "weapon fx probe: the first pose binds exactly the fixed resident pool");
+
+        ecs::Entity muzzle_light{};
+        fx_world.query<ecs::WorldTransform, render::PointLight>().for_each(
+            [&](ecs::Entity e, ecs::WorldTransform& at, render::PointLight& light) {
+                if (light.intensity > 0 && core::length(at.value.translation - flash_pos_a) < 1e-4f)
+                    muzzle_light = e;
+            });
+        check(muzzle_light.is_valid(), "weapon fx probe: a live light accompanies the flash");
+        // Change only the view at a fixed shot age. Advancing time here would also move the
+        // tracer along its world path, confounding camera motion with projectile presentation.
+        block_play::PlayWeaponFx::ViewPose view_b = view_a;
+        view_b.eye.x += 0.3f;
+        view_b.muzzle = {0.5f, 1.15f, -3.85f};
+        view_b.direction = {1, 0, 0.2f};
+        fx.pose(fx_world, &fx_physics, &view_b);
+        const auto flash_pos_b = transform_of(find_by_material(flash_mat));
+        const auto tracer_pos_b = transform_of(find_by_material(tracer_mat));
+        const auto impact_pos_b = transform_of(find_by_material(impact_mat));
+        const float flash_moved = core::length(flash_pos_b - flash_pos_a);
+        check(flash_moved > 0.1f,
+              "weapon fx probe: flash follows the moved view pose within one 16 ms frame");
+        check(core::length(tracer_pos_b - tracer_pos_a) < 1e-4f,
+              "weapon fx probe: accepted tracer world path is unaffected by the view move");
+        check(core::length(impact_pos_b - impact_pos_a) < 1e-4f,
+              "weapon fx probe: accepted impact world position is unaffected by the view move");
+        check(core::length(transform_of(muzzle_light) - flash_pos_b) < 1e-4f,
+              "weapon fx probe: the live light follows the current flash pose");
+        fx.advance(.005f);
+        fx.pose(fx_world, &fx_physics, &view_b);
+        const auto travelled = transform_of(find_by_material(tracer_mat)) - tracer_pos_b;
+        const auto accepted_path = core::normalize(core::Vec3{4, 1, 0} - view_a.muzzle);
+        check(core::dot(travelled, accepted_path) > 1.0f &&
+                  core::length(core::cross(travelled, accepted_path)) < 1e-4f,
+              "weapon fx probe: elapsed time advances the tracer along its accepted world path");
+
+        // Case ejection: one queued case, posed under a view with real velocity/ejection data. Its
+        // first pose must land exactly at the ejection point with a velocity that carries the
+        // player's own motion (view->velocity), not just the weapon's local kick. Deliberately the
+        // FIRST case this isolated instance ever ejects: every case entity shares `case_mat` (all
+        // 32 ring slots do), so `find_by_material` can only name ONE of them unambiguously while
+        // exactly one is active -- this must run before the overflow stress below puts several
+        // more into flight.
+        fx.queue_case();
+        fx.pose(fx_world, &fx_physics, &view_a);
+        check(inverse_safe_effects(), "weapon fx probe: case transforms satisfy checked inverse");
+        const auto case_entity = find_by_material(case_mat);
+        check(case_entity != ecs::Entity{} &&
+                  core::length(transform_of(case_entity) - view_a.ejection_point) < 1e-4f,
+              "weapon fx probe: a queued case is ejected at the view's ejection point");
+        const float start_height = transform_of(case_entity).y;
+        const float floor_top = floor_desc.position.y + floor_desc.shape.half_extents.y;
+        float min_height = start_height;
+        // Fall under gravity, bounce once off the floor, then settle -- never sink through it. The
+        // view's +2.2 m/s vertical kick (play_weapon_fx.cpp's `pose`) makes it rise ~0.25 m before
+        // falling, so a worked trajectory (v0=2.2, g=9.81, drop to y=0 from y=1.05) puts first
+        // contact at ~0.74 s and the settle a few tenths later; 100 ticks at 16 ms (1.6 s) covers
+        // both bounces with margin and stays well under kCaseLifetime's 3 s, so age never expires
+        // the mesh before it settles.
+        bool saw_descent = false, saw_rise_after_floor = false;
+        for (int tick = 0; tick < 100; ++tick) {
+            fx.advance(0.016f);
+            fx.pose(fx_world, &fx_physics, &view_a);
+            const float y = transform_of(case_entity).y;
+            saw_descent |= y < start_height - 0.02f;
+            min_height = std::min(min_height, y);
+            if (y > min_height + 0.002f && min_height < start_height - 0.02f)
+                saw_rise_after_floor = true; // the one visible bounce
+        }
+        check(saw_descent, "weapon fx probe: the ejected case falls under gravity");
+        check(min_height > floor_top - 0.01f,
+              "weapon fx probe: the case never sinks through the floor");
+        check(saw_rise_after_floor,
+              "weapon fx probe: the case bounces once off the floor before settling");
+        const auto settled_height = transform_of(case_entity).y;
+        fx.advance(0.1f);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        check(
+            std::fabs(transform_of(case_entity).y - settled_height) < 1e-4f,
+            "weapon fx probe: a settled case stays at rest rather than sinking through the floor");
+
+        // Pool growth: fire far past the ring size, and queue far past the case ring size WITHOUT a
+        // valid-view pose to drain it (the 2-arg `pose()` overload -- no view at all, the
+        // documented fallback for "old callers"). `queue_case()` clamps at kCaseSlots rather than
+        // growing, and neither overflow may add a single entity/mesh/material to the fixed pool.
+        for (std::size_t i = 0; i < block_play::PlayWeaponFx::kSlots * 3; ++i)
+            fx.fire(view_a.eye, view_a.direction, view_a.muzzle, {4, 1, 0}, false);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        for (std::size_t i = 0; i < block_play::PlayWeaponFx::kCaseSlots * 2; ++i)
+            fx.queue_case();
+        fx.pose(fx_world, &fx_physics); // no view: queued cases stay queued, not ejected
+        check(fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount,
+              "weapon fx probe: burst overflow and a flooded, undrained case queue grow no pool");
+
+        // Expiry: run the clock past every shot lifetime and re-pose; the flash/tracer/spark
+        // entities must drop back to kInvalidMeshId rather than keep showing a stale pose. (This
+        // valid-view pose also drains the queue above -- harmless, nothing after this reads a case
+        // by material again.)
+        fx.advance(block_play::PlayWeaponFx::kSparkLifetime + 0.01f);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        check(find_by_material(flash_mat) == ecs::Entity{} &&
+                  find_by_material(tracer_mat) == ecs::Entity{} &&
+                  find_by_material(spark_mat) == ecs::Entity{},
+              "weapon fx probe: expired shot parts hide their mesh");
+
+        // Invalid dt/view handling: neither may propagate a NaN into any posed transform. advance()
+        // guards dt with isfinite()+>0 (negative/zero/NaN are all no-ops); a NaN view fails
+        // pose()'s own `valid_view` check and falls back to each shot's recorded muzzle/direction
+        // instead.
+        fx.advance(std::nanf(""));
+        fx.advance(-1.0f);
+        fx.advance(0.0f);
+        block_play::PlayWeaponFx::ViewPose bad_view = view_a;
+        bad_view.eye.x = std::nanf("");
+        fx.pose(fx_world, &fx_physics, &bad_view);
+        bool any_nan = false;
+        fx_world.query<ecs::WorldTransform>().for_each(
+            [&](ecs::WorldTransform& t) { any_nan |= !finite3(t.value.translation); });
+        check(!any_nan, "weapon fx probe: a NaN view/dt never reaches a posed WorldTransform");
+
+        std::printf("environment-smoke: weapon fx probe flash-move %.3f m / case fall %.3f m, "
+                    "min height %.3f\n",
+                    static_cast<double>(flash_moved),
+                    static_cast<double>(start_height - min_height),
+                    static_cast<double>(min_height));
+    }
     return okay ? 0 : 1;
 }
 
@@ -4781,6 +5412,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     demo.scripted_charge = false; // interactive: wait for F, not the tape
     demo.session.server.weapon.automatic = true;
     demo.streamed_world = true;
+    demo.building_support_enabled = true;
     demo.environment_enabled = true;
     demo.viewmodel_enabled = true;
     demo.player_help = true;
@@ -4840,19 +5472,18 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         const platform::CursorMode cursor =
             demo.app.window()->set_cursor_mode(platform::CursorMode::Locked);
         bindings.look_requires_drag = gameplay::look_requires_drag_for(cursor);
-        std::printf(
-            "99-the-block: presenting in a window.\n"
-            "  WASD move · %s to look · HOLD LEFT MOUSE for automatic fire\n"
-            "  1 SCAR-H · 2 M4A1 · 3 MSR / Schmidt & Bender PM II\n"
-            "  Hold Q or RIGHT MOUSE to aim (also while dragging) · F detonates · ESC exits\n",
-            bindings.look_requires_drag
-                // Not "this display cannot lock": at startup the pointer is usually not
-                // over the window yet, and on Wayland that alone is enough to refuse. The
-                // scheme switches by itself the moment the lock is granted, so the text
-                // says what is true now and what will change rather than diagnosing the
-                // platform from one early answer.
-                ? "hold RIGHT-DRAG (free look engages if the cursor locks)"
-                : "MOVE THE MOUSE");
+        std::printf("99-the-block: presenting in a window.\n"
+                    "  WASD move · %s to look · LEFT MOUSE fires (rifles hold, sniper click)\n"
+                    "  1 SCAR-H · 2 M4A1 · 3 MSR / Schmidt & Bender PM II\n"
+                    "  Q / RIGHT MOUSE aims · R reload animation · F detonates · ESC exits\n",
+                    bindings.look_requires_drag
+                        // Not "this display cannot lock": at startup the pointer is usually not
+                        // over the window yet, and on Wayland that alone is enough to refuse. The
+                        // scheme switches by itself the moment the lock is granted, so the text
+                        // says what is true now and what will change rather than diagnosing the
+                        // platform from one early answer.
+                        ? "hold RIGHT-DRAG (free look engages if the cursor locks)"
+                        : "MOVE THE MOUSE");
     } else {
         std::printf("99-the-block: no display available; running the script headless instead.\n");
     }
@@ -4866,7 +5497,8 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     const float look_sensitivity = demo.session.client.view.sensitivity;
 
     demo.app.add_sim_stage(app::Application::SimStage::PreSim, [&](ecs::World&, double) {
-        demo.step_sim(gameplay_net::to_input_command(live.tick()));
+        auto input = live.tick();
+        demo.step_play(input);
     });
     demo.app.on_render([&](app::FrameContext& ctx) {
         // The look scheme follows the cursor mode the window ACTUALLY holds, every frame. It is
@@ -4902,6 +5534,8 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
                                       : core::Vec3{};
             demo.viewmodel->advance(
                 static_cast<float>(ctx.frame_dt), velocity, demo.shot_presented);
+            if (demo.weapon_fx && demo.viewmodel->take_case_ejection())
+                demo.weapon_fx->queue_case();
             demo.shot_presented = false;
         }
         demo.render(ctx);

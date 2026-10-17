@@ -1,0 +1,11 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:356)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:126)
+[INFO] rhi: swapchain ready — 1280x720, 3 images, mailbox (/home/next/projects/rime/engine/rhi/src/vulkan/swapchain_vulkan.cpp:84)
+[INFO] app: presenting in a 1280x720 window (/home/next/projects/rime/engine/app/src/application.cpp:103)
+99-the-block: building support: loaded=1 all_supported=1 buildings=8 quarantined=0 nodes=1920 roots=200 bond_edges=4058 contact_edges=3660 unreachable=0 missing_geometry=0
+[INFO] wayland: pointer lock is pending — a surface can only lock a pointer that is over it, so move the mouse into the window (/home/next/projects/rime/engine/platform/src/linux/window_wayland.cpp:269)
+99-the-block: presenting in a window.
+  WASD move · hold RIGHT-DRAG (free look engages if the cursor locks) to look · HOLD LEFT MOUSE for automatic fire
+  1 SCAR-H · 2 M4A1 · 3 MSR / Schmidt & Bender PM II
+  Hold Q or RIGHT MOUSE to aim (also while dragging) · F detonates · ESC exits
+99-the-block: 1981 frames, 542 ticks

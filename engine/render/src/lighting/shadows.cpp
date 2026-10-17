@@ -14,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <string_view>
+#include <utility>
 
 namespace rime::render {
 
@@ -130,6 +131,7 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
                                      const SceneDrawData& scene_data,
                                      const CascadeInputs& inputs,
                                      const LightingSettings& settings) {
+    caster_stats_ = std::make_shared<std::array<CullStats, kMaxCascades>>();
     resolution_ = settings.shadow_map_resolution;
     const CascadeFit fit = compute_cascades(inputs, settings);
 
@@ -185,7 +187,19 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
         // This cascade's slice, not the whole block.
         cascade_data.bind_frame_ubo(
             vp_slice.buffer, vp_slice.offset + c * kCascadeStride, kCascadeStride);
-        prepass.add(graph, cascades, cascade_data, c, kCascadeLabels[c]);
+        const std::optional<Frustum> caster_frustum =
+            settings.shadow_caster_culling
+                ? std::optional<Frustum>{frustum_from_view_proj(fit.view_proj[c])}
+                : std::nullopt;
+        // Aliasing ownership pins this frame's array through deferred graph execution.
+        std::shared_ptr<CullStats> counter(caster_stats_, &(*caster_stats_)[c]);
+        prepass.add(graph,
+                    cascades,
+                    cascade_data,
+                    c,
+                    kCascadeLabels[c],
+                    caster_frustum,
+                    std::move(counter));
     }
 
     return ShadowBinding{cascades, su_slice, compare_sampler_};

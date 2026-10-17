@@ -68,32 +68,38 @@ Texel surface(Surface kind, float u, float v) {
     Texel t;
     switch (kind) {
         case Surface::Brick: {
-            // Four stretchers by twelve courses per metre, alternating half-brick bond.
-            const int row = static_cast<int>(v * 12);
-            const float x = u * 4 + (row % 2) * .5f;
+            // Part-leaf UVs are projected in metres; one tile is one metre. Four stretchers and
+            // twelve courses give legible mortar without changing the cooked slab geometry.
+            const int row = static_cast<int>(std::floor(v * 12));
+            const float x = u * 4 + (row & 1) * .5f;
             const float bx = x - std::floor(x), by = v * 12 - std::floor(v * 12);
-            const float edge = std::min(std::min(bx, 1 - bx) * .25f, std::min(by, 1 - by) / 12.0f);
-            const float brick = std::clamp((edge - .002f) / .004f, 0.0f, 1.0f);
-            const float tone = .76f + .28f * noise(std::floor(x), static_cast<float>(row), 12);
-            t.color = core::Vec3{.72f, .64f, .51f} * (1 - brick) +
-                      core::Vec3{tone, tone * .94f, tone * .87f} * brick;
-            t.color = t.color * (.88f + fine * .12f + medium * .08f);
-            t.height = .18f + brick * (.40f + fine * .09f);
-            t.roughness = .78f + .20f * fine;
+            const float joint = std::min(std::min(bx, 1 - bx) * .25f, std::min(by, 1 - by) / 12.0f);
+            const float brick = std::clamp((joint - .004f) / .007f, 0.0f, 1.0f);
+            const float course = noise(std::floor(x), static_cast<float>(row), 16);
+            const float soot =
+                std::clamp((.52f - broad) * .42f + (.5f - medium) * .12f, -.12f, .18f);
+            const core::Vec3 clay{.68f, .39f, .30f};
+            const core::Vec3 mortar{.52f, .49f, .43f};
+            t.color = (mortar * (1 - brick) + clay * brick * (.82f + course * .3f)) *
+                      (1 - soot + (fine - .5f) * .10f);
+            t.height = .22f + brick * (.30f + fine * .085f) + medium * .035f;
+            t.roughness = std::clamp(.79f + (1 - brick) * .13f + fine * .07f, 0.0f, 1.0f);
             break;
         }
         case Surface::Plaster: {
-            const float staining = .72f + broad * .20f + medium * .08f;
-            const float chips = std::clamp((medium - .70f) * 5, 0.0f, 1.0f);
-            t.color = core::Vec3{1.0f, .98f, .92f} * staining * (1 - chips * .23f);
-            t.height = .44f + fine * .1f - chips * .14f;
-            t.roughness = .77f + fine * .2f;
+            const float weather = .76f + broad * .18f + medium * .08f;
+            const float chips = std::clamp((fine - .76f) * 5.0f, 0.0f, 1.0f);
+            const float mineral = std::clamp((.36f - medium) * 1.4f, 0.0f, .22f);
+            t.color = core::Vec3{.88f, .90f, .86f} * weather * (1 - chips * .15f - mineral);
+            t.height = .42f + fine * .10f + medium * .045f - chips * .10f;
+            t.roughness = std::clamp(.78f + fine * .15f + chips * .04f, 0.0f, 1.0f);
             break;
         }
         case Surface::Concrete:
-            t.color = core::Vec3{.83f, .84f, .81f} * (.76f + medium * .17f + fine * .12f);
-            t.height = .38f + fine * .15f + medium * .04f;
-            t.roughness = .8f + fine * .18f;
+            t.color =
+                core::Vec3{.78f, .79f, .76f} * (.72f + broad * .12f + medium * .14f + fine * .10f);
+            t.height = .39f + fine * .11f + medium * .05f;
+            t.roughness = std::clamp(.82f + fine * .14f, 0.0f, 1.0f);
             break;
         case Surface::Bark: {
             const float groove =

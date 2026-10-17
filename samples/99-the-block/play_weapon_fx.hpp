@@ -36,14 +36,24 @@ public:
     // scars you are looking at are always the most recent ones.
     static constexpr std::size_t kImpactSlots = 48;
     static constexpr float kImpactLifetime = 20.0f;
-    static constexpr std::size_t kEntityCount = kSlots * 5 + kImpactSlots;
+    static constexpr std::size_t kCaseSlots = 32;
+    static constexpr float kCaseLifetime = 3.0f;
+    static constexpr std::size_t kEntityCount = kSlots * 5 + kImpactSlots + kCaseSlots;
+
+    struct ViewPose {
+        core::Vec3 eye{};
+        core::Vec3 direction{0, 0, -1};
+        core::Vec3 muzzle{};
+        core::Vec3 ejection_point{};
+        core::Vec3 velocity{};
+    };
 
     PlayWeaponFx(rhi::Device&,
                  render::MeshRegistry& meshes,
                  render::MaterialRegistry& materials) noexcept;
     PlayWeaponFx(const PlayWeaponFx&) = delete;
     PlayWeaponFx& operator=(const PlayWeaponFx&) = delete;
-    // One attempt only: two meshes and three materials, with no per-shot residency changes.
+    // One attempt only: burst and brass meshes plus fixed materials; no per-shot uploads.
     [[nodiscard]] bool initialize();
     void fire(core::Vec3 eye,
               core::Vec3 direction,
@@ -54,13 +64,16 @@ public:
               physics::BodyId body = {},
               const physics::PhysicsWorld* physics = nullptr) noexcept;
     void advance(float dt) noexcept;
-    // First call binds ONE world and creates kEntityCount entities -- 8 shot slots x (flash,
-    // bullet, spark, muzzle light, impact light) plus 48 surface marks, 88 in all -- and every
-    // later call only writes components. Nothing is spawned or despawned per shot, so a held
-    // trigger at 600 RPM cannot grow GPU residency; an effect that is over is a mesh set to
-    // kInvalidMeshId or a light set to zero intensity, not a destroyed entity.
-    // Call before rendering either camera; advance() ages a new shot after its first pose.
-    void pose(ecs::World& world, const physics::PhysicsWorld* physics = nullptr);
+    // Queue a spent case for the next pose. The bounded queue is also valid before the first
+    // pose; it creates no entities. The caller chooses extraction timing (shot or bolt cycle).
+    void queue_case() noexcept;
+    // First call binds one world and creates kEntityCount entities: 40 shot parts, 48 marks,
+    // 32 cases. Later calls only write components. Provide the camera/viewmodel pose AFTER
+    // posing the viewmodel. Flash and muzzle light follow it for their short lifetime;
+    // accepted shot paths and impacts remain fixed in world/body space.
+    void pose(ecs::World& world,
+              const physics::PhysicsWorld* physics = nullptr,
+              const ViewPose* view = nullptr);
 
 private:
     struct Shot {
@@ -78,6 +91,15 @@ private:
         float age = kImpactLifetime;
     };
 
+    struct Case {
+        core::Vec3 position{}, previous{}, velocity{};
+        core::Quat rotation = core::quat_identity();
+        ecs::Entity entity{};
+        float age = kCaseLifetime;
+        bool bounced = false;
+        bool settled = false;
+    };
+
     void show(ecs::World& world,
               ecs::Entity entity,
               render::MeshId mesh,
@@ -85,12 +107,16 @@ private:
     render::MeshRegistry& meshes_;
     render::MaterialRegistry& materials_;
     std::array<Shot, kSlots> shots_{};
-    std::array<render::MaterialId, 4> material_ids_{};
+    std::array<render::MaterialId, 5> material_ids_{};
     std::array<Impact, kImpactSlots> impacts_{};
+    std::array<Case, kCaseSlots> cases_{};
     render::MeshId burst_ = render::kInvalidMeshId;
+    render::MeshId brass_ = render::kInvalidMeshId;
     ecs::World* world_ = nullptr; // identity check only; never dereferenced by destruction
     std::size_t next_ = 0;
     std::size_t next_impact_ = 0;
+    std::size_t next_case_ = 0;
+    std::size_t queued_cases_ = 0;
     bool attempted_ = false, ready_ = false;
 };
 

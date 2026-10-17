@@ -189,6 +189,10 @@ struct LightingSettings {
     // geometry/light edits respond, but an unchanged scene does not receive fresh Monte Carlo
     // noise each frame. Trades temporal convergence for bounded spatial quadrature error.
     bool ddgi_stable_rays = false;
+
+    // Cull only directional-cascade casters outside that cascade's light frustum. Kept
+    // independent of shadows_enabled for an explicit on/off proof; local maps are unchanged.
+    bool shadow_caster_culling = false;
 };
 
 } // namespace rime::render

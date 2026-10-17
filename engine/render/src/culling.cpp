@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace rime::render {
 namespace {
@@ -76,6 +77,68 @@ bool aabb_in_frustum(const Frustum& frustum, core::Vec3 min, core::Vec3 max) noe
     // Not proven outside. That is deliberately weaker than "proven inside": a box straddling two
     // planes' outer regions without touching the frustum survives this test. It costs a draw and
     // never costs a pixel (culling.hpp on why that is the only acceptable direction to be wrong).
+    return true;
+}
+
+bool shadow_caster_aabb_in_frustum(const Frustum& frustum,
+                                   const core::Mat4& model,
+                                   core::Vec3 local_min,
+                                   core::Vec3 local_max) noexcept {
+    const auto finite = [](float x) { return std::isfinite(x); };
+    if (!finite(local_min.x) || !finite(local_min.y) || !finite(local_min.z) ||
+        !finite(local_max.x) || !finite(local_max.y) || !finite(local_max.z) ||
+        local_min.x > local_max.x || local_min.y > local_max.y || local_min.z > local_max.z)
+        return true;
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            if (!finite(model.at(r, c)))
+                return true;
+    if (model.at(3, 0) != 0.0f || model.at(3, 1) != 0.0f || model.at(3, 2) != 0.0f ||
+        model.at(3, 3) != 1.0f)
+        return true;
+    for (const core::Vec4& p : frustum.planes)
+        if (!finite(p.x) || !finite(p.y) || !finite(p.z) || !finite(p.w) ||
+            !(p.x * p.x + p.y * p.y + p.z * p.z > 0.0f))
+            return true;
+
+    core::Vec3 mn{}, mx{};
+    transform_aabb(model, local_min, local_max, mn, mx);
+    if (!finite(mn.x) || !finite(mn.y) || !finite(mn.z) || !finite(mx.x) || !finite(mx.y) ||
+        !finite(mx.z))
+        return true;
+
+    // A world-space box formed from float matrix products can round inward by a few ulps.
+    // Scale the outward guard with BOTH transformed coordinates and the model/local products:
+    // large cancelling translations must not leave a tiny fixed-world epsilon.
+    double error_scale = 1.0;
+    for (int r = 0; r < 3; ++r) {
+        double axis = std::abs(static_cast<double>(model.at(r, 3)));
+        for (int c = 0; c < 3; ++c) {
+            const float bound = c == 0   ? std::max(std::abs(local_min.x), std::abs(local_max.x))
+                                : c == 1 ? std::max(std::abs(local_min.y), std::abs(local_max.y))
+                                         : std::max(std::abs(local_min.z), std::abs(local_max.z));
+            axis += std::abs(static_cast<double>(model.at(r, c))) * bound;
+        }
+        error_scale = std::max(error_scale, axis);
+    }
+    const double world_guard = 64.0 * std::numeric_limits<float>::epsilon() * error_scale;
+    if (!std::isfinite(world_guard))
+        return true;
+    for (const core::Vec4& p : frustum.planes) {
+        const double x = p.x >= 0.0f ? mx.x : mn.x;
+        const double y = p.y >= 0.0f ? mx.y : mn.y;
+        const double z = p.z >= 0.0f ? mx.z : mn.z;
+        const double distance = static_cast<double>(p.x) * x + static_cast<double>(p.y) * y +
+                                static_cast<double>(p.z) * z + p.w;
+        const double plane_guard =
+            64.0 * std::numeric_limits<float>::epsilon() *
+            (std::abs(static_cast<double>(p.x) * x) + std::abs(static_cast<double>(p.y) * y) +
+             std::abs(static_cast<double>(p.z) * z) + std::abs(static_cast<double>(p.w)) + 1.0);
+        if (!std::isfinite(distance) || !std::isfinite(plane_guard))
+            return true;
+        if (distance < -(world_guard + plane_guard))
+            return false;
+    }
     return true;
 }
 

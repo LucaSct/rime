@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "play_arm_ik.hpp"
+#include "play_weapon_motion.hpp"
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/manifest.hpp"
 #include "rime/core/math/transform.hpp"
@@ -48,6 +50,18 @@ public:
     void advance(float frame_dt, core::Vec3 actual_velocity, bool fired) noexcept;
     void observe_camera(core::Vec3 eye) noexcept;
 
+    [[nodiscard]] bool begin_reload() noexcept {
+        return motion_.begin_reload(static_cast<PlayWeaponMotion::Weapon>(selected_));
+    }
+
+    [[nodiscard]] bool reloading() const noexcept { return motion_.reloading(); }
+
+    [[nodiscard]] bool cycling() const noexcept { return motion_.cycling(); }
+
+    [[nodiscard]] bool busy() const noexcept { return motion_.busy(); }
+
+    [[nodiscard]] bool take_case_ejection() noexcept { return motion_.take_case_ejection(); }
+
     // Consumes the already-folded frame levels/selection edges. A right drag can look and aim
     // together when pointer capture is unavailable; capture must never disable the aim button.
     void apply_controls(const platform::Input& devices,
@@ -78,6 +92,33 @@ public:
     [[nodiscard]] const PlayArmIk::Stats& arm_stats() const noexcept {
         return models_[static_cast<unsigned>(selected_)].arms.stats();
     }
+
+    // What the action hand paths actually used in the LAST pose(): per side (left support,
+    // right firing), the fraction of the authored offset kept and the offset applied in weapon
+    // metres. limited_poses counts every pose that shortened a path, so a shortened reach is
+    // visible to a proof rather than silently absorbed.
+    struct ReachStats {
+        std::array<float, 2> retained{1.0f, 1.0f};
+        std::array<float, 2> applied_offset{};
+        std::uint64_t limited_poses = 0;
+    };
+
+    [[nodiscard]] const ReachStats& reach_stats() const noexcept { return reach_stats_; }
+
+    // Last posed wrist targets after the physical reach limit, in world metres.
+    [[nodiscard]] const std::array<core::Vec3, 2>& wrist_world() const noexcept {
+        return wrist_world_;
+    }
+
+    // Shoulder-to-wrist distance limits of the selected rig, MEASURED at load through the real
+    // solver, not re-derived from bone lengths: {near, far} per side, metres.
+    [[nodiscard]] std::array<std::array<float, 2>, 2> reach_limits() const noexcept {
+        const auto& m = models_[static_cast<unsigned>(selected_)];
+        return {{{m.reach_near[0], m.reach_far[0]}, {m.reach_near[1], m.reach_far[1]}}};
+    }
+
+    // Distance kept inside each measured limit. See pose() for why 5 mm.
+    static constexpr float kReachMargin = 0.005f;
 
     [[nodiscard]] bool scoped() const noexcept { return selected_ == Weapon::Sniper; }
 
@@ -123,6 +164,7 @@ private:
         PlayArmIk arms;
         render::MeshId arm_mesh = render::kInvalidMeshId;
         std::array<core::Mat4, 2> grips{};
+        std::array<float, 2> reach_near{}, reach_far{};
         std::vector<core::Vec3> previous, last;
         bool history = false;
     };
@@ -139,12 +181,15 @@ private:
     float gait_phase_ = 0.0f;
     float bob_amount_ = 0.0f;
     float recoil_ = 0.0f;
+    PlayWeaponMotion motion_;
     bool aiming_ = false;
     float aim_ = 0.0f;
     render::DrawItem lens_{};
     core::Mat4 optic_world_{};
     core::Mat4 weapon_local_{};
     std::vector<render::FirstPersonDeformation> deformations_;
+    ReachStats reach_stats_{};
+    std::array<core::Vec3, 2> wrist_world_{};
     std::size_t resident_meshes_ = 0;
     std::size_t resident_materials_ = 0;
     std::size_t resident_textures_ = 0;

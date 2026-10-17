@@ -17,6 +17,8 @@ rime_add_test(rime_gameplay_tests
     input_map_test.cpp
     weapon_test.cpp
     play_arm_ik_test.cpp
+    play_weapon_motion_test.cpp
+    play_weapon_policy_test.cpp
     ../../samples/99-the-block/play_arm_ik.cpp)
 
 target_link_libraries(rime_gameplay_tests

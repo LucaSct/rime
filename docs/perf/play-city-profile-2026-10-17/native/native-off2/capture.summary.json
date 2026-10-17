@@ -1,0 +1,954 @@
+{
+  "status": "descriptive_only",
+  "baseline_proven": false,
+  "perf_gate_pass": null,
+  "recorded": 1981,
+  "joined": 1980,
+  "contiguous_ids": true,
+  "extent": {
+    "width": 1280,
+    "height": 720,
+    "native_width": 1280,
+    "native_height": 720
+  },
+  "phases": {
+    "warmup": {
+      "n": 60,
+      "dt_ms": {
+        "mean": 12.7535635,
+        "p50": 12.01325,
+        "p95": 18.2277,
+        "p99": 35.8979,
+        "max": 35.8979
+      },
+      "pump_ms": {
+        "mean": 0.08254733333333333,
+        "p50": 0.003325,
+        "p95": 0.00679,
+        "p99": 4.73117,
+        "max": 4.73117
+      },
+      "sim_ms": {
+        "mean": 2.331170166666667,
+        "p50": 2.9277249999999997,
+        "p95": 3.49246,
+        "p99": 7.37455,
+        "max": 7.37455
+      },
+      "acquire_ms": {
+        "mean": 0.01254685,
+        "p50": 0.0101155,
+        "p95": 0.02312,
+        "p99": 0.04098,
+        "max": 0.04098
+      },
+      "declare_ms": {
+        "mean": 1.7722943333333334,
+        "p50": 1.6544150000000002,
+        "p95": 2.11181,
+        "p99": 4.613,
+        "max": 4.613
+      },
+      "execute_ms": {
+        "mean": 8.422227166666667,
+        "p50": 7.344374999999999,
+        "p95": 11.7406,
+        "p99": 29.215,
+        "max": 29.215
+      },
+      "present_ms": {
+        "mean": 0.10256196666666667,
+        "p50": 0.0545055,
+        "p95": 0.143151,
+        "p99": 2.02592,
+        "max": 2.02592
+      },
+      "accounted_ms": {
+        "mean": 12.723347816666667,
+        "p50": 11.9837555,
+        "p95": 18.193602,
+        "p99": 35.86295,
+        "max": 35.86295
+      },
+      "residual_ms": {
+        "mean": 0.030215683333333458,
+        "p50": 0.028773499999999785,
+        "p95": 0.03632999999999953,
+        "p99": 0.043229000000000184,
+        "max": 0.043229000000000184
+      },
+      "over16_7": 5,
+      "over33_3": 1,
+      "extent_histogram": {
+        "1280x720": 60
+      },
+      "ticks_histogram": {
+        "0": 17,
+        "2": 2,
+        "1": 41
+      }
+    },
+    "hip": {
+      "n": 600,
+      "dt_ms": {
+        "mean": 11.583931333333334,
+        "p50": 12.0511,
+        "p95": 13.4818,
+        "p99": 15.386,
+        "max": 17.2441
+      },
+      "pump_ms": {
+        "mean": 0.002082478333333333,
+        "p50": 0.00195,
+        "p95": 0.00321,
+        "p99": 0.00487,
+        "max": 0.00767
+      },
+      "sim_ms": {
+        "mean": 2.0495443333333334,
+        "p50": 2.88291,
+        "p95": 3.09249,
+        "p99": 3.5358,
+        "max": 3.97566
+      },
+      "acquire_ms": {
+        "mean": 0.01331583,
+        "p50": 0.0117155,
+        "p95": 0.0266,
+        "p99": 0.03487,
+        "max": 0.045871
+      },
+      "declare_ms": {
+        "mean": 1.6744914166666667,
+        "p50": 1.648965,
+        "p95": 1.95397,
+        "p99": 2.10359,
+        "max": 2.60872
+      },
+      "execute_ms": {
+        "mean": 7.756788616666666,
+        "p50": 7.79396,
+        "p95": 8.502,
+        "p99": 9.69542,
+        "max": 10.7089
+      },
+      "present_ms": {
+        "mean": 0.05732857833333333,
+        "p50": 0.0546155,
+        "p95": 0.07928,
+        "p99": 0.09583,
+        "max": 0.116531
+      },
+      "accounted_ms": {
+        "mean": 11.553551253333334,
+        "p50": 12.022694999999999,
+        "p95": 13.390001,
+        "p99": 15.348861,
+        "max": 17.200630999999998
+      },
+      "residual_ms": {
+        "mean": 0.030380080000000007,
+        "p50": 0.027330000000000076,
+        "p95": 0.044180000000000774,
+        "p99": 0.09014900000000026,
+        "max": 0.10678799999999988
+      },
+      "over16_7": 1,
+      "over33_3": 0,
+      "extent_histogram": {
+        "1280x720": 600
+      },
+      "ticks_histogram": {
+        "0": 183,
+        "1": 417
+      }
+    },
+    "settle_ads": {
+      "n": 60,
+      "dt_ms": {
+        "mean": 16.789904666666665,
+        "p50": 17.363300000000002,
+        "p95": 20.3109,
+        "p99": 21.5349,
+        "max": 21.5349
+      },
+      "pump_ms": {
+        "mean": 0.00255385,
+        "p50": 0.0023150000000000002,
+        "p95": 0.00472,
+        "p99": 0.00618,
+        "max": 0.00618
+      },
+      "sim_ms": {
+        "mean": 2.9221783333333335,
+        "p50": 2.9159100000000002,
+        "p95": 5.73715,
+        "p99": 5.79904,
+        "max": 5.79904
+      },
+      "acquire_ms": {
+        "mean": 0.016870333333333334,
+        "p50": 0.013049999999999999,
+        "p95": 0.040801,
+        "p99": 0.051631,
+        "max": 0.051631
+      },
+      "declare_ms": {
+        "mean": 2.4342825,
+        "p50": 2.5688199999999997,
+        "p95": 2.96604,
+        "p99": 3.18977,
+        "max": 3.18977
+      },
+      "execute_ms": {
+        "mean": 11.276442666666666,
+        "p50": 11.7275,
+        "p95": 12.8353,
+        "p99": 12.9704,
+        "max": 12.9704
+      },
+      "present_ms": {
+        "mean": 0.078103,
+        "p50": 0.0764405,
+        "p95": 0.109201,
+        "p99": 0.162771,
+        "max": 0.162771
+      },
+      "accounted_ms": {
+        "mean": 16.730430683333335,
+        "p50": 17.3103005,
+        "p95": 20.25777,
+        "p99": 21.446371,
+        "max": 21.446371
+      },
+      "residual_ms": {
+        "mean": 0.05947398333333339,
+        "p50": 0.05310449999999811,
+        "p95": 0.1627880000000026,
+        "p99": 0.2260780000000011,
+        "max": 0.2260780000000011
+      },
+      "over16_7": 49,
+      "over33_3": 0,
+      "extent_histogram": {
+        "1280x720": 60
+      },
+      "ticks_histogram": {
+        "0": 4,
+        "1": 52,
+        "2": 4
+      }
+    },
+    "ads": {
+      "n": 600,
+      "dt_ms": {
+        "mean": 17.886960166666668,
+        "p50": 17.48545,
+        "p95": 20.4361,
+        "p99": 22.6894,
+        "max": 26.3294
+      },
+      "pump_ms": {
+        "mean": 0.0025472183333333336,
+        "p50": 0.0023,
+        "p95": 0.00479,
+        "p99": 0.00662,
+        "max": 0.011501
+      },
+      "sim_ms": {
+        "mean": 3.1515817166666666,
+        "p50": 2.91979,
+        "p95": 5.78302,
+        "p99": 5.89643,
+        "max": 7.14159
+      },
+      "acquire_ms": {
+        "mean": 0.014805031666666666,
+        "p50": 0.01297,
+        "p95": 0.026341,
+        "p99": 0.03317,
+        "max": 0.042921
+      },
+      "declare_ms": {
+        "mean": 2.60421205,
+        "p50": 2.576425,
+        "p95": 2.71408,
+        "p99": 3.27737,
+        "max": 3.35312
+      },
+      "execute_ms": {
+        "mean": 11.977651666666667,
+        "p50": 11.79165,
+        "p95": 12.7269,
+        "p99": 15.273,
+        "max": 15.6353
+      },
+      "present_ms": {
+        "mean": 0.07895340333333334,
+        "p50": 0.076031,
+        "p95": 0.098311,
+        "p99": 0.109541,
+        "max": 0.135201
+      },
+      "accounted_ms": {
+        "mean": 17.82975108666667,
+        "p50": 17.4261105,
+        "p95": 20.381632,
+        "p99": 22.610981000000002,
+        "max": 26.251881
+      },
+      "residual_ms": {
+        "mean": 0.05720908000000001,
+        "p50": 0.05392900000000189,
+        "p95": 0.07258900000000068,
+        "p99": 0.11839799999999912,
+        "max": 0.19515799999999928
+      },
+      "over16_7": 600,
+      "over33_3": 0,
+      "extent_histogram": {
+        "1280x720": 600
+      },
+      "ticks_histogram": {
+        "1": 556,
+        "2": 44
+      }
+    },
+    "settle_turn": {
+      "n": 60,
+      "dt_ms": {
+        "mean": 12.001886,
+        "p50": 12.238900000000001,
+        "p95": 15.3574,
+        "p99": 16.3733,
+        "max": 16.3733
+      },
+      "pump_ms": {
+        "mean": 0.0021728666666666666,
+        "p50": 0.0021349999999999997,
+        "p95": 0.00285,
+        "p99": 0.0038,
+        "max": 0.0038
+      },
+      "sim_ms": {
+        "mean": 2.1668563333333335,
+        "p50": 2.917125,
+        "p95": 3.47138,
+        "p99": 4.05209,
+        "max": 4.05209
+      },
+      "acquire_ms": {
+        "mean": 0.014351966666666667,
+        "p50": 0.01176,
+        "p95": 0.02865,
+        "p99": 0.03534,
+        "max": 0.03534
+      },
+      "declare_ms": {
+        "mean": 1.7258761666666667,
+        "p50": 1.658285,
+        "p95": 2.05618,
+        "p99": 2.57565,
+        "max": 2.57565
+      },
+      "execute_ms": {
+        "mean": 7.997419,
+        "p50": 7.731095,
+        "p95": 9.65042,
+        "p99": 10.2885,
+        "max": 10.2885
+      },
+      "present_ms": {
+        "mean": 0.0600435,
+        "p50": 0.057650999999999994,
+        "p95": 0.080081,
+        "p99": 0.086961,
+        "max": 0.086961
+      },
+      "accounted_ms": {
+        "mean": 11.966719833333332,
+        "p50": 12.2117615,
+        "p95": 15.319141,
+        "p99": 16.32107,
+        "max": 16.32107
+      },
+      "residual_ms": {
+        "mean": 0.0351661666666668,
+        "p50": 0.02840450000000061,
+        "p95": 0.06407899999999955,
+        "p99": 0.10241900000000115,
+        "max": 0.10241900000000115
+      },
+      "over16_7": 0,
+      "over33_3": 0,
+      "extent_histogram": {
+        "1280x720": 60
+      },
+      "ticks_histogram": {
+        "1": 43,
+        "0": 17
+      }
+    },
+    "turning": {
+      "n": 600,
+      "dt_ms": {
+        "mean": 9.520460033333332,
+        "p50": 9.521135000000001,
+        "p95": 12.2391,
+        "p99": 15.0527,
+        "max": 15.7729
+      },
+      "pump_ms": {
+        "mean": 0.002116765,
+        "p50": 0.00207,
+        "p95": 0.00277,
+        "p99": 0.0035,
+        "max": 0.00629
+      },
+      "sim_ms": {
+        "mean": 1.71150975,
+        "p50": 2.9134599999999997,
+        "p95": 3.41808,
+        "p99": 3.53236,
+        "max": 3.61434
+      },
+      "acquire_ms": {
+        "mean": 0.009258393333333333,
+        "p50": 0.00899,
+        "p95": 0.01371,
+        "p99": 0.0156,
+        "max": 0.02155
+      },
+      "declare_ms": {
+        "mean": 1.6800466166666668,
+        "p50": 1.6500849999999998,
+        "p95": 1.94761,
+        "p99": 2.08094,
+        "max": 2.09401
+      },
+      "execute_ms": {
+        "mean": 6.0362745166666665,
+        "p50": 5.70399,
+        "p95": 7.57788,
+        "p99": 9.52373,
+        "max": 9.95394
+      },
+      "present_ms": {
+        "mean": 0.05270589333333333,
+        "p50": 0.05188,
+        "p95": 0.067571,
+        "p99": 0.073701,
+        "max": 0.083241
+      },
+      "accounted_ms": {
+        "mean": 9.491911935,
+        "p50": 9.493681,
+        "p95": 12.20966,
+        "p99": 15.017011,
+        "max": 15.73279
+      },
+      "residual_ms": {
+        "mean": 0.02854809833333333,
+        "p50": 0.027519499999999475,
+        "p95": 0.03638000000000119,
+        "p99": 0.04001899999999914,
+        "max": 0.04860000000000042
+      },
+      "over16_7": 0,
+      "over33_3": 0,
+      "extent_histogram": {
+        "1280x720": 600
+      },
+      "ticks_histogram": {
+        "1": 343,
+        "0": 257
+      }
+    }
+  },
+  "shots": 0,
+  "charge": false,
+  "terrain_range": [
+    304,
+    304
+  ],
+  "resize_events_total": 0,
+  "scope_feed_by_phase": {
+    "hip": {
+      "0": 600
+    },
+    "ads": {
+      "1": 600
+    },
+    "turning": {
+      "0": 600
+    }
+  },
+  "steady_long": {
+    "n": 0
+  },
+  "steady_short": {
+    "n": 1744,
+    "dt_ms": {
+      "mean": 12.728990493119266,
+      "p50": 12.08595,
+      "p95": 17.6543,
+      "p99": 18.3138,
+      "max": 19.7524
+    },
+    "pump_ms": {
+      "mean": 0.0022326244266055047,
+      "p50": 0.00215,
+      "p95": 0.00311,
+      "p99": 0.00606,
+      "max": 0.011501
+    },
+    "sim_ms": {
+      "mean": 2.20466502293578,
+      "p50": 2.913095,
+      "p95": 3.01109,
+      "p99": 3.50737,
+      "max": 3.97566
+    },
+    "acquire_ms": {
+      "mean": 0.012298772935779816,
+      "p50": 0.01204,
+      "p95": 0.02423,
+      "p99": 0.03298,
+      "max": 0.045871
+    },
+    "declare_ms": {
+      "mean": 1.9606644438073395,
+      "p50": 1.661945,
+      "p95": 2.59419,
+      "p99": 2.63901,
+      "max": 3.32615
+    },
+    "execute_ms": {
+      "mean": 8.44905618119266,
+      "p50": 7.78706,
+      "p95": 11.9998,
+      "p99": 12.6604,
+      "max": 13.2842
+    },
+    "present_ms": {
+      "mean": 0.06224307970183486,
+      "p50": 0.056085499999999996,
+      "p95": 0.083721,
+      "p99": 0.099171,
+      "max": 0.135201
+    },
+    "accounted_ms": {
+      "mean": 12.691160125,
+      "p50": 12.0583705,
+      "p95": 17.600101,
+      "p99": 18.2436,
+      "max": 19.684212000000002
+    },
+    "residual_ms": {
+      "mean": 0.037830368119266065,
+      "p50": 0.028168999999999222,
+      "p95": 0.05749899999999997,
+      "p99": 0.08819800000000022,
+      "max": 0.19515799999999928
+    },
+    "over16_7": 545,
+    "over33_3": 0,
+    "extent_histogram": {
+      "1280x720": 1744
+    },
+    "ticks_histogram": {
+      "0": 440,
+      "1": 1304
+    }
+  },
+  "worst": [
+    {
+      "frame": 1,
+      "phase": "warmup",
+      "dt_ms": 35.8979,
+      "pump_ms": 0.00166,
+      "width": 1280,
+      "height": 720,
+      "ticks": 0,
+      "scope_feed": 0,
+      "sim_ms": 0.0,
+      "acquire_ms": 0.00737,
+      "declare_ms": 4.613,
+      "execute_ms": 29.215,
+      "present_ms": 2.02592,
+      "accounted_ms": 35.86295,
+      "residual_ms": 0.034950000000002035
+    },
+    {
+      "frame": 2,
+      "phase": "warmup",
+      "dt_ms": 29.1854,
+      "pump_ms": 0.01437,
+      "width": 1280,
+      "height": 720,
+      "ticks": 2,
+      "scope_feed": 0,
+      "sim_ms": 7.37455,
+      "acquire_ms": 0.00287,
+      "declare_ms": 2.35783,
+      "execute_ms": 19.2494,
+      "present_ms": 0.143151,
+      "accounted_ms": 29.142171,
+      "residual_ms": 0.043229000000000184
+    },
+    {
+      "frame": 1007,
+      "phase": "ads",
+      "dt_ms": 26.3294,
+      "pump_ms": 0.00467,
+      "width": 1280,
+      "height": 720,
+      "ticks": 2,
+      "scope_feed": 1,
+      "sim_ms": 7.14159,
+      "acquire_ms": 0.01737,
+      "declare_ms": 3.34444,
+      "execute_ms": 15.6353,
+      "present_ms": 0.108511,
+      "accounted_ms": 26.251881,
+      "residual_ms": 0.07751899999999878
+    },
+    {
+      "frame": 1054,
+      "phase": "ads",
+      "dt_ms": 25.5622,
+      "pump_ms": 0.00346,
+      "width": 1280,
+      "height": 720,
+      "ticks": 2,
+      "scope_feed": 1,
+      "sim_ms": 6.82381,
+      "acquire_ms": 0.0195,
+      "declare_ms": 3.11927,
+      "execute_ms": 15.4243,
+      "present_ms": 0.100471,
+      "accounted_ms": 25.490811,
+      "residual_ms": 0.07138899999999992
+    },
+    {
+      "frame": 1056,
+      "phase": "ads",
+      "dt_ms": 25.5514,
+      "pump_ms": 0.00284,
+      "width": 1280,
+      "height": 720,
+      "ticks": 2,
+      "scope_feed": 1,
+      "sim_ms": 6.8351,
+      "acquire_ms": 0.0192,
+      "declare_ms": 3.11456,
+      "execute_ms": 15.4086,
+      "present_ms": 0.099091,
+      "accounted_ms": 25.479391,
+      "residual_ms": 0.07200900000000132
+    },
+    {
+      "frame": 1051,
+      "phase": "ads",
+      "dt_ms": 25.391,
+      "pump_ms": 0.00305,
+      "width": 1280,
+      "height": 720,
+      "ticks": 2,
+      "scope_feed": 1,
+      "sim_ms": 6.80327,
+      "acquire_ms": 0.01942,
+      "declare_ms": 3.09781,
+      "execute_ms": 15.2998,
+      "present_ms": 0.099351,
+      "accounted_ms": 25.322701,
+      "residual_ms": 0.06829899999999967
+    },
+    {
+      "frame": 1059,
+      "phase": "ads",
+      "dt_ms": 25.2539,
+      "pump_ms": 0.00252,
+      "width": 1280,
+      "height": 720,
+      "ticks": 2,
+      "scope_feed": 1,
+      "sim_ms": 6.75424,
+      "acquire_ms": 0.01675,
+      "declare_ms": 3.08647,
+      "execute_ms": 15.225,
+      "present_ms": 0.096971,
+      "accounted_ms": 25.181950999999998,
+      "residual_ms": 0.0719490000000036
+    },
+    {
+      "frame": 987,
+      "phase": "ads",
+      "dt_ms": 24.0941,
+      "pump_ms": 0.00272,
+      "width": 1280,
+      "height": 720,
+      "ticks": 2,
+      "scope_feed": 1,
+      "sim_ms": 6.91807,
+      "acquire_ms": 0.01681,
+      "declare_ms": 3.27737,
+      "execute_ms": 13.7264,
+      "present_ms": 0.075551,
+      "accounted_ms": 24.016921,
+      "residual_ms": 0.077179000000001
+    },
+    {
+      "frame": 1006,
+      "phase": "ads",
+      "dt_ms": 22.6894,
+      "pump_ms": 0.00272,
+      "width": 1280,
+      "height": 720,
+      "ticks": 1,
+      "scope_feed": 1,
+      "sim_ms": 3.58852,
+      "acquire_ms": 0.01941,
+      "declare_ms": 3.33089,
+      "execute_ms": 15.5599,
+      "present_ms": 0.109541,
+      "accounted_ms": 22.610981000000002,
+      "residual_ms": 0.07841899999999669
+    },
+    {
+      "frame": 1313,
+      "phase": "ads",
+      "dt_ms": 22.2653,
+      "pump_ms": 0.00359,
+      "width": 1280,
+      "height": 720,
+      "ticks": 2,
+      "scope_feed": 1,
+      "sim_ms": 5.89643,
+      "acquire_ms": 0.04237,
+      "declare_ms": 3.06859,
+      "execute_ms": 12.9638,
+      "present_ms": 0.115901,
+      "accounted_ms": 22.090681,
+      "residual_ms": 0.17461899999999986
+    }
+  ],
+  "scope_transitions": [
+    {
+      "render_frame": 670,
+      "phase": "settle_ads",
+      "feed": true,
+      "aim": 0.869287,
+      "following_interval": {
+        "frame": 671,
+        "phase": "settle_ads",
+        "dt_ms": 15.983,
+        "pump_ms": 0.00604,
+        "width": 1280,
+        "height": 720,
+        "ticks": 0,
+        "scope_feed": 1,
+        "sim_ms": 0.0,
+        "acquire_ms": 0.014,
+        "declare_ms": 2.87568,
+        "execute_ms": 12.9173,
+        "present_ms": 0.141911,
+        "accounted_ms": 15.954930999999998,
+        "residual_ms": 0.02806900000000212
+      }
+    },
+    {
+      "render_frame": 1320,
+      "phase": "settle_turn",
+      "feed": false,
+      "aim": 0.713347,
+      "following_interval": {
+        "frame": 1321,
+        "phase": "settle_turn",
+        "dt_ms": 12.9097,
+        "pump_ms": 0.00172,
+        "width": 1280,
+        "height": 720,
+        "ticks": 1,
+        "scope_feed": 0,
+        "sim_ms": 2.86458,
+        "acquire_ms": 0.02692,
+        "declare_ms": 1.44808,
+        "execute_ms": 8.43388,
+        "present_ms": 0.06779,
+        "accounted_ms": 12.842970000000001,
+        "residual_ms": 0.06672999999999973
+      }
+    }
+  ],
+  "csv_sha256": "84e2661f1bf7006a094c598aca881776aeff6a57f393721b01827beff3c6fdc5",
+  "provenance": {
+    "source_root": "/home/next/projects/rime",
+    "source_git": {
+      "head": "fdd7d4f61f44c2634b234b80ea49d11b999fb52a",
+      "dirty": true
+    },
+    "build_dir": "/home/next/projects/rime/build/release",
+    "build_source_root": "/home/next/projects/rime",
+    "build_source_git": {
+      "head": "fdd7d4f61f44c2634b234b80ea49d11b999fb52a",
+      "dirty": true
+    },
+    "source_sha256": "6fd9d17c280f62c500c722836c173fa31f09b11d253f8c7c1f1b1f3441f78bb4",
+    "instrumented_sha256": "a0108efd4998080199d15cb98e4d9619b4de89a71634828aa1ed619632e7b80d",
+    "wrapper_sha256": "84c1b2aea49df5ca8b7808f473def5ac25bf5dcdf7d367dea3e6438b9afdf961",
+    "capture_header_sha256": "56b455193f65b64e599b5167218e5e98311059ebfee5bc29600df572e589b185",
+    "disable_city": false,
+    "compile_command": [
+      "/usr/bin/c++",
+      "-I/home/next/projects/rime/samples/99-the-block",
+      "-DRIME_BLOCK_COOKED_DIR=\"/home/next/projects/rime/build/release/samples/99-the-block/cooked\"",
+      "-DRIME_VIEWMODEL_COOKED_DIR=\"/home/next/projects/rime/build/release/samples/99-the-block/viewmodel-cooked\"",
+      "-I/home/next/projects/rime/engine/app/include",
+      "-I/home/next/projects/rime/engine/core/include",
+      "-I/home/next/projects/rime/engine/ecs/include",
+      "-I/home/next/projects/rime/engine/platform/include",
+      "-I/home/next/projects/rime/engine/render/include",
+      "-I/home/next/projects/rime/engine/rhi/include",
+      "-I/home/next/projects/rime/engine/assets/include",
+      "-I/home/next/projects/rime/engine/worldkit/include",
+      "-I/home/next/projects/rime/engine/blockkit/include",
+      "-I/home/next/projects/rime/engine/destruction/include",
+      "-I/home/next/projects/rime/engine/physics/include",
+      "-I/home/next/projects/rime/engine/ground/include",
+      "-I/home/next/projects/rime/engine/scene/include",
+      "-I/home/next/projects/rime/engine/destruction_net/include",
+      "-I/home/next/projects/rime/engine/replication/include",
+      "-I/home/next/projects/rime/engine/net/include",
+      "-I/home/next/projects/rime/engine/destruction_render/include",
+      "-I/home/next/projects/rime/engine/gameplay/include",
+      "-I/home/next/projects/rime/engine/gameplay_net/include",
+      "-I/home/next/projects/rime/engine/terrain_collision/include",
+      "-I/home/next/projects/rime/engine/audio/include",
+      "-isystem",
+      "/home/next/.conan2/p/b/fmt9d943314ec67a/p/include",
+      "-m64",
+      "-O2",
+      "-g",
+      "-DNDEBUG",
+      "-std=c++20",
+      "-fPIE",
+      "-fvisibility=hidden",
+      "-fvisibility-inlines-hidden",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-Werror",
+      "-o",
+      "/home/next/reports/rime-city-profile-2026-10-17/native-final/capture_wrapper.o",
+      "-c",
+      "/home/next/reports/rime-city-profile-2026-10-17/native-final/capture_wrapper.cpp"
+    ],
+    "link_command": [
+      "/usr/bin/c++",
+      "-m64",
+      "-O2",
+      "-g",
+      "-DNDEBUG",
+      "-m64",
+      "-Wl,--dependency-file=/home/next/reports/rime-city-profile-2026-10-17/native-final/capture_play.link.d",
+      "/home/next/reports/rime-city-profile-2026-10-17/native-final/capture_wrapper.o",
+      "samples/99-the-block/CMakeFiles/the_block.dir/play_arm_ik.cpp.o",
+      "samples/99-the-block/CMakeFiles/the_block.dir/play_building_support.cpp.o",
+      "samples/99-the-block/CMakeFiles/the_block.dir/play_city.cpp.o",
+      "samples/99-the-block/CMakeFiles/the_block.dir/play_environment.cpp.o",
+      "samples/99-the-block/CMakeFiles/the_block.dir/play_viewmodel.cpp.o",
+      "samples/99-the-block/CMakeFiles/the_block.dir/play_weapon_fx.cpp.o",
+      "samples/99-the-block/CMakeFiles/the_block.dir/play_world.cpp.o",
+      "-o",
+      "/home/next/reports/rime-city-profile-2026-10-17/native-final/capture_play",
+      "-L/home/next/.conan2/p/b/fmt9d943314ec67a/p/lib",
+      "-L/home/next/.conan2/p/b/volka453278fcf916/p/lib",
+      "-Wl,-rpath,/home/next/.conan2/p/b/fmt9d943314ec67a/p/lib:/home/next/.conan2/p/b/volka453278fcf916/p/lib",
+      "lib/librime_app.a",
+      "lib/librime_worldkit.a",
+      "lib/librime_blockkit.a",
+      "lib/librime_ground.a",
+      "lib/librime_scene.a",
+      "lib/librime_destruction.a",
+      "lib/librime_destruction_net.a",
+      "lib/librime_destruction_render.a",
+      "lib/librime_gameplay.a",
+      "lib/librime_gameplay_net.a",
+      "lib/librime_replication.a",
+      "lib/librime_net.a",
+      "lib/librime_physics.a",
+      "lib/librime_terrain_collision.a",
+      "lib/librime_assets.a",
+      "lib/librime_audio.a",
+      "lib/librime_render.a",
+      "lib/librime_platform.a",
+      "lib/librime_ecs.a",
+      "lib/librime_core.a",
+      "lib/librime_gameplay.a",
+      "lib/librime_destruction.a",
+      "lib/librime_rhi.a",
+      "/usr/lib/libX11.so",
+      "/home/next/.conan2/p/b/volka453278fcf916/p/lib/libvolk.a",
+      "lib/librime_vma.a",
+      "-ldl",
+      "lib/librime_physics.a",
+      "lib/librime_ecs.a",
+      "lib/librime_assets.a",
+      "lib/librime_platform.a",
+      "/usr/lib/libX11.so",
+      "lib/librime_xdg_shell.a",
+      "/usr/lib/libwayland-client.so",
+      "-lm",
+      "/usr/lib/libwayland-cursor.so",
+      "/usr/lib/libxkbcommon.so",
+      "lib/librime_core.a",
+      "/home/next/.conan2/p/b/fmt9d943314ec67a/p/lib/libfmt.a",
+      "-lm",
+      "/usr/lib/libasound.so"
+    ],
+    "binary_sha256": "0d0330d07359f52806fac0fb5204140c3ab07a616efaedd225acdf1fcc9bf528",
+    "csv_path": "/home/next/reports/rime-city-profile-2026-10-17/native-final/capture.frames.csv",
+    "linked_inputs_sha256": {
+      "/home/next/projects/rime/build/release/samples/99-the-block/CMakeFiles/the_block.dir/play_arm_ik.cpp.o": "adf0102145bf078cb77c16c19e8a4132f44e2744de21b6bc1ad7c344b8b2f8dd",
+      "/home/next/projects/rime/build/release/samples/99-the-block/CMakeFiles/the_block.dir/play_building_support.cpp.o": "51d654c44dd9e0b8b6d5d2746e0b0ccc4cc2f48314c11d9094004b966b9cf97d",
+      "/home/next/projects/rime/build/release/samples/99-the-block/CMakeFiles/the_block.dir/play_city.cpp.o": "244334df251dceaafa4667a7ca6dc8b5cbdff5a3fd20b284c5203dc61fbe2359",
+      "/home/next/projects/rime/build/release/samples/99-the-block/CMakeFiles/the_block.dir/play_environment.cpp.o": "27893349723172ef3b3c37ff5602e450670aba7c998aa2f4a3f43a7661a86b6c",
+      "/home/next/projects/rime/build/release/samples/99-the-block/CMakeFiles/the_block.dir/play_viewmodel.cpp.o": "199be9464be99b67a5b36c33875070205021e13a4d32e0002a3a158e289075e0",
+      "/home/next/projects/rime/build/release/samples/99-the-block/CMakeFiles/the_block.dir/play_weapon_fx.cpp.o": "36dbbad294ca34013a1dbabe534c083148fbbd95bdce63fb3166d7a42f7ffd28",
+      "/home/next/projects/rime/build/release/samples/99-the-block/CMakeFiles/the_block.dir/play_world.cpp.o": "9b27c38d1cd297e764961dff0f44548136192c128da403ab788c5743a93853d3",
+      "/home/next/projects/rime/build/release/lib/librime_app.a": "1a84e03e56551dbb3f33784ed83ae42c3ebd25c0434bdfc233b643d3b68f79c5",
+      "/home/next/projects/rime/build/release/lib/librime_worldkit.a": "85fee4b28f8de08cfd14db527d57e02f65a34c6bf6fb260bb5a5ff143cfa0ec9",
+      "/home/next/projects/rime/build/release/lib/librime_blockkit.a": "7a29d1713722bf72e9a016294e2ee8d3c62c3b9ff4e2825a28fa58905861eefe",
+      "/home/next/projects/rime/build/release/lib/librime_ground.a": "0fa5f24b533eca6df1465d2f52c37a7438eb463ae5d49412f9dd4c14c7fa15f4",
+      "/home/next/projects/rime/build/release/lib/librime_scene.a": "8af0c4401a718fb3d5c44f7426c45129b91827cad7bece910da134d555c59c1b",
+      "/home/next/projects/rime/build/release/lib/librime_destruction.a": "5fd8cfddd4f64332e4c3caf0e1d396a2a63fc4601f4f0893b992fa7feb06a7ab",
+      "/home/next/projects/rime/build/release/lib/librime_destruction_net.a": "8bc3d81f8e8e4228ddadb618f4c71aca1531ff1569cf5524b6d7b3de8f35eb21",
+      "/home/next/projects/rime/build/release/lib/librime_destruction_render.a": "b1bb63cf57ae11d5dbcba0e418bb9f8287a35ffc3e26c857a5845a1860a0f2ff",
+      "/home/next/projects/rime/build/release/lib/librime_gameplay.a": "8eb3bd96f0d9165c33a2b60d579d4a44e3b1e26d9d00ba3779f619aec5f54ccd",
+      "/home/next/projects/rime/build/release/lib/librime_gameplay_net.a": "9ed05ac21878a304d7d1454d1186fc23a7b4e9f3171e509bf464dcf49b371444",
+      "/home/next/projects/rime/build/release/lib/librime_replication.a": "972e1c8909a99f869813c42ea6ca29356fba7264f3b2bba337c2e63a3bb539d9",
+      "/home/next/projects/rime/build/release/lib/librime_net.a": "bc85fa202648dc10912cf4a2dd79c0c6a7dd9905093032b647069d21490c4cae",
+      "/home/next/projects/rime/build/release/lib/librime_physics.a": "e5670df703106c5e33b7a34c3803543343f9ff81b49c26536bd5c915f20094f4",
+      "/home/next/projects/rime/build/release/lib/librime_terrain_collision.a": "8cb0622ea64a939e80bb2bde7551ecaf0dc9e2e2555a99b7ad50cae4ab58e105",
+      "/home/next/projects/rime/build/release/lib/librime_assets.a": "03529fa373e3645cf1e8fc54758151a8af9fa728b95cc93071cf3a54e3a4ed6d",
+      "/home/next/projects/rime/build/release/lib/librime_audio.a": "1d643a2d1a465df9d855e6ceba78223d097074f8154f8635571b446e7e9435ac",
+      "/home/next/projects/rime/build/release/lib/librime_render.a": "1c2ab7b196476b072b5174a1f8bbe21eb17a483f2b57e9390bd469c5cca6a6d0",
+      "/home/next/projects/rime/build/release/lib/librime_platform.a": "e6b0f42821e52e21f363524025908526d95cc356d25b6381c5de89bafa212c23",
+      "/home/next/projects/rime/build/release/lib/librime_ecs.a": "287928cd233e6eb3268dc6d65ebbf8c27de98cddb831b7b42cfb02ec01c5a200",
+      "/home/next/projects/rime/build/release/lib/librime_core.a": "f675ce1369cf4063643471c12dd33b942c5f91af403e0cbfc14f39684962ac83",
+      "/home/next/projects/rime/build/release/lib/librime_rhi.a": "974ae7d23815d83e9c6c95a8ba6a6d3550f027994503823fda4131ad78f5b73c",
+      "/usr/lib/libX11.so": "3e0a60a0dae542818c603cfcffca83bbacec086ec8d6e59d541f4f92793b31e7",
+      "/home/next/.conan2/p/b/volka453278fcf916/p/lib/libvolk.a": "44dcedd167dd5990efca04f77ca57b7d31e07bd8c326a0421d800cf8c597db03",
+      "/home/next/projects/rime/build/release/lib/librime_vma.a": "b8c8523246fdc910005c2b2dcb1117f0136caf4a077f971d8d5fa4cad95988bf",
+      "/home/next/projects/rime/build/release/lib/librime_xdg_shell.a": "a79d0e3c44af1aa9727ee9f7ca20f577dd750b3ac5f0f490cdbbf81786533eec",
+      "/usr/lib/libwayland-client.so": "6dd2f50576ab711288bd6b3d6d557c2fc5f2d0a0a32cbe6d793b4380abe33a4f",
+      "/usr/lib/libwayland-cursor.so": "0d21ef8862706af5bbf53aecb6ef870f3adb76d9fa38af6923a30b837767dd60",
+      "/usr/lib/libxkbcommon.so": "0a756040ef5eb110e03234da28ea078979906024a730021c0ca20e19d096eda7",
+      "/home/next/.conan2/p/b/fmt9d943314ec67a/p/lib/libfmt.a": "c8915190d7dc1ba6d75c81c730320ae1aa46076af77edde268f7a182cd24b9ec",
+      "/usr/lib/libasound.so": "4d42cc131d5c5e78edbae3a36a767c6dcbc9cb564f4ec150fbebd815dce08adf"
+    },
+    "cmake_build_type": "RelWithDebInfo"
+  },
+  "csv_path": "/home/next/reports/rime-city-profile-2026-10-17/native-final/capture.frames.csv"
+}
