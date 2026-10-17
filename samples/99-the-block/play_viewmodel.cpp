@@ -126,6 +126,82 @@ const assets::ManifestEntry* mesh_entry(const assets::Manifest& manifest, const 
     return nullptr;
 }
 
+// MEASURE the reach the real solver enforces, rather than re-deriving it from bone lengths.
+// PlayArmIk clamps the shoulder-to-wrist distance into [|upper - lower|, upper + lower] and
+// reports the residual as wrist_position_error. So one solve with each wrist pushed 2 m past its
+// bind position along the shoulder ray reads the far limit as distance - error, and one with the
+// wrist 0.1 mm from the shoulder reads the near limit as distance + error. Both are the solver's
+// own arithmetic, so a later bone or clamp change cannot leave a stale copy here. The far solve
+// MUST clamp both sides, or the reading is not a limit at all.
+bool measure_reach(PlayArmIk& arms,
+                   const std::array<core::Vec3, 2>& poles,
+                   std::array<float, 2>& near_limit,
+                   std::array<float, 2>& far_limit) {
+    const auto shoulders = arms.bind_shoulders();
+    const auto& wrists = arms.bind_wrists();
+    const auto probe = [&](bool far, std::array<float, 2>& out) {
+        std::array<core::Mat4, 2> targets{};
+        std::array<float, 2> distance{};
+        for (unsigned side = 0; side < 2; ++side) {
+            const core::Vec3 wrist = core::transform_point(wrists[side], {});
+            const core::Vec3 ray = wrist - shoulders[side];
+            const float bind = core::length(ray);
+            if (!(bind > 1e-4f))
+                return false;
+            distance[side] = far ? bind + 2.0f : 1e-4f;
+            const core::Vec3 target = shoulders[side] + ray * (distance[side] / bind);
+            targets[side] = core::mat4_translation(target - wrist) * wrists[side];
+        }
+        (void)arms.solve(core::Mat4{}, targets, poles);
+        const auto& st = arms.stats();
+        if (!st.valid_input || (far && st.clamped_targets != 2))
+            return false;
+        for (unsigned side = 0; side < 2; ++side)
+            out[side] = far ? distance[side] - st.wrist_position_error[side]
+                            : distance[side] + st.wrist_position_error[side];
+        return true;
+    };
+    if (!probe(true, far_limit) || !probe(false, near_limit))
+        return false;
+    for (unsigned side = 0; side < 2; ++side)
+        if (!(far_limit[side] > near_limit[side] + 4.0f * PlayViewmodel::kReachMargin))
+            return false;
+    return true;
+}
+
+// The largest fraction f in [0, 1] of an action's hand offset whose wrist target stays inside
+// the measured reach, kReachMargin in from each limit. The path is the AUTHORED one -- the hand
+// still travels toward the magazine or bolt along the same weapon-local line, attached to the
+// moving gun -- it just stops where the arm runs out. Projecting the target onto the reach
+// sphere instead would be the solver's clamp done one step earlier: the counter would read
+// zero while the hand left the path it was asked to follow.
+//
+// Distance from the shoulder is convex along a straight line, so the reachable part of the
+// path that contains f = 0 is one interval and bisection finds its end. If even f = 0 (the
+// plain grip on the moved gun) is out of reach nothing here can help: the authored offset is
+// kept and the solver's clamp counter reports the frame honestly.
+float reachable_fraction(const core::Mat4& arms_from_weapon,
+                         core::Vec3 grip,
+                         core::Vec3 offset,
+                         core::Vec3 shoulder,
+                         float near_limit,
+                         float far_limit) {
+    const auto inside = [&](float f) {
+        const float d =
+            core::length(core::transform_point(arms_from_weapon, grip + offset * f) - shoulder);
+        return d >= near_limit + PlayViewmodel::kReachMargin &&
+               d <= far_limit - PlayViewmodel::kReachMargin;
+    };
+    if (inside(1.0f) || !inside(0.0f))
+        return 1.0f;
+    float lo = 0.0f, hi = 1.0f;
+    for (int i = 0; i < 20; ++i) { // 1e-6 of the offset: far below a visible millimetre
+        const float mid = 0.5f * (lo + hi);
+        (inside(mid) ? lo : hi) = mid;
+    }
+    return lo;
+}
+
 } // namespace
 
 bool PlayViewmodel::load(const std::filesystem::path& cooked,
@@ -262,6 +338,11 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
                  core::transform_point(model.arms_from_camera, {.5f, -.65f, -.25f})}};
             model.arm_mesh = mesh_id;
             model.grips = model.arms.bind_wrists();
+            if (!measure_reach(model.arms, model.elbow_poles, model.reach_near, model.reach_far)) {
+                std::fprintf(
+                    stderr, "99-the-block: arm rig %s has no measurable reach\n", kSources[i]);
+                return false;
+            }
             model.previous.resize(mesh->vertex_count);
             model.last.resize(mesh->vertex_count);
         }
@@ -504,17 +585,37 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     auto grips = selected.grips;
     // Slot zero is the support left hand; slot one is the firing right hand. Moving
     // wrist targets leaves the shoulder anchors fixed and uses the existing CPU IK mesh.
-    grips[0] = core::mat4_translation({0.035f * motion_pose.left_magazine,
-                                       -0.095f * motion_pose.left_magazine,
-                                       0.10f * motion_pose.left_magazine}) *
-               grips[0];
-    grips[1] =
-        core::mat4_translation({0.025f * motion_pose.right_bolt,
-                                0.035f * motion_pose.right_bolt,
-                                -0.11f * motion_pose.right_bolt + 0.095f * motion_pose.bolt_pull}) *
-        grips[1];
-    const auto vertices =
-        selected.arms.solve(selected.arms_from_camera * weapon_local, grips, selected.elbow_poles);
+    const std::array<core::Vec3, 2> offsets{
+        {{0.035f * motion_pose.left_magazine,
+          -0.095f * motion_pose.left_magazine,
+          0.10f * motion_pose.left_magazine},
+         {0.025f * motion_pose.right_bolt,
+          0.035f * motion_pose.right_bolt,
+          -0.11f * motion_pose.right_bolt + 0.095f * motion_pose.bolt_pull}}};
+    // The gun lowers AND the support hand drops toward the magazine, and together those carried
+    // the left wrist up to 34 mm past the SCAR's measured reach (15 mm M4, 7.5 mm MSR) for most
+    // of the reload hold. Shorten each hand's path to what that rig can reach; the gun's own
+    // lower and roll are untouched. The 5 mm margin is ~10^4 above the float error of the
+    // measured limit (a difference of two ~2.5 m values), so the solver's exact
+    // clamp test cannot flicker on a frame-to-frame rounding difference, and it leaves the
+    // elbow visibly bent (about 4 cm of elbow offset for 30 cm bones) rather than locked straight.
+    const core::Mat4 arms_from_weapon = selected.arms_from_camera * weapon_local;
+    const auto shoulders = selected.arms.bind_shoulders();
+    bool limited = false;
+    for (unsigned side = 0; side < 2; ++side) {
+        const float f = reachable_fraction(arms_from_weapon,
+                                           core::transform_point(grips[side], {}),
+                                           offsets[side],
+                                           shoulders[side],
+                                           selected.reach_near[side],
+                                           selected.reach_far[side]);
+        limited = limited || f < 1.0f;
+        reach_stats_.retained[side] = f;
+        reach_stats_.applied_offset[side] = core::length(offsets[side]) * f;
+        grips[side] = core::mat4_translation(offsets[side] * f) * grips[side];
+    }
+    reach_stats_.limited_poses += limited ? 1u : 0u;
+    const auto vertices = selected.arms.solve(arms_from_weapon, grips, selected.elbow_poles);
     for (std::size_t i = 0; i < vertices.size(); ++i) {
         const core::Vec3 current{vertices[i].px, vertices[i].py, vertices[i].pz};
         selected.previous[i] = selected.history ? selected.last[i] : current;

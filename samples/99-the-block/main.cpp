@@ -4630,6 +4630,10 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         float first_clamp = -1.0f; // seconds into the action
         float wrist_miss[2]{};     // requested-vs-reached wrist, metres; above zero only if clamped
         float min_skin = 1e9f, arm_delta = 0.0f, muzzle_delta = 0.0f;
+        // The reach limiter's own record: frames it shortened a hand path, the smallest share of
+        // the authored path kept, and the longest hand travel actually applied (weapon metres).
+        int limited = 0;
+        float retained[2]{1.0f, 1.0f}, hand_travel[2]{};
     };
 
     const auto sweep = [&](float seconds, bool fire_first, float measure_from) {
@@ -4658,6 +4662,12 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
             for (unsigned side = 0; side < 2; ++side)
                 r.wrist_miss[side] = std::max(r.wrist_miss[side], st.wrist_position_error[side]);
             r.min_skin = std::min(r.min_skin, st.max_vertex_displacement);
+            const auto& reach = demo.viewmodel->reach_stats();
+            r.limited += reach.retained[0] < 1.0f || reach.retained[1] < 1.0f ? 1 : 0;
+            for (unsigned side = 0; side < 2; ++side) {
+                r.retained[side] = std::min(r.retained[side], reach.retained[side]);
+                r.hand_travel[side] = std::max(r.hand_travel[side], reach.applied_offset[side]);
+            }
             if (t < measure_from || demo.viewmodel->deformations().empty())
                 continue;
             const auto v = demo.viewmodel->deformations().front().current;
@@ -4674,7 +4684,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     const auto report_sweep = [&](const char* what, VmWeapon w, const ActionSweep& r) {
         std::printf("viewmodel-smoke: %s %s sweep %d frames, busy %d, invalid %d, clamped %d "
                     "(first %.3f s), wrist miss L %.2f R %.2f mm, min bind skin %.4f m, arm "
-                    "delta %.4f m, muzzle delta %.4f m\n",
+                    "delta %.4f m, muzzle delta %.4f m; reach-limited %d frames, path kept L %.3f "
+                    "R %.3f, hand travel L %.4f R %.4f m\n",
                     weapon_name(w),
                     what,
                     r.frames,
@@ -4686,17 +4697,31 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
                     r.wrist_miss[1] * 1000.0f,
                     r.min_skin,
                     r.arm_delta,
-                    r.muzzle_delta);
+                    r.muzzle_delta,
+                    r.limited,
+                    r.retained[0],
+                    r.retained[1],
+                    r.hand_travel[0],
+                    r.hand_travel[1]);
     };
     for (const auto weapon : {VmWeapon::Scar, VmWeapon::M4, VmWeapon::Sniper}) {
         demo.viewmodel->select(weapon == VmWeapon::M4 ? VmWeapon::Scar : VmWeapon::M4);
         demo.viewmodel->select(weapon);
         demo.viewmodel->set_aiming(false);
         demo.viewmodel->advance(1.0f, {}, false);
+        const auto limits = demo.viewmodel->reach_limits();
+        std::printf("viewmodel-smoke: %s measured reach L %.4f..%.4f R %.4f..%.4f m\n",
+                    weapon_name(weapon),
+                    limits[0][0],
+                    limits[0][1],
+                    limits[1][0],
+                    limits[1][1]);
         const auto control = sweep(.5f, false, 0.0f);
         report_sweep("idle-control", weapon, control);
         check(control.busy == 0 && control.invalid == 0 && control.clamped == 0 &&
-                  control.arm_delta < 1e-6f && control.muzzle_delta < 1e-6f,
+                  control.arm_delta < 1e-6f && control.muzzle_delta < 1e-6f &&
+                  control.limited == 0 && control.hand_travel[0] == 0.0f &&
+                  control.hand_travel[1] == 0.0f,
               "idle control sweep reads no action motion");
         check(demo.viewmodel->begin_reload(), "idle weapon accepts a swept reload");
         const float reload_seconds = weapon == VmWeapon::Sniper
@@ -4709,6 +4734,11 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         check(reload.busy >= static_cast<int>(reload_seconds * 60.0f) - 1 &&
                   !demo.viewmodel->busy() && reload.arm_delta > .03f && reload.muzzle_delta > .05f,
               "the swept reload moves both the weapon and the skinned arms, then ends");
+        // Non-vacuity of the reach limiter: a path shortened to nothing would satisfy the reach
+        // claim above by never moving the hand. The support hand must still travel 3 cm or more
+        // along its authored path toward the magazine, ON TOP of following the lowered gun.
+        check(reload.hand_travel[0] >= .03f,
+              "the support hand still visibly reaches toward the magazine within arm reach");
     }
     // The bolt is measured only after the shot's recoil has decayed (exp(-14 t) is under 0.4%
     // by 0.4 s), so what remains is the right hand's reach to the bolt and its pull. Sniper is
@@ -4720,7 +4750,7 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
               "every bolt frame keeps both hands on reachable, valid targets");
         check(bolt.busy >=
                       static_cast<int>(block_play::PlayWeaponMotion::kBoltSeconds * 60.0f) - 1 &&
-                  !demo.viewmodel->busy() && bolt.arm_delta > .03f &&
+                  !demo.viewmodel->busy() && bolt.arm_delta > .03f && bolt.hand_travel[1] >= .03f &&
                   demo.viewmodel->take_case_ejection() && !demo.viewmodel->take_case_ejection(),
               "the swept bolt moves the skinned right arm, ends, and ejects exactly one case");
     }

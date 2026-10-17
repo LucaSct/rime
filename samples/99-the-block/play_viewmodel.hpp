@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -92,6 +93,28 @@ public:
         return models_[static_cast<unsigned>(selected_)].arms.stats();
     }
 
+    // What the action hand paths actually used in the LAST pose(): per side (left support,
+    // right firing), the fraction of the authored offset kept and the offset applied in weapon
+    // metres. limited_poses counts every pose that shortened a path, so a shortened reach is
+    // visible to a proof rather than silently absorbed.
+    struct ReachStats {
+        std::array<float, 2> retained{1.0f, 1.0f};
+        std::array<float, 2> applied_offset{};
+        std::uint64_t limited_poses = 0;
+    };
+
+    [[nodiscard]] const ReachStats& reach_stats() const noexcept { return reach_stats_; }
+
+    // Shoulder-to-wrist distance limits of the selected rig, MEASURED at load through the real
+    // solver, not re-derived from bone lengths: {near, far} per side, metres.
+    [[nodiscard]] std::array<std::array<float, 2>, 2> reach_limits() const noexcept {
+        const auto& m = models_[static_cast<unsigned>(selected_)];
+        return {{{m.reach_near[0], m.reach_far[0]}, {m.reach_near[1], m.reach_far[1]}}};
+    }
+
+    // Distance kept inside each measured limit. See pose() for why 5 mm.
+    static constexpr float kReachMargin = 0.005f;
+
     [[nodiscard]] bool scoped() const noexcept { return selected_ == Weapon::Sniper; }
 
     [[nodiscard]] float aim_fraction() const noexcept { return aim_; }
@@ -136,6 +159,7 @@ private:
         PlayArmIk arms;
         render::MeshId arm_mesh = render::kInvalidMeshId;
         std::array<core::Mat4, 2> grips{};
+        std::array<float, 2> reach_near{}, reach_far{};
         std::vector<core::Vec3> previous, last;
         bool history = false;
     };
@@ -159,6 +183,7 @@ private:
     core::Mat4 optic_world_{};
     core::Mat4 weapon_local_{};
     std::vector<render::FirstPersonDeformation> deformations_;
+    ReachStats reach_stats_{};
     std::size_t resident_meshes_ = 0;
     std::size_t resident_materials_ = 0;
     std::size_t resident_textures_ = 0;
