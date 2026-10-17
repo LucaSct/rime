@@ -182,6 +182,15 @@ struct DestructionWorld::Impl {
     LifecycleConfig lifecycle{};
     std::uint64_t tick = 0;
 
+    // How many times the budget pass has had to repair a stale Settled label from STATE because
+    // no Woke event existed to do it (see enforce_debris_budget). This is a counter on a repair
+    // path, and the repair path is exactly the kind that reads as working when it is doing
+    // nothing: without it, a test can only observe that debris ended up in the right phase, not
+    // whether this code is what put it there. It is also the falsification handle -- in a scene
+    // with no between-step wakes this must stay at zero, and if it does not, the reconciliation
+    // is firing on bodies the event stream already reported and we are handling them twice.
+    std::uint64_t reconciled_wakes = 0;
+
     // The M8.5 debris lifetime & budget pass (lifecycle.cpp): reclaim settled debris past their
     // linger and hold the live debris population under the cap. Runs in update()'s sequential tail,
     // only when lifecycle.enabled — so it can never perturb the parallel step's cross-worker hash.

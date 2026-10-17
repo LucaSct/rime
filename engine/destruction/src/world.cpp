@@ -232,6 +232,10 @@ std::size_t DestructionWorld::debris_count() const noexcept {
     return impl_->debris.size();
 }
 
+std::uint64_t DestructionWorld::reconciled_wake_count() const noexcept {
+    return impl_->reconciled_wakes;
+}
+
 physics::BodyId DestructionWorld::debris_body(std::size_t debris) const noexcept {
     if (debris >= impl_->debris.size()) {
         return physics::BodyId{};

@@ -133,8 +133,10 @@ void DestructionWorld::Impl::enforce_debris_budget(physics::PhysicsWorld& world)
     // to the diff forever, not merely late. That blind spot is why this edge reads state instead.
     for (Debris& rec : debris) {
         if (rec.phase == DebrisPhase::Settled && world.is_alive(rec.body) &&
-            !world.is_asleep(rec.body))
+            !world.is_asleep(rec.body)) {
             rec.phase = DebrisPhase::Falling;
+            ++reconciled_wakes;
+        }
     }
 
     // 1) Linger → freeze. Any SETTLED debris that has rested at least freeze_delay_ticks is

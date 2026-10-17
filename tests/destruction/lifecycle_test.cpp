@@ -227,6 +227,41 @@ TEST_CASE(
     CHECK(dw.instance_part_count(inst2) == 3);
 }
 
+TEST_CASE("the settled-label repair stays idle when nothing wakes between steps") {
+    // THE FALSIFICATION FOR THE REPAIR ABOVE. enforce_debris_budget repairs a stale Settled label
+    // from body state, because a wake that happens between steps never reaches the event stream.
+    // That repair is the kind of code that looks correct while doing nothing -- or, worse, while
+    // duplicating what the Woke event already handled. Both failure modes are invisible if you
+    // only check the phase the debris ended up in, because the event path would have produced the
+    // same phase on its own.
+    //
+    // So assert the counter, not the outcome: let debris fall and settle with NO explicit wake
+    // anywhere, and the repair must never fire. A non-zero reading here means it is firing on
+    // bodies the event diff already reported, and the two paths are racing to do the same job.
+    physics::PhysicsWorld pw;
+    destruction::DestructionWorld dw;
+    destruction::LifecycleConfig cfg;
+    cfg.enabled = true;
+    cfg.freeze_delay_ticks = 8;
+    cfg.max_live_debris = 1000;
+    dw.configure_lifecycle(cfg);
+    const auto asset = make_grid(1, 1, {.25f, .25f, .15f}, 1000, 1);
+    const auto pattern = dw.register_pattern(asset, pw);
+    const auto instance = dw.spawn(pattern, {}, pw);
+    add_ground(pw);
+    dw.apply_damage(instance, {.0f, .25f, .0f}, .1f, 10, {});
+    dw.update(pw);
+    REQUIRE(dw.debris_count() == 1);
+    CHECK(dw.reconciled_wake_count() == 0);
+    settle(dw, pw);
+    // Settled, frozen, and well past the linger window -- all of it driven by physics events.
+    for (std::uint32_t i = 0; i < cfg.freeze_delay_ticks + 20; ++i) {
+        pw.step(kDt);
+        dw.update(pw);
+    }
+    CHECK(dw.reconciled_wake_count() == 0);
+}
+
 TEST_CASE("explicitly woken settled debris cannot freeze during its old linger window") {
     physics::PhysicsWorld pw;
     destruction::DestructionWorld dw;
@@ -261,6 +296,10 @@ TEST_CASE("explicitly woken settled debris cannot freeze during its old linger w
     REQUIRE(pw.get_body_state(body, state));
     CHECK(state.position.y > 8);
     CHECK(state.linear_velocity.y < -1);
+    // The counterpart to the idle-case test above: there, the repair must never fire; here it
+    // MUST have. Without this the idle assertion could pass simply because the repair is dead
+    // code, which is the usual way a "it never misfires" proof turns out to be worthless.
+    CHECK(dw.reconciled_wake_count() > 0);
 }
 
 TEST_CASE("M8.5 body swap: repeated fracture frees the old remainder compounds (bounded store)") {
