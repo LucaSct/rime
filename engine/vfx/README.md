@@ -4,7 +4,8 @@ A deliberately small, **deletable** CPU particle field that turns destruction ev
 feedback: when a part breaks or an island detaches, a puff of billboard dust blooms at the break and
 drifts away. It was a *stub* in the honest sense — and since **m13.1a** it is a stub that is
 actually drawn: `render::FxParticlePass` renders these particles as additive HDR billboards. What
-remains stubby is the *content* (one family, no atlas, no GPU sim), not the pipeline.
+remains stubby is the *content and simulation* (three simple families, no atlas, no GPU sim).
+The additive pipeline is not yet lit, attenuating general smoke.
 
 ## The idea
 
@@ -51,6 +52,21 @@ A structural collapse should always smoke; the impulse scales it *up*. Multiply 
 and the quietest collapses — a wall simply giving way — are the ones with no smoke at all.
 
 Removable feature module (guardrail 2): depends on `rime::core` only, and nothing depends on it.
+
+## General-smoke emission seam
+
+`stats()` reports requested and spawned particles, capacity drops, invalid
+emissions, natural retirements and explicit clear removals. Requested counts are
+measured after the intensity clamp and before the capacity clamp, so a full pool
+or a zero-capacity field still reports dropped work. `reset_stats()` starts a new
+accounting interval without changing live particles or the scatter stream;
+`clear()` records its removals separately from particles that expire naturally.
+
+This is the first observability slice of M-FX1 in
+[the environment-effects plan](../../docs/design/environment-effects-milestones.md).
+The existing emission parameters/families are reused by future ambient,
+destruction and fire consumers. No new plume, GPU solver or lighting dependency
+is enabled by these counters.
 
 ## Building & testing
 

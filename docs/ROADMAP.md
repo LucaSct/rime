@@ -30,7 +30,13 @@ orders destruction smoke/particle capacity (fx1b), heightfield water with two-wa
 buoyancy (fl1a), then ignition, fire-driven lighting and smoke (fx1c), after the M18
 performance gate. [ADR-0085](adr/0085-multiplayer-development-and-shipment.md)
 also requires exported multiplayer and measured capacity in the shipment path.
-There is no supported calendar date for these bricks while those gates remain open.
+[ADR-0088](adr/0088-environment-effects-as-separate-milestones.md), following the
+owner's newer request, now separates these into four milestones and permits
+research, CPU oracles and default-off seams to start before M18 closes. The
+[small-brick plan](design/environment-effects-milestones.md) gives each a useful
+first release and independent exits. Enabled GPU workloads and completed
+simulation features still require the performance/authority proofs; there is no
+supported calendar date while those gates remain open.
 
 **How we use this roadmap.** These are *milestones* — the map, not the turn-by-turn
 directions. Each milestone is decomposed into small **bricks**, and every brick is
