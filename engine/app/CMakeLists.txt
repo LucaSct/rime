@@ -78,6 +78,10 @@ rime_install_module(rime_app_game)
 #      proof runs in-tree is byte-for-byte the one it bundles: a game that needs a non-system
 #      shared library then fails here, on the developer's machine, rather than on a player's.
 function(rime_game_content target content_dir)
+    cmake_parse_arguments(GAME "" "BUNDLE_METADATA" "" ${ARGN})
+    if(GAME_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "rime_game_content: unknown arguments ${GAME_UNPARSED_ARGUMENTS}")
+    endif()
     get_filename_component(_rime_content "${content_dir}" ABSOLUTE)
     set_target_properties(${target} PROPERTIES SKIP_BUILD_RPATH TRUE)
     target_compile_definitions(${target} PRIVATE
@@ -85,7 +89,15 @@ function(rime_game_content target content_dir)
         RIME_GAME_BINARY_DIR="$<TARGET_FILE_DIR:${target}>")
     file(GENERATE
         OUTPUT "${CMAKE_BINARY_DIR}/export/$<CONFIG>/${target}.export"
-        CONTENT "target=${target}\nexecutable=$<TARGET_FILE:${target}>\ncontent=${_rime_content}\n")
+        CONTENT "schema=2\ntarget=${target}\nexecutable=$<TARGET_FILE:${target}>\ncontent=${_rime_content}\nconfiguration=$<CONFIG>\nsystem=${CMAKE_SYSTEM_NAME}\narchitecture=${CMAKE_SYSTEM_PROCESSOR}\nproject_version=${PROJECT_VERSION}\nbundle_metadata=${GAME_BUNDLE_METADATA}\n")
+    find_package(Git QUIET)
+    add_custom_command(TARGET ${target} POST_BUILD
+        COMMAND ${CMAKE_COMMAND}
+            "-DGAME_BINARY=$<TARGET_FILE:${target}>"
+            "-DGAME_SOURCE=${PROJECT_SOURCE_DIR}"
+            "-DGAME_GIT=${GIT_EXECUTABLE}"
+            -P "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/../../cmake/game_provenance.cmake"
+        VERBATIM)
 endfunction()
 
 # ── rime_hello — the launcher (M0 seed, now the --scene loader) ───────────────────────────────────

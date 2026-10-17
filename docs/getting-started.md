@@ -72,6 +72,23 @@ build/dev/bin/hello_game --verbose      # the GPU-free self-check, with a report
 build/dev/bin/hello_game --headless     # render off-screen and check the pixels
 ```
 
+## 4. Export a verified Linux development build
+
+On Linux x86_64, with Python 3.11+, Bubblewrap and working user namespaces:
+
+```bash
+scripts/export-proof.sh --preset release --out-dir "$HOME/rime-exports/hello-proof"
+python3 scripts/game_bundle_manifest.py verify "$HOME/rime-exports/hello-proof/hello_game"
+```
+
+Use a new output directory. The proof builds hello-game, verifies every payload
+and required notice, runs it with the repository and Vulkan hidden, and retains
+`proof.json` beside the bundle. `--no-build` reuses a previously built binary
+only when its build provenance still matches its bytes. The bundle's
+`SYSTEM-REQUIREMENTS.txt` records actual host ABI requirements; this is a
+development export, pending clean-machine release compatibility. Dedicated mode
+currently runs simulation without a GPU; listening multiplayer is subsequent work.
+
 ## Where to read next
 
 | If you want to | Read |

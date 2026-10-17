@@ -30,7 +30,7 @@ gate. Unfinished performance and editor work remains tracked in the main roadmap
 | Step | Concrete result | Proof and pipeline gate |
 | --- | --- | --- |
 | 0 — Playable repair, in progress | Held-RMB second-camera scope with a larger ocular; reliable firing feedback; diagnose disappearing ground darkness | Rendered target magnification, input/fixed-tick regressions, actual accepted-shot feedback, controlled tree comparisons; existing three-OS and sanitizer CI |
-| 1 — Auditable Linux export, next | Versioned payload manifest, content hashes and reviewed redistribution notices for hello-game | Existing repository/Vulkan-hidden execution proof; reject modified/missing/unsafe payloads and missing notices; deterministic manifest for identical bytes; CI retains revision, tests and artifact identity |
+| 1 — Auditable Linux export, implemented; CI pending | Versioned payload manifest, content hashes and reviewed redistribution notices for hello-game | 32 local cases and isolated Release execution with HOME-based and outside-HOME checkouts; CI retains revision, tests and artifact identity; clean-machine release compatibility pending |
 | 2 — Exported multiplayer | Existing GameDefinition launches a listening authoritative server and separate clients; then port the block | Two client processes from exported artifacts, late join, prescribed loss/reordering, compatibility refusal and convergence; CI captures logs and always cleans up processes |
 | 3 — Capacity and operations | Measured physics/destruction/network envelope; operable servers | Named hardware, player/body counts, tick percentiles, bandwidth/memory/corrections/soak; health checks, graceful shutdown, version pinning, staged rollout and rollback rehearsal |
 | 4 — More native targets and browser play | Windows export proof, then other proven native exports; exported games through the streaming gateway | Native dependency checks and clean-machine tests; authenticated session isolation, resource limits, reconnect, input/audio latency and concurrency measurements; console gates remain separately blocked |
@@ -40,7 +40,7 @@ Steps 4 and 5 are split into further bricks when their prerequisites are measure
 Console access/feasibility tracking starts immediately; a blocked console target
 does not block verifiable PC/server work.
 
-## Next brick: verified Linux bundle
+## Verified Linux bundle
 
 Keep `scripts/export-game.sh`, its generated CMake export record and the existing
 content-root rule. Scope the first implementation to `samples/hello-game` on Linux.
@@ -70,6 +70,10 @@ Acceptance requires:
 
 Dedicated networking follows this bounded packaging brick. The package identity
 must not become a reason to postpone a real multiplayer delivery proof.
+
+Implementation is recorded in [ADR-0087](../adr/0087-verified-linux-development-bundle.md).
+The next shipment brick is a bounded listening hello-game server plus two
+separate exported client processes, with join/leave and convergence evidence.
 
 ## Runtime and trust boundaries
 
