@@ -4835,8 +4835,11 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
                     return false;
                 const float x = clip.x / clip.w;
                 const float y = clip.y / clip.w;
-                return std::isfinite(x) && std::isfinite(y) && std::abs(x) < max_x && y > -.92f &&
-                       y < .45f;
+                std::printf("viewmodel-smoke: %s reload projected x %.3f y %.3f depth %.3f m\n",
+                            weapon_name(weapon), x, y, clip.w);
+                // Vulkan's projection flips Y: positive NDC Y is below the screen centre.
+                return std::isfinite(x) && std::isfinite(y) && std::abs(x) < max_x && y > -.45f &&
+                       y < .92f;
             };
             return in_lower_view(demo.viewmodel->muzzle_world(eye_pose), .95f) &&
                    in_lower_view(demo.viewmodel->wrist_world()[0], .9f);
@@ -5221,6 +5224,20 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         auto finite3 = [](core::Vec3 v) {
             return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
         };
+        const auto inverse_safe_effects = [&]() {
+            bool safe = true;
+            fx_world.query<ecs::WorldTransform, render::MeshRef>().for_each(
+                [&](ecs::Entity, ecs::WorldTransform& transform, render::MeshRef& mesh) {
+                    if (mesh.mesh == render::kInvalidMeshId)
+                        return;
+                    // The renderer computes inverse-transpose normal matrices. Keep this
+                    // checked-build contract visible in Release too: millimetre geometry is
+                    // valid, but a tiny instance determinant trips the inverse's guard.
+                    const float det = core::determinant(core::to_matrix(transform.value));
+                    safe &= std::isfinite(det) && std::abs(det) > core::kEpsilon;
+                });
+            return safe;
+        };
 
         block_play::PlayWeaponFx::ViewPose view_a{};
         view_a.eye = {0, 1.2f, -4};
@@ -5240,6 +5257,7 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
                 target_body,
                 &fx_physics);
         fx.pose(fx_world, &fx_physics, &view_a);
+        check(inverse_safe_effects(), "weapon fx probe: shot transforms satisfy checked inverse");
         const auto flash_a = find_by_material(flash_mat);
         const auto flash_pos_a = transform_of(flash_a);
         const auto tracer_pos_a = transform_of(find_by_material(tracer_mat));
@@ -5292,6 +5310,7 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         // more into flight.
         fx.queue_case();
         fx.pose(fx_world, &fx_physics, &view_a);
+        check(inverse_safe_effects(), "weapon fx probe: case transforms satisfy checked inverse");
         const auto case_entity = find_by_material(case_mat);
         check(case_entity != ecs::Entity{} &&
                   core::length(transform_of(case_entity) - view_a.ejection_point) < 1e-4f,

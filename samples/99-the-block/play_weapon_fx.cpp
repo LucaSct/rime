@@ -25,9 +25,11 @@ core::Quat along_z(core::Vec3 unit) {
 }
 
 render::CpuMesh case_mesh() {
-    // Unit-radius, unit-half-length eight-sided cylinder. The instance scale supplies actual
-    // 9 mm case dimensions; flat rings make its motion readable without a texture.
+    // Bake metre dimensions into the mesh, keeping its instance transform rigid. A tiny scale
+    // determinant trips the normal-matrix inverse's absolute singularity guard in debug builds,
+    // even though the shape itself is valid. Geometry size must not depend on assertion mode.
     render::CpuMesh mesh;
+    constexpr float radius = .0048f, half_length = .013f;
     constexpr int sides = 8;
     constexpr float tau = 6.28318530718f;
     for (int i = 0; i < sides; ++i) {
@@ -35,9 +37,9 @@ render::CpuMesh case_mesh() {
         const float x = std::cos(a), y = std::sin(a);
         for (float z : {-1.0f, 1.0f}) {
             render::MeshVertex v{};
-            v.px = x;
-            v.py = y;
-            v.pz = z;
+            v.px = x * radius;
+            v.py = y * radius;
+            v.pz = z * half_length;
             v.nx = x;
             v.ny = y;
             mesh.vertices.push_back(v);
@@ -53,9 +55,9 @@ render::CpuMesh case_mesh() {
         for (int i = 0; i < sides; ++i) {
             const float a = tau * static_cast<float>(i) / sides;
             render::MeshVertex v{};
-            v.px = std::cos(a);
-            v.py = std::sin(a);
-            v.pz = z;
+            v.px = std::cos(a) * radius;
+            v.py = std::sin(a) * radius;
+            v.pz = z * half_length;
             v.nx = 0;
             v.ny = 0;
             v.nz = z;
@@ -89,7 +91,9 @@ bool PlayWeaponFx::initialize() {
     attempted_ = true;
     // Low-poly solids work with the existing opaque/emissive path. They need no texture, alpha
     // blending, transient light, shader, or asset cook. Registry ownership covers GPU retirement.
-    burst_ = meshes_.add(render::make_uv_sphere(1.0f, 4, 8), "weapon-feedback-burst");
+    // One centimetre is the shared sphere's base radius; scales express centimetres below.
+    // This keeps millimetre-wide tracers above the inverse's determinant guard as well.
+    burst_ = meshes_.add(render::make_uv_sphere(.01f, 4, 8), "weapon-feedback-burst");
     brass_ = meshes_.add(case_mesh(), "weapon-feedback-case");
     // The sphere serves flash, tracer, spark and marks; cases share one low-poly cylinder.
     if (!meshes_.contains(burst_) || !meshes_.contains(brass_))
@@ -263,7 +267,7 @@ void PlayWeaponFx::pose(ecs::World& world,
         flash.translation = muzzle + muzzle_dir * (valid_view ? .035f : .15f);
         flash.rotation = along_z(muzzle_dir);
         const float flare = 1.0f - std::min(shot.age / kFlashLifetime, 1.0f);
-        flash.scale = {0.02f + 0.03f * flare, 0.02f + 0.03f * flare, 0.06f * flare + 0.02f};
+        flash.scale = {2.0f + 3.0f * flare, 2.0f + 3.0f * flare, 6.0f * flare + 2.0f};
         show(world,
              shot.entities[0],
              shot.age < kFlashLifetime ? burst_ : render::kInvalidMeshId,
@@ -276,13 +280,13 @@ void PlayWeaponFx::pose(ecs::World& world,
         const bool forward_path = core::dot(path, shot.direction) > .28f;
         // A short swept streak visualizes the already-resolved hitscan. Its travel time is
         // presentation only: it does not postpone damage, collision, or any ShotEvent.
-        // Scale is the sphere radius, so a 30 mm total length needs a 15 mm Z half-extent.
+        // A 30 mm total length needs a 15 mm Z half-extent, expressed in base centimetres.
         // Start beyond the live flare and suppress a pellet for a hit too close to the muzzle.
         const float head = std::min(distance, .28f + 800.0f * shot.age);
         const float tail = std::max(.25f, head - .03f);
         tracer.translation = shot.muzzle + direction * ((head + tail) * 0.5f);
         tracer.rotation = along_z(direction);
-        tracer.scale = {.003f, .003f, std::max((head - tail) * .5f, .001f)};
+        tracer.scale = {.3f, .3f, std::max((head - tail) * 50.0f, .1f)};
         show(world,
              shot.entities[1],
              shot.age < kTracerLifetime && head < distance && forward_path ? burst_
@@ -293,7 +297,7 @@ void PlayWeaponFx::pose(ecs::World& world,
         spark.translation = shot.spark;
         spark.rotation = along_z(-shot.direction);
         const float size = 0.015f + 0.065f * (1.0f - shot.age / kSparkLifetime);
-        spark.scale = {size, size, size * 1.5f};
+        spark.scale = {size * 100.0f, size * 100.0f, size * 150.0f};
         show(world,
              shot.entities[2],
              shot.hit_surface && shot.age < kSparkLifetime ? burst_ : render::kInvalidMeshId,
@@ -332,7 +336,7 @@ void PlayWeaponFx::pose(ecs::World& world,
             scar.translation = state.position +
                                core::rotate(state.orientation, impact.local_point) + normal * .004f;
             scar.rotation = along_z(normal);
-            scar.scale = {.045f, .045f, .006f};
+            scar.scale = {4.5f, 4.5f, .6f};
         }
         show(world, impact.entity, active ? burst_ : render::kInvalidMeshId, scar);
     }
@@ -364,11 +368,7 @@ void PlayWeaponFx::pose(ecs::World& world,
         core::Transform transform{};
         transform.translation = casing.position;
         transform.rotation = casing.rotation;
-        // 9.6 mm diameter x 26 mm length -- the mesh's radius and half-height are both 1, so this
-        // scale IS the case's half-dimensions. The old .0095 half-length (19 mm total) read as a
-        // pistol case; the held weapon art here is the sniper/rifle pair, so a slightly longer
-        // case (still a few cm, not a "giant bullet") reads correctly at ejection distance.
-        transform.scale = {.0048f, .0048f, .013f};
+        // The shared mesh already contains the 9.6 mm diameter and 26 mm length.
         show(world, casing.entity, active ? brass_ : render::kInvalidMeshId, transform);
     }
 }
