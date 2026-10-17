@@ -804,6 +804,9 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
                                                        selected.reach_near[0],
                                                        selected.reach_far[0]);
     const core::Vec3 approached = approach_path * approach_fraction;
+    if (selected.magazine_triangles != 0 && motion_pose.left_magazine >= .999f &&
+        approach_fraction < 1.0f)
+        ++reach_stats_.missed_magazine_contacts;
     const float pull_fraction = approach_fraction == 1.0f
                                     ? reachable_fraction(arms_from_weapon,
                                                          support_grip + approached,

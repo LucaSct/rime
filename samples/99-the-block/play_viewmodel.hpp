@@ -101,6 +101,7 @@ public:
         std::array<float, 2> retained{1.0f, 1.0f};
         std::array<float, 2> applied_offset{};
         std::uint64_t limited_poses = 0;
+        std::uint64_t missed_magazine_contacts = 0;
     };
 
     [[nodiscard]] const ReachStats& reach_stats() const noexcept { return reach_stats_; }
