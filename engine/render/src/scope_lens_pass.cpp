@@ -137,7 +137,7 @@ RGTexture ScopeLensPass::add(RenderGraph& graph,
          std::max(0.0f, params.reflection_strength)},
         {std::clamp(params.glass_roughness, 0.0f, 1.0f),
          std::clamp(params.reticle_strength, 0.0f, 1.0f),
-         0.0f,
+         params.unmagnified ? 1.0f : 0.0f,
          0.0f}};
     const auto uniform_slice = graph.push_frame_data(&uniforms, sizeof(uniforms));
     // LOAD creates a read dependency on the preceding world/first-person HDR writer. Depth is

@@ -13,10 +13,12 @@ from mathutils import Matrix, Vector
 
 CHAINS = [('L_arm_01', 'L_elbow_02', 'L_wrist_03'),
           ('R_arm_023', 'R_elbow_024', 'R_wrist_025')]
+# Wrist centres are BELOW the knuckle row, at each actual grip. The former targets
+# put the right knuckles in the receiver and left the unposed thumb sticking out.
 WRIST_POINTS = {
-    'scar-h': ((.112, -.287, -.745), (.168, -.278, -.388)),
-    'm4a1': ((.117, -.249, -.710), (.163, -.275, -.391)),
-    'msr': ((.112, -.238, -.490), (.166, -.276, -.090)),
+    'scar-h': ((.112, -.365, -.705), (.168, -.343, -.363)),
+    'm4a1': ((.117, -.295, -.680), (.163, -.333, -.366)),
+    'msr': ((.112, -.300, -.465), (.166, -.385, -.030)),
 }
 
 
@@ -97,9 +99,9 @@ def prepare_arms(p, kind, mapping):
         inward = Vector((1 if side == 0 else -1, 0, 0))
         axis = desired.cross(inward).normalized()
         for finger in ('point', 'middle', 'ring', 'pink'):
+            if side == 1 and finger == 'point':
+                continue  # authored independently against the trigger guard below
             for phalanx, degrees in ((1,15), (2,55), (3,40)):
-                if side == 1 and finger == 'point':
-                    degrees *= .3  # trigger finger remains mostly extended
                 bone = next(b for b in rig.pose.bones
                             if b.name.startswith(prefix+finger+str(phalanx)+'_'))
                 world = rig.matrix_world @ bone.matrix
@@ -107,6 +109,34 @@ def prepare_arms(p, kind, mapping):
                 rotation = Matrix.Rotation(math.radians(degrees), 4, axis)
                 place_bone(rig, bone, Matrix.Translation(head) @ rotation @
                            Matrix.Translation(-head) @ world)
+        # The imported thumbs were previously left in their open-hand pose. Solve each
+        # phalanx from joint heads so the thumb opposes the curled fingers on the grip;
+        # the source bone tails are unrelated display helpers, not anatomical endpoints.
+        for phalanx, direction in enumerate(((0,.65,-.76),
+                (-.5 if side == 0 else .5,.2,-.85),
+                (-.25,-.3,-.92) if side == 0 else (.8,-.3,-.5)), start=1):
+            bone = next(b for b in rig.pose.bones
+                        if b.name.startswith(prefix+'thumb'+str(phalanx)+'_'))
+            child = next(b for b in rig.pose.bones
+                        if b.name.startswith(prefix+'thumb'+str(phalanx+1)+'_'))
+            origin = (rig.matrix_world @ bone.matrix).translation
+            orient_segment(rig, bone, child, origin + Vector(direction))
+        if side == 1:
+            # The index follows the trigger guard, not the shared fist curl. A mostly
+            # straight source index extended left of the receiver instead of into its guard.
+            # Use actual head-to-head segment lengths and keep its bend in the guard.
+            directions = ((0,.25,-.968), (-.3,0,-.954), (-.3,-.15,-.942))
+            if kind == 'm4a1':
+                directions = ((0,.70,-.714), (-.3,.2,-.933), (-.3,-.1,-.949))
+            if kind == 'msr':
+                directions = ((0,.05,-1), (-.75,.15,-.65), (.5,-.3,.81))
+            for phalanx, direction in enumerate(directions, start=1):
+                bone = next(b for b in rig.pose.bones
+                            if b.name.startswith(prefix+'point'+str(phalanx)+'_'))
+                child = next(b for b in rig.pose.bones
+                            if b.name.startswith(prefix+'point'+str(phalanx+1)+'_'))
+                origin = (rig.matrix_world @ bone.matrix).translation
+                orient_segment(rig, bone, child, origin + Vector(direction))
         grips.append(frame.copy())
     # Preserve this solved pose as the weighted REST mesh. Runtime IK starts here and
     # changes shoulder/elbow/wrist matrices; finger children retain their authored pose.
@@ -192,6 +222,8 @@ def build(p, kind):
         out.write('RIME_GRIP_V1\n')
         for frame in grips:
             out.write(' '.join(str(frame[r][c]) for c in range(4) for r in range(4))+'\n')
+    # Editable art must remain usable after the temporary conversion directory disappears.
+    bpy.ops.file.pack_all()
     bpy.ops.wm.save_as_mainfile(filepath=str(p.ROOT/(f'grip-{kind}.blend')))
     p.preview(kind, [arms]+gun)
     report = {'weapon': kind, 'wrist_frames': [[[float(v) for v in row] for row in m]

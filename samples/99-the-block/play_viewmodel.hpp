@@ -21,6 +21,11 @@ namespace rime::core {
 class JobSystem;
 }
 
+namespace rime::platform {
+class Input;
+struct Event;
+} // namespace rime::platform
+
 namespace rime::block_play {
 
 // Play-only presentation. Mesh topology/materials/textures load once. Each render solves
@@ -43,7 +48,19 @@ public:
     void advance(float frame_dt, core::Vec3 actual_velocity, bool fired) noexcept;
     void observe_camera(core::Vec3 eye) noexcept;
 
+    // Consumes the already-folded frame levels/selection edges. A right drag can look and aim
+    // together when pointer capture is unavailable; capture must never disable the aim button.
+    void apply_controls(const platform::Input& devices,
+                        std::span<const platform::Event> events = {}) noexcept;
+
     void set_aiming(bool aiming) noexcept { aiming_ = aiming; }
+
+    static constexpr float kScopeLensRadius = 0.026f;
+    static constexpr float kScopeEyeRelief = 0.05f;
+    static constexpr float kScopeMagnification = 5.0f;
+    static constexpr float kScopeEyeBoxRadius = 0.012f;
+    static constexpr float kScopeEyeReliefTolerance = 0.06f;
+    [[nodiscard]] static float scope_fov_y() noexcept;
 
     [[nodiscard]] std::span<const render::DrawItem> pose(const core::Transform& camera);
 
@@ -66,9 +83,20 @@ public:
 
     [[nodiscard]] float aim_fraction() const noexcept { return aim_; }
 
-    [[nodiscard]] const render::DrawItem& lens() const noexcept { return lens_; }
+    [[nodiscard]] const render::DrawItem& lens() const noexcept {
+        return selected_ == Weapon::Scar ? collimated_lens_ : lens_;
+    }
 
     [[nodiscard]] core::Mat4 optic_world() const noexcept { return optic_world_; }
+
+    // Conservative exit-pupil test after pose(): an entirely closed pupil needs reflected
+    // glass, but no second rendering of the world. Uses the same limits as scope_lens.frag.
+    [[nodiscard]] bool scope_feed_visible(const core::Transform& eye) const noexcept;
+
+    [[nodiscard]] core::Vec3 muzzle_world(const core::Transform& camera) const noexcept {
+        return core::transform_point(core::to_matrix(camera) * weapon_local_,
+                                     models_[static_cast<unsigned>(selected_)].muzzle);
+    }
 
     [[nodiscard]] std::size_t resident_meshes() const noexcept { return resident_meshes_; }
 
@@ -77,6 +105,8 @@ public:
     [[nodiscard]] std::size_t resident_textures() const noexcept { return resident_textures_; }
 
 private:
+    render::DrawItem collimated_lens_{};
+
     struct Part {
         render::MeshId mesh = render::kInvalidMeshId;
         render::MaterialId material = render::kInvalidMaterialId;
@@ -86,6 +116,9 @@ private:
     };
 
     struct Model {
+        core::Vec3 muzzle{}, stock{};
+        core::Mat4 camera_from_arms{}, arms_from_camera{};
+        std::array<core::Vec3, 2> elbow_poles{};
         std::vector<Part> parts;
         PlayArmIk arms;
         render::MeshId arm_mesh = render::kInvalidMeshId;
@@ -110,6 +143,7 @@ private:
     float aim_ = 0.0f;
     render::DrawItem lens_{};
     core::Mat4 optic_world_{};
+    core::Mat4 weapon_local_{};
     std::vector<render::FirstPersonDeformation> deformations_;
     std::size_t resident_meshes_ = 0;
     std::size_t resident_materials_ = 0;

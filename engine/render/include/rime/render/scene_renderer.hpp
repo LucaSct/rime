@@ -208,6 +208,7 @@ public:
         scope_hdr_ = hdr;
         scope_lens_ = lens;
         scope_params_ = params;
+        scope_requested_ = true;
     }
 
     // Optional and single-render, like the draw borrow. Counts must match the registry and
@@ -505,6 +506,8 @@ public:
 
 private:
     std::unique_ptr<ScopeLensPass> scope_lens_pass_;
+    std::unique_ptr<PresentPass> sight_world_copy_;
+    bool scope_requested_ = false;
     RGTexture scope_hdr_{};
     DrawItem scope_lens_{};
     ScopeLensPass::Params scope_params_{};

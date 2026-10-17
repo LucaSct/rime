@@ -1,0 +1,242 @@
+{
+  "frames_recorded": 451,
+  "expected_frames": 451,
+  "complete": true,
+  "phases": {
+    "warmup": {
+      "frames": 31,
+      "mean_ms": 41.45212935483871,
+      "p50_ms": 16.6508,
+      "p95_ms": 147.491,
+      "p99_ms": 569.327,
+      "max_ms": 569.327,
+      "over16_7": 13,
+      "over33_3": 4,
+      "ticks_histogram": {
+        "0": 3,
+        "8": 2,
+        "1": 18,
+        "2": 8
+      },
+      "extent_histogram": {
+        "952x514": 3,
+        "1900x508": 28
+      },
+      "aim_fraction_range": [
+        0.0,
+        0.0
+      ],
+      "yaw_range": [
+        -1.5708,
+        -1.5708
+      ],
+      "scope_feed_histogram": {
+        "0": 31
+      },
+      "terrain_range": [
+        304,
+        304
+      ]
+    },
+    "hip": {
+      "frames": 120,
+      "mean_ms": 22.084310833333333,
+      "p50_ms": 16.6989,
+      "p95_ms": 33.5592,
+      "p99_ms": 34.0175,
+      "max_ms": 34.5728,
+      "over16_7": 60,
+      "over33_3": 28,
+      "ticks_histogram": {
+        "1": 81,
+        "2": 39
+      },
+      "extent_histogram": {
+        "1900x508": 120
+      },
+      "aim_fraction_range": [
+        0.0,
+        0.0
+      ],
+      "yaw_range": [
+        -1.5708,
+        -1.5708
+      ],
+      "scope_feed_histogram": {
+        "0": 120
+      },
+      "terrain_range": [
+        304,
+        304
+      ]
+    },
+    "settle_ads": {
+      "frames": 30,
+      "mean_ms": 22.32888,
+      "p50_ms": 16.7368,
+      "p95_ms": 34.1581,
+      "p99_ms": 51.453,
+      "max_ms": 51.453,
+      "over16_7": 16,
+      "over33_3": 6,
+      "ticks_histogram": {
+        "1": 19,
+        "2": 9,
+        "3": 1,
+        "0": 1
+      },
+      "extent_histogram": {
+        "1900x508": 30
+      },
+      "aim_fraction_range": [
+        0.232765,
+        0.999977
+      ],
+      "yaw_range": [
+        -1.5708,
+        -1.5708
+      ],
+      "scope_feed_histogram": {
+        "0": 5,
+        "1": 25
+      },
+      "terrain_range": [
+        304,
+        304
+      ]
+    },
+    "ads": {
+      "frames": 120,
+      "mean_ms": 22.221958333333333,
+      "p50_ms": 16.7007,
+      "p95_ms": 33.5857,
+      "p99_ms": 34.1958,
+      "max_ms": 34.3614,
+      "over16_7": 61,
+      "over33_3": 25,
+      "ticks_histogram": {
+        "1": 80,
+        "2": 40
+      },
+      "extent_histogram": {
+        "1900x508": 120
+      },
+      "aim_fraction_range": [
+        0.999983,
+        1.0
+      ],
+      "yaw_range": [
+        -1.5708,
+        -1.5708
+      ],
+      "scope_feed_histogram": {
+        "1": 120
+      },
+      "terrain_range": [
+        304,
+        304
+      ]
+    },
+    "settle_turn": {
+      "frames": 30,
+      "mean_ms": 22.110233333333333,
+      "p50_ms": 16.6863,
+      "p95_ms": 33.5001,
+      "p99_ms": 33.8461,
+      "max_ms": 33.8461,
+      "over16_7": 14,
+      "over33_3": 9,
+      "ticks_histogram": {
+        "1": 20,
+        "2": 10
+      },
+      "extent_histogram": {
+        "1900x508": 30
+      },
+      "aim_fraction_range": [
+        2.46532e-05,
+        0.76978
+      ],
+      "yaw_range": [
+        -1.5708,
+        -1.5708
+      ],
+      "scope_feed_histogram": {
+        "0": 30
+      },
+      "terrain_range": [
+        304,
+        304
+      ]
+    },
+    "turning": {
+      "frames": 120,
+      "mean_ms": 22.220505833333334,
+      "p50_ms": 16.6964,
+      "p95_ms": 33.5557,
+      "p99_ms": 34.5132,
+      "max_ms": 35.27,
+      "over16_7": 59,
+      "over33_3": 28,
+      "ticks_histogram": {
+        "1": 80,
+        "2": 40
+      },
+      "extent_histogram": {
+        "1900x508": 120
+      },
+      "aim_fraction_range": [
+        7.32853e-24,
+        1.89337e-05
+      ],
+      "yaw_range": [
+        -2.17589,
+        -0.770988
+      ],
+      "scope_feed_histogram": {
+        "0": 120
+      },
+      "terrain_range": [
+        304,
+        304
+      ]
+    }
+  },
+  "resize_events_total": 2,
+  "extent_changes": [
+    {
+      "frame": 0,
+      "extent": [
+        952,
+        514
+      ]
+    },
+    {
+      "frame": 2,
+      "extent": [
+        1900,
+        508
+      ]
+    }
+  ],
+  "shots": 0,
+  "charge": false,
+  "gpu_timings": "Unavailable: production Application does not resolve timing queries on windowed present.",
+  "scope_transitions": [
+    {
+      "render_frame": 155,
+      "phase": "settle_ads",
+      "feed": true,
+      "aim": 0.882716,
+      "following_interval_ms": 51.453
+    },
+    {
+      "render_frame": 300,
+      "phase": "settle_turn",
+      "feed": false,
+      "aim": 0.76978,
+      "following_interval_ms": 13.6215
+    }
+  ],
+  "all_frames_max_ms": 569.327
+}

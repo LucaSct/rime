@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "rime/rhi/rhi.hpp"
@@ -379,6 +380,13 @@ public:
     }
 
 private:
+    struct PassNameState {
+        bool fold_repeats = false;
+        std::size_t next_suffix = 1;
+    };
+
+    std::unordered_map<std::string, PassNameState> pass_names_;
+
     // One declared use of one resource: the state the pass needs it in, and whether it writes.
     // This little record is the whole input to ordering, culling, AND barriers — the payoff of
     // declaring accesses instead of hand-placing synchronization.

@@ -46,6 +46,15 @@ public:
 
     [[nodiscard]] std::span<const rime::core::Mat4> joint_worlds() const noexcept { return world_; }
 
+    // Rest-pose anchors let presentation place a torso independently of the moving weapon.
+    // Elbow poles choose the bend plane; they cannot move these shoulder joints.
+    [[nodiscard]] std::array<rime::core::Vec3, 2> bind_shoulders() const noexcept {
+        if (!initialized_)
+            return {};
+        return {rime::core::transform_point(bind_world_[arms_[0].joints[0]], {}),
+                rime::core::transform_point(bind_world_[arms_[1].joints[0]], {})};
+    }
+
 private:
     struct Influence {
         std::array<std::uint16_t, 4> joints{};

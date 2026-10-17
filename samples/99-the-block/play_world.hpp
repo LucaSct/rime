@@ -80,6 +80,12 @@ public:
     [[nodiscard]] bool recenter(core::Vec3 eye);
     void mark_drawn() noexcept;
 
+    // Set before the first recenter. Textures remain owned by the scene's environment.
+    void set_surface_palette(const render::TerrainPalette& palette) {
+        surface_palette_ = palette;
+        dressed_surface_ = true;
+    }
+
     [[nodiscard]] render::TerrainPass* pass() noexcept { return pass_.get(); }
 
     [[nodiscard]] std::span<const render::TerrainSceneDraw> draws() const noexcept {
@@ -129,6 +135,8 @@ private:
     std::vector<render::TerrainSceneDraw> draws_;
     render::TerrainFrame frame_ = 0;
     Stats stats_{};
+    render::TerrainPalette surface_palette_{};
+    bool dressed_surface_ = false;
 };
 
 [[nodiscard]] bool needs_recovery(core::Vec3 position) noexcept;

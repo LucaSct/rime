@@ -27,7 +27,7 @@ layout(std140, set = 0, binding = 4) uniform DdgiParams {
     mat4 ray_rotation;          // this frame's random rotation (upper-left 3x3 meaningful)
     vec4 grid_origin_spacing;   // xyz snapped lattice origin, w spacing
     uvec4 grid_dims_base;       // xyz probe counts, w round-robin base (global index of local 0)
-    uvec4 probes_rays_total;    // x probes_this_update, y rays_per_probe, z total_probes
+    uvec4 probes_rays_total;    // x probes_this_update, y rays_per_probe, z total_probes, w stable rays
     vec4 sun_dir_maxdist;       // xyz sun TRAVEL direction, w max trace distance
     vec4 sun_radiance_albedo;   // rgb sun radiance, w grey-world albedo
     vec4 sky_radiance_pad;      // rgb flat fallback radiance (a miss), w = sky-LUT enabled
@@ -56,6 +56,28 @@ vec3 fibonacci_direction(uint i, uint n) {
     return vec3(cos(theta) * r, y, sin(theta) * r);
 }
 
+uint probe_hash(uint x) {
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16u);
+}
+vec3 stable_probe_direction(vec3 direction, vec3 position, float spacing) {
+    // Key the quadrature rotation to a WORLD lattice point, never the rolling atlas slot.
+    // A remapped probe therefore keeps its directions as well as its irradiance history.
+    const uvec3 cell = uvec3(ivec3(round(position / spacing)));
+    const uint seed = probe_hash(cell.x ^ probe_hash(cell.y) ^ probe_hash(cell.z + 0x9e3779b9u));
+    const float z = float(seed & 65535u) / 32767.5 - 1.0;
+    const float azimuth = float(probe_hash(seed) & 65535u) * (6.28318530718 / 65536.0);
+    const vec3 axis = vec3(sqrt(max(0.0, 1.0 - z*z)) * cos(azimuth), z,
+                           sqrt(max(0.0, 1.0 - z*z)) * sin(azimuth));
+    const float angle = float(probe_hash(seed + 1u) & 65535u) * (6.28318530718 / 65536.0);
+    // Rodrigues' axis-angle rotation, a fixed stratified integration rule rather than frozen GI.
+    return direction * cos(angle) + cross(axis, direction) * sin(angle) +
+           axis * dot(axis, direction) * (1.0 - cos(angle));
+}
+
 void main() {
     uint rays_per_probe = params.probes_rays_total.y;
     uint total = params.probes_rays_total.x * rays_per_probe;
@@ -78,7 +100,10 @@ void main() {
     vec3 probe_pos = params.grid_origin_spacing.xyz +
                      vec3(float(px), float(py), float(pz)) * params.grid_origin_spacing.w;
 
-    vec3 dir = mat3(params.ray_rotation) * fibonacci_direction(ray_idx, rays_per_probe);
+    const vec3 basis = fibonacci_direction(ray_idx, rays_per_probe);
+    vec3 dir = params.probes_rays_total.w != 0u
+                   ? stable_probe_direction(basis, probe_pos, params.grid_origin_spacing.w)
+                   : mat3(params.ray_rotation) * basis;
     float max_dist = params.sun_dir_maxdist.w;
     float t = sdf_sphere_trace(probe_pos, dir, max_dist);
 

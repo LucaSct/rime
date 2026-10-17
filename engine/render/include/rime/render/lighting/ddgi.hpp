@@ -159,7 +159,7 @@ struct GpuDdgiTraceParams {
     float grid_origin_spacing[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // xyz snapped origin, w spacing
     std::uint32_t grid_dims_base[4] = {0, 0, 0, 0}; // xyz probe counts, w round-robin base index
     std::uint32_t probes_rays_total[4] =
-        {0, 0, 0, 0}; // x probes_this_update, y rays_per_probe, z total_probes, w unused
+        {0, 0, 0, 0}; // x probes_this_update, y rays_per_probe, z total_probes, w stable quadrature
     float sun_dir_maxdist[4] = {0.0f, -1.0f, 0.0f, 8.0f};    // xyz sun TRAVEL dir, w max trace dist
     float sun_radiance_albedo[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // rgb sun radiance, w grey albedo
     float sky_radiance_pad[4] = {0.0f, 0.0f, 0.0f, 0.0f};    // rgb sky/ambient (a miss), w unused
@@ -197,7 +197,10 @@ static_assert(sizeof(GpuDdgiBlendParams) == 16, "GpuDdgiBlendParams must be one 
 struct GpuDdgiSampleParams {
     float grid_origin_spacing[4] = {0.0f, 0.0f, 0.0f, 0.0f}; // xyz snapped origin, w spacing
     std::uint32_t grid_dims_perrow[4] = {0, 0, 0, 0};        // xyz probe counts, w probes/row
-    std::uint32_t enabled_pad[4] = {0, 0, 0, 0};             // x enabled (0/1), yzw unused
+    std::uint32_t enabled_pad[4] = {0,
+                                    0,
+                                    0,
+                                    0}; // x enabled, y finite camera-relative support, zw unused
 };
 
 static_assert(sizeof(GpuDdgiSampleParams) == 48 &&

@@ -25,6 +25,9 @@ public:
         float reflection_strength = 1.0f; // zero is a useful sensitivity control
         float glass_roughness = 0.12f;
         float reticle_strength = 1.0f;
+        // A collimated 1x sight transmits a snapshot of parent world HDR at the SAME pixel.
+        // It needs no second camera or circular exit pupil; the actual glass mesh is its mask.
+        bool unmagnified = false;
     };
 
     explicit ScopeLensPass(rhi::Device& device);

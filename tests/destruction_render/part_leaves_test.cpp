@@ -127,6 +127,39 @@ struct Fixture {
 
 } // namespace
 
+TEST_CASE("part meshes: texture phase survives COM rebasing and every face has a tangent frame") {
+    const auto wall = load_wall();
+    std::size_t triangles = 0;
+    for (const auto& part : wall.parts) {
+        const auto mesh = destruction_render::mesh_from_part(part);
+        auto shifted = part;
+        const core::Vec3 offset{3.25f, -1.5f, 2.75f};
+        shifted.com += offset;
+        for (auto& p : shifted.vertices)
+            p -= offset;
+        const auto rebased = destruction_render::mesh_from_part(shifted);
+        REQUIRE(mesh.vertices.size() == rebased.vertices.size());
+        for (std::size_t i = 0; i < mesh.vertices.size(); ++i) {
+            const auto& a = mesh.vertices[i];
+            const auto& b = rebased.vertices[i];
+            CHECK(a.u == doctest::Approx(b.u).epsilon(2e-5));
+            CHECK(a.v == doctest::Approx(b.v).epsilon(2e-5));
+            CHECK(std::isfinite(a.tx + a.ty + a.tz + a.tw));
+            CHECK(core::dot(core::Vec3{a.nx, a.ny, a.nz}, core::Vec3{a.tx, a.ty, a.tz}) ==
+                  doctest::Approx(0).epsilon(2e-5));
+        }
+        for (std::size_t i = 0; i < mesh.indices.size(); i += 3) {
+            const auto& a = mesh.vertices[mesh.indices[i]];
+            const auto& b = mesh.vertices[mesh.indices[i + 1]];
+            const auto& c = mesh.vertices[mesh.indices[i + 2]];
+            const float uv_area = (b.u - a.u) * (c.v - a.v) - (b.v - a.v) * (c.u - a.u);
+            CHECK(std::abs(uv_area) > 1e-8f);
+            ++triangles;
+        }
+    }
+    CHECK(triangles > wall.parts.size());
+}
+
 TEST_CASE("part leaves: one leaf per part, and ONE mesh table per pattern") {
     Fixture fx(3);
     const destruction_render::LeafStats stats =

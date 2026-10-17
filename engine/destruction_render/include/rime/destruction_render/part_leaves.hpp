@@ -43,6 +43,11 @@ class PhysicsWorld;
 // afford and the block cannot.
 namespace rime::destruction_render {
 
+// Fan-triangulate a convex part with metre-scaled, dominant-face planar UVs. Coordinates are
+// anchored in the original unbroken slab, so adjacent chunks share a pattern before fracture,
+// and carry that pattern with them after they detach. Pure CPU conversion; no renderer required.
+[[nodiscard]] render::CpuMesh mesh_from_part(const assets::DestructiblePart& part);
+
 // What one `update()` did. Every field exists because the failure it names is otherwise INVISIBLE:
 // a block that draws nothing and a block that draws everything both produce a frame.
 struct LeafStats {

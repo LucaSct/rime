@@ -48,3 +48,17 @@ weighted arm rigs in uniform camera-local metres. Synthetic CI tests prove conta
 skinning, deformation velocity, frame lifetime, lens boundaries, occlusion, eye response
 and reflection sensitivity. Real-art smoke additionally exercises motion and ADS;
 coverage of downloaded artwork remains local.
+
+## 2026-10-15: closer aimed ocular and rendered magnification proof
+
+The owner requested a larger aiming window. The sample moves the MSR aim pose
+forward 40 mm, reducing nominal eye relief from 90 to 50 mm. Lens radius remains
+26 mm; the second camera's FOV and the eye-box parameters use the shared relief.
+The outer camera FOV stays unchanged. A 5,376-pose installed-rig sweep, including
+bob and recoil extremes, has zero clamped targets, 47.063 mm minimum arm reach
+margin and 23.810 mm housing clearance beyond the parent near plane.
+
+The smoke now renders a real target through the normal and optical paths and
+measures its pixel width after TAA: 11 versus 54 pixels (4.909× on the RTX 3060).
+This supplements the projective 5× check and transmitted-input sensitivity control;
+a camera focal-ratio assertion by itself cannot prove the displayed magnification.

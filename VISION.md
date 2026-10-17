@@ -13,11 +13,26 @@ true, we change it on purpose (via an [ADR](docs/adr/)) — never by accident.
 
 ## 1. The dream in one sentence
 
-**Rime is a free, open-source, AAA-grade game engine that fuses the destruction of
-Frostbite, the lighting and rendering of Unreal Engine 5, and the modular
-architecture of O3DE — built to ship a game at the fidelity of Battlefield 6, and
-built so that anyone can read the source and learn how a modern engine actually
-works.**
+**Rime is a free, open-source, multiplayer-first game engine for developing and
+shipping large-scale games: Battlefield-class destruction and rendering,
+Arma-like physical simulation, and a modular runtime shared by development and
+shipped games. Its pipeline produces native artifacts for each supported target,
+with dedicated hosting, browser play, and creator-enabled browser development.**
+
+This is the product direction, not a claim that every target or scale is available
+already. The source remains written to teach how a modern engine works.
+
+The shipping targets include Windows and Linux PCs, PlayStation 4 and Xbox, with
+other platforms added through the same target pipeline. Each target receives its
+own executable and platform package. A console player build can be accompanied by
+a compatible Linux/Windows dedicated-server build. Browser play initially uses the
+native streaming architecture; a browser-native runtime is a separate target.
+
+A creator can enable browser development so players can change their own game or
+fork. Editing uses the same simulation and content pipeline as a shipped game;
+changes become validated, versioned builds before entering shared sessions.
+See [the multiplayer shipment plan](docs/design/multiplayer-shipping.md) and
+[ADR-0085](docs/adr/0085-multiplayer-development-and-shipment.md).
 
 ## 2. Why this exists
 
@@ -58,8 +73,9 @@ These are ordered. When two principles conflict, the higher one wins.
    Where a feature's quality or performance is at stake, we do not compromise it for
    convenience, portability, or simplicity.
 2. **Cross-platform, but never at the engine's expense.** The engine and its editor
-   target **Windows, Linux, and macOS**, and games built with it should ship to many
-   platforms. *But* if a portability requirement would diminish the engine's power or
+   currently build on **Windows, Linux, and macOS**. Native game shipment targets
+   also include **PlayStation 4 and Xbox**, with explicit toolchain, runtime and
+   package proofs before a target is called supported. *But* if a portability requirement would diminish the engine's power or
    performance, we narrow the platform set rather than weaken the engine. Portability
    is a goal, not a constraint that gets to win.
 3. **The code teaches.** Source is written to be *read*. Generous, honest comments
@@ -82,8 +98,13 @@ These are ordered. When two principles conflict, the higher one wins.
   from the same destruction event, GI that updates as walls come down, all running at
   a playable frame rate. This single scene exercises destruction + lighting +
   modularity together. It is our "vertical slice" of the dream.
-- **The platform proof:** a small team can build a Battlefield-style multiplayer
-  combat sandbox on Rime without forking the engine.
+- **The platform proof:** a small team can develop and ship a Battlefield-style
+  multiplayer combat sandbox without forking the engine. The exported game uses
+  the same authoritative netcode and physics as development, includes an operable
+  dedicated-server artifact, and has versioned native builds per supported target.
+- **The browser proof:** players can play through a browser and, where the creator
+  enables it, edit their own fork, preview it in isolation, and publish a validated
+  version into their own multiplayer session.
 - **The learning proof:** someone with no engine experience reads the repo and the
   docs and *understands* how the renderer, the ECS, and the destruction system fit
   together — and lands their first contribution.
@@ -93,8 +114,10 @@ These are ordered. When two principles conflict, the higher one wins.
 To stay honest about scope, these are explicitly **out of the initial milestones**.
 Each may return later via an ADR.
 
-- Console platform backends (PS5/Xbox/Switch) — designed-for, not built yet.
-- Mobile/web targets.
+- Console backends are planned shipment work, not implemented support. Each console
+  remains blocked until its toolchain, hardware, runtime and package gates pass.
+- Mobile targets and a native WebAssembly runtime. Browser streaming and optional
+  browser authoring are product requirements with their own delivery stages.
 - A marketplace/asset store.
 - Photorealistic-out-of-the-box content (we build the *engine*; art comes later).
 - Backward-compatibility guarantees while we are pre-1.0. Things will change.

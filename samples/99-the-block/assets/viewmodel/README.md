@@ -1,11 +1,15 @@
 # Held weapon art for `--play`
 
 `the_block --play` draws a SCAR-H (`1`), M4A1 (`2`), or Remington MSR with a Schmidt & Bender
-5–25×56 PM II (`3`). Hold `Q` or right mouse with captured cursor to aim. The optical view is
+5–25×56 PM II (`3`). Hold `Q` or right mouse to aim (also during drag-look fallback). The aimed ocular sits 50 mm from the eye (about 85% of frame height). The optical view is
 5×; only the physical scope lens magnifies, and the surrounding view keeps its normal FOV.
 The models are third-party [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/) work by four Sketchfab
 creators; **they are not in this repository**, and `.gitignore` here keeps them out. Attribution,
 original links and the exact modifications are in [ASSET-LICENSES.md](ASSET-LICENSES.md).
+
+All three weapons have separate aim poses and authored opposed thumbs/finger curls. The optical
+camera is calibrated through the physical ocular for an apparent 5× image; a fivefold feed focal
+ratio alone would only appear about 2.36× through this aperture. Rifles retain normal magnification.
 
 ## Without the art
 
@@ -42,5 +46,13 @@ images and says so.
 The MSR source has solid materials and no texture maps; the preparation keeps those materials.
 Its original opaque glass is replaced by a physical lens with the separate camera's HDR image,
 eye-box blackout, reticle and Fresnel-weighted sky reflections. This is an optical approximation,
-not a simulation of every glass element. Scope rendering adds a second scene view only while the
-MSR is selected. Pressing right mouse in drag-look mode keeps looking; use `Q` to aim there.
+not a simulation of every glass element. Scope rendering adds a second scene view only when its
+exit pupil can transmit to the eye. At hip fire the same glass/reflection pass uses a black input.
+Hold right mouse to aim while drag-look remains available; `Q` is another held aim control.
+
+The camera represents the right eye. Each measured stock seats on a fixed right shoulder with
+a bladed arm frame; wrist constraints still follow bob, recoil and the full aim blend. Both M4
+sights define its calibrated sight line. The SCAR's opaque panes are separated from their shared
+housing material; its original near glass masks a transparent 1× parent-world image and collimated
+red ring. This path needs no second world camera. See
+[ADR-0086](../../../../docs/adr/0086-play-sight-calibration-and-render-graph-scale.md).

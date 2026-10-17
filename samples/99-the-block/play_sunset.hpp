@@ -96,6 +96,11 @@ inline int apply(ecs::World& world) {
     authored.intensity = 0.06f;
     authored.use_scene_sun = true;
     authored.angular_radius = 0.012f;
+    // A broken cloud deck rather than a clear test sky. Wind stays fixed here: changing this
+    // bake every frame would also animate the environment lighting while diagnosing stability.
+    authored.coverage = .62f;
+    authored.density = .65f;
+    authored.sharpness = .18f;
     return authored;
 }
 

@@ -66,7 +66,6 @@ constexpr float kWallZ = -2.0f; // view space; the camera is the world origin lo
 
 // The probe grid: 2x2x2 probes, 2 m apart, its nearest layer 0.5 m BEHIND the camera. The wall
 // (z = -2) is outside it; every pixel's mirror ray (wall normal +z) points back toward it.
-constexpr std::uint32_t kProbes = 8;
 constexpr float kGridOrigin[3] = {-1.0f, -1.0f, 0.5f};
 constexpr float kGridSpacing = 2.0f;
 
@@ -167,14 +166,16 @@ struct Fixture {
         return upload(e, 1, rhi::Format::RG32Float, px.data(), px.size() * sizeof(float));
     }
 
-    rhi::TextureHandle probe_plane_visibility() {
-        constexpr rhi::Extent2D e{kProbes * kDdgiVisibilityTileSize, kDdgiVisibilityTileSize};
+    rhi::TextureHandle probe_plane_visibility(std::uint32_t dims) {
+        const auto per_row = dims * dims;
+        const rhi::Extent2D e{per_row * kDdgiVisibilityTileSize, dims * kDdgiVisibilityTileSize};
         std::vector<float> px(static_cast<std::size_t>(e.width) * e.height * 2);
         for (std::uint32_t y = 0; y < e.height; ++y) {
             for (std::uint32_t x = 0; x < e.width; ++x) {
-                // Probe index = x + y*2 + z*4. The z=0 layer sits on the query plane
-                // and rejects every nonzero distance; the z=1 layer is fully visible.
-                const float mean = x / kDdgiVisibilityTileSize >= 4 ? 100.0f : 0.0f;
+                // Real packing: one XY plane of tiles per atlas row, Z slices stacked down.
+                const auto global =
+                    x / kDdgiVisibilityTileSize + (y / kDdgiVisibilityTileSize) * per_row;
+                const float mean = global / (dims * dims) >= 1 ? 100.0f : 0.0f;
                 const std::size_t i = 2 * (static_cast<std::size_t>(y) * e.width + x);
                 px[i] = mean;
                 px[i + 1] = mean * mean;
@@ -199,11 +200,31 @@ struct Fixture {
         bool chain = false;
         bool sdf = false;
         float wall_z = kWallZ;
+        bool finite_support = false; // legacy authored/thin grids retain their clamp contract
+        std::uint32_t grid_dims = 2;
+        float grid_spacing = kGridSpacing;
+        bool snap_grid_to_camera = false;
+        core::Vec3 camera_position{};
+        bool track_world_point = false;
+        core::Vec3 world_point{}; // held at pixel (3,3) using an off-axis frustum
     };
 
+    core::Vec3 last_origin{};
+
     HdrImage run(const Case& c) {
-        const core::Mat4 proj = core::perspective(1.0f, 1.0f, 0.1f, 100.0f);
-        const core::Vec4 wall_clip = proj * core::Vec4{0.0f, 0.0f, c.wall_z, 1.0f};
+        core::Mat4 proj = core::perspective(1.0f, 1.0f, 0.1f, 100.0f);
+        if (c.track_world_point) {
+            // Keep a real world-plane point under the SAME pixel while translating the camera.
+            // An off-axis perspective frustum changes neither that plane nor its +Z normal.
+            constexpr float query_ndc = (3.5f / kSize) * 2.0f - 1.0f;
+            const float distance = c.camera_position.z - c.wall_z;
+            proj.at(0, 2) =
+                proj.at(0, 0) * (c.world_point.x - c.camera_position.x) / distance - query_ndc;
+            proj.at(1, 2) =
+                proj.at(1, 1) * (c.world_point.y - c.camera_position.y) / distance - query_ndc;
+        }
+        const core::Vec4 wall_clip =
+            proj * core::Vec4{0.0f, 0.0f, c.wall_z - c.camera_position.z, 1.0f};
         const float wall_ndc = wall_clip.z / wall_clip.w;
 
         const rhi::Extent2D e{kSize, kSize};
@@ -215,25 +236,39 @@ struct Fixture {
         const rhi::TextureHandle lut =
             constant_f16({32, 18}, {kSkyLut[0], kSkyLut[1], kSkyLut[2], 1.0f});
 
+        // Match DdgiProbes' actual XY-plane packing at every dimension; the finite-volume
+        // regressions use 8^3 real tiles, never a tiny atlas sampled out of bounds.
+        const auto per_row = c.grid_dims * c.grid_dims;
         const rhi::TextureHandle irradiance =
-            constant_f16({kProbes * kDdgiIrradianceTileSize, kDdgiIrradianceTileSize},
+            constant_f16({per_row * kDdgiIrradianceTileSize, c.grid_dims * kDdgiIrradianceTileSize},
                          {c.ddgi_radiance[0], c.ddgi_radiance[1], c.ddgi_radiance[2], 1.0f});
         const float mean = c.coverage == Coverage::Covered ? 100.0f : 0.0f;
         const rhi::TextureHandle visibility =
             c.coverage == Coverage::ProbePlane
-                ? probe_plane_visibility()
-                : constant_rg32({kProbes * kDdgiVisibilityTileSize, kDdgiVisibilityTileSize},
-                                mean,
-                                mean * mean);
+                ? probe_plane_visibility(c.grid_dims)
+                : constant_rg32(
+                      {per_row * kDdgiVisibilityTileSize, c.grid_dims * kDdgiVisibilityTileSize},
+                      mean,
+                      mean * mean);
 
         GpuDdgiSampleParams dp{};
-        dp.grid_origin_spacing[0] = kGridOrigin[0];
-        dp.grid_origin_spacing[1] = kGridOrigin[1];
-        dp.grid_origin_spacing[2] = c.coverage == Coverage::ProbePlane ? kWallZ : kGridOrigin[2];
-        dp.grid_origin_spacing[3] = kGridSpacing;
-        dp.grid_dims_perrow[0] = dp.grid_dims_perrow[1] = dp.grid_dims_perrow[2] = 2;
-        dp.grid_dims_perrow[3] = kProbes; // one atlas row
+        const std::array camera{c.camera_position.x, c.camera_position.y, c.camera_position.z};
+        for (unsigned axis = 0; axis < 3; ++axis) {
+            const float half_extent = static_cast<float>(c.grid_dims - 1) * c.grid_spacing * .5f;
+            dp.grid_origin_spacing[axis] =
+                c.snap_grid_to_camera
+                    ? std::floor((camera[axis] - half_extent) / c.grid_spacing) * c.grid_spacing
+                    : kGridOrigin[axis];
+        }
+        if (c.coverage == Coverage::ProbePlane)
+            dp.grid_origin_spacing[2] = kWallZ;
+        dp.grid_origin_spacing[3] = c.grid_spacing;
+        dp.grid_dims_perrow[0] = dp.grid_dims_perrow[1] = dp.grid_dims_perrow[2] = c.grid_dims;
+        dp.grid_dims_perrow[3] = per_row;
         dp.enabled_pad[0] = c.ddgi_enabled ? 1u : 0u;
+        dp.enabled_pad[1] = c.finite_support ? 1u : 0u;
+        last_origin = {
+            dp.grid_origin_spacing[0], dp.grid_origin_spacing[1], dp.grid_origin_spacing[2]};
 
         RenderGraph graph(device);
         graph.reset();
@@ -268,7 +303,7 @@ struct Fixture {
         }
 
         SsrInputs in{};
-        in.view = core::identity();
+        in.view = core::mat4_translation(-c.camera_position);
         in.proj = proj;
         in.z_near = 0.1f;
         in.z_far = 100.0f;
@@ -458,4 +493,91 @@ TEST_CASE("ssr ddgi coverage: normal-biased query stays on the covered side of a
     // Each sky channel is 75% of its probe counterpart: the analytic control gap is 25%.
     CHECK_MESSAGE(worst_against(outside, kDdgiBright) > 0.2,
                   "the unsupported control must differ visibly from probe radiance");
+}
+
+TEST_CASE("ssr ddgi finite support: covered core darkness, missing coverage and remote fallback") {
+    auto device = device_or_skip("finite DDGI SSR support proof");
+    if (!device)
+        return;
+    Fixture f(*device);
+    Fixture::Case core{};
+    core.coverage = Fixture::Coverage::Covered;
+    core.wall_z = -0.5f;
+    core.finite_support = true;
+    core.grid_dims = 8;
+    core.grid_spacing = 1.0f;
+    core.snap_grid_to_camera = true;
+    const auto black = f.run(core);
+    core.ddgi_radiance = kDdgiBright;
+    const auto bright = f.run(core);
+    core.coverage = Fixture::Coverage::None;
+    const auto rejected = f.run(core);
+    CHECK_MESSAGE(max_channel(black) <= 1e-6f, "accepted black in the supported core stays black");
+    CHECK_MESSAGE(worst_against(bright, kDdgiBright) < 1e-3,
+                  "bright-atlas control proves the core really accepts probes");
+    CHECK_MESSAGE(worst_against(rejected, kSkyLut) < 1e-3,
+                  "no accepted core probe retains the sky despite a bright irradiance atlas");
+
+    Fixture::Case remote = core;
+    remote.coverage = Fixture::Coverage::Covered;
+    remote.track_world_point = true;
+    remote.world_point = {6.0f, 0.0f, remote.wall_z};
+    const auto finite = f.run(remote);
+    remote.finite_support = false;
+    const auto legacy = f.run(remote);
+    const auto channel = [](const HdrImage& image, unsigned c) {
+        return image.rgb[(3 * kSize + 3) * 3 + c];
+    };
+    for (unsigned c = 0; c < 3; ++c) {
+        CHECK(channel(finite, c) == doctest::Approx(kSkyLut[c]).epsilon(.002));
+        CHECK(channel(legacy, c) == doctest::Approx(kDdgiBright[c]).epsilon(.002));
+    }
+    MESSAGE("finite SSR remote: sky=" << finite.luminance(3, 3)
+                                      << "; legacy covered-probe sensitivity="
+                                      << legacy.luminance(3, 3));
+}
+
+TEST_CASE("ssr ddgi finite support: a fixed world query blends continuously across camera snap") {
+    auto device = device_or_skip("finite DDGI recenter continuity proof");
+    if (!device)
+        return;
+    Fixture f(*device);
+    Fixture::Case query{};
+    query.coverage = Fixture::Coverage::Covered;
+    query.ddgi_radiance = kDdgiBright;
+    query.wall_z = -0.5f;
+    query.finite_support = true;
+    query.grid_dims = 8;
+    query.grid_spacing = 1.0f;
+    query.snap_grid_to_camera = true;
+    query.track_world_point = true;
+    query.world_point = {2.5f, 0.0f, query.wall_z};
+    query.camera_position = {0.49f, 0.0f, 0.0f};
+    const auto before = f.run(query);
+    const auto origin_before = f.last_origin;
+    query.camera_position.x = .51f;
+    const auto after = f.run(query);
+    REQUIRE(f.last_origin.x == origin_before.x + 1.0f);
+    const auto sample = [](const HdrImage& image, unsigned channel) {
+        return image.rgb[(3 * kSize + 3) * 3 + channel];
+    };
+    float largest_step = 0.0f;
+    for (unsigned c = 0; c < 3; ++c) {
+        const float lo = std::min(kSkyLut[c], kDdgiBright[c]);
+        const float hi = std::max(kSkyLut[c], kDdgiBright[c]);
+        CHECK(sample(before, c) > lo + .1f * (hi - lo));
+        CHECK(sample(before, c) < hi - .1f * (hi - lo));
+        CHECK(sample(after, c) > lo + .1f * (hi - lo));
+        CHECK(sample(after, c) < hi - .1f * (hi - lo));
+        const float change = std::abs(sample(after, c) - sample(before, c));
+        largest_step = std::max(largest_step, change);
+        // A two-centimetre camera move must change a one-metre fade by a small fraction of its
+        // measured sky/probe control gap, even while the actual lattice moves a WHOLE metre.
+        CHECK(change < .04f * (hi - lo) + .002f);
+    }
+    CHECK(largest_step > .005f); // sensitivity: continuous support is live, not frozen to a slot
+    CHECK(sample(after, 0) > sample(before, 0)); // camera moved toward this fixed bright query
+    MESSAGE("finite SSR snap: fixed world (2.5,0,-.5), camera .49->.51, grid "
+            << origin_before.x << "->" << f.last_origin.x
+            << "; max radiance step=" << largest_step);
 }

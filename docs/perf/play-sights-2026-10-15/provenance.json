@@ -1,0 +1,38 @@
+{
+  "time": "2026-10-15 16:24:10.271354+02:00",
+  "source": {
+    "main-before.cpp": {
+      "sha256": "abc7f1e45be8a93ed77723a12cf9825daab71547f85d5f984187993b0640e6af",
+      "bytes": 274294
+    },
+    "main-after.cpp": {
+      "sha256": "71ddcde1b956548011bc99704d15e911a0ecd65911ea4120801ec30cc4e81609",
+      "bytes": 276257
+    },
+    "main-after-instrumented.cpp": {
+      "sha256": "b8dc4477de60987cf33fe01d8707cd3de1f77f68deb693430bdf1581ee9380ab",
+      "bytes": 276660
+    },
+    "live_scene_perf_after.cpp": {
+      "sha256": "0f85703d0d0027ae244e7d4b7db252feb4b700ce1ef7af598260fff7d10d7458",
+      "bytes": 6878
+    },
+    "live_scene_perf_span.cpp": {
+      "sha256": "03391b9c5a9f7709304ad0fc682aed74672454571214273571b9e46944329f71",
+      "bytes": 7161
+    },
+    "live_scene_perf": {
+      "sha256": "eaf7645ce130c37697f5b2c15ff565cc747e455cff86b835590050325b5f5be4",
+      "bytes": 56921088
+    },
+    "live_scene_perf_after": {
+      "sha256": "45153ece7a447d068fcff74281b665ac7e35f5b450012a3044f760ffbfd38f83",
+      "bytes": 57325848
+    },
+    "live_scene_perf_span": {
+      "sha256": "1d862d5cc694a164cd1b8fd33ec1bfea71b5cea4e2a1bcbd20cf5c985fde3ef1",
+      "bytes": 57365576
+    }
+  },
+  "note": "Hashes of preserved artifacts; linked archive/source hashes at after build time are in after-provenance.txt. Root changed ScopeLensParams after these captures; do not rebuild until its next matched engine build."
+}

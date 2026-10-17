@@ -2,9 +2,10 @@
 # Copyright (c) 2026 The Rime Engine Authors.
 """Prepare first-person weapons and weighted arm rigs from CC BY sources.
 
-Run from the repository root with:  blender -b -t 4 --python <this file>
+Run from the repository root with: blender -b -t 4 --python-exit-code 1 --python <this file>
 Inputs: the original GLBs in ../source/. Outputs: ../held-*.glb, ../arms-*.glb, editable rigs,
 plus preview renders in $RIME_PREVIEW_DIR (default: ./viewmodel-previews).
+$RIME_VIEWMODEL_OUTPUT_DIR can stage generated art without replacing installed assets.
 
 Why textures come from the images EMBEDDED in those GLBs: the textures that Sketchfab's
 public media URLs serve for these models are corrupt. Each decodes as a valid PNG at its
@@ -28,10 +29,11 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from viewmodel_textures import extract_glb_images, specgloss_to_metalrough
 
-ROOT = HERE.parent
+ROOT = Path(os.environ.get('RIME_VIEWMODEL_OUTPUT_DIR', HERE.parent)).resolve()
+ROOT.mkdir(parents=True, exist_ok=True)
 REPORT = Path(os.environ.get('RIME_PREVIEW_DIR', 'viewmodel-previews')).resolve()
 REPORT.mkdir(parents=True, exist_ok=True)
-SRC = ROOT / 'source'
+SRC = HERE.parent / 'source'
 WORK = Path(tempfile.mkdtemp(prefix='viewmodel-tex-'))
 
 def image(path, noncolor=False):

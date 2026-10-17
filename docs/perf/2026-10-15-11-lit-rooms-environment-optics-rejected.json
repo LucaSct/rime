@@ -1,0 +1,387 @@
+{
+  "schema": 1,
+  "run": {
+    "sample": "11-lit-rooms",
+    "commit": "b6efb21-dirty",
+    "date": "2026-10-15"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 3060",
+    "driver": "NVIDIA 615.78.08",
+    "os": "linux",
+    "build": "RelWithDebInfo",
+    "sanitizer": "off",
+    "preset": "all-lighting-gates",
+    "width": 1920,
+    "height": 1080
+  },
+  "distributions": {
+    "frame": {
+      "count": 300,
+      "min_ms": 1.870,
+      "p50_ms": 1.927,
+      "p95_ms": 2.062,
+      "p99_ms": 2.194,
+      "max_ms": 2.941
+    },
+    "frame.collapse": {
+      "count": 60,
+      "min_ms": 1.891,
+      "p50_ms": 1.925,
+      "p95_ms": 2.024,
+      "p99_ms": 2.179,
+      "max_ms": 2.179
+    },
+    "frame.declare": {
+      "count": 300,
+      "min_ms": 0.004,
+      "p50_ms": 0.005,
+      "p95_ms": 0.010,
+      "p99_ms": 0.013,
+      "max_ms": 0.014
+    },
+    "frame.declare.per_frame": {
+      "count": 300,
+      "min_ms": 0.004,
+      "p50_ms": 0.005,
+      "p95_ms": 0.010,
+      "p99_ms": 0.013,
+      "max_ms": 0.014
+    },
+    "frame.execute": {
+      "count": 300,
+      "min_ms": 0.024,
+      "p50_ms": 0.033,
+      "p95_ms": 0.049,
+      "p99_ms": 0.057,
+      "max_ms": 0.067
+    },
+    "frame.execute.per_frame": {
+      "count": 300,
+      "min_ms": 0.024,
+      "p50_ms": 0.033,
+      "p95_ms": 0.049,
+      "p99_ms": 0.057,
+      "max_ms": 0.067
+    },
+    "frame.submit": {
+      "count": 300,
+      "min_ms": 1.825,
+      "p50_ms": 1.889,
+      "p95_ms": 2.003,
+      "p99_ms": 2.153,
+      "max_ms": 2.896
+    },
+    "frame.submit.per_frame": {
+      "count": 300,
+      "min_ms": 1.825,
+      "p50_ms": 1.889,
+      "p95_ms": 2.003,
+      "p99_ms": 2.153,
+      "max_ms": 2.896
+    },
+    "rhi.submit.queue": {
+      "count": 300,
+      "min_ms": 0.227,
+      "p50_ms": 0.264,
+      "p95_ms": 0.287,
+      "p99_ms": 0.394,
+      "max_ms": 0.747
+    },
+    "rhi.submit.queue.per_frame": {
+      "count": 300,
+      "min_ms": 0.227,
+      "p50_ms": 0.264,
+      "p95_ms": 0.287,
+      "p99_ms": 0.394,
+      "max_ms": 0.747
+    },
+    "rhi.submit.reclaim": {
+      "count": 300,
+      "min_ms": 0.257,
+      "p50_ms": 0.279,
+      "p95_ms": 0.320,
+      "p99_ms": 0.518,
+      "max_ms": 1.277
+    },
+    "rhi.submit.reclaim.per_frame": {
+      "count": 300,
+      "min_ms": 0.257,
+      "p50_ms": 0.279,
+      "p95_ms": 0.320,
+      "p99_ms": 0.518,
+      "max_ms": 1.277
+    },
+    "rhi.submit.wait": {
+      "count": 300,
+      "min_ms": 1.203,
+      "p50_ms": 1.347,
+      "p95_ms": 1.377,
+      "p99_ms": 1.505,
+      "max_ms": 1.549
+    },
+    "rhi.submit.wait.per_frame": {
+      "count": 300,
+      "min_ms": 1.203,
+      "p50_ms": 1.347,
+      "p95_ms": 1.377,
+      "p99_ms": 1.505,
+      "max_ms": 1.549
+    },
+    "sim.post": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.post.per_frame": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.pre": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.pre.per_frame": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.publish": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.publish.per_frame": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.schedule": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.schedule.per_frame": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.tick": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.006
+    },
+    "sim.tick.per_frame": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.006
+    },
+    "sim.transforms": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.transforms.per_frame": {
+      "count": 300,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    }
+  },
+  "passes": {
+    "ddgi-trace": {
+      "p50_ms": 0.055,
+      "max_ms": 0.075
+    },
+    "ddgi-blend-irradiance": {
+      "p50_ms": 0.012,
+      "max_ms": 0.013
+    },
+    "ddgi-blend-visibility": {
+      "p50_ms": 0.022,
+      "max_ms": 0.023
+    },
+    "ddgi-atlases-ready": {
+      "p50_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "depth-prepass": {
+      "p50_ms": 0.014,
+      "max_ms": 0.021
+    },
+    "velocity": {
+      "p50_ms": 0.024,
+      "max_ms": 0.031
+    },
+    "csm-cascade-0": {
+      "p50_ms": 0.006,
+      "max_ms": 0.007
+    },
+    "csm-cascade-1": {
+      "p50_ms": 0.004,
+      "max_ms": 0.005
+    },
+    "csm-cascade-2": {
+      "p50_ms": 0.003,
+      "max_ms": 0.003
+    },
+    "cluster-cull": {
+      "p50_ms": 0.006,
+      "max_ms": 0.006
+    },
+    "forward-pbr shadowed": {
+      "p50_ms": 0.351,
+      "max_ms": 0.562
+    },
+    "ssr-resolve": {
+      "p50_ms": 0.474,
+      "max_ms": 0.705
+    },
+    "taa-resolve": {
+      "p50_ms": 0.112,
+      "max_ms": 0.302
+    },
+    "tonemap": {
+      "p50_ms": 0.033,
+      "max_ms": 0.035
+    },
+    "sdf-clipmap-clear-L0": {
+      "p50_ms": 0.005,
+      "max_ms": 0.005
+    },
+    "sdf-clipmap-stamp-L0": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "sdf-clipmap-clear-L1": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "sdf-clipmap-stamp-L1": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "sdf-clipmap-clear-L2": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "sdf-clipmap-stamp-L2": {
+      "p50_ms": 0.004,
+      "max_ms": 0.004
+    },
+    "spot-shadow-0": {
+      "p50_ms": 0.005,
+      "max_ms": 0.005
+    }
+  },
+  "worst_frame": {
+    "index": 71,
+    "ms": 2.941,
+    "passes": {
+      "ddgi-trace": 0.053,
+      "ddgi-blend-irradiance": 0.012,
+      "ddgi-blend-visibility": 0.022,
+      "ddgi-atlases-ready": 0.000,
+      "depth-prepass": 0.016,
+      "velocity": 0.030,
+      "csm-cascade-0": 0.006,
+      "csm-cascade-1": 0.005,
+      "csm-cascade-2": 0.003,
+      "cluster-cull": 0.006,
+      "forward-pbr shadowed": 0.539,
+      "ssr-resolve": 0.458,
+      "taa-resolve": 0.114,
+      "tonemap": 0.034
+    },
+    "zones": {
+      "sim.pre": 0.000,
+      "sim.schedule": 0.000,
+      "sim.transforms": 0.000,
+      "sim.post": 0.000,
+      "sim.publish": 0.000,
+      "sim.tick": 0.000,
+      "frame.declare": 0.005,
+      "frame.execute": 0.034,
+      "rhi.submit.queue": 0.713,
+      "rhi.submit.wait": 1.393,
+      "rhi.submit.reclaim": 0.789,
+      "frame.submit": 2.896
+    }
+  },
+  "ledger": {
+    "frames.measured": 300,
+    "ddgi.probes_updated_static": 300,
+    "sdf.stamps_on_break": 3,
+    "shadow.rendered_on_break": 1,
+    "ddgi.fast_tracked_on_break": 60
+  },
+  "integrity": {
+    "accounting_gaps": 0,
+    "foreign_zones": 0
+  },
+  "cpu": {
+    "model": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "cores": 16,
+    "threads": 32,
+    "governor": "performance",
+    "boost": "1",
+    "l3_domains": 2,
+    "l3_shared_cpu_lists": ["0-7,16-23", "8-15,24-31"],
+    "busiest_core_min": 5683,
+    "busiest_core_median": 5690.0,
+    "busiest_core_max": 5702,
+    "busiest_core_spread_pct": 0.3,
+    "all_core_mean_median": 4938.5,
+    "samples_total": 17
+  },
+  "gpu_clocks": {
+    "graphics_min": 1837,
+    "graphics_median": 1837.0,
+    "graphics_max": 1837,
+    "graphics_spread_pct": 0.0,
+    "memory_min": 7301,
+    "memory_median": 7301.0,
+    "memory_max": 7301,
+    "memory_spread_pct": 0.0,
+    "samples_total": 17,
+    "samples_under_load": 5,
+    "stable": null
+  }
+}

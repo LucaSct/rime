@@ -33,6 +33,15 @@ void Input::new_frame() {
 
 void Input::process(const Event& e) {
     switch (e.type) {
+        case EventType::WindowFocus:
+            if (!e.focus.focused) {
+                // The OS may deliver releases to another window after focus moves away.
+                // Drop held levels here so returning cannot leave aim, movement or fire stuck.
+                keys_cur_.fill(false);
+                mouse_cur_.fill(false);
+                mouse_dx_ = mouse_dy_ = wheel_x_ = wheel_y_ = 0.0f;
+            }
+            break;
         case EventType::KeyDown:
             keys_cur_[key_index(e.key.key)] = true;
             break;

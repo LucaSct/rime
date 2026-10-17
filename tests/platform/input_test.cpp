@@ -92,3 +92,32 @@ TEST_CASE("Input: mouse buttons, motion, wheel, and typed text") {
     CHECK(in.mouse_down(MouseButton::Left));          // still held across the frame
     CHECK_FALSE(in.mouse_pressed(MouseButton::Left)); // but not a fresh press
 }
+
+TEST_CASE("Input: losing focus releases held aim and keys") {
+    Input in;
+    in.new_frame();
+    in.process(key_event(EventType::KeyDown, Key::Q));
+    in.process(key_event(EventType::KeyDown, Key::W));
+    Event aim{};
+    aim.type = EventType::MouseButton;
+    aim.button.button = MouseButton::Right;
+    aim.button.down = true;
+    in.process(aim);
+    REQUIRE(in.key_down(Key::Q));
+    REQUIRE(in.mouse_down(MouseButton::Right));
+    in.new_frame();
+    Event focus{};
+    focus.type = EventType::WindowFocus;
+    focus.focus.focused = false;
+    in.process(focus);
+    CHECK_FALSE(in.key_down(Key::Q));
+    CHECK_FALSE(in.key_down(Key::W));
+    CHECK_FALSE(in.mouse_down(MouseButton::Right));
+    CHECK(in.key_released(Key::Q));
+    CHECK(in.mouse_released(MouseButton::Right));
+    in.new_frame();
+    focus.focus.focused = true;
+    in.process(focus);
+    CHECK_FALSE(in.key_down(Key::Q));
+    CHECK_FALSE(in.mouse_down(MouseButton::Right));
+}

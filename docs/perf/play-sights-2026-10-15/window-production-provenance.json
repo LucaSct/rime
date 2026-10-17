@@ -1,0 +1,12 @@
+{
+  "/home/next/reports/rime-play-perf-2026-10-15/main-window-final-production.cpp": "fdacd713fddbedf5bf15ada04323a461f0d548d5e1e712a62f88d471295f8d9e",
+  "/home/next/reports/rime-play-perf-2026-10-15/main-window-final-instrumented.cpp": "1fcbae454c7afc67f55082e963f211e5e607ce2db494daac32946df9c83f562d",
+  "/home/next/reports/rime-play-perf-2026-10-15/window_capture_zones_support.hpp": "ad8663f06338d98e3b2d0397462f91e88728c86d98838ba71dd59c9f02dff2d6",
+  "/home/next/reports/rime-play-perf-2026-10-15/live_window_production_perf.cpp": "4102eebcc2b637d933635f03c7d84f1a5bee51ee8671060bb66e3d14215195d5",
+  "/home/next/reports/rime-play-perf-2026-10-15/live_window_production_perf": "a2e1b68953b394f9589aa4e16709b9e34c4d707a7bd2d01c466bc088f7534d94",
+  "/home/next/projects/rime/build/release/lib/librime_app.a": "65630dc6e6a3c060717ba6ef9b0c0335b478571f1be67d9cc649227cc4b16a05",
+  "/home/next/projects/rime/engine/app/include/rime/app/application.hpp": "6aae5f06bccdbeaf9064aef7e003d0009457ac4092a1d98ca5557ec78b6fc4ef",
+  "/home/next/projects/rime/engine/app/src/application.cpp": "6fab6763506058ce9d757d743a81cdc2ab2d7e82bc4f116f9d9d3c5968147b6e",
+  "/home/next/projects/rime/build/release/lib/librime_render.a": "734e0eba9d4ac7e6288ab1d016b1e8da438cacb8ad58152fb4ab1250d4c5b5b7",
+  "/home/next/projects/rime/build/release/lib/librime_rhi.a": "9e7ee4b5a99439401327b29d6ba72cac1d7a8505c94578c7a07b4c9bbc2107e3"
+}

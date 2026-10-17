@@ -6,12 +6,14 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 #include <unordered_set>
 
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/platform/filesystem.hpp"
+#include "rime/platform/input.hpp"
 
 namespace rime::block_play {
 namespace {
@@ -23,6 +25,83 @@ constexpr std::array<const char*, 6> kSources{"held-scar-h.glb",
                                               "arms-m4a1.glb",
                                               "arms-msr.glb"};
 constexpr std::size_t kMaxDraws = 32; // SceneRenderer's first-person draw contract
+
+constexpr std::array<core::Vec3, 3> kAimOffsets{
+    {{-.14f, .09f, .37f}, {-.137777f, .0947244f, .37f}, {-.14f, .118f, .035f}}};
+constexpr std::array<core::Vec3, 3> kHipOffsets{{{0, 0, .22f}, {0, 0, .22f}, {0, 0, 0}}};
+constexpr core::Vec3 kScarSight{.14f, -.0848075f, -.473f};
+
+core::Mat4 sight_alignment(unsigned weapon, float aim) {
+    if (weapon != 1)
+        return {};
+    // The M4's front post is 4.890 mm below its rear peep over a 370.56 mm sight radius.
+    // Rotate the whole weapon about that measured peep, aligning BOTH sights with the eye.
+    // A translation can centre the aperture alone while leaving the front post misaligned.
+    constexpr core::Vec3 peep{.137777f, -.094724381f, -.46498038f};
+    return core::mat4_translation(peep) *
+           core::to_mat4(core::quat_from_axis_angle({1, 0, 0}, .0131968f * aim)) *
+           core::mat4_translation(-peep);
+}
+
+bool extract_scar_glass(render::CpuMesh& gun, render::CpuMesh& glass) {
+    // The authored holographic sight contains two opaque, isolated glass hulls sharing its
+    // housing material. Identify their measured metre-space bounds INSIDE the same submesh:
+    // a global front-box test also catches seven housing triangles. Refuse changed artwork
+    // rather than silently cutting an unrelated part. Keep the original near glass as the mask.
+    const auto pane = [&](std::size_t index, bool rear) {
+        for (unsigned j = 0; j < 3; ++j) {
+            const auto& v = gun.vertices[gun.indices[index + j]];
+            if (!(v.px > .1219f && v.px < .1581f && v.py > -.0967f && v.py < -.0729f &&
+                  v.pz > (rear ? -.476f : -.5005f) && v.pz < (rear ? -.4729f : -.4975f)))
+                return false;
+        }
+        return true;
+    };
+    std::size_t found = gun.submeshes.size();
+    for (std::size_t i = 0; i < gun.submeshes.size(); ++i) {
+        const auto& range = gun.submeshes[i];
+        unsigned rear = 0, front = 0;
+        for (std::size_t t = range.first_index; t < range.first_index + range.index_count; t += 3) {
+            rear += pane(t, true) ? 1u : 0u;
+            front += pane(t, false) ? 1u : 0u;
+        }
+        if (rear == 316 && front == 316) {
+            if (found != gun.submeshes.size())
+                return false;
+            found = i;
+        }
+    }
+    if (found == gun.submeshes.size())
+        return false;
+    std::vector<std::uint32_t> kept;
+    std::vector<std::uint32_t> remap(gun.vertices.size(),
+                                     std::numeric_limits<std::uint32_t>::max());
+    for (std::size_t i = 0; i < gun.submeshes.size(); ++i) {
+        auto& range = gun.submeshes[i];
+        const auto begin = static_cast<std::uint32_t>(kept.size());
+        for (std::size_t t = range.first_index; t < range.first_index + range.index_count; t += 3) {
+            const bool rear = i == found && pane(t, true);
+            const bool front = i == found && pane(t, false);
+            for (unsigned j = 0; j < 3; ++j) {
+                const auto source = gun.indices[t + j];
+                if (rear) {
+                    auto& destination = remap[source];
+                    if (destination == std::numeric_limits<std::uint32_t>::max()) {
+                        destination = static_cast<std::uint32_t>(glass.vertices.size());
+                        glass.vertices.push_back(gun.vertices[source]);
+                    }
+                    glass.indices.push_back(destination);
+                } else if (!front) {
+                    kept.push_back(source);
+                }
+            }
+        }
+        range.first_index = begin;
+        range.index_count = static_cast<std::uint32_t>(kept.size()) - begin;
+    }
+    gun.indices = std::move(kept);
+    return !glass.indices.empty();
+}
 
 struct TextureRefs {
     assets::TextureAssetHandle base{};
@@ -106,7 +185,48 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
                 stderr, "99-the-block: viewmodel %s has missing/oversized geometry\n", kSources[i]);
             return false;
         }
-        const render::MeshId mesh_id = meshes.add(render::mesh_from_cooked(*mesh), kSources[i]);
+        auto geometry = render::mesh_from_cooked(*mesh);
+        if (i == 0) {
+            render::CpuMesh glass;
+            if (!extract_scar_glass(geometry, glass)) {
+                std::fprintf(stderr,
+                             "99-the-block: SCAR sight glass no longer matches its calibration\n");
+                return false;
+            }
+            collimated_lens_.mesh = meshes.add(glass, "SCAR collimated sight glass");
+            if (!meshes.contains(collimated_lens_.mesh))
+                return false;
+            collimated_lens_.index_count = static_cast<std::uint32_t>(glass.indices.size());
+            ++resident_meshes_;
+        }
+        if (i < 3 && !geometry.vertices.empty()) {
+            // Prepared guns point down -Z. Average the frontmost centimetre of the barrel
+            // rather than guessing a camera-space flash position for differently sized guns.
+            float front = geometry.vertices.front().pz, rear = front;
+            for (const auto& v : geometry.vertices) {
+                front = std::min(front, v.pz);
+                rear = std::max(rear, v.pz);
+            }
+            const float extent = std::numeric_limits<float>::max();
+            core::Vec3 low{extent, extent, extent}, high{-extent, -extent, -extent};
+            for (const auto& v : geometry.vertices)
+                if (v.pz >= rear - .005f) {
+                    low.x = std::min(low.x, v.px);
+                    low.y = std::min(low.y, v.py);
+                    high.x = std::max(high.x, v.px);
+                    high.y = std::max(high.y, v.py);
+                }
+            models_[i].stock = {(low.x + high.x) * .5f, (low.y + high.y) * .5f, rear};
+            core::Vec3 muzzle{};
+            unsigned count = 0;
+            for (const auto& v : geometry.vertices)
+                if (v.pz <= front + .01f) {
+                    muzzle = muzzle + core::Vec3{v.px, v.py, v.pz};
+                    ++count;
+                }
+            models_[i].muzzle = muzzle / static_cast<float>(count);
+        }
+        const render::MeshId mesh_id = meshes.add(geometry, kSources[i]);
         if (!meshes.contains(mesh_id))
             return false;
         ++resident_meshes_;
@@ -124,6 +244,22 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
                 std::fprintf(stderr, "99-the-block: invalid weighted arm rig %s\n", kSources[i]);
                 return false;
             }
+            // The camera follows the RIGHT aiming eye. Seat the gun's measured butt on its
+            // right shoulder and blade the torso 60 degrees: the left shoulder comes forward
+            // for the support hand. This reference stays fixed through bob/recoil; solving
+            // wrists alone had left the stock floating far from either shoulder.
+            const auto shoulder = model.arms.bind_shoulders()[1];
+            const auto seat = core::transform_point(
+                                  sight_alignment(static_cast<unsigned>(i - 3), 1), model.stock) +
+                              kAimOffsets[i - 3];
+            model.camera_from_arms =
+                core::mat4_translation(seat) *
+                core::to_mat4(core::quat_from_axis_angle({0, 1, 0}, -1.0471975512f)) *
+                core::mat4_translation(-shoulder);
+            model.arms_from_camera = core::inverse(model.camera_from_arms);
+            model.elbow_poles = {
+                {core::transform_point(model.arms_from_camera, {-.4f, -.65f, -.25f}),
+                 core::transform_point(model.arms_from_camera, {.5f, -.65f, -.25f})}};
             model.arm_mesh = mesh_id;
             model.grips = model.arms.bind_wrists();
             model.previous.resize(mesh->vertex_count);
@@ -211,7 +347,7 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
     render::CpuMesh lens;
     constexpr unsigned segments = 64;
     const core::Vec3 ocular{.14f, -.118f, -.085f};
-    constexpr float radius = .026f;
+    constexpr float radius = kScopeLensRadius;
     lens.vertices.push_back({ocular.x, ocular.y, ocular.z, 0, 0, 1, .5f, .5f});
     for (unsigned i = 0; i <= segments; ++i) {
         const float angle = static_cast<float>(i) * 6.28318530718f / segments;
@@ -237,6 +373,7 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
     glass.base_color[2] = .02f;
     glass.roughness = .12f;
     lens_.material = materials.add(glass);
+    collimated_lens_.material = lens_.material;
     ++resident_materials_;
     lens_.index_count = static_cast<std::uint32_t>(lens.indices.size());
     return true;
@@ -254,6 +391,52 @@ void PlayViewmodel::select(Weapon weapon) noexcept {
     }
 }
 
+void PlayViewmodel::apply_controls(const platform::Input& devices,
+                                   std::span<const platform::Event> events) noexcept {
+    if (devices.key_pressed(platform::Key::Num1))
+        select(Weapon::Scar);
+    if (devices.key_pressed(platform::Key::Num2))
+        select(Weapon::M4);
+    if (devices.key_pressed(platform::Key::Num3))
+        select(Weapon::Sniper);
+    // A tap can begin AND end between two rendered frames. The final device level then has
+    // no pressed edge; selection follows the real down event so a quick 3 never leaves a rifle
+    // active when the player expects the magnified optic. Repeats do not reset the aim pose.
+    for (const auto& event : events) {
+        if (event.type != platform::EventType::KeyDown || event.key.repeat)
+            continue;
+        if (event.key.key == platform::Key::Num1)
+            select(Weapon::Scar);
+        if (event.key.key == platform::Key::Num2)
+            select(Weapon::M4);
+        if (event.key.key == platform::Key::Num3)
+            select(Weapon::Sniper);
+    }
+    set_aiming(devices.key_down(platform::Key::Q) ||
+               devices.mouse_down(platform::MouseButton::Right));
+}
+
+float PlayViewmodel::scope_fov_y() noexcept {
+    // The rendered feed is fitted into a physical aperture, not across the whole viewport.
+    // At ADS, angular magnification = (ocular radius / eye relief) / tan(feed half-FOV).
+    // Dividing the PARENT camera's focal length by five ignored the aperture's apparent size
+    // and produced only about 2.36x apparent zoom for the authored 26 mm / 90 mm ocular.
+    return 2.0f * std::atan(kScopeLensRadius / (kScopeEyeRelief * kScopeMagnification));
+}
+
+bool PlayViewmodel::scope_feed_visible(const core::Transform& eye) const noexcept {
+    if (!scoped())
+        return false;
+    const auto p = core::transform_point(core::inverse(optic_world_), eye.translation);
+    // The shader intersects two unit discs: the physical aperture and an exit pupil shifted
+    // by eye.xy / eye_box_radius. Their supports cannot meet beyond two radii. A small
+    // conservative margin avoids switching at a floating-point boundary during an aim blend.
+    constexpr float margin = .0001f;
+    const float support = 2 * kScopeEyeBoxRadius + margin;
+    return p.z > 0 && std::abs(p.z - kScopeEyeRelief) < kScopeEyeReliefTolerance + margin &&
+           p.x * p.x + p.y * p.y < support * support;
+}
+
 void PlayViewmodel::advance(float frame_dt, core::Vec3 actual_velocity, bool fired) noexcept {
     const float dt = std::clamp(frame_dt, 0.0f, 0.05f);
     const float speed =
@@ -263,7 +446,7 @@ void PlayViewmodel::advance(float frame_dt, core::Vec3 actual_velocity, bool fir
     if (fired)
         recoil_ = std::min(recoil_ + 0.012f, 0.035f);
     recoil_ *= std::exp(-14.0f * dt);
-    const float target_aim = aiming_ && selected_ == Weapon::Sniper ? 1.0f : 0.0f;
+    const float target_aim = aiming_ ? 1.0f : 0.0f;
     aim_ += (target_aim - aim_) * (1.0f - std::exp(-16.0f * dt));
 }
 
@@ -289,15 +472,23 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
                          recoil_ * 0.5f};
     const float pose_amount = 1.0f - aim_ * .85f;
     local.translation = local.translation * pose_amount;
-    local.translation = local.translation + core::Vec3{-.14f, .118f, -.005f} * aim_;
+    // These weapon-local sight lines are authored in metres: SCAR holographic glass, M4 peep,
+    // and PM II ocular. Align each line with the eye without changing the world camera.
+    // Rifle aim has no magnification; only the sniper owns a second optical camera.
+    // A shouldered stock belongs behind the eye. The old rifle pose exposed its rear cap
+    // 23 cm IN FRONT of the camera; matching hip placement keeps the entire transition reachable.
+    const auto index = static_cast<unsigned>(selected_);
+    local.translation =
+        local.translation + kAimOffsets[index] * aim_ + kHipOffsets[index] * (1 - aim_);
     local.rotation = core::quat_from_euler(
         recoil_ * .8f, .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount, 0.0f);
     const core::Mat4 camera_matrix = core::to_matrix(camera);
-    const core::Mat4 weapon_local = core::to_matrix(local);
+    const core::Mat4 weapon_local = core::to_matrix(local) * sight_alignment(index, aim_);
+    weapon_local_ = weapon_local;
     const core::Mat4 model = camera_matrix * weapon_local;
     auto& selected = models_[static_cast<unsigned>(selected_)];
     const auto vertices = selected.arms.solve(
-        weapon_local, selected.grips, {{{-.4f, -.65f, -.25f}, {.5f, -.65f, -.25f}}});
+        selected.arms_from_camera * weapon_local, selected.grips, selected.elbow_poles);
     for (std::size_t i = 0; i < vertices.size(); ++i) {
         const core::Vec3 current{vertices[i].px, vertices[i].py, vertices[i].pz};
         selected.previous[i] = selected.history ? selected.last[i] : current;
@@ -310,7 +501,7 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
         render::DrawItem draw{};
         draw.mesh = part.mesh;
         draw.material = part.material;
-        draw.model = part.arm ? camera_matrix : model;
+        draw.model = part.arm ? camera_matrix * selected.camera_from_arms : model;
         draw.first_index = part.first_index;
         draw.index_count = part.index_count;
         draws_.push_back(draw);
@@ -319,12 +510,17 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
         lens_.model = model;
         draws_.push_back(lens_);
         optic_world_ = model * core::mat4_translation({.14f, -.118f, -.085f});
+    } else if (selected_ == Weapon::Scar) {
+        collimated_lens_.model = model;
+        draws_.push_back(collimated_lens_);
+        optic_world_ = model * core::mat4_translation(kScarSight);
     }
     return draws_;
 }
 
 std::size_t PlayViewmodel::selected_draw_count() const noexcept {
-    return models_[static_cast<unsigned>(selected_)].parts.size() + (scoped() ? 1 : 0);
+    return models_[static_cast<unsigned>(selected_)].parts.size() +
+           ((scoped() || selected_ == Weapon::Scar) ? 1 : 0);
 }
 
 render::MeshId PlayViewmodel::selected_mesh() const noexcept {
