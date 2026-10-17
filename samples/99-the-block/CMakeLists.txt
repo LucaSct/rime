@@ -183,9 +183,20 @@ set_tests_properties(the_block_world_gpu_smoke PROPERTIES
     TIMEOUT 600)
 
 add_test(NAME the_block_environment_smoke COMMAND the_block --environment-smoke)
+# This one gets a far larger budget than its siblings, and the reason is measured rather than
+# guessed. The dressed street is the heaviest thing the sample draws -- 24 textures, 26 trees,
+# 3466 grass tufts, a pond and its SSR -- and CI renders it on lavapipe, a software rasterizer,
+# so the cost lands on the CPU at full resolution. Measured on 532e511: 189 s on the faster
+# self-hosted runner in the dev (Debug) preset, and 265 s in the ASan+UBSan build on the same
+# machine. The slower self-hosted runner is 2.2-2.8x that machine on the three sibling block
+# tests, which puts this one past 600 s there -- which is exactly how it was discovered, as a
+# CTest Timeout at 600.16 s while every other job on the same commit was green. The worst case
+# the matrix can produce is the sanitizer build on the slow runner, ~1160 s extrapolated, so
+# 1800 s leaves headroom without being so large that a genuine hang sits in the queue for an
+# hour. Raise it if the street grows again; the number is a measurement, not a convention.
 set_tests_properties(the_block_environment_smoke PROPERTIES
     FIXTURES_REQUIRED block_demo_cook
-    TIMEOUT 600)
+    TIMEOUT 1800)
 
 # Registered only when the art is here; the binary itself skips the mode rather than failing, so
 # running it by hand on a clean clone is harmless too.
