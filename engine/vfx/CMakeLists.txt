@@ -11,7 +11,9 @@
 # (guardrail 2): the engine still builds with it gone.
 
 add_library(rime_vfx STATIC
-    src/dust.cpp)
+    src/dust.cpp
+    src/plume.cpp
+    src/fire.cpp)
 
 # Namespaced alias so dependents link `rime::vfx`, matching our C++ namespace.
 add_library(rime::vfx ALIAS rime_vfx)
