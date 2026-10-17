@@ -570,14 +570,14 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     const auto index = static_cast<unsigned>(selected_);
     local.translation =
         local.translation + kAimOffsets[index] * aim_ + kHipOffsets[index] * (1 - aim_);
-    // Bring the whole gun forward into the lower middle of the viewport for the magazine
-    // action. Its support wrist follows the same transform; the reach limiter below shortens
-    // only the extra hand path when a rig cannot reach it.
-    local.translation = local.translation + core::Vec3{0.02f * motion_pose.lower,
-                                                       -0.055f * motion_pose.lower,
-                                                       -0.16f * motion_pose.lower};
+    // Bring the magazine action upward and left in the viewport while preserving the
+    // reachable gun depth. Moving the whole gun forward extended both base wrists past
+    // their measured limit, where shortening the support-hand offset cannot help.
+    local.translation = local.translation + core::Vec3{-0.025f * motion_pose.lower,
+                                                       -0.04f * motion_pose.lower,
+                                                       0.09f * motion_pose.lower};
     local.rotation =
-        core::quat_from_euler(recoil_ * .8f + 0.10f * motion_pose.lower,
+        core::quat_from_euler(recoil_ * .8f + 0.07f * motion_pose.lower,
                               .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount,
                               0.22f * motion_pose.tilt);
     const core::Mat4 camera_matrix = core::to_matrix(camera);
