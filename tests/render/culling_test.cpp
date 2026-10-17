@@ -302,7 +302,7 @@ TEST_CASE("m13.2a: a shadow caster outside the view still casts into it") {
         // Outside the cascade XY footprint and deliberately between floor and blocker in the
         // shared draw list. A compacted-list implementation would shift the blocker's UBO index.
         core::Transform outside_tf{};
-        outside_tf.translation = {100.0f, 0.0f, 0.0f};
+        outside_tf.translation = {100000.0f, 0.0f, 0.0f};
         (void)world.spawn_with(ecs::WorldTransform{outside_tf}, MeshRef{blocker}, MaterialRef{mat});
 
         if (with_blocker) {

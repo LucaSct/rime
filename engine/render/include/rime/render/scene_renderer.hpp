@@ -363,6 +363,11 @@ public:
     // and idempotent — call it once per event as the stream drains.
     void invalidate_shadow_region(const WorldAabb& region) { local_shadows_.invalidate(region); }
 
+    // These counters describe the latest declared directional maps after graph execution.
+    [[nodiscard]] const std::array<CullStats, kMaxCascades>& csm_caster_stats() const noexcept {
+        return csm_.caster_stats();
+    }
+
     // Local-shadow cache stats from the most recent render() — how many spot maps were re-rendered
     // vs served from cache (the ≈100%-reuse property a static scene holds after warmup).
     [[nodiscard]] const LocalShadowStats& local_shadow_stats() const noexcept {

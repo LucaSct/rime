@@ -4609,6 +4609,46 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         write_ppm((g_ppm + ".target-scoped.ppm").c_str(), scoped_target, kW, kH);
     }
     (void)demo.session.client.world.despawn(target_entity);
+    // Exercise actions through the real rig and uploaded deformation stream. The pure timeline
+    // tests cannot detect a reload that advances correctly but never reaches rendered vertices.
+    for (const auto weapon :
+         {block_play::PlayViewmodel::Weapon::Scar, block_play::PlayViewmodel::Weapon::Sniper}) {
+        demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+        demo.viewmodel->select(weapon);
+        demo.viewmodel->set_aiming(false);
+        demo.viewmodel->advance(1.0f, {}, false);
+        demo.app.run_frames(48);
+        const auto idle_action = capture();
+        check(demo.viewmodel->begin_reload(), "idle weapon accepts a reload action");
+        demo.viewmodel->advance(.8f, {}, false);
+        const auto reload_action = capture();
+        const auto& arms = demo.viewmodel->arm_stats();
+        check(demo.viewmodel->reloading() && arms.valid_input && arms.clamped_targets == 0 &&
+                  arms.max_vertex_displacement > .001f && changed(idle_action, reload_action) > 100,
+              "reload visibly moves the actual weapon and reachable skinned arms");
+        if (!g_ppm.empty())
+            write_ppm(
+                (g_ppm + (demo.viewmodel->scoped() ? ".sniper-reload.ppm" : ".scar-reload.ppm"))
+                    .c_str(),
+                reload_action,
+                kW,
+                kH);
+        demo.viewmodel->advance(3.0f, {}, false);
+        check(!demo.viewmodel->busy(), "reload finishes in elapsed time");
+    }
+    demo.viewmodel->advance(.35f, {}, true);
+    const auto bolt_action = capture();
+    check(demo.viewmodel->cycling() && demo.viewmodel->arm_stats().valid_input &&
+              demo.viewmodel->arm_stats().clamped_targets == 0 &&
+              demo.viewmodel->take_case_ejection() && !demo.viewmodel->take_case_ejection(),
+          "accepted sniper shot reaches bolt extraction with exactly one case");
+    if (!g_ppm.empty())
+        write_ppm((g_ppm + ".sniper-bolt.ppm").c_str(), bolt_action, kW, kH);
+    check(demo.visuals->renderer.rejected_first_person_deformations() == 0 &&
+              demo.viewmodel->resident_meshes() == meshes &&
+              demo.viewmodel->resident_materials() == materials &&
+              demo.viewmodel->resident_textures() == textures,
+          "actions reuse resident resources and valid deformation uploads");
     demo.app.finish_gpu();
     return okay ? 0 : 1;
 }
