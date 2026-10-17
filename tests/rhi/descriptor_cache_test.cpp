@@ -5,8 +5,8 @@
 // descriptors and reuse identical descriptor sets within an encoder, and NOTHING a caller of the
 // public RHI can observe may change — every claim below is a pixel (or storage-buffer word) read
 // back through the public API, run twice: once with the cache on and once with
-// RIME_VK_DESCRIPTOR_CACHE=0, which is the pre-cache path verbatim. Both runs must produce the same
-// expected values.
+// RIME_VK_DESCRIPTOR_CACHE=0, which disables dynamic promotion and descriptor reuse. Payload
+// preparation is shared by both modes. Both runs must produce the same expected values.
 //
 // The cache's EFFECT is witnessed separately, without widening the RHI: with
 // RIME_VK_DESCRIPTOR_STATS=1 the backend logs one "rhi.vk.descriptors:" counter line per encoder,
