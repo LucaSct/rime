@@ -12,6 +12,9 @@
 #include <fstream>
 #include <initializer_list>
 #include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -19,6 +22,8 @@
 #include <stdexcept>
 #include <string_view>
 #include <system_error>
+#include <utility>
+#include "rime/core/diagnostics/profile.hpp"
 
 namespace city_profile {
 using Clock = std::chrono::steady_clock;
@@ -26,6 +31,81 @@ struct CpuRow { std::uint64_t frame; std::string name; double ms; std::uint64_t 
 struct GpuRow { std::uint64_t frame; std::string name; double ms; };
 struct StageRow { std::uint64_t frame; std::string name; double ms; };
 struct CasterRow { std::uint64_t frame, cascade, considered, submitted, culled; const char* view; };
+struct PhaseRow { std::uint64_t frame, step; std::string world, name; double ms; };
+struct IslandRow {
+    std::uint64_t frame, step;
+    std::string world;
+    std::uint32_t island, bodies, contacts;
+    std::uint64_t ns, warm_ns, velocity_ns, store_ns, position_ns;
+};
+struct StepKey { std::uint64_t frame, step; const char* world; };
+
+// The zone sink runs on both the caller and the server job. Keep its frame window,
+// per-world sequence, and output buffers behind one lock; never consult thread_local config here.
+class PhaseRecorder {
+public:
+    void begin_frame(std::uint64_t frame) {
+        const std::lock_guard lock(mutex_);
+        frame_ = frame; steps_ = {}; open_ = true;
+    }
+    void end_frame() {
+        const std::lock_guard lock(mutex_);
+        open_ = false;
+    }
+    std::optional<StepKey> zone(std::string_view name, double ms) {
+        const std::string_view full_name = name;
+        constexpr std::string_view prefix = "physics.";
+        if (!name.starts_with(prefix)) return std::nullopt;
+        name.remove_prefix(prefix.size());
+        const bool server = name.starts_with("server.");
+        if (!server && !name.starts_with("client.")) return std::nullopt;
+        name.remove_prefix(7);
+        const std::lock_guard lock(mutex_);
+        if (!open_) return std::nullopt;
+        auto& step = steps_[server ? 0 : 1];
+        const StepKey key{frame_, step, server ? "server" : "client"};
+        phases_.push_back({frame_, step, key.world, std::string(full_name), ms});
+        if (name == "step") { ++step; return key; }
+        return std::nullopt;
+    }
+    template <class Costs> void islands(StepKey key, const Costs& costs) {
+        const std::lock_guard lock(mutex_);
+        for (const auto& cost : costs)
+            islands_.push_back({key.frame, key.step, key.world, cost.island, cost.bodies,
+                                cost.constraints, cost.solve_ns, cost.warm_ns, cost.velocity_ns,
+                                cost.store_ns, cost.position_ns});
+    }
+    void write(const std::filesystem::path& dir) const {
+        // Called only after app.step has joined all work and the sink has been removed.
+        auto open = [&](const char* name) { std::ofstream file(dir / name); if (!file) throw std::runtime_error(name); return file; };
+        auto phases = open("physics-phases.csv");
+        phases << "frame,world,step,name,ms\n";
+        for (const auto& row : phases_)
+            phases << row.frame << ',' << row.world << ',' << row.step << ',' << row.name << ',' << row.ms << '\n';
+        phases.flush(); if (!phases) throw std::runtime_error("physics-phases.csv write failed");
+        auto islands = open("physics-islands.csv");
+        islands << "frame,world,step,island,bodies,contacts,ns,warm_ns,velocity_ns,store_ns,position_ns\n";
+        for (const auto& row : islands_)
+            islands << row.frame << ',' << row.world << ',' << row.step << ',' << row.island
+                    << ',' << row.bodies << ',' << row.contacts << ',' << row.ns << ',' << row.warm_ns
+                    << ',' << row.velocity_ns << ',' << row.store_ns << ',' << row.position_ns << '\n';
+        islands.flush(); if (!islands) throw std::runtime_error("physics-islands.csv write failed");
+    }
+private:
+    mutable std::mutex mutex_;
+    bool open_ = false;
+    std::uint64_t frame_ = 0;
+    std::array<std::uint64_t, 2> steps_{};
+    std::vector<PhaseRow> phases_;
+    std::vector<IslandRow> islands_;
+};
+
+struct PhaseSinkGuard {
+    explicit PhaseSinkGuard(rime::core::ZoneSink sink) { rime::core::set_zone_sink(std::move(sink)); }
+    ~PhaseSinkGuard() { rime::core::set_zone_sink({}); }
+    PhaseSinkGuard(const PhaseSinkGuard&) = delete;
+    PhaseSinkGuard& operator=(const PhaseSinkGuard&) = delete;
+};
 struct PhysicsRow {
     std::uint32_t bodies = 0, dynamic = 0, awake = 0, sleeping = 0;
     std::uint32_t pairs = 0, manifolds = 0, contact_points = 0;
@@ -56,6 +136,7 @@ struct Context {
     std::thread::id owner{};
     std::uint64_t frame = 0, warmup = 60;
     bool recording = false, ads = false, control = false, collapse = false, multi_collapse = false;
+    bool physics_phases = false;
     bool multi_missing_target = false;
     std::array<std::uint64_t, 3> multi_targets{};
     std::array<std::uint64_t, 3> multi_alive_before{}, multi_alive_after{};
@@ -124,6 +205,7 @@ inline bool parse_cli(int argc, char** argv, std::filesystem::path& output, std:
         else if (flag == "--city") config.control = false;
         else if (flag == "--collapse") config.collapse = true;
         else if (flag == "--multi-collapse") { config.collapse = true; config.multi_collapse = true; }
+        else if (flag == "--physics-phases") config.physics_phases = true;
         else if (flag == "--shadow-culling-off") config.shadow_caster_culling = false;
         else if (flag == "--shadow-culling-on") config.shadow_caster_culling = true;
         else if (flag == "--ppm") {
