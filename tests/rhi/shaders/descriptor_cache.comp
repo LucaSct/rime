@@ -1,0 +1,25 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// Compute shader for the descriptor-cache proof: accumulate `op.v.x` into `acc.data[op.v.y]`.
+// A read-modify-write, so running it twice through the SAME cached descriptor set proves the set
+// names the buffer's memory rather than a snapshot of it (the second dispatch must see the first
+// one's write, ordered by the backend's post-dispatch barrier). The uniform block is the pipeline's
+// only uniform buffer, so the Vulkan backend promotes it to dynamic — exercising the compute bind
+// point's dynamic offsets. Bindings 4/5 deliberately avoid the graphics proof's 0..3, because the
+// pending attachments are one namespace shared by every pipeline an encoder binds.
+#version 450
+
+layout(local_size_x = 1) in;
+
+layout(set = 0, binding = 4) uniform Op {
+    uvec4 v; // x = amount to add, y = element index
+} op;
+
+layout(std430, set = 0, binding = 5) buffer Acc {
+    uint data[];
+} acc;
+
+void main() {
+    acc.data[op.v.y] += op.v.x;
+}

@@ -8,6 +8,7 @@
 // keeps the RHI free of render-pass/framebuffer objects and friendly to the future render graph.
 
 #include <array>
+#include <cstdint>
 #include <vector>
 
 #include "vulkan/vulkan_backend.hpp"
@@ -16,19 +17,65 @@ namespace rime::rhi {
 
 namespace {
 
+// The backend-private half of a pipeline's set-0 shape: which Vulkan descriptor type each
+// declared binding really gets, and which uniform buffers become DYNAMIC (see
+// VulkanDescriptorCache for why). Policy: the `max_dynamic` LOWEST-NUMBERED UniformBuffer
+// bindings below kMaxSetBindings are promoted, and their dynamic-offset slots are numbered in
+// ascending binding order — the order Vulkan reads pDynamicOffsets in. Lowest-numbered because
+// that is a rule a reader can predict without knowing the pass; it is not a claim that those are
+// the bindings that change most. `max_dynamic` 0 (cache switched off) promotes nothing, which
+// reproduces the ADR-0020 layout exactly.
+struct SetShape {
+    std::vector<VkDescriptorType> vk_types;
+    std::vector<std::int8_t> dynamic_index;
+    std::uint32_t dynamic_count = 0;
+};
+
+[[nodiscard]] SetShape make_set_shape(const std::vector<BindingDesc>& bindings,
+                                      std::uint32_t max_dynamic) {
+    SetShape shape;
+    shape.vk_types.reserve(bindings.size());
+    shape.dynamic_index.assign(bindings.size(), -1);
+    for (const BindingDesc& b : bindings)
+        shape.vk_types.push_back(to_vk(b.type));
+
+    // Pick by repeated minimum rather than sorting a copy: max_dynamic is at most 2 and binding
+    // lists are a few dozen entries, so this is the simplest correct form.
+    for (std::uint32_t slot = 0; slot < max_dynamic; ++slot) {
+        std::size_t best = bindings.size();
+        for (std::size_t i = 0; i < bindings.size(); ++i) {
+            const BindingDesc& b = bindings[i];
+            if (b.type != BindingType::UniformBuffer || b.binding >= kMaxSetBindings ||
+                shape.dynamic_index[i] >= 0)
+                continue;
+            if (best == bindings.size() || b.binding < bindings[best].binding)
+                best = i;
+        }
+        if (best == bindings.size())
+            break;
+        shape.dynamic_index[best] = static_cast<std::int8_t>(slot);
+        shape.vk_types[best] = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+        ++shape.dynamic_count;
+    }
+    return shape;
+}
+
 // Build the set-0 VkDescriptorSetLayout for a declared binding list (ADR-0020). Shared by the
 // graphics and compute pipeline paths — the layout model is identical on both sides, which is
-// what lets one dispatch and one draw attach the same resources.
+// what lets one dispatch and one draw attach the same resources. `vk_types` is the effective
+// type per binding (make_set_shape), so a promoted uniform buffer is declared DYNAMIC here.
 [[nodiscard]] VkDescriptorSetLayout make_set_layout(VkDevice device,
-                                                    const std::vector<BindingDesc>& bindings) {
+                                                    const std::vector<BindingDesc>& bindings,
+                                                    const std::vector<VkDescriptorType>& vk_types) {
     if (bindings.empty())
         return VK_NULL_HANDLE;
     std::vector<VkDescriptorSetLayoutBinding> vk_bindings;
     vk_bindings.reserve(bindings.size());
-    for (const BindingDesc& b : bindings) {
+    for (std::size_t i = 0; i < bindings.size(); ++i) {
+        const BindingDesc& b = bindings[i];
         VkDescriptorSetLayoutBinding vb{};
         vb.binding = b.binding;
-        vb.descriptorType = to_vk(b.type);
+        vb.descriptorType = vk_types[i];
         vb.descriptorCount = 1;
         vb.stageFlags = to_vk(b.stages);
         vk_bindings.push_back(vb);
@@ -227,7 +274,8 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
         bindings.push_back(
             {0, BindingType::CombinedImageSampler, StageMask::Vertex | StageMask::Fragment});
     }
-    VkDescriptorSetLayout set_layout = make_set_layout(device_, bindings);
+    SetShape shape = make_set_shape(bindings, max_dynamic_uniforms_);
+    VkDescriptorSetLayout set_layout = make_set_layout(device_, bindings, shape.vk_types);
     if (!bindings.empty() && set_layout == VK_NULL_HANDLE)
         return {};
 
@@ -298,6 +346,9 @@ PipelineHandle VulkanDevice::create_graphics_pipeline(const GraphicsPipelineDesc
     p.cull = rs.cullMode;
     p.set_layout = set_layout;
     p.bindings = std::move(bindings);
+    p.vk_types = std::move(shape.vk_types);
+    p.dynamic_index = std::move(shape.dynamic_index);
+    p.dynamic_count = shape.dynamic_count;
     p.push_constant_stages = desc.push_constant_size > 0 ? pc_stages : 0;
     const VkResult r =
         vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pci, nullptr, &p.pipeline);
@@ -329,7 +380,8 @@ PipelineHandle VulkanDevice::create_compute_pipeline(const ComputePipelineDesc& 
     // set-layout model (ADR-0020), and an optional push-constant range — that is the whole
     // recipe. Everything a kernel touches beyond push constants arrives through bindings.
     std::vector<BindingDesc> bindings(desc.bindings.begin(), desc.bindings.end());
-    VkDescriptorSetLayout set_layout = make_set_layout(device_, bindings);
+    SetShape shape = make_set_shape(bindings, max_dynamic_uniforms_);
+    VkDescriptorSetLayout set_layout = make_set_layout(device_, bindings, shape.vk_types);
     if (!bindings.empty() && set_layout == VK_NULL_HANDLE)
         return {};
 
@@ -367,6 +419,9 @@ PipelineHandle VulkanDevice::create_compute_pipeline(const ComputePipelineDesc& 
     p.bind_point = VK_PIPELINE_BIND_POINT_COMPUTE;
     p.set_layout = set_layout;
     p.bindings = std::move(bindings);
+    p.vk_types = std::move(shape.vk_types);
+    p.dynamic_index = std::move(shape.dynamic_index);
+    p.dynamic_count = shape.dynamic_count;
     const VkShaderStageFlags cs_stage = VK_SHADER_STAGE_COMPUTE_BIT;
     p.push_constant_stages = desc.push_constant_size > 0 ? cs_stage : 0u;
     const VkResult r =
