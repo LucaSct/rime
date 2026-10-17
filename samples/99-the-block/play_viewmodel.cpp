@@ -526,15 +526,16 @@ bool PlayViewmodel::scope_feed_visible(const core::Transform& eye) const noexcep
 void PlayViewmodel::advance(float frame_dt, core::Vec3 actual_velocity, bool fired) noexcept {
     // Animation time uses the entire finite frame; a slow frame must not extend a reload.
     const float dt = std::isfinite(frame_dt) && frame_dt >= 0.0f ? frame_dt : 0.0f;
-    motion_.advance(frame_dt, static_cast<PlayWeaponMotion::Weapon>(selected_), fired);
+    const bool pending_bolt = motion_.pending_bolt();
+    motion_.advance(frame_dt, static_cast<PlayWeaponMotion::Weapon>(selected_), fired, aiming_);
     const float speed =
         std::sqrt(actual_velocity.x * actual_velocity.x + actual_velocity.z * actual_velocity.z);
     gait_phase_ += std::min(speed, 10.0f) * dt * 1.6f;
     bob_amount_ = std::clamp(speed / 6.0f, 0.0f, 1.0f);
-    if (fired)
+    if ((fired && !motion_.pending_bolt()) || (pending_bolt && motion_.cycling()))
         recoil_ = std::min(recoil_ + (scoped() ? 0.028f : 0.012f), 0.06f);
     recoil_ *= std::exp(-14.0f * dt);
-    const float target_aim = aiming_ && !motion_.busy() ? 1.0f : 0.0f;
+    const float target_aim = aiming_ && !motion_.reloading() && !motion_.cycling() ? 1.0f : 0.0f;
     aim_ += (target_aim - aim_) * (1.0f - std::exp(-16.0f * dt));
 }
 
@@ -569,10 +570,12 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     const auto index = static_cast<unsigned>(selected_);
     local.translation =
         local.translation + kAimOffsets[index] * aim_ + kHipOffsets[index] * (1 - aim_);
-    // The whole gun lowers and rolls during reload; there is no separate animated magazine.
+    // Bring the whole gun forward into the lower middle of the viewport for the magazine
+    // action. Its support wrist follows the same transform; the reach limiter below shortens
+    // only the extra hand path when a rig cannot reach it.
     local.translation = local.translation + core::Vec3{0.02f * motion_pose.lower,
-                                                       -0.12f * motion_pose.lower,
-                                                       0.09f * motion_pose.lower};
+                                                       -0.055f * motion_pose.lower,
+                                                       -0.16f * motion_pose.lower};
     local.rotation =
         core::quat_from_euler(recoil_ * .8f + 0.10f * motion_pose.lower,
                               .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount,
@@ -613,6 +616,7 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
         reach_stats_.retained[side] = f;
         reach_stats_.applied_offset[side] = core::length(offsets[side]) * f;
         grips[side] = core::mat4_translation(offsets[side] * f) * grips[side];
+        wrist_world_[side] = core::transform_point(model * grips[side], {});
     }
     reach_stats_.limited_poses += limited ? 1u : 0u;
     const auto vertices = selected.arms.solve(arms_from_weapon, grips, selected.elbow_poles);

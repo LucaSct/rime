@@ -119,3 +119,53 @@ TEST_CASE("invalid time still honours a weapon change and an accepted sniper sho
     motion.advance(kNaN, Weapon::Scar, true);
     CHECK_FALSE(motion.busy());
 }
+
+TEST_CASE("scoped sniper holds the shot until aim release and cycles exactly once") {
+    using Weapon = PlayWeaponMotion::Weapon;
+    PlayWeaponMotion motion;
+    motion.advance(0.1f, Weapon::Sniper, true, true);
+    REQUIRE(motion.pending_bolt());
+    CHECK(motion.busy());
+    CHECK_FALSE(motion.begin_reload(Weapon::Sniper));
+    CHECK(motion.pose().lower == 0.0f);
+    motion.advance(3.0f, Weapon::Sniper, false, true);
+    motion.advance(3.0f, Weapon::Sniper, true, true);
+    CHECK(motion.pending_bolt());
+    CHECK(motion.elapsed() == 0.0f);
+    CHECK_FALSE(motion.take_case_ejection());
+
+    motion.advance(0.0f, Weapon::Sniper, false, false);
+    REQUIRE(motion.cycling());
+    motion.advance(PlayWeaponMotion::kExtractionSeconds, Weapon::Sniper, false, false);
+    CHECK(motion.take_case_ejection());
+    CHECK_FALSE(motion.take_case_ejection());
+    motion.advance(10.0f, Weapon::Sniper, false, false);
+    CHECK_FALSE(motion.busy());
+    CHECK_FALSE(motion.take_case_ejection());
+}
+
+TEST_CASE("pending scoped shot survives invalid time and selection cancels it") {
+    using Weapon = PlayWeaponMotion::Weapon;
+    constexpr float kNaN = std::numeric_limits<float>::quiet_NaN();
+    PlayWeaponMotion motion;
+    motion.advance(kNaN, Weapon::Sniper, true, true);
+    REQUIRE(motion.pending_bolt());
+    motion.advance(kNaN, Weapon::Sniper, false, false);
+    REQUIRE(motion.cycling());
+    CHECK(motion.elapsed() == 0.0f);
+    CHECK_FALSE(motion.take_case_ejection());
+    motion.cancel(Weapon::M4);
+    CHECK_FALSE(motion.busy());
+    CHECK_FALSE(motion.take_case_ejection());
+
+    motion.advance(-1.0f, Weapon::Sniper, true, true);
+    REQUIRE(motion.pending_bolt());
+    motion.cancel(Weapon::Scar);
+    CHECK_FALSE(motion.busy());
+    CHECK(motion.begin_reload(Weapon::Scar));
+    motion.cancel(Weapon::Sniper);
+    motion.advance(PlayWeaponMotion::kBoltSeconds + 1.0f, Weapon::Sniper, true);
+    CHECK_FALSE(motion.busy());
+    CHECK(motion.take_case_ejection());
+    CHECK_FALSE(motion.take_case_ejection());
+}

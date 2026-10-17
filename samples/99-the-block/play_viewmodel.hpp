@@ -105,6 +105,11 @@ public:
 
     [[nodiscard]] const ReachStats& reach_stats() const noexcept { return reach_stats_; }
 
+    // Last posed wrist targets after the physical reach limit, in world metres.
+    [[nodiscard]] const std::array<core::Vec3, 2>& wrist_world() const noexcept {
+        return wrist_world_;
+    }
+
     // Shoulder-to-wrist distance limits of the selected rig, MEASURED at load through the real
     // solver, not re-derived from bone lengths: {near, far} per side, metres.
     [[nodiscard]] std::array<std::array<float, 2>, 2> reach_limits() const noexcept {
@@ -184,6 +189,7 @@ private:
     core::Mat4 weapon_local_{};
     std::vector<render::FirstPersonDeformation> deformations_;
     ReachStats reach_stats_{};
+    std::array<core::Vec3, 2> wrist_world_{};
     std::size_t resident_meshes_ = 0;
     std::size_t resident_materials_ = 0;
     std::size_t resident_textures_ = 0;

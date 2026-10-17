@@ -13,7 +13,7 @@ namespace rime::block_play {
 class PlayWeaponMotion {
 public:
     enum class Weapon : std::uint8_t { Scar, M4, Sniper };
-    enum class Action : std::uint8_t { Idle, Reload, Bolt };
+    enum class Action : std::uint8_t { Idle, Reload, PendingBolt, Bolt };
 
     struct Pose {
         float lower = 0.0f;
@@ -38,19 +38,24 @@ public:
     }
 
     // fired is an accepted shot. A bolt cycle never creates a shot of its own.
-    void advance(float dt, Weapon weapon, bool fired) noexcept {
+    void advance(float dt, Weapon weapon, bool fired, bool aiming = false) noexcept {
         if (weapon != weapon_)
             cancel(weapon);
-        // The shot was already accepted by the authoritative weapon, so its bolt cycle starts even
-        // on a frame whose clock is unusable; only the ADVANCE of time is refused. Checking dt
-        // first silently dropped a real shot's bolt and case.
+        // The shot was already accepted by the authoritative weapon, so record it even on a
+        // frame whose clock is unusable. Checking dt first silently dropped its bolt and case.
         if (fired && weapon == Weapon::Sniper && !busy()) {
+            // A scoped shot keeps its sight picture until the aim level is released. The
+            // accepted event is stored even when this frame has an unusable clock.
+            action_ = aiming ? Action::PendingBolt : Action::Bolt;
+            elapsed_ = 0.0f;
+        }
+        if (action_ == Action::PendingBolt && !aiming) {
             action_ = Action::Bolt;
             elapsed_ = 0.0f;
         }
         if (!std::isfinite(dt) || dt < 0.0f)
             return;
-        if (!busy())
+        if (!busy() || action_ == Action::PendingBolt)
             return;
         const float prior = elapsed_;
         const float duration = action_ == Action::Bolt ? kBoltSeconds : reload_seconds(weapon_);
@@ -74,6 +79,8 @@ public:
 
     [[nodiscard]] bool cycling() const noexcept { return action_ == Action::Bolt; }
 
+    [[nodiscard]] bool pending_bolt() const noexcept { return action_ == Action::PendingBolt; }
+
     [[nodiscard]] bool busy() const noexcept { return action_ != Action::Idle; }
 
     [[nodiscard]] Action action() const noexcept { return action_; }
@@ -88,7 +95,7 @@ public:
     }
 
     [[nodiscard]] Pose pose() const noexcept {
-        if (!busy())
+        if (!busy() || action_ == Action::PendingBolt)
             return {};
         const float duration = action_ == Action::Bolt ? kBoltSeconds : reload_seconds(weapon_);
         const float t = elapsed_ / duration;

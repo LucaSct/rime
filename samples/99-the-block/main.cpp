@@ -4638,6 +4638,35 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         write_ppm((g_ppm + ".target-scoped.ppm").c_str(), scoped_target, kW, kH);
     }
     (void)demo.session.client.world.despawn(target_entity);
+    // The accepted scoped shot retains the exact optic pose through a hold longer than the
+    // entire bolt timeline. Releasing aim starts the one deferred cycle and extraction.
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Sniper);
+    demo.viewmodel->set_aiming(true);
+    demo.viewmodel->advance(1.0f, {}, false);
+    (void)demo.viewmodel->pose(eye_pose);
+    const auto held_optic = demo.viewmodel->optic_world();
+    demo.viewmodel->advance(1.0f / 60.0f, {}, true);
+    demo.viewmodel->advance(2.0f, {}, false);
+    (void)demo.viewmodel->pose(eye_pose);
+    const auto held_eye = core::transform_point(held_optic, {});
+    const auto after_hold_eye = core::transform_point(demo.viewmodel->optic_world(), {});
+    const auto held_axis = core::transform_point(held_optic, {0, 0, -1});
+    const auto after_hold_axis = core::transform_point(demo.viewmodel->optic_world(), {0, 0, -1});
+    check(demo.viewmodel->busy() && !demo.viewmodel->cycling() &&
+              demo.viewmodel->aim_fraction() > .99f &&
+              core::length(after_hold_eye - held_eye) < .0001f &&
+              core::length(after_hold_axis - held_axis) < .0001f &&
+              demo.viewmodel->scope_feed_visible(eye_pose) && !demo.viewmodel->take_case_ejection(),
+          "accepted scoped shot holds optical focus without recoil, bolt or extraction");
+    demo.viewmodel->set_aiming(false);
+    demo.viewmodel->advance(0.0f, {}, false);
+    check(demo.viewmodel->cycling() && !demo.viewmodel->take_case_ejection(),
+          "scope release starts the deferred bolt exactly once");
+    demo.viewmodel->advance(block_play::PlayWeaponMotion::kExtractionSeconds, {}, false);
+    check(demo.viewmodel->take_case_ejection() && !demo.viewmodel->take_case_ejection(),
+          "deferred scoped bolt emits exactly one case at extraction");
+    demo.viewmodel->advance(2.0f, {}, false);
     // Sweep every frame of each action through the REAL rig before any image is read. One
     // rendered sample can say only that a claim failed; this says which term and when. The arm
     // solve and the weapon pose are camera-local, so pose() with an identity camera needs no GPU
@@ -4796,6 +4825,28 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         demo.viewmodel->advance(.8f, {}, false);
         const auto reload_action = capture();
         const auto& arms = demo.viewmodel->arm_stats();
+        // Project the real action wrist and weapon with the viewport camera used by the
+        // rendered frame. Image differences alone also pass when the action leaves the screen.
+        const auto projected_action = [&]() {
+            const auto& vp = demo.visuals->renderer.view_proj_unjittered();
+            const auto in_lower_view = [&](core::Vec3 world, float max_x) {
+                const auto clip = vp * core::Vec4{world.x, world.y, world.z, 1.0f};
+                if (!(clip.w > 0.0f))
+                    return false;
+                const float x = clip.x / clip.w;
+                const float y = clip.y / clip.w;
+                return std::isfinite(x) && std::isfinite(y) && std::abs(x) < max_x && y > -.92f &&
+                       y < .45f;
+            };
+            return in_lower_view(demo.viewmodel->muzzle_world(eye_pose), .95f) &&
+                   in_lower_view(demo.viewmodel->wrist_world()[0], .9f);
+        };
+        bool framed_action = projected_action();
+        for (const float step : {.45f, .45f}) {
+            demo.viewmodel->advance(step, {}, false);
+            (void)capture();
+            framed_action = framed_action && projected_action();
+        }
         // Every term of the claim below, so a failure names itself instead of needing a rerun.
         std::printf("viewmodel-smoke: %s rendered reload: reloading %d, valid %d, clamped %u, "
                     "bind skin %.4f m, wrist miss L %.2f R %.2f mm, changed %zu px\n",
@@ -4810,6 +4861,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         check(demo.viewmodel->reloading() && arms.valid_input && arms.clamped_targets == 0 &&
                   arms.max_vertex_displacement > .001f && changed(idle_action, reload_action) > 100,
               "reload visibly moves the actual weapon and reachable skinned arms");
+        check(framed_action,
+              "reload weapon and support wrist stay in the lower viewport across the action");
         if (!g_ppm.empty())
             write_ppm(
                 (g_ppm + (demo.viewmodel->scoped() ? ".sniper-reload.ppm" : ".scar-reload.ppm"))
