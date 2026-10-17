@@ -79,6 +79,7 @@
 #include <utility>
 #include <vector>
 
+#include "play_city.hpp"
 #include "play_environment.hpp"
 #include "play_input.hpp"
 #include "play_sunset.hpp"
@@ -405,6 +406,11 @@ struct Peer {
     std::unordered_map<std::uint64_t, destruction::PatternId> patterns;
     MeasuredScene measured;
 
+    // The play-only city (play_city.hpp): 24 more buildings and destructible lamps and barriers.
+    // Set by Demo::start BEFORE patterns are registered, and only for the generated scene -- a
+    // `--scene` run keeps exactly the level it was handed.
+    bool city = false;
+
     // HAND THE PHYSICS A JOB SYSTEM (m17.5). Without this pointer `PhysicsWorld` takes the
     // sequential island solve — same answer, one thread — and it had been taking it here since the
     // demo was written: each peer owned a job system and spent it only on
@@ -458,6 +464,12 @@ struct Peer {
                 (void)leaves->register_pattern(id, *asset, meshes);
             }
         }
+        // The city's two generated patterns ride the same seam (null leaves/meshes on a server).
+        if (city &&
+            !block_play::city::register_patterns(destruction, physics, patterns, leaves, meshes)) {
+            std::fprintf(stderr, "99-the-block: physics rejected a city pattern\n");
+            return false;
+        }
         return true;
     }
 
@@ -510,6 +522,9 @@ struct Peer {
             blockkit::BlockParams params;
             params.ground_material = ground_material;
             (void)blockkit::assemble(authoring, params);
+            if (city) {
+                (void)block_play::city::expand(authoring);
+            }
             if (!scene::load_scene_from_string(world, scene::save_scene_to_string(authoring)).ok) {
                 std::fprintf(stderr,
                              "99-the-block: the block's own scene file did not load back\n");
@@ -1798,6 +1813,7 @@ struct Demo {
     app::Application app;
     Session session{0x13B10Cull};
     std::unique_ptr<block_play::PlayEnvironment> environment;
+    block_play::city::Dresser city_dresser; // per-part lamp/barrier look, fed by sync() each tick
     std::unique_ptr<Visuals> visuals;
     std::unique_ptr<block_play::PlayWorld> play_world;
     std::unique_ptr<block_play::PlayViewmodel> viewmodel;
@@ -1865,6 +1881,9 @@ struct Demo {
     explicit Demo(const app::AppConfig& cfg) : app(cfg) {}
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked, std::string_view scene_path) {
+        // The city is the PLAYABLE street: the environment layer on a generated scene. Headless,
+        // perf and the authored `--scene` path never set it, so they stay byte-identical.
+        session.server.city = session.client.city = environment_enabled && scene_path.empty();
         if (app.device() != nullptr) {
             visuals = std::make_unique<Visuals>(*app.device());
         }
@@ -1910,6 +1929,9 @@ struct Demo {
         }
         if (visuals) {
             visuals->dress(session.client.world);
+            if (session.client.city) {
+                city_dresser.init(visuals->palette, visuals->materials);
+            }
             if (visuals->camera == ecs::kNullEntity) {
                 std::fprintf(stderr, "99-the-block: the block's scene carries no camera\n");
                 return false;
@@ -2203,6 +2225,10 @@ struct Demo {
         if (visuals) {
             visuals->leaf_stats = visuals->leaves.update(
                 session.client.world, session.client.destruction, session.client.physics);
+            if (city_dresser.ready()) {
+                (void)city_dresser.sync(
+                    session.client.world, session.client.destruction, visuals->leaves);
+            }
         }
     }
 
