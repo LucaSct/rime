@@ -3,6 +3,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include <limits>
+
 #include "rime/vfx/dust.hpp"
 
 // M8.4 proofs for the dust STUB: it is GPU-free (the actual additive draw + coverage-delta PIXEL
@@ -77,4 +79,89 @@ TEST_CASE("M8.4 dust: degenerate emits are no-ops") {
     field.emit_burst({-0.2f, 0.0f, -0.2f}, {0.2f, 0.4f, 0.2f}, -1.0f); // negative intensity
     field.emit_burst({0.2f, 0.4f, 0.2f}, {-0.2f, 0.0f, -0.2f}, 1.0f);  // inverted box
     CHECK(field.count() == 0);
+    CHECK(field.stats().rejected_emissions == 3);
+}
+
+TEST_CASE("smoke seam: invalid emissions leave the next valid particle sequence untouched") {
+    vfx::ParticleField field(100, 71);
+    vfx::ParticleField control(100, 71);
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float inf = std::numeric_limits<float>::infinity();
+    const core::Vec3 lo{-0.2f, 0.0f, -0.2f};
+    const core::Vec3 hi{0.2f, 0.4f, 0.2f};
+    field.emit_burst(lo, hi, nan);
+    field.emit_burst(lo, hi, inf);
+    field.emit_burst({nan, 0.0f, 0.0f}, hi, 1.0f);
+    field.emit_burst(lo, {inf, 0.4f, 0.2f}, 1.0f);
+    field.emit_burst(hi, lo, 1.0f);
+    auto bad = vfx::impact_dust();
+    bad.min_lifetime = bad.max_lifetime + 1.0f;
+    field.emit_burst(lo, hi, 1.0f, bad);
+    bad = vfx::impact_dust();
+    bad.speed = inf;
+    field.emit_burst(lo, hi, 1.0f, bad);
+    bad = vfx::impact_dust();
+    bad.family = static_cast<vfx::Family>(255);
+    field.emit_burst(lo, hi, 1.0f, bad);
+    CHECK(field.stats().rejected_emissions == 8);
+    CHECK(field.stats().requested_particles == 0);
+
+    field.emit_burst(lo, hi, 1.0f);
+    control.emit_burst(lo, hi, 1.0f);
+    REQUIRE(field.count() == control.count());
+    for (std::size_t i = 0; i < field.count(); ++i) {
+        const auto& a = field.particles()[i];
+        const auto& b = control.particles()[i];
+        CHECK(a.position.x == b.position.x);
+        CHECK(a.position.y == b.position.y);
+        CHECK(a.position.z == b.position.z);
+        CHECK(a.velocity.x == b.velocity.x);
+        CHECK(a.velocity.y == b.velocity.y);
+        CHECK(a.velocity.z == b.velocity.z);
+        CHECK(a.size == b.size);
+        CHECK(a.lifetime == b.lifetime);
+    }
+}
+
+TEST_CASE("smoke seam: a zero budget records demand and large finite requests safely") {
+    vfx::ParticleField field(0);
+    auto huge = vfx::impact_dust();
+    huge.count = std::numeric_limits<std::uint32_t>::max();
+    field.emit_burst({0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}, 4.0f, huge);
+    CHECK(field.count() == 0);
+    CHECK(field.stats().requested_particles == 4ull * std::numeric_limits<std::uint32_t>::max());
+    CHECK(field.stats().spawned_particles == 0);
+    CHECK(field.stats().dropped_capacity == field.stats().requested_particles);
+    CHECK(field.stats().rejected_emissions == 0);
+}
+
+TEST_CASE("smoke seam: retirement and clear have separate counters") {
+    vfx::ParticleField field(100, 23);
+    vfx::ParticleField control(100, 23);
+    const core::Vec3 point{0.0f, 0.0f, 0.0f};
+    field.emit_burst(point, point, 1.0f, vfx::muzzle_flash());
+    control.emit_burst(point, point, 1.0f, vfx::muzzle_flash());
+    field.simulate(0.2f);
+    control.simulate(0.2f);
+    CHECK(field.stats().retired_particles == 10);
+    CHECK(field.stats().cleared_particles == 0);
+    field.emit_burst(point, point, 1.0f, vfx::lingering_smoke());
+    control.emit_burst(point, point, 1.0f, vfx::lingering_smoke());
+    field.clear();
+    control.clear();
+    CHECK(field.stats().cleared_particles == 18);
+    CHECK(field.stats().retired_particles == 10);
+    field.reset_stats();
+    CHECK(field.stats().retired_particles == 0);
+    CHECK(field.stats().cleared_particles == 0);
+    field.emit_burst(point, point, 1.0f);
+    control.emit_burst(point, point, 1.0f);
+    REQUIRE(field.count() == control.count());
+    for (std::size_t i = 0; i < field.count(); ++i) {
+        CHECK(field.particles()[i].velocity.x == control.particles()[i].velocity.x);
+        CHECK(field.particles()[i].velocity.y == control.particles()[i].velocity.y);
+        CHECK(field.particles()[i].velocity.z == control.particles()[i].velocity.z);
+    }
+    CHECK(field.stats().requested_particles == 48);
+    CHECK(field.stats().spawned_particles == 48);
 }
