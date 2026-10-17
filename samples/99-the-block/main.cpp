@@ -941,7 +941,7 @@ struct Session {
         // is expressed against that scale and a building takes sustained fire rather than one shot.
         server.weapon.damage = 0.34f;
         server.weapon.damage_radius = 0.35f;
-        server.weapon.cooldown_ticks = 3;
+        server.weapon.cooldown_ticks = server.weapon.automatic ? 6 : 3;
 
         // The server is GPU-free by construction — it never draws, so it never registers leaf
         // meshes. Only the client does, and that asymmetry is the point of m13.2d's null-registry
@@ -2124,7 +2124,10 @@ struct Demo {
                                 shot.did_hit
                                     ? shot.point
                                     : shot.origin + shot.direction * session.server.weapon.range,
-                                shot.did_hit);
+                                shot.did_hit,
+                                shot.normal,
+                                shot.body,
+                                &session.server.physics);
             }
         }
         if (session.world_stopped) {
@@ -2219,7 +2222,7 @@ struct Demo {
         ecs::World& world = session.client.world;
         if (weapon_fx) {
             weapon_fx->advance(static_cast<float>(ctx.frame_dt));
-            weapon_fx->pose(world);
+            weapon_fx->pose(world, &session.server.physics);
         }
         if (auto* tf = world.get<ecs::WorldTransform>(visuals->camera)) {
             tf->value =
@@ -4524,6 +4527,7 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
     demo.streamed_world = true;
     demo.environment_enabled = true;
     demo.development_hud = false;
+    demo.session.server.weapon.automatic = true;
     if (!demo.app.device())
         return std::getenv("RIME_REQUIRE_VULKAN") ? 1 : 0;
     if (!demo.start(cooked, scene_path) || !demo.environment)
@@ -4719,11 +4723,22 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
     check(firing_pixels > 50 && firing_pixels > firing_drift * 3,
           "accepted muzzle/tracer feedback is visible and expires above static drift");
     std::printf(
-        "environment-smoke: accepted firing feedback %zu pixels / drift %zu; pool24 entities\n",
+        "environment-smoke: accepted firing feedback %zu pixels / drift %zu; fixed resident pool\n",
         firing_pixels,
         firing_drift);
     if (!g_ppm.empty())
         write_ppm((g_ppm + ".firing.ppm").c_str(), fired, kW, kH);
+    const auto automatic_before = demo.session.shots_fired;
+    trigger.held = gameplay::kActionFire;
+    for (int tick = 0; tick < 18; ++tick) {
+        trigger.pressed = tick == 0 ? gameplay::kActionFire : 0;
+        demo.step_sim(gameplay_net::to_input_command(trigger));
+    }
+    trigger.pressed = trigger.held = 0;
+    for (int tick = 0; tick < 8; ++tick)
+        demo.step_sim(gameplay_net::to_input_command(trigger));
+    check(demo.session.shots_fired == automatic_before + 3,
+          "held trigger fires three accepted rounds in 18 ticks, then release stops fire");
     return okay ? 0 : 1;
 }
 
@@ -4743,6 +4758,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
 
     Demo demo(cfg);
     demo.scripted_charge = false; // interactive: wait for F, not the tape
+    demo.session.server.weapon.automatic = true;
     demo.streamed_world = true;
     demo.environment_enabled = true;
     demo.viewmodel_enabled = true;
@@ -4805,7 +4821,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         bindings.look_requires_drag = gameplay::look_requires_drag_for(cursor);
         std::printf(
             "99-the-block: presenting in a window.\n"
-            "  WASD move · %s to look · LEFT CLICK to fire\n"
+            "  WASD move · %s to look · HOLD LEFT MOUSE for automatic fire\n"
             "  1 SCAR-H · 2 M4A1 · 3 MSR / Schmidt & Bender PM II\n"
             "  Hold Q or RIGHT MOUSE to aim (also while dragging) · F detonates · ESC exits\n",
             bindings.look_requires_drag
