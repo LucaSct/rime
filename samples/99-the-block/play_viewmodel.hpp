@@ -110,6 +110,18 @@ public:
         return wrist_world_;
     }
 
+    [[nodiscard]] std::uint32_t magazine_triangles() const noexcept {
+        return models_[static_cast<unsigned>(selected_)].magazine_triangles;
+    }
+
+    [[nodiscard]] core::Mat4 magazine_world() const noexcept { return magazine_world_; }
+
+    [[nodiscard]] core::Vec3 magazine_contact_world() const noexcept {
+        return magazine_contact_world_;
+    }
+
+    [[nodiscard]] float magazine_contact_gap() const noexcept { return magazine_contact_gap_; }
+
     // Shoulder-to-wrist distance limits of the selected rig, MEASURED at load through the real
     // solver, not re-derived from bone lengths: {near, far} per side, metres.
     [[nodiscard]] std::array<std::array<float, 2>, 2> reach_limits() const noexcept {
@@ -154,6 +166,9 @@ private:
         std::uint32_t first_index = 0;
         std::uint32_t index_count = 0;
         bool arm = false;
+        bool magazine = false;
+        std::uint8_t source_file = 0;
+        std::uint32_t source_range = 0;
     };
 
     struct Model {
@@ -165,6 +180,8 @@ private:
         render::MeshId arm_mesh = render::kInvalidMeshId;
         std::array<core::Mat4, 2> grips{};
         std::array<float, 2> reach_near{}, reach_far{};
+        core::Vec3 magazine_contact{};
+        std::uint32_t magazine_triangles = 0;
         std::vector<core::Vec3> previous, last;
         bool history = false;
     };
@@ -190,6 +207,9 @@ private:
     std::vector<render::FirstPersonDeformation> deformations_;
     ReachStats reach_stats_{};
     std::array<core::Vec3, 2> wrist_world_{};
+    core::Mat4 magazine_world_{};
+    core::Vec3 magazine_contact_world_{};
+    float magazine_contact_gap_ = 0.0f;
     std::size_t resident_meshes_ = 0;
     std::size_t resident_materials_ = 0;
     std::size_t resident_textures_ = 0;

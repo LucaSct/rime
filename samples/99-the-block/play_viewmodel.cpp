@@ -103,6 +103,99 @@ bool extract_scar_glass(render::CpuMesh& gun, render::CpuMesh& glass) {
     return !glass.indices.empty();
 }
 
+struct MagazineSplit {
+    render::CpuMesh magazine;
+    core::Vec3 contact{};
+    std::uint32_t triangles = 0;
+};
+
+bool split_magazine(render::CpuMesh& body, unsigned weapon, MagazineSplit& out) {
+    // Source GLBs measured in prepared weapon-local metres. M4's authored material slot is a
+    // clean magazine. SCAR and MSR share materials with their receivers: classify WHOLE
+    // index-connected pieces by bounds, never triangles clipped along an arbitrary plane.
+    // Exact triangle totals make changed artwork fail closed instead of moving receiver faces.
+    constexpr std::array<core::Vec3, 2> lo{{{.120f, -.349f, -.620f}, {}}};
+    constexpr std::array<core::Vec3, 2> hi{{{.157f, -.187f, -.534f}, {}}};
+    constexpr std::array<std::uint32_t, 2> expected{1152, 664};
+    // MSR remains a single body until its UV-split source magazine has an unambiguous component
+    // set; a coordinate triangle cut would produce floating receiver faces.
+    if (weapon >= expected.size())
+        return false;
+    std::vector<std::uint32_t> parent(body.vertices.size());
+    for (std::uint32_t i = 0; i < parent.size(); ++i)
+        parent[i] = i;
+    const auto root = [&](std::uint32_t index) {
+        while (parent[index] != index) {
+            parent[index] = parent[parent[index]];
+            index = parent[index];
+        }
+        return index;
+    };
+    for (std::size_t t = 0; t < body.indices.size(); t += 3) {
+        const auto a = root(body.indices[t]);
+        parent[root(body.indices[t + 1])] = a;
+        parent[root(body.indices[t + 2])] = a;
+    }
+
+    struct Bounds {
+        core::Vec3 low{std::numeric_limits<float>::max(),
+                       std::numeric_limits<float>::max(),
+                       std::numeric_limits<float>::max()};
+        core::Vec3 high{-std::numeric_limits<float>::max(),
+                        -std::numeric_limits<float>::max(),
+                        -std::numeric_limits<float>::max()};
+    };
+
+    std::vector<Bounds> bounds(body.vertices.size());
+    for (const auto index : body.indices) {
+        auto& b = bounds[root(index)];
+        const auto& v = body.vertices[index];
+        b.low = {std::min(b.low.x, v.px), std::min(b.low.y, v.py), std::min(b.low.z, v.pz)};
+        b.high = {std::max(b.high.x, v.px), std::max(b.high.y, v.py), std::max(b.high.z, v.pz)};
+    }
+    const auto inside = [&](std::uint32_t index) {
+        const auto& b = bounds[root(index)];
+        return b.low.x >= lo[weapon].x && b.low.y >= lo[weapon].y && b.low.z >= lo[weapon].z &&
+               b.high.x <= hi[weapon].x && b.high.y <= hi[weapon].y && b.high.z <= hi[weapon].z;
+    };
+    out.magazine.vertices = body.vertices; // preserve positions, normals, UVs and tangents
+    std::vector<std::uint32_t> kept;
+    core::Vec3 contact_sum{};
+    std::uint32_t contact_vertices = 0;
+    for (auto& range : body.submeshes) {
+        const auto body_begin = static_cast<std::uint32_t>(kept.size());
+        const auto mag_begin = static_cast<std::uint32_t>(out.magazine.indices.size());
+        for (std::size_t t = range.first_index; t < range.first_index + range.index_count; t += 3) {
+            const bool mag = weapon == 1 ? range.material_slot == 2 : inside(body.indices[t]);
+            auto& target = mag ? out.magazine.indices : kept;
+            for (unsigned j = 0; j < 3; ++j) {
+                const auto source = body.indices[t + j];
+                target.push_back(source);
+                if (mag) {
+                    const auto& v = body.vertices[source];
+                    contact_sum = contact_sum + core::Vec3{v.px, v.py, v.pz};
+                    ++contact_vertices;
+                }
+            }
+        }
+        out.magazine.submeshes.push_back(
+            {mag_begin,
+             static_cast<std::uint32_t>(out.magazine.indices.size()) - mag_begin,
+             range.material_slot});
+        range.first_index = body_begin;
+        range.index_count = static_cast<std::uint32_t>(kept.size()) - body_begin;
+    }
+    out.triangles = static_cast<std::uint32_t>(out.magazine.indices.size() / 3);
+    if (out.triangles != expected[weapon])
+        return false;
+    body.indices = std::move(kept);
+    // The palm aims at the magazine's centre near its upper socket. The articulated fingers in
+    // the source rig are locked; this is a wrist contact target, not a finger-grasp claim.
+    out.contact = contact_sum / static_cast<float>(contact_vertices);
+    out.contact.y = std::min(out.contact.y + .04f, hi[weapon].y);
+    return true;
+}
+
 struct TextureRefs {
     assets::TextureAssetHandle base{};
     assets::TextureAssetHandle mr{};
@@ -302,10 +395,29 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
                 }
             models_[i].muzzle = muzzle / static_cast<float>(count);
         }
+        MagazineSplit magazine;
+        if (i < 2) {
+            if (!split_magazine(geometry, static_cast<unsigned>(i), magazine)) {
+                std::fprintf(
+                    stderr,
+                    "99-the-block: %s magazine topology changed; expected authored split\n",
+                    kSources[i]);
+                return false;
+            }
+            models_[i].magazine_contact = magazine.contact;
+            models_[i].magazine_triangles = magazine.triangles;
+        }
         const render::MeshId mesh_id = meshes.add(geometry, kSources[i]);
         if (!meshes.contains(mesh_id))
             return false;
         ++resident_meshes_;
+        render::MeshId magazine_id = render::kInvalidMeshId;
+        if (i < 2) {
+            magazine_id = meshes.add(magazine.magazine, "held detachable magazine");
+            if (!meshes.contains(magazine_id))
+                return false;
+            ++resident_meshes_;
+        }
         if (i >= 3) {
             auto& model = models_[i - 3];
             const auto* skeleton_entry =
@@ -351,7 +463,8 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             return false;
         int normal_mapped = 0;
         int metal_rough_mapped = 0;
-        for (const auto& range : ranges) {
+        for (std::size_t j = 0; j < ranges.size(); ++j) {
+            const auto& range = ranges[j];
             const std::string source =
                 entries[i]->source_path + "#material" + std::to_string(range.material_slot);
             const auto* material_entry = manifest_->find_by_source(source);
@@ -376,17 +489,38 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             request_texture(material->occlusion_tex, p.textures.occlusion);
             request_texture(material->emissive_tex, p.textures.emissive);
             pending[i].push_back(p);
-            models_[i % 3].parts.push_back({mesh_id,
-                                            render::kInvalidMaterialId,
-                                            range.first_index,
-                                            range.index_count,
-                                            i >= 3});
+            if (range.index_count != 0)
+                models_[i % 3].parts.push_back({mesh_id,
+                                                render::kInvalidMaterialId,
+                                                range.first_index,
+                                                range.index_count,
+                                                i >= 3,
+                                                false,
+                                                static_cast<std::uint8_t>(i),
+                                                static_cast<std::uint32_t>(j)});
+            if (i < 2) {
+                const auto& mag_range = magazine.magazine.submeshes[j];
+                if (mag_range.index_count != 0)
+                    models_[i].parts.push_back({magazine_id,
+                                                render::kInvalidMaterialId,
+                                                mag_range.first_index,
+                                                mag_range.index_count,
+                                                false,
+                                                true,
+                                                static_cast<std::uint8_t>(i),
+                                                static_cast<std::uint32_t>(j)});
+            }
         }
         // The CC-BY MSR is a solid-material model; retain those source materials
         // honestly. The other weapons and every arm still require their native maps.
         if (i != 2 && (normal_mapped == 0 || metal_rough_mapped == 0)) {
             std::fprintf(
                 stderr, "99-the-block: %s needs real normal and metal-rough maps\n", kSources[i]);
+            return false;
+        }
+        if (i >= 3 && models_[i - 3].parts.size() > kMaxDraws - 1) {
+            std::fprintf(
+                stderr, "99-the-block: %s exceeds first-person draw budget\n", kSources[i]);
             return false;
         }
     }
@@ -416,8 +550,10 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             desc.normal_texture = ready(p.textures.normal);
             desc.occlusion_texture = ready(p.textures.occlusion);
             desc.emissive_texture = ready(p.textures.emissive);
-            const std::size_t part_offset = i >= 3 ? pending[i - 3].size() : 0;
-            models_[i % 3].parts[part_offset + j].material = materials.add(desc);
+            const auto material_id = materials.add(desc);
+            for (auto& part : models_[i % 3].parts)
+                if (part.source_file == i && part.source_range == j)
+                    part.material = material_id;
             ++resident_materials_;
         }
     }
@@ -579,7 +715,7 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     local.rotation =
         core::quat_from_euler(recoil_ * .8f + 0.07f * motion_pose.lower,
                               .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount,
-                              0.50f * motion_pose.tilt);
+                              0.24f * motion_pose.tilt);
     const core::Mat4 camera_matrix = core::to_matrix(camera);
     const core::Mat4 weapon_local = core::to_matrix(local) * sight_alignment(index, aim_);
     weapon_local_ = weapon_local;
@@ -588,23 +724,23 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     auto grips = selected.grips;
     // Slot zero is the support left hand; slot one is the firing right hand. Moving
     // wrist targets leaves the shoulder anchors fixed and uses the existing CPU IK mesh.
+    // Target the measured magazine body, then translate the wrist and detached mesh together.
+    // The same reach fraction limits both: moving only the wrist would visibly detach the palm
+    // from a magazine continuing on its full path. MSR has no safe magazine split yet.
+    const core::Vec3 pull{0.0f, -0.11f, 0.035f};
+    const core::Vec3 support_grip = core::transform_point(grips[0], {});
+    const core::Vec3 approach =
+        selected.magazine_triangles != 0 ? selected.magazine_contact - support_grip : core::Vec3{};
+    const float pull_amount = selected.magazine_triangles != 0 ? motion_pose.magazine_pull : 0.0f;
     const std::array<core::Vec3, 2> offsets{
-        {{0.035f * motion_pose.left_magazine,
-          -0.095f * motion_pose.left_magazine,
-          0.10f * motion_pose.left_magazine},
+        {approach * motion_pose.left_magazine + pull * pull_amount,
          {0.025f * motion_pose.right_bolt,
           0.035f * motion_pose.right_bolt,
           -0.11f * motion_pose.right_bolt + 0.095f * motion_pose.bolt_pull}}};
-    // The gun lowers AND the support hand drops toward the magazine, and together those carried
-    // the left wrist up to 34 mm past the SCAR's measured reach (15 mm M4, 7.5 mm MSR) for most
-    // of the reload hold. Shorten each hand's path to what that rig can reach; the gun's own
-    // lower and roll are untouched. The 5 mm margin is ~10^4 above the float error of the
-    // measured limit (a difference of two ~2.5 m values), so the solver's exact
-    // clamp test cannot flicker on a frame-to-frame rounding difference, and it leaves the
-    // elbow visibly bent (about 4 cm of elbow offset for 30 cm bones) rather than locked straight.
     const core::Mat4 arms_from_weapon = selected.arms_from_camera * weapon_local;
     const auto shoulders = selected.arms.bind_shoulders();
     bool limited = false;
+    float support_fraction = 1.0f;
     for (unsigned side = 0; side < 2; ++side) {
         const float f = reachable_fraction(arms_from_weapon,
                                            core::transform_point(grips[side], {}),
@@ -613,11 +749,20 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
                                            selected.reach_near[side],
                                            selected.reach_far[side]);
         limited = limited || f < 1.0f;
+        if (side == 0)
+            support_fraction = f;
         reach_stats_.retained[side] = f;
         reach_stats_.applied_offset[side] = core::length(offsets[side]) * f;
         grips[side] = core::mat4_translation(offsets[side] * f) * grips[side];
         wrist_world_[side] = core::transform_point(model * grips[side], {});
     }
+    const core::Mat4 magazine_local =
+        core::mat4_translation(pull * (pull_amount * support_fraction));
+    magazine_world_ = model * magazine_local;
+    magazine_contact_world_ = core::transform_point(magazine_world_, selected.magazine_contact);
+    magazine_contact_gap_ = selected.magazine_triangles != 0
+                                ? core::length(wrist_world_[0] - magazine_contact_world_)
+                                : 0.0f;
     reach_stats_.limited_poses += limited ? 1u : 0u;
     const auto vertices = selected.arms.solve(arms_from_weapon, grips, selected.elbow_poles);
     for (std::size_t i = 0; i < vertices.size(); ++i) {
@@ -632,7 +777,8 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
         render::DrawItem draw{};
         draw.mesh = part.mesh;
         draw.material = part.material;
-        draw.model = part.arm ? camera_matrix * selected.camera_from_arms : model;
+        draw.model = part.arm ? camera_matrix * selected.camera_from_arms
+                              : (part.magazine ? magazine_world_ : model);
         draw.first_index = part.first_index;
         draw.index_count = part.index_count;
         draws_.push_back(draw);

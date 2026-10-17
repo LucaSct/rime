@@ -36,6 +36,38 @@ TEST_CASE("weapon reload uses elapsed time and ignores a held reload retrigger")
     CHECK_FALSE(slow.busy());
 }
 
+TEST_CASE("magazine reload reaches contact before extraction and reseats before hand return") {
+    using Weapon = PlayWeaponMotion::Weapon;
+    PlayWeaponMotion motion;
+    REQUIRE(motion.begin_reload(Weapon::M4));
+    const auto at = [&](float fraction) {
+        motion.advance(
+            PlayWeaponMotion::kRifleReloadSeconds * fraction - motion.elapsed(), Weapon::M4, false);
+        return motion.pose();
+    };
+    const auto approach = at(.20f);
+    CHECK(approach.left_magazine > 0.0f);
+    CHECK(approach.left_magazine < 1.0f);
+    CHECK(approach.magazine_pull == 0.0f);
+    const auto contact = at(.32f);
+    CHECK(contact.left_magazine == doctest::Approx(1.0f));
+    CHECK(contact.magazine_pull == 0.0f);
+    const auto extraction = at(.55f);
+    CHECK(extraction.left_magazine == doctest::Approx(1.0f));
+    CHECK(extraction.magazine_pull == doctest::Approx(1.0f));
+    const auto reseat = at(.70f);
+    CHECK(reseat.magazine_pull < extraction.magazine_pull);
+    CHECK(reseat.magazine_pull > 0.0f);
+    CHECK(reseat.left_magazine == doctest::Approx(1.0f));
+    const auto returned = at(.95f);
+    CHECK(returned.magazine_pull == 0.0f);
+    CHECK(returned.left_magazine == 0.0f);
+    motion.advance(PlayWeaponMotion::kRifleReloadSeconds, Weapon::M4, false);
+    CHECK_FALSE(motion.busy());
+    CHECK(motion.pose().magazine_pull == 0.0f);
+    CHECK(motion.pose().left_magazine == 0.0f);
+}
+
 TEST_CASE("only accepted sniper shots cycle and emit one extraction event") {
     using Weapon = PlayWeaponMotion::Weapon;
     PlayWeaponMotion motion;

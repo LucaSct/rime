@@ -19,6 +19,7 @@ public:
         float lower = 0.0f;
         float tilt = 0.0f;
         float left_magazine = 0.0f;
+        float magazine_pull = 0.0f;
         float right_bolt = 0.0f;
         float bolt_pull = 0.0f;
     };
@@ -100,16 +101,19 @@ public:
         const float duration = action_ == Action::Bolt ? kBoltSeconds : reload_seconds(weapon_);
         const float t = elapsed_ / duration;
         if (action_ == Action::Reload) {
-            // Lower first, move the support hand to the magazine, then shoulder again.
+            // Approach, grip, extract, pause, reseat, then return. The support wrist and
+            // magazine share magazine_pull while gripped; idle and completed reloads are zero.
             return {window(t, 0.0f, 0.18f, 0.75f, 1.0f),
                     window(t, 0.04f, 0.24f, 0.72f, 0.97f),
-                    window(t, 0.16f, 0.32f, 0.62f, 0.86f),
+                    window(t, 0.10f, 0.30f, 0.76f, 0.94f),
+                    window(t, 0.34f, 0.48f, 0.61f, 0.77f),
                     0.0f,
                     0.0f};
         }
         // The sniper's right hand reaches the bolt, pulls, and returns to its grip.
         return {0.28f * window(t, 0.03f, 0.16f, 0.70f, 0.95f),
                 0.12f * window(t, 0.08f, 0.20f, 0.70f, 0.92f),
+                0.0f,
                 0.0f,
                 window(t, 0.04f, 0.20f, 0.68f, 0.91f),
                 window(t, 0.21f, 0.42f, 0.56f, 0.76f)};
