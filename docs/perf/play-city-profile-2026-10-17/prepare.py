@@ -172,6 +172,19 @@ def instrument_main(text, header, out):
          '        demo.render(ctx);\n'
          '        if (city_profile::active()) city_profile::config.frames.back().graph_passes = ctx.graph->pass_count();'),
         ('    if (demo.app.windowed()) {\n        (void)demo.app.run();\n    } else {\n        demo.app.run_frames(static_cast<int>(g_ticks));\n    }',
+         '    const blockkit::BlockParams diagnostic_params{};\n'
+         '    const std::array<std::uint32_t, 3> diagnostic_buildings{\n'
+         '        diagnostic_params.hero_south, diagnostic_params.hero_north, 0};\n'
+         '    if (city_profile::config.multi_collapse &&\n'
+         '        (diagnostic_buildings[0] == diagnostic_buildings[1] ||\n'
+         '         diagnostic_buildings[0] == diagnostic_buildings[2] ||\n'
+         '         diagnostic_buildings[1] == diagnostic_buildings[2] ||\n'
+         '         diagnostic_buildings[0] >= diagnostic_params.building_count() ||\n'
+         '         diagnostic_buildings[1] >= diagnostic_params.building_count() ||\n'
+         '         diagnostic_buildings[2] >= diagnostic_params.building_count())) return 7;\n'
+         '    const std::array<std::uint64_t, 3> diagnostic_beats{0, 60, 120};\n'
+         '    std::uint64_t diagnostic_tick_origin = 0;\n'
+         '    std::size_t diagnostic_next_charge = 0;\n'
          '    for (std::uint64_t i = 0; i < city_profile::config.warmup + diagnostic_frames; ++i) {\n'
          '        city_profile::config.frame = demo.app.frame_index();\n'
          '        city_profile::config.recording = i >= city_profile::config.warmup;\n'
@@ -180,16 +193,39 @@ def instrument_main(text, header, out):
          '            city_profile::config.frames.push_back(row);\n'
          '        }\n'
          '        const auto diagnostic_frame_start = city_profile::Clock::now();\n'
-         '        if (city_profile::config.collapse && i == city_profile::config.warmup) {\n'
+         '        if (i == city_profile::config.warmup) diagnostic_tick_origin = demo.app.tick_count();\n'
+         '        if (city_profile::config.multi_collapse && i >= city_profile::config.warmup &&\n'
+         '            diagnostic_next_charge < diagnostic_beats.size() &&\n'
+         '            demo.app.tick_count() - diagnostic_tick_origin == diagnostic_beats[diagnostic_next_charge]) {\n'
+         '            auto& row = city_profile::config.frames.back();\n'
+         '            row.charge_requested = true;\n'
+         '            row.charge_building = diagnostic_buildings[diagnostic_next_charge];\n'
+         '            row.charge_tick = demo.app.tick_count() - diagnostic_tick_origin;\n'
+         '            row.charge_targets = diagnostic_detonate_building(\n'
+         '                demo.session, row.charge_building);\n'
+         '            row.charge_fired = row.charge_targets > 0;\n'
+         '            city_profile::config.multi_targets[diagnostic_next_charge] = row.charge_targets;\n'
+         '            city_profile::config.charge_targets += row.charge_targets;\n'
+         '            city_profile::config.multi_missing_target |= !row.charge_fired;\n'
+         '            ++diagnostic_next_charge;\n'
+         '        } else if (city_profile::config.collapse && i == city_profile::config.warmup) {\n'
          '            city_profile::config.frames.back().charge_requested = true;\n'
          '            demo.fire_charge();\n'
          '            auto& row = city_profile::config.frames.back();\n'
          '            row.charge_fired = demo.charge_fired;\n'
          '            row.charge_targets = city_profile::config.charge_targets;\n'
+         '            row.charge_building = diagnostic_params.hero_south;\n'
          '        }\n'
          '        (void)demo.app.step(1.0 / 60.0);\n'
          '        if (city_profile::active()) {\n'
-         '            city_profile::config.frames.back().frame_cpu_ms = city_profile::elapsed_ms(diagnostic_frame_start);\n'
+         '            auto& row = city_profile::config.frames.back();\n'
+         '            row.frame_cpu_ms = city_profile::elapsed_ms(diagnostic_frame_start);\n'
+         '            row.peers_agree = destruction_net::shared_state_hash(demo.session.server.world,\n'
+         '                demo.session.server.replicator->map(), demo.session.server.destruction) ==\n'
+         '                destruction_net::shared_state_hash(demo.session.client.world,\n'
+         '                    demo.session.client.replicator->map(), demo.session.client.destruction);\n'
+         '            if (city_profile::config.multi_collapse && row.charge_requested)\n'
+         '                city_profile::config.multi_effects[diagnostic_next_charge - 1] = row.committed_ops > 0;\n'
          '            city_profile::capture_casters(city_profile::config.frame, "main",\n'
          '                demo.visuals->renderer.csm_caster_stats());\n'
          '            if (demo.visuals->scope_renderer && demo.visuals->last_scope_ldr.is_valid())\n'
@@ -220,12 +256,21 @@ def instrument_main(text, header, out):
          '    if (!summary) throw std::runtime_error("summary.json open failed");\n'
          '    bool overflow = false, gpu_present = true, pass_mismatch = false;\n'
          '    bool collapse_effect_seen = false, ticks_present = true, physics_present = true;\n'
-         '    std::uint64_t charge_requests = 0;\n'
+         '    std::uint64_t charge_requests = 0, frames_peer_mismatch = 0;\n'
+         '    std::uint64_t settling_peer_mismatch = 0, first_mismatch = 0, last_mismatch = 0;\n'
+         '    std::size_t diagnostic_summary_index = 0;\n'
          '    for (const auto& f : city_profile::config.frames) {\n'
          '        overflow |= f.overflow; gpu_present &= f.gpu_present;\n'
          '        ticks_present &= f.ticks > 0 && f.frame_cpu_ms > 0;\n'
          '        physics_present &= f.server_physics.bodies > 0 && f.client_physics.bodies > 0;\n'
          '        charge_requests += f.charge_requested ? 1u : 0u;\n'
+         '        if (!f.peers_agree) {\n'
+         '            if (frames_peer_mismatch == 0) first_mismatch = f.frame;\n'
+         '            last_mismatch = f.frame; ++frames_peer_mismatch;\n'
+         '            if (diagnostic_summary_index + 60 >= city_profile::config.frames.size())\n'
+         '                ++settling_peer_mismatch;\n'
+         '        }\n'
+         '        ++diagnostic_summary_index;\n'
          '        collapse_effect_seen |= f.committed_ops > 0 || f.server_debris > 0;\n'
          '        pass_mismatch |= f.executed_passes == 0 ||\n'
          '            f.timed_passes != std::min<std::uint64_t>(f.executed_passes, render::RenderGraph::max_timed_passes());\n'
@@ -239,22 +284,75 @@ def instrument_main(text, header, out):
          '            << ",\\"gpu_present\\":" << (gpu_present ? "true" : "false")\n'
          '            << ",\\"overflow\\":" << (overflow ? "true" : "false")\n'
          '            << ",\\"pass_mismatch\\":" << (pass_mismatch ? "true" : "false")\n'
-         '            << ",\\"shadow_caster_culling\\":" << (city_profile::config.shadow_caster_culling ? "true" : "false")\n'
+         '            << ",\\"main_shadow_caster_culling\\":false"\n'
+         '            << ",\\"optic_shadow_caster_culling\\":" << (city_profile::config.shadow_caster_culling ? "true" : "false")\n'
          '            << ",\\"ppm_written\\":" << (city_profile::config.ppm_written ? "true" : "false")\n'
          '            << ",\\"collapse_requested\\":" << (city_profile::config.collapse ? "true" : "false")\n'
+         '            << ",\\"multi_collapse\\":" << (city_profile::config.multi_collapse ? "true" : "false")\n'
+         '            << ",\\"charge_requests\\":" << charge_requests\n'
+         '            << ",\\"multi_charge_targets\\":[" << city_profile::config.multi_targets[0]\n'
+         '            << "," << city_profile::config.multi_targets[1] << "," << city_profile::config.multi_targets[2] << "]"\n'
+         '            << ",\\"multi_charge_effects\\":[" << (city_profile::config.multi_effects[0] ? "true" : "false")\n'
+         '            << "," << (city_profile::config.multi_effects[1] ? "true" : "false")\n'
+         '            << "," << (city_profile::config.multi_effects[2] ? "true" : "false") << "]"\n'
+         '            << ",\\"frames_peer_mismatch\\":" << frames_peer_mismatch\n'
+         '            << ",\\"first_mismatch_frame\\":"\n'
+         '            << (frames_peer_mismatch ? std::to_string(first_mismatch) : "null")\n'
+         '            << ",\\"last_mismatch_frame\\":"\n'
+         '            << (frames_peer_mismatch ? std::to_string(last_mismatch) : "null")\n'
+         '            << ",\\"settling_window_frames\\":" << std::min<std::size_t>(60, city_profile::config.frames.size())\n'
+         '            << ",\\"settling_peer_mismatch\\":" << settling_peer_mismatch\n'
          '            << ",\\"collapse_effect_seen\\":" << (collapse_effect_seen ? "true" : "false")\n'
          '            << ",\\"charge_targets\\":" << city_profile::config.charge_targets\n'
          '            << ",\\"perf_gate_pass\\":null}" << std::endl;\n'
          '    summary.flush(); if (!summary) throw std::runtime_error("summary.json write failed");\n'
          '    if (!count_ok || !gpu_present || overflow || pass_mismatch || !ticks_present || !physics_present ||\n'
          '        (!city_profile::config.ppm.empty() && !city_profile::config.ppm_written) ||\n'
-         '        (city_profile::config.collapse && (charge_requests != 1 || !demo.charge_fired ||\n'
-         '         city_profile::config.charge_targets == 0 || !collapse_effect_seen))) return 5;')])
+         '        (city_profile::config.multi_collapse && (charge_requests != 3 ||\n'
+         '         city_profile::config.multi_missing_target ||\n'
+         '         std::any_of(city_profile::config.multi_targets.begin(),\n'
+         '                     city_profile::config.multi_targets.end(), [](auto n) { return n == 0; }) ||\n'
+         '         std::any_of(city_profile::config.multi_effects.begin(),\n'
+         '                     city_profile::config.multi_effects.end(), [](bool effect) { return !effect; }))) ||\n'
+         '        (city_profile::config.collapse && !city_profile::config.multi_collapse &&\n'
+         '         (charge_requests != 1 || !demo.charge_fired ||\n'
+         '          city_profile::config.charge_targets == 0 || !collapse_effect_seen))) return 5;')])
     text = exactly(text, 'session.server.city = session.client.city = environment_enabled && scene_path.empty();',
                    'session.server.city = session.client.city = environment_enabled && scene_path.empty() && !city_profile::config.control;')
+    helper = '''// External diagnostic: choose a standing ground-storey street corner from live authored slabs.
+std::size_t diagnostic_detonate_building(Session& session, std::uint32_t building) {
+    float min_x = std::numeric_limits<float>::infinity();
+    float nearest_z = std::numeric_limits<float>::infinity();
+    bool found = false;
+    session.server.world.query<blockkit::SlabRole, ecs::WorldTransform,
+                               destruction::DestructibleInstanceRef>().for_each(
+        [&](blockkit::SlabRole& role, ecs::WorldTransform& transform,
+            destruction::DestructibleInstanceRef& ref) {
+            if (role.building != building || role.storey != 0 ||
+                !blockkit::slab_kind::is_destructible(role.kind)) return;
+            const destruction::InstanceId id{ref.instance};
+            const auto parts = session.server.destruction.instance_part_count(id);
+            bool standing = false;
+            for (std::uint32_t part = 0; part < parts; ++part)
+                standing |= session.server.destruction.part_alive(id, part);
+            if (!standing) return;
+            const auto at = transform.value.translation;
+            if (!std::isfinite(at.x) || !std::isfinite(at.z)) return;
+            min_x = std::min(min_x, at.x);
+            if (!found || std::fabs(at.z) < std::fabs(nearest_z) ||
+                (std::fabs(at.z) == std::fabs(nearest_z) && at.z < nearest_z))
+                nearest_z = at.z;
+            found = true;
+        });
+    if (!found) return 0;
+    Charge charge{}; // production radius 11, damage 9, impulse 7
+    charge.at = {min_x, 1.2f, nearest_z};
+    return detonate(session, building, charge);
+}
+'''
     text = exactly(text, 'int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {',
                    'std::uint64_t diagnostic_frames = 120;\nstd::filesystem::path diagnostic_out;\n'
-                   'int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {')
+                   + helper + 'int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {')
     return text
 
 def command_for(entries, rel, generated, obj, root, build_source_root):
@@ -307,7 +405,7 @@ def main():
                        '; const auto generated_out = diagnostic_out' +
                        '; if (!city_profile::parse_cli(argc, argv, diagnostic_out, diagnostic_frames)) { '
                        'std::fputs("usage: profile_play [--out-dir DIR] [--ads|--hip] [--control|--city] '
-                       '[--warmup N] [--frames N] [--collapse] [--shadow-culling-off|--shadow-culling-on] [--ppm PATH]\\n", stderr); return 2; } '
+                       '[--warmup N] [--frames N] [--collapse|--multi-collapse] [--shadow-culling-off|--shadow-culling-on] [--ppm PATH]\\n", stderr); return 2; } '
                        'if (generated_out != diagnostic_out) { std::error_code error; '
                        'std::filesystem::copy_file(generated_out / "provenance.json", '
                        'diagnostic_out / "provenance.json", '

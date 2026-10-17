@@ -3,6 +3,8 @@
 // External diagnostic context, shared by the three generated translation units.
 #pragma once
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <chrono>
 #include <charconv>
 #include <cstdint>
@@ -41,7 +43,9 @@ struct FrameRow { std::uint64_t frame;
     std::uint64_t ticks = 0, damage_ops = 0, committed_ops = 0;
     std::uint64_t server_debris = 0, client_debris = 0;
     std::uint64_t charge_targets = 0;
-    bool charge_requested = false, charge_fired = false;
+    bool charge_requested = false, charge_fired = false, peers_agree = true;
+    std::uint32_t charge_building = 0;
+    std::uint64_t charge_tick = 0;
     double frame_cpu_ms = 0, pre_sim_ms = 0, post_session_ms = 0;
     double session_post_sim_ms = 0, server_ms = 0, client_ms = 0, join_ms = 0;
     PhysicsRow server_physics{}, client_physics{}; std::uint64_t main_considered, main_submitted, main_culled;
@@ -51,7 +55,10 @@ struct FrameRow { std::uint64_t frame;
 struct Context {
     std::thread::id owner{};
     std::uint64_t frame = 0, warmup = 60;
-    bool recording = false, ads = false, control = false, collapse = false;
+    bool recording = false, ads = false, control = false, collapse = false, multi_collapse = false;
+    bool multi_missing_target = false;
+    std::array<std::uint64_t, 3> multi_targets{};
+    std::array<bool, 3> multi_effects{};
     bool shadow_caster_culling = true, ppm_written = false;
     std::filesystem::path ppm;
     std::uint64_t charge_targets = 0;
@@ -115,6 +122,7 @@ inline bool parse_cli(int argc, char** argv, std::filesystem::path& output, std:
         else if (flag == "--control") config.control = true;
         else if (flag == "--city") config.control = false;
         else if (flag == "--collapse") config.collapse = true;
+        else if (flag == "--multi-collapse") { config.collapse = true; config.multi_collapse = true; }
         else if (flag == "--shadow-culling-off") config.shadow_caster_culling = false;
         else if (flag == "--shadow-culling-on") config.shadow_caster_culling = true;
         else if (flag == "--ppm") {
@@ -130,7 +138,8 @@ inline bool parse_cli(int argc, char** argv, std::filesystem::path& output, std:
             if (++i >= argc || !parse_count(argv[i], frames, true)) return false;
         } else return false;
     }
-    if (config.collapse && (frames < 120 || frames > 360 || config.warmup > 600)) return false;
+    if (config.multi_collapse && (frames < 180 || frames > 360 || config.warmup > 600)) return false;
+    if (config.collapse && !config.multi_collapse && (frames < 120 || frames > 360 || config.warmup > 600)) return false;
     if (frames > std::numeric_limits<std::uint64_t>::max() - config.warmup) return false;
     std::error_code error;
     std::filesystem::create_directories(output, error);
@@ -143,7 +152,7 @@ inline void write(const std::filesystem::path& dir) {
         file.flush(); if (!file) throw std::runtime_error(name);
     };
     auto frames = open("frames.csv");
-    frames << "frame,main_considered,main_submitted,main_culled,optic_considered,optic_submitted,optic_culled,main_shadow_rendered,main_shadow_reused,optic_shadow_rendered,optic_shadow_reused,graph_passes,executed_passes,timed_passes,overflow,gpu_present,ticks,frame_cpu_ms,pre_sim_ms,post_session_ms,session_post_sim_ms,server_ms,client_ms,join_ms,charge_requested,charge_fired,charge_targets,damage_ops,committed_ops,server_debris,client_debris";
+    frames << "frame,main_considered,main_submitted,main_culled,optic_considered,optic_submitted,optic_culled,main_shadow_rendered,main_shadow_reused,optic_shadow_rendered,optic_shadow_reused,graph_passes,executed_passes,timed_passes,overflow,gpu_present,ticks,frame_cpu_ms,pre_sim_ms,post_session_ms,session_post_sim_ms,server_ms,client_ms,join_ms,charge_requested,charge_fired,charge_targets,charge_building,charge_tick,peers_agree,damage_ops,committed_ops,server_debris,client_debris";
     for (const char* side : {"server", "client"})
         for (const char* field : {"bodies", "dynamic", "awake", "sleeping", "pairs", "manifolds", "contact_points", "islands", "active_islands", "largest_active_island"})
             frames << ',' << side << '_' << field;
@@ -162,7 +171,8 @@ inline void write(const std::filesystem::path& dir) {
                << ',' << r.ticks << ',' << r.frame_cpu_ms << ',' << r.pre_sim_ms
                << ',' << r.post_session_ms << ',' << r.session_post_sim_ms << ',' << r.server_ms
                << ',' << r.client_ms << ',' << r.join_ms << ',' << r.charge_requested
-               << ',' << r.charge_fired << ',' << r.charge_targets << ',' << r.damage_ops
+               << ',' << r.charge_fired << ',' << r.charge_targets << ',' << r.charge_building
+               << ',' << r.charge_tick << ',' << r.peers_agree << ',' << r.damage_ops
                << ',' << r.committed_ops << ',' << r.server_debris << ',' << r.client_debris;
         write_physics(r.server_physics); write_physics(r.client_physics);
         frames << '\n';
