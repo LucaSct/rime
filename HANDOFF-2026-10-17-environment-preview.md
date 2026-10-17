@@ -216,4 +216,18 @@ found separate CI workloads; high whole-desktop CPU is not necessarily the game.
 
 ## Wrap results
 
-Final verification and backup status are appended here before delivery.
+- Production integration commit: `6a68aed` (the final build and hardware proofs).
+- Research/evidence/handoff commit: `8a8aa2c`; later wrap commits only record results.
+- Release full build passed after both unsafe optimization reverts.
+- Hardware viewmodel proof passed all SCAR/M4/MSR reload and held-focus checks;
+  66/66/84 magazine-contact frames with zero measured gap, no clamped IK targets.
+  Inspected phase-1 image sheet: low action framing and dominant MSR geometry
+  remain art limitations, alongside fixed fingers. Do not call this final polish.
+- Hardware effects proof passed: changed 4,052 pixels, drift 0, live/requested/
+  spawned 72, capacity/render drops 0, unchanged physics hashes. GPU `fx-smoke`
+  24-frame diagnostic p50 0.004096 ms, p99/max 0.382976 ms at 640x360.
+- Pinned exact engine/tests format gate, SPDX check and `git diff --check` passed.
+  New translation units and the modified physics/render/sample units had passed
+  Clang syntax checks earlier in this integration; removed experimental tests do
+  not ship. Full CTest, qualified perf attempt and backup status follow below.
+- All coding agents completed; no subagents or agent builds remain running.
