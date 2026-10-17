@@ -264,6 +264,37 @@ struct IslandSolveCost {
     std::uint64_t position_ns = 0; // pose integration loop + solve_positions (the position half)
 };
 
+// Optional, per-world diagnostic for the most recent contact build. Counts describe work; times
+// are wall-clock samples and must never enter simulation state or world_hash(). The time buckets
+// are disjoint: heightfield_ns includes terrain's cache lookups and speculative routine, while
+// warmcache_ns covers only plain and compound contacts. Exact calls count collide_shapes;
+// speculative calls count both convex and terrain attempts. Posed children include the one
+// surrogate child of a plain side of a compound pair. Gaps are dispatch and clock overhead.
+struct ContactProfile {
+    std::uint64_t raw_candidate_keys = 0;
+    std::uint64_t unique_pairs = 0;
+    std::uint64_t duplicate_keys = 0;
+    std::uint64_t plain_pairs = 0;
+    std::uint64_t compound_pairs = 0;
+    std::uint64_t posed_children = 0;
+    std::uint64_t tested_child_pairs = 0;
+    std::uint64_t culled_child_pairs = 0;
+    std::uint64_t exact_narrowphase_calls = 0;
+    std::uint64_t speculative_calls = 0;
+    std::uint64_t heightfield_pairs = 0;
+    std::uint64_t produced_manifolds = 0;
+    std::uint64_t pair_query_ns = 0;
+    std::uint64_t pair_canonicalize_ns = 0;
+    std::uint64_t plain_exact_ns = 0;
+    std::uint64_t plain_speculative_ns = 0;
+    std::uint64_t compound_pose_ns = 0;
+    std::uint64_t compound_cull_ns = 0;
+    std::uint64_t compound_exact_ns = 0;
+    std::uint64_t compound_speculative_ns = 0;
+    std::uint64_t heightfield_ns = 0;
+    std::uint64_t warmcache_ns = 0;
+};
+
 class PhysicsWorld {
 public:
     PhysicsWorld();
@@ -408,6 +439,12 @@ public:
     // One entry per active island of the most recent step(), in island-id order; empty when the
     // profile is off. Invalidated by the next step().
     [[nodiscard]] std::span<const IslandSolveCost> island_solve_profile_last() const noexcept;
+
+    // Diagnostic side channel for step() and compute_contacts(); disabled by default. Disabling
+    // clears the last snapshot. A profiled contact build replaces it rather than accumulating.
+    void set_contact_profile_enabled(bool enabled) noexcept;
+    [[nodiscard]] bool contact_profile_enabled() const noexcept;
+    [[nodiscard]] const ContactProfile& contact_profile() const noexcept;
 
     // Whether a body is currently asleep (deactivated): skipped by integration and the solver until
     // something wakes it — a moving body colliding into its island, wake_body(), or sleeping being
