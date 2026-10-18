@@ -141,7 +141,14 @@ PaletteStats apply_palette(ecs::World& world, const BlockPalette& palette) {
         // re-apply. Counted, so the skip is visible to the proof rather than indistinguishable
         // from a role the palette forgot.
         const render::MaterialAsset* authored = world.get<render::MaterialAsset>(entity);
-        if (authored != nullptr && authored->asset != 0) {
+        const bool has_authored_material = authored != nullptr && authored->asset != 0;
+        // Registry indices belong to this renderer, while SlabRole is the saved intent.
+        // Mark every derived draw before stamping it so an editor save reconstructs the
+        // palette on reopen instead of baking process-local material/mesh ids into the map.
+        if (!has_authored_material || mesh != render::kInvalidMeshId) {
+            (void)world.add_component(entity, ecs::DerivedComponents{});
+        }
+        if (has_authored_material) {
             ++stats.authored;
         } else {
             (void)world.add_component(entity, render::MaterialRef{material});

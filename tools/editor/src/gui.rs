@@ -37,6 +37,7 @@ use crate::gizmo::{self, DragSession, Snapping};
 #[cfg(test)]
 mod click_tests;
 mod commands;
+mod game_run;
 mod outliner;
 #[cfg(test)]
 use outliner::label as outliner_label;
@@ -69,6 +70,13 @@ pub fn run(args: &[String]) -> ExitCode {
     // (the m9.5 passthrough); without it the engine builds its built-in demo scene.
     let scene = arg_value(args, "--scene");
 
+    let game_config = match game_run::Config::parse(args) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("editor: {error}");
+            return ExitCode::from(2);
+        }
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Rime Editor")
@@ -79,11 +87,9 @@ pub fn run(args: &[String]) -> ExitCode {
         "Rime Editor",
         options,
         Box::new(move |_cc| {
-            Ok(Box::new(EditorApp::new(
-                engine,
-                assets.clone(),
-                scene.clone(),
-            )))
+            let mut app = EditorApp::new(engine, assets.clone(), scene.clone());
+            app.game.config = game_config;
+            Ok(Box::new(app))
         }),
     ) {
         Ok(()) => ExitCode::SUCCESS,
@@ -342,6 +348,8 @@ struct EditorApp {
     // and has to be shown rather than swallowed.
     scene_path: Option<String>,
     save_as_path: String,
+    save_pending: Option<game_run::PendingSave>,
+    game: game_run::GameRun,
     save_status: Option<(String, bool)>, // (message, ok)
     // ── New / Open (E2) ─────────────────────────────────────────────────────────────────────
     // `opener` starts a replacement session for Open; `None` only in tests that have not supplied
@@ -407,6 +415,8 @@ impl EditorApp {
             scene_path: scene.clone(),
             save_as_path: scene.unwrap_or_default(),
             save_status: None,
+            save_pending: None,
+            game: game_run::GameRun::default(),
             opener: None,
             pending_open: None,
             open_path: String::new(),
@@ -737,6 +747,39 @@ impl eframe::App for EditorApp {
             )
         };
 
+        self.game.poll();
+        let saved = self.shared.lock().unwrap().last_save.take();
+        if let Some(result) = saved {
+            if let Some(pending) = self.save_pending.take() {
+                if !result.ok || result.path != pending.target {
+                    self.save_status = Some((
+                        if result.error.is_empty() {
+                            "save acknowledgement did not match the requested file".into()
+                        } else {
+                            result.error
+                        },
+                        false,
+                    ));
+                } else {
+                    self.scene_path = Some(result.path.clone());
+                    self.save_status = Some((
+                        format!("saved {} entities to {}", result.entities, result.path),
+                        true,
+                    ));
+                    if pending.run {
+                        if let Err(error) = self.game.launch(&result.path) {
+                            self.game.status = Some(error);
+                        }
+                    }
+                }
+            } // No pending request: discard an unsolicited/stale result, never launch from it.
+        }
+        if self.save_pending.is_some() && (!connected || error.is_some()) {
+            self.save_pending = None;
+            self.save_status = Some(("save interrupted; game was not launched".into(), false));
+        }
+        let saving = self.save_pending.is_some() || self.pending_open.is_some();
+
         // Click-to-select (m9.6): the engine answered a viewport click with the entity under that
         // pixel, as a handle — the one message that still speaks handles — so map it to the
         // entity's EditorId through the snapshot. A miss (empty space) — or a handle the snapshot
@@ -756,7 +799,7 @@ impl eframe::App for EditorApp {
         // The undo history is frozen while the simulation runs (ADR-0075): Stop discards whatever
         // play did, so a step recorded against the played world would undo something that is no
         // longer there. Entering play remembers the selection; Stop hands it back with the world.
-        let editing = play_state.phase == PlayPhase::Edit;
+        let editing = play_state.phase == PlayPhase::Edit && !saving;
         if !editing && self.pre_play_selection.is_none() {
             self.pre_play_selection = Some(self.selected);
         }
@@ -791,10 +834,11 @@ impl eframe::App for EditorApp {
         // While a text box has focus, Ctrl+Z / Ctrl+Y belong to it (E2): the world's undo is only
         // for when no text is being typed, so fixing a typo in the asset search box cannot revert
         // a world edit. Only the key routing is gated; the undo itself is unchanged.
-        let typing = ctx.wants_keyboard_input();
+        let typing = ctx.wants_keyboard_input() || saving;
         // Saving (m15.3): set by Ctrl+S or the File menu; `Some("")` means "write back where the
         // scene was opened", which is a decision the engine owns.
         let mut do_save: Option<String> = None;
+        let mut do_run = false;
         // File → New and File → Open (E2): set by the menu, applied after it.
         let mut do_new = false;
         let mut do_open: Option<String> = None;
@@ -812,7 +856,7 @@ impl eframe::App for EditorApp {
             }
             // Ctrl/Cmd+S — the reflex every user already has. Only meaningful with a scene open;
             // Save As lives in the menu, because it needs a path and this shell has no file dialog.
-            if i.modifiers.command && i.key_pressed(egui::Key::S) && scene_is_open {
+            if !saving && i.modifiers.command && i.key_pressed(egui::Key::S) && scene_is_open {
                 do_save = Some(String::new());
             }
         });
@@ -846,8 +890,8 @@ impl eframe::App for EditorApp {
             self.gizmo_hover = None;
         }
 
-        let can_undo = self.stack.can_undo();
-        let can_redo = self.stack.can_redo();
+        let can_undo = self.stack.can_undo() && !saving;
+        let can_redo = self.stack.can_redo() && !saving;
         // Mirror into locals the menu-bar closure mutates, then write back (the closure borrows
         // these, not `self`, keeping the panel body free of a self-borrow tangle).
         let mut gizmo_mode = self.gizmo_mode;
@@ -859,6 +903,13 @@ impl eframe::App for EditorApp {
             .filter(|t| self.dock.find_tab(t).is_some())
             .collect();
         let mut reopen_tab: Option<Tab> = None;
+        let can_run_game = connected
+            && !saving
+            && self.game.config.is_some()
+            && !self.game.running()
+            && self.scene_path.is_some()
+            && self.pending_open.is_none()
+            && play_state.phase == PlayPhase::Edit;
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.label(egui::RichText::new("Rime Editor").strong());
@@ -872,7 +923,7 @@ impl eframe::App for EditorApp {
                 ui.menu_button("File", |ui| {
                     let has_scene = self.scene_path.is_some();
                     if ui
-                        .add_enabled(has_scene, egui::Button::new("Save\tCtrl+S"))
+                        .add_enabled(has_scene && !saving, egui::Button::new("Save\tCtrl+S"))
                         .on_disabled_hover_text(
                             "no scene was opened — use Save As, or launch with --scene",
                         )
@@ -894,7 +945,7 @@ impl eframe::App for EditorApp {
                         );
                         if ui
                             .add_enabled(
-                                !self.save_as_path.trim().is_empty(),
+                                !saving && !self.save_as_path.trim().is_empty(),
                                 egui::Button::new("Write"),
                             )
                             .clicked()
@@ -906,7 +957,7 @@ impl eframe::App for EditorApp {
                     ui.separator();
                     // New and Open replace the whole world, so they wait until it is not being
                     // played: Stop is what brings the edit world back.
-                    let editing = play_state.phase == PlayPhase::Edit;
+                    let editing = play_state.phase == PlayPhase::Edit && !saving;
                     if ui
                         .add_enabled(editing, egui::Button::new("New"))
                         .on_disabled_hover_text("stop the play session first")
@@ -987,29 +1038,32 @@ impl eframe::App for EditorApp {
                 // safe) from Edit, Playing, or Paused alike (the engine pauses-then-steps).
                 let phase = play_state.phase;
                 if ui
-                    .add_enabled(phase != PlayPhase::Playing, egui::Button::new("▶"))
-                    .on_hover_text("Play")
+                    .add_enabled(!saving && phase != PlayPhase::Playing, egui::Button::new("▶"))
+                    .on_hover_text("Preview simulation in editor (use Run game for the full runtime)")
                     .clicked()
                 {
                     actions.push(Command::Play);
                 }
                 if ui
-                    .add_enabled(phase == PlayPhase::Playing, egui::Button::new("⏸"))
+                    .add_enabled(!saving && phase == PlayPhase::Playing, egui::Button::new("⏸"))
                     .on_hover_text("Pause")
                     .clicked()
                 {
                     actions.push(Command::Pause);
                 }
-                if ui.button("⏭").on_hover_text("Step one tick").clicked() {
+                if ui.add_enabled(!saving, egui::Button::new("⏭")).on_hover_text("Step one tick").clicked() {
                     actions.push(Command::Step);
                 }
                 if ui
-                    .add_enabled(phase != PlayPhase::Edit, egui::Button::new("⏹"))
+                    .add_enabled(!saving && phase != PlayPhase::Edit, egui::Button::new("⏹"))
                     .on_hover_text("Stop (restore the pre-play world)")
                     .clicked()
                 {
                     actions.push(Command::Stop);
                 }
+                if ui.add_enabled(can_run_game,
+                    egui::Button::new("Run game")).on_hover_text("Save this scene, then launch the full game in a separate window. The game continues if the editor closes.")
+                    .on_disabled_hover_text("Stop Preview first. A game must be configured by the city editor launcher; wait for any save or running game to finish.").clicked() { do_run = true; }
                 ui.label(match phase {
                     PlayPhase::Edit => "Edit".to_owned(),
                     PlayPhase::Playing => format!("▶ Playing · tick {}", play_state.tick_count),
@@ -1059,29 +1113,31 @@ impl eframe::App for EditorApp {
         if let Some(path) = do_open {
             self.start_open(path);
         }
-        if let Some(path) = do_save {
-            // Straight to the wire, NOT onto the undo stack: a save mutates a file, not the world,
-            // so there is nothing for an inverse to restore. `Save As` also becomes the session's
-            // scene, so the next Ctrl+S writes where the user last chose.
-            if !path.is_empty() {
-                self.scene_path = Some(path.clone());
-            }
-            let (msg, payload) = Command::SaveScene { path }.to_wire();
-            let _ = self.out_tx.send(Outbound::Editor { msg, payload });
-            self.save_status = Some(("saving…".to_owned(), true));
+        if do_run {
+            do_save = self.scene_path.clone();
         }
-        // The engine's answer. A REFUSAL IS A NORMAL OUTCOME (the engine declines to save a world
-        // whose load dropped component types it does not register — m14.3), so it lands in the
-        // status bar with its reason rather than being swallowed as a failed request.
-        if let Some(result) = self.shared.lock().unwrap().last_save.take() {
-            self.save_status = Some(if result.ok {
-                (
-                    format!("saved {} entities to {}", result.entities, result.path),
-                    true,
-                )
-            } else {
-                (result.error, false)
-            });
+        if let Some(path) = do_save {
+            if !saving {
+                let target = if path.is_empty() {
+                    self.scene_path.clone()
+                } else {
+                    Some(path.clone())
+                };
+                if let Some(target) = target {
+                    self.save_pending = Some(game_run::PendingSave {
+                        target,
+                        run: do_run,
+                    });
+                    let (msg, payload) = Command::SaveScene { path }.to_wire();
+                    if self.out_tx.send(Outbound::Editor { msg, payload }).is_err() {
+                        self.save_pending = None;
+                        self.save_status =
+                            Some(("could not send save; game was not launched".into(), false));
+                    } else {
+                        self.save_status = Some(("saving…".into(), true));
+                    }
+                }
+            }
         }
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -1106,6 +1162,12 @@ impl eframe::App for EditorApp {
                 // The save outcome, kept visible until the next one. A refusal is red and carries
                 // the engine's reason verbatim — "cannot save" with no cause is indistinguishable
                 // from a bug, and a user who cannot tell those apart reaches for a workaround.
+                if let Some(status) = &self.game.status {
+                    let label = ui.label(status);
+                    if let Some(path) = &self.game.log {
+                        label.on_hover_text(format!("Game output: {}", path.display()));
+                    }
+                }
                 if let Some((message, ok)) = &self.save_status {
                     ui.separator();
                     ui.colored_label(
@@ -1203,7 +1265,9 @@ impl eframe::App for EditorApp {
             })
         });
 
+        let saving_now = self.save_pending.is_some() || self.pending_open.is_some();
         let mut viewer = EditorTabs {
+            editing_enabled: !saving_now,
             frame_tex: self.frame_tex.as_ref(),
             frame_dims,
             play_phase: play_state.phase,
@@ -1282,6 +1346,7 @@ fn spawn_opened(engine: &str, assets: Option<&str>, scene: &str) -> OpenedSessio
 
 /// The per-frame view over app state handed to each dock panel.
 struct EditorTabs<'a> {
+    editing_enabled: bool,
     frame_tex: Option<&'a egui::TextureHandle>,
     frame_dims: Option<(u32, u32)>,
     // The engine's play/edit phase (m9.7) — the viewport border's state colour.
@@ -1334,6 +1399,9 @@ impl TabViewer for EditorTabs<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        if !self.editing_enabled {
+            ui.disable();
+        }
         match tab {
             Tab::Viewport => {
                 let mut gz = GizmoView {
@@ -1426,7 +1494,7 @@ fn assets_ui(
     });
     ui.separator();
 
-    ui.weak("Scene effects: Outliner → + spawn → Inspector → + add component");
+    ui.weak("Scene effects: Outliner > + spawn > Inspector > + add component");
     if assets.is_empty() {
         ui.weak("(no cooked assets — launch the engine with --assets <manifest>)");
         return;
@@ -2288,7 +2356,8 @@ mod outliner_tests {
         };
         // LocalTransform first in the component list, and still not the label: almost everything has
         // one, so it narrows nothing down.
-        assert_eq!(outliner_label(&schema, 4, &entity(&[1, 2])), "4  SlabRole");
+        // This schema-only fixture has no role fields; it uses the readable fallback.
+        assert_eq!(outliner_label(&schema, 4, &entity(&[1, 2])), "4  City part");
     }
 
     #[test]

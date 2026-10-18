@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "play_city.hpp"
 #include "rime/app/editor_host_app.hpp"
 #include "rime/blockkit/block.hpp"
 #include "rime/blockkit/palette.hpp"
@@ -40,6 +41,33 @@
 #include "rime/worldkit/profile.hpp"
 
 namespace {
+
+// Preview the same convex-part source geometry used by the live city patterns. Runtime mesh
+// handles never enter the saved map; only Destructible content identities survive save/reload.
+rime::render::CpuMesh intact_city_mesh(const rime::assets::DestructibleAsset& asset) {
+    rime::render::CpuMesh mesh;
+    for (const auto& part : asset.parts) {
+        std::size_t offset = 0;
+        for (const auto count : part.face_counts) {
+            const auto first = static_cast<std::uint32_t>(mesh.vertices.size());
+            const auto p0 = part.vertices[part.face_indices[offset]];
+            const auto p1 = part.vertices[part.face_indices[offset + 1]];
+            const auto p2 = part.vertices[part.face_indices[offset + 2]];
+            const auto normal = rime::core::normalize(rime::core::cross(p1 - p0, p2 - p0));
+            for (std::uint32_t i = 0; i < count; ++i) {
+                const auto point = part.vertices[part.face_indices[offset + i]] + part.com;
+                mesh.vertices.push_back(
+                    {point.x, point.y, point.z, normal.x, normal.y, normal.z, point.x, point.y});
+            }
+            for (std::uint32_t i = 1; i + 1 < count; ++i) {
+                mesh.indices.insert(mesh.indices.end(), {first, first + i, first + i + 1});
+            }
+            offset += count;
+        }
+    }
+    rime::render::compute_tangents(mesh);
+    return mesh;
+}
 
 // Turn the block's authored data into something the viewport can draw.
 //
@@ -77,6 +105,11 @@ void prepare_block_for_viewport(rime::ecs::World& world,
                        spec.name);
     }
 
+    preview[rime::block_play::city::kLampAsset] = meshes.add(
+        intact_city_mesh(rime::block_play::city::make_lamp_asset()), "city-lamp-preview");
+    preview[rime::block_play::city::kBarrierAsset] = meshes.add(
+        intact_city_mesh(rime::block_play::city::make_barrier_asset()), "city-barrier-preview");
+
     std::vector<std::pair<rime::ecs::Entity, rime::render::MeshId>> to_mesh;
     std::size_t unknown_pattern = 0;
     world.query<rime::blockkit::SlabRole, rime::destruction::Destructible>().for_each(
@@ -92,6 +125,7 @@ void prepare_block_for_viewport(rime::ecs::World& world,
             to_mesh.emplace_back(e, it->second); // collect: add_component moves the archetype
         });
     for (const auto& [e, mesh] : to_mesh) {
+        (void)world.add_component(e, rime::ecs::DerivedComponents{});
         (void)world.add_component(e, rime::render::MeshRef{mesh});
     }
 

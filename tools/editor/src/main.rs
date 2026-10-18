@@ -62,6 +62,7 @@ fn print_usage() {
         "  editor [--engine <rime-engine>] [--scene <file.rscene>] [--assets <manifest>]\n\
          \x20                              launch the docking shell (needs --features gui)"
     );
+    eprintln!("         [--game <runtime> --game-arg <one argument> ...] enables save-before-run");
     eprintln!("  editor --smoke [--frames N] [--engine <rime-engine>] [--scene <file.rscene>]");
     eprintln!("      --courtyard-preview  verify the saved three-station thermal city demo");
     eprintln!("      --thermal-sources  verify thermal authoring and bounded live preview");

@@ -90,6 +90,7 @@
 #include "play_weapon_policy.hpp"
 #include "play_world.hpp"
 #include "rime/app/application.hpp"
+#include "rime/app/content_root.hpp"
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/assets/manifest.hpp"
@@ -154,6 +155,7 @@
 namespace {
 
 using namespace rime;
+std::filesystem::path g_viewmodel_content = RIME_VIEWMODEL_COOKED_DIR;
 
 // ── The scenario ────────────────────────────────────────────────────────────────────────────────
 
@@ -414,6 +416,7 @@ struct Peer {
     // Set by Demo::start BEFORE patterns are registered, and only for the generated scene -- a
     // `--scene` run keeps exactly the level it was handed.
     bool city = false;
+    bool city_patterns = false;
 
     // HAND THE PHYSICS A JOB SYSTEM (m17.5). Without this pointer `PhysicsWorld` takes the
     // sequential island solve — same answer, one thread — and it had been taking it here since the
@@ -469,7 +472,7 @@ struct Peer {
             }
         }
         // The city's two generated patterns ride the same seam (null leaves/meshes on a server).
-        if (city &&
+        if ((city || city_patterns) &&
             !block_play::city::register_patterns(destruction, physics, patterns, leaves, meshes)) {
             std::fprintf(stderr, "99-the-block: physics rejected a city pattern\n");
             return false;
@@ -964,6 +967,24 @@ struct Session {
         server.weapon.damage = 0.34f;
         server.weapon.damage_radius = 0.35f;
         server.weapon.cooldown_ticks = server.weapon.automatic ? 6 : 3;
+
+        // Saved city maps do not trigger generation. Inspect only their content identities so
+        // both peers register the same procedural patterns before binding strict-loaded entities.
+        if (!scene_path.empty()) {
+            ecs::World authored;
+            register_all(authored);
+            const auto loaded = scene::load_scene_file(authored, std::filesystem::path(scene_path));
+            if (!loaded.ok) {
+                std::fprintf(stderr, "city scene: %s\n", loaded.error.c_str());
+                return false;
+            }
+            bool city_pattern = false;
+            authored.query<destruction::Destructible>().for_each([&](ecs::Entity, const auto& d) {
+                city_pattern |= d.asset == block_play::city::kLampAsset ||
+                                d.asset == block_play::city::kBarrierAsset;
+            });
+            server.city_patterns = client.city_patterns = city_pattern;
+        }
 
         // The server is GPU-free by construction — it never draws, so it never registers leaf
         // meshes. Only the client does, and that asymmetry is the point of m13.2d's null-registry
@@ -2107,17 +2128,16 @@ struct Demo {
             // clean clone simply has no cook to load. That is a normal state, not a defect: drop
             // the hands and say why. Art that IS present but fails to load is the opposite case --
             // a real fault -- and stays fatal below, so the two can never be confused.
-            if (!std::filesystem::exists(std::filesystem::path(RIME_VIEWMODEL_COOKED_DIR) /
-                                         "manifest.txt")) {
+            if (!std::filesystem::exists(g_viewmodel_content / "manifest.txt")) {
                 std::fprintf(stderr,
                              "99-the-block: no cooked viewmodel under %s -- running without the "
                              "held weapon (see samples/99-the-block/assets/viewmodel/README.md)\n",
-                             RIME_VIEWMODEL_COOKED_DIR);
+                             g_viewmodel_content.string().c_str());
                 viewmodel_enabled = false;
                 return true;
             }
             viewmodel = std::make_unique<block_play::PlayViewmodel>();
-            if (!viewmodel->load(RIME_VIEWMODEL_COOKED_DIR,
+            if (!viewmodel->load(g_viewmodel_content,
                                  session.jobs,
                                  *app.device(),
                                  visuals->meshes,
@@ -4305,8 +4325,7 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     // does. This check has to come BEFORE start(), because start() treats absent art as benign and
     // quietly clears viewmodel_enabled -- without this the proof below would read a frame with no
     // model in it and still call every claim satisfied.
-    if (!std::filesystem::exists(std::filesystem::path(RIME_VIEWMODEL_COOKED_DIR) /
-                                 "manifest.txt")) {
+    if (!std::filesystem::exists(g_viewmodel_content / "manifest.txt")) {
         std::fprintf(stderr, "viewmodel-smoke: no cooked viewmodel art -- skipped\n");
         return std::getenv("RIME_REQUIRE_VIEWMODEL") != nullptr ? 1 : 0;
     }
@@ -4322,8 +4341,10 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     // -- in which the sun contributes so little that killing every shadow in the frame moves 1.39%
     // of pixels by at most 10/255, against 19.8% and 99/255 in the block's own headless view. A
     // weapon is lit by whatever the player is standing in, so the proof has to stand there too.
-    play_sunset::apply(demo.session.server.world);
-    play_sunset::apply(demo.session.client.world);
+    if (scene_path.empty()) {
+        play_sunset::apply(demo.session.server.world);
+        play_sunset::apply(demo.session.client.world);
+    } // Saved maps own their lighting: Run must not silently replace an editor's sun edits.
     demo.session.client.view.yaw = play_sunset::kViewYaw;
     demo.session.client.view.pitch = play_sunset::kViewPitch;
     if (auto* camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera)) {
@@ -5588,7 +5609,7 @@ int run_effects_smoke(const std::filesystem::path& cooked, std::string_view scen
     return okay ? 0 : 1;
 }
 
-int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
+int run_play(const std::filesystem::path& cooked, std::string_view scene_path, unsigned frames) {
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kWidth, kHeight};
@@ -5620,8 +5641,10 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     // PLAY-ONLY evening preset (play_sunset.hpp): turn the one authored sun ahead of the player on
     // both peers, and face the live view down the street at it. Done before the live intent is
     // built below, so the first frame already looks at the sun.
-    play_sunset::apply(demo.session.server.world);
-    play_sunset::apply(demo.session.client.world);
+    if (scene_path.empty()) {
+        play_sunset::apply(demo.session.server.world);
+        play_sunset::apply(demo.session.client.world);
+    } // Saved maps own their lighting: Run must not silently replace an editor's sun edits.
     demo.session.client.view.yaw = play_sunset::kViewYaw;
     demo.session.client.view.pitch = play_sunset::kViewPitch;
     if (auto* camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera)) {
@@ -5629,7 +5652,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         // including immediately before a recenter. Show several kilometres of that cover.
         play_sunset::configure_camera(*camera);
     }
-    if (demo.visuals) {
+    if (demo.visuals && scene_path.empty()) {
         // The sky's solar radiance is not coupled to the light's colour, so match it here and
         // lower the exposure for a sun-facing view (see play_sunset::sky).
         demo.visuals->renderer.set_sky(play_sunset::sky(Visuals::authored_sky()));
@@ -5685,6 +5708,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     // and the tick run at different rates, so the tick reads the latest fold rather than doing its
     // own — which is also what keeps the yaw the mover receives the one the player is looking
     // along.
+    rhi::Extent2D play_extent = cfg.render_extent;
     block_play::PlayInput live;
     bool quit = false;
     const float look_sensitivity = demo.session.client.view.sensitivity;
@@ -5694,6 +5718,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         demo.step_play(input);
     });
     demo.app.on_render([&](app::FrameContext& ctx) {
+        play_extent = ctx.extent;
         // The look scheme follows the cursor mode the window ACTUALLY holds, every frame. It is
         // live state: the lock is granted when the pointer enters, and dropped again whenever the
         // window loses focus (a background app must not keep the pointer). Deciding once at startup
@@ -5735,15 +5760,25 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     });
 
     if (demo.app.windowed()) {
-        (void)demo.app.run();
+        if (frames)
+            demo.app.run_frames(static_cast<int>(frames));
+        else
+            (void)demo.app.run();
     } else {
-        demo.app.run_frames(static_cast<int>(g_ticks));
+        demo.app.run_frames(static_cast<int>(frames ? frames : g_ticks));
     }
     std::printf("99-the-block: %llu frames, %llu ticks%s\n",
                 static_cast<unsigned long long>(demo.app.frame_index()),
                 static_cast<unsigned long long>(demo.app.tick_count()),
                 quit ? " (ESC)" : "");
     demo.app.finish_gpu(); // first-person resources retire before Visuals and their registries
+    if (!g_ppm.empty() && demo.visuals && demo.visuals->last_ldr.is_valid()) {
+        const auto pixels = read_rgba8(*demo.app.device(),
+                                       demo.app.graph()->physical(demo.visuals->last_ldr),
+                                       play_extent.width,
+                                       play_extent.height);
+        write_ppm(g_ppm.c_str(), pixels, play_extent.width, play_extent.height);
+    }
     return 0;
 }
 
@@ -5761,12 +5796,38 @@ int main(int argc, char** argv) {
         EffectsSmoke
     } mode = Mode::Headless;
     PerfOptions perf{};
+    unsigned play_frames = 0;
+    std::string write_city;
+    std::filesystem::path content_override;
+    bool explicit_mode = false;
+    bool scene_info = false;
     std::filesystem::path cooked = RIME_BLOCK_COOKED_DIR;
     std::string scene_path; // --scene: run a scene someone authored, not the generated one (m14.4)
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view a(argv[i]);
-        if (a == "--headless") {
+        if (a == "--help" || a == "-h") {
+            std::printf("the_block --play [--scene file.rscene] [--frames N] [--ppm file.ppm]\n"
+                        "          --content dir | --cooked dir --viewmodel-content dir\n"
+                        "          --write-city new-file.rscene | --scene-info | --headless\n"
+                        "A copied development bundle starts windowed play with no arguments.\n"
+                        "WASD move, mouse look, left mouse fire, Q/right mouse aim, R reload, "
+                        "1/2/3 weapons, Esc quit.\n");
+            return 0;
+        }
+        if (a == "--play" || a == "--headless" || a == "--perf" || a == "--world-smoke" ||
+            a == "--world-gpu-smoke" || a == "--viewmodel-smoke" || a == "--environment-smoke" ||
+            a == "--effects-smoke")
+            explicit_mode = true;
+        if (a == "--scene-info") {
+            scene_info = true;
+        } else if (a == "--write-city" && i + 1 < argc) {
+            write_city = argv[++i];
+        } else if (a == "--content" && i + 1 < argc) {
+            content_override = argv[++i];
+        } else if (a == "--viewmodel-content" && i + 1 < argc) {
+            g_viewmodel_content = argv[++i];
+        } else if (a == "--headless") {
             mode = Mode::Headless;
         } else if (a == "--play") {
             mode = Mode::Play;
@@ -5786,6 +5847,11 @@ int main(int argc, char** argv) {
             mode = Mode::Perf;
         } else if (a == "--frames" && i + 1 < argc) {
             perf.frames = std::atoi(argv[++i]);
+            if (perf.frames < 1 || perf.frames > 1000000) {
+                std::fprintf(stderr, "--frames must be 1..1000000\n");
+                return 2;
+            }
+            play_frames = static_cast<unsigned>(perf.frames);
         } else if (a == "--pipelined" && i + 1 < argc) {
             // Checked as a SIGNED int before the cast. `--pipelined -1` used to become 4294967295,
             // which is not merely a big ring: `in_flight_.size() >= headless_in_flight_` is then
@@ -5826,6 +5892,98 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!write_city.empty()) {
+        if (std::filesystem::exists(write_city)) {
+            std::fprintf(stderr, "city generator refuses to overwrite %s\n", write_city.c_str());
+            return 2;
+        }
+        ecs::World authored;
+        register_all(authored);
+        blockkit::BlockParams params;
+        if (const auto text = platform::read_file(cooked / "manifest.txt")) {
+            if (const auto manifest = assets::Manifest::parse(
+                    {reinterpret_cast<const char*>(text->data()), text->size()}))
+                params.ground_material = blockkit::ground_material_id(*manifest);
+        }
+        (void)blockkit::assemble(authored, params);
+        const auto expanded = block_play::city::expand(authored);
+        // A saved city owns its environment. The editor and full runtime both consume this
+        // Sky and authored directional light; no runtime-only preset overwrites the file.
+        render::Sky sky;
+        sky.intensity =
+            .06f; // calibrated scene exposure: physical sky light must not wash out the map
+        (void)authored.spawn_with(sky);
+        if (!scene::save_scene_file(authored, write_city))
+            return 1;
+        ecs::World loaded;
+        register_all(loaded);
+        const auto result = scene::load_scene_file(loaded, write_city);
+        if (!result.ok || result.skipped_components ||
+            loaded.entity_count() != authored.entity_count())
+            return 1;
+        std::printf("city authored: %zu entities, %u added buildings, %u lamps, %u barriers; "
+                    "strict reload 0 skipped\n",
+                    authored.entity_count(),
+                    expanded.buildings_added,
+                    expanded.lamps,
+                    expanded.barriers);
+        return 0;
+    }
+    // A moved development binary must find its own content, never silently use the checkout's
+    // compiled directories. In-tree tools retain their existing defaults and self-check mode.
+    std::error_code content_error;
+    const auto executable = platform::executable_path();
+    const bool in_tree =
+        std::filesystem::equivalent(executable.parent_path(), RIME_GAME_BINARY_DIR, content_error);
+    if (!content_override.empty() || !in_tree) {
+        app::ContentSearch search;
+        search.explicit_dir = content_override;
+        search.required = "city.rscene";
+        const auto root = app::resolve_content_root(search);
+        if (!root.ok) {
+            std::fprintf(stderr, "%s\n", app::describe_content_failure(root).c_str());
+            return 2;
+        }
+        cooked = root.dir / "block";
+        g_viewmodel_content = root.dir / "viewmodels";
+        if (scene_path.empty())
+            scene_path = (root.dir / "city.rscene").string();
+        if (!explicit_mode)
+            mode = Mode::Play;
+        std::printf("city content: %s\n", root.dir.string().c_str());
+    }
+
+    if (scene_info) {
+        if (scene_path.empty()) {
+            std::fprintf(stderr, "--scene-info needs --scene or bundle content\n");
+            return 2;
+        }
+        ecs::World authored;
+        register_all(authored);
+        const auto loaded = scene::load_scene_file(authored, scene_path);
+        if (!loaded.ok || loaded.skipped_components) {
+            std::fprintf(stderr, "scene-info strict load failed: %s\n", loaded.error.c_str());
+            return 2;
+        }
+        Peer peer;
+        authored.query<destruction::Destructible>().for_each([&](ecs::Entity, const auto& d) {
+            peer.city_patterns |= d.asset == block_play::city::kLampAsset ||
+                                  d.asset == block_play::city::kBarrierAsset;
+        });
+        // Exercise the actual game's pattern registration and strict stand-up, without a device
+        // or a chaotic collapse threshold. The same measured digest is printed by live startup.
+        if (!peer.register_patterns(cooked) ||
+            !peer.stand_up(destruction::Authority::Local, true, scene_path, 0))
+            return 2;
+        std::printf("city scene-info: %zu entities, %zu destructibles, digest 0x%016llx, "
+                    "city-patterns=%d, no GPU\n",
+                    peer.measured.entities,
+                    peer.measured.destructibles,
+                    static_cast<unsigned long long>(peer.measured.placement_digest),
+                    peer.city_patterns);
+        return 0;
+    }
+
     if (mode == Mode::Perf) {
         // A short probe run (scripts/perf.sh uses --frames 12) must not try to fire the charge
         // after the run has ended, nor demand a collapse window it cannot fill.
@@ -5834,7 +5992,7 @@ int main(int argc, char** argv) {
         return run_perf(cooked, scene_path, perf);
     }
     if (mode == Mode::Play) {
-        return run_play(cooked, scene_path);
+        return run_play(cooked, scene_path, play_frames);
     }
     if (mode == Mode::WorldSmoke) {
         return run_world_smoke(cooked, scene_path);

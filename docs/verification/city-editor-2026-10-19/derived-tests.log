@@ -1,0 +1,31 @@
+Test project /home/next/projects/rime/build/release
+      Start 26: block_demo_cook_wall_bg
+ 1/13 Test #26: block_demo_cook_wall_bg ..........   Passed    0.21 sec
+      Start 27: block_demo_cook_wall_hero
+ 2/13 Test #27: block_demo_cook_wall_hero ........   Passed    0.09 sec
+      Start 28: block_demo_cook_side_bg
+ 3/13 Test #28: block_demo_cook_side_bg ..........   Passed    0.08 sec
+      Start 29: block_demo_cook_side_hero
+ 4/13 Test #29: block_demo_cook_side_hero ........   Passed    0.09 sec
+      Start 30: block_demo_cook_floor_bg
+ 5/13 Test #30: block_demo_cook_floor_bg .........   Passed    0.09 sec
+      Start 31: block_demo_cook_floor_hero
+ 6/13 Test #31: block_demo_cook_floor_hero .......   Passed    0.08 sec
+      Start 32: block_demo_cook_half_bg
+ 7/13 Test #32: block_demo_cook_half_bg ..........   Passed    0.08 sec
+      Start 33: block_demo_cook_half_hero
+ 8/13 Test #33: block_demo_cook_half_hero ........   Passed    0.08 sec
+      Start 34: block_demo_cook_crate
+ 9/13 Test #34: block_demo_cook_crate ............   Passed    0.08 sec
+      Start 35: block_demo_cook_ground
+10/13 Test #35: block_demo_cook_ground ...........   Passed    2.85 sec
+      Start 43: the_block_city_scene
+11/13 Test #43: the_block_city_scene .............   Passed    0.05 sec
+      Start 63: rime_scene_tests
+12/13 Test #63: rime_scene_tests .................   Passed    0.00 sec
+      Start 74: blockkit_test
+13/13 Test #74: blockkit_test ....................   Passed    0.00 sec
+
+100% tests passed out of 13
+
+Total Test time (real) =   3.78 sec

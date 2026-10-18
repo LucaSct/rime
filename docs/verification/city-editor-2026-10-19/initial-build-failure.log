@@ -1,0 +1,36 @@
+[0/1] Re-running CMake...
+-- Using Conan toolchain: /home/next/projects/rime/build/release/conan_toolchain.cmake
+-- Conan toolchain: Defining architecture flag: -m64
+-- Conan toolchain: C++ Standard 20 with extensions OFF
+-- Conan: Component target declared 'fmt::fmt'
+-- Conan: Component target declared 'Vulkan::Headers'
+-- Conan: Component target declared 'Vulkan::Registry'
+-- Conan: Target declared 'vulkan-headers::vulkan-headers'
+-- Conan: Component target declared 'volk::volk'
+-- Conan: Component target declared 'volk::volk_headers'
+-- Conan: Target declared 'GPUOpen::VulkanMemoryAllocator'
+-- Conan: Component target declared 'libjpeg-turbo::jpeg-static'
+-- Conan: Component target declared 'libjpeg-turbo::turbojpeg-static'
+-- Conan: Target declared 'libjpeg-turbo::libjpeg-turbo'
+-- Conan: Target declared 'LZ4::lz4_static'
+-- Conan: Component target declared 'libsvtav1::encoder'
+-- Conan: Target declared 'libsvtav1::libsvtav1'
+-- Conan: Target declared 'dav1d::dav1d'
+-- rime_audio: ALSA sink enabled
+-- Conan: Target declared 'doctest::doctest'
+-- Rime: RIME_SANITIZER=off
+-- Rime 0.0.1 — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_physics, rime_assets, rime_destruction, rime_audio, rime_vfx, rime_fluids, rime_render, rime_stream, rime_editorhost, rime_scene, rime_app, rime_net, rime_replication, rime_destruction_net, rime_gameplay, rime_gameplay_net, rime_destruction_render, rime_blockkit, rime_capi, rime_hello.
+-- Configuring done (0.1s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/next/projects/rime/build/release
+[1/12] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_arm_ik.cpp.o
+[2/12] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_building_support.cpp.o
+[3/12] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_effects.cpp.o
+[4/12] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_city.cpp.o
+[5/12] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_environment.cpp.o
+[6/12] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_weapon_fx.cpp.o
+[7/12] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_viewmodel.cpp.o
+[8/12] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_world.cpp.o
+[9/12] Linking CXX executable bin/the-block-host
+[10/12] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/main.cpp.o
+[11/12] Linking CXX executable bin/the_block

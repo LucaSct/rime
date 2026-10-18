@@ -11,7 +11,7 @@
 //! without pretending that persistent user naming or rendered asset thumbnails already exist.
 use super::{Command, EntityId};
 use eframe::egui;
-use rime_protocol::{Schema, SnapshotEntity};
+use rime_protocol::{decode_value, Schema, SnapshotEntity, Value};
 
 #[derive(Default, PartialEq)]
 enum Filter {
@@ -64,6 +64,12 @@ fn role<'a>(schema: &'a Schema, entity: &SnapshotEntity) -> (&'a str, Icon) {
             "rime::render::Camera" => (4, "Camera", Icon::Camera),
             "rime::render::PointLight" => (5, "Point light", Icon::Light),
             "rime::render::DirectionalLight" => (5, "Sun light", Icon::Light),
+            "rime::render::Sky" => (6, "Sky", Icon::Light),
+            // The sample's reflected role is its authored vocabulary, not a renderer id.
+            "rime::blockkit::SlabRole" => (20, slab_kind(schema, entity), Icon::Mesh),
+            "rime::destruction::Destructible" => (30, "Destructible", Icon::Mesh),
+            "rime::physics::RigidBody" => (35, "Physics body", Icon::Mesh),
+            "rime::physics::Collider" => (36, "Collider", Icon::Mesh),
             "rime::render::MeshAsset" => (40, "Mesh asset", Icon::Mesh),
             "rime::render::MeshRef" => (50, "Mesh", Icon::Mesh),
             "rime::render::MaterialRef" | "rime::render::MaterialSet" => {
@@ -83,11 +89,101 @@ fn role<'a>(schema: &'a Schema, entity: &SnapshotEntity) -> (&'a str, Icon) {
             best = candidate;
         }
     }
-    (best.1, best.2)
+    let geometry = entity.components.iter().any(|c| {
+        schema.type_by_hash(c.type_hash).is_some_and(|t| {
+            matches!(
+                t.name.as_str(),
+                "rime::render::MeshRef" | "rime::render::MeshAsset"
+            )
+        })
+    });
+    (
+        best.1,
+        if matches!(best.2, Icon::Entity) && geometry {
+            Icon::Mesh
+        } else {
+            best.2
+        },
+    )
 }
 
 pub(super) fn label(schema: &Schema, index: usize, entity: &SnapshotEntity) -> String {
-    format!("{index}  {}", role(schema, entity).0)
+    let name = role(schema, entity).0;
+    if let Some(fields) = slab_fields(schema, entity) {
+        if name == slab_kind(schema, entity) {
+            if let (Some(building), Some(storey)) =
+                (uint(&fields, "building"), uint(&fields, "storey"))
+            {
+                if city_prop(building).is_some() {
+                    return format!("{index}  {name} {}", (building & 0xffff) + 1);
+                }
+                if building != u32::MAX {
+                    return format!(
+                        "{index}  {name} · B{} / level {}",
+                        building + 1,
+                        storey.saturating_add(1)
+                    );
+                }
+            }
+        }
+    }
+    format!("{index}  {name}")
+}
+
+fn uint(fields: &[(String, Value)], name: &str) -> Option<u32> {
+    fields.iter().find_map(|(key, value)| match value {
+        Value::U32(value) if key == name => Some(*value),
+        _ => None,
+    })
+}
+
+fn slab_fields(schema: &Schema, entity: &SnapshotEntity) -> Option<Vec<(String, Value)>> {
+    let component = entity.components.iter().find(|c| {
+        schema
+            .type_by_hash(c.type_hash)
+            .is_some_and(|t| t.name == "rime::blockkit::SlabRole")
+    })?;
+    match decode_value(schema, component.type_hash, &component.data).ok()? {
+        Value::Struct(fields) => Some(fields),
+        _ => None,
+    }
+}
+
+fn slab_kind(schema: &Schema, entity: &SnapshotEntity) -> &'static str {
+    let fields = slab_fields(schema, entity);
+    if let Some(name) = fields
+        .as_deref()
+        .and_then(|fields| uint(fields, "building"))
+        .and_then(city_prop)
+    {
+        return name;
+    }
+    // Mirrors blockkit::slab_kind's public reflected values; unknown/new values stay identifiable.
+    match fields.as_deref().and_then(|fields| uint(fields, "kind")) {
+        Some(0) => "Wall",
+        Some(1) => "Side wall",
+        Some(2) => "Doorway wall",
+        Some(3) => "Floor",
+        Some(4) => "Roof",
+        Some(5) => "Crate",
+        Some(6) => "Street",
+        Some(7) => "Kerb",
+        Some(8) => "Barrier",
+        Some(9) => "Lamp post",
+        Some(10) => "Lamp fixture",
+        Some(11) => "Scene marker",
+        _ => "City part",
+    }
+}
+
+fn city_prop(building: u32) -> Option<&'static str> {
+    // play_city.hpp reserves high-word tags; these are prop identities, not building numbers.
+    match building & 0xffff_0000 {
+        0xc17a_0000 => Some("Street lamp"),
+        0xc17b_0000 => Some("Street barrier"),
+        0xc17c_0000 => Some("Lamp diffuser"),
+        _ => None,
+    }
 }
 
 fn icon(ui: &mut egui::Ui, kind: Icon, size: f32, selected: bool, label: &str) -> egui::Response {

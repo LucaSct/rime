@@ -58,3 +58,13 @@ Don't touch old untracked notes. Explicit stage, pinned exact-set clang-format,
 new-TU actual Clang, proportional checks, self-review, draft PRs via gh api; no
 merge while gates open. Global actual rules path:
 /home/next/.claude-switch/profiles/default/CLAUDE.md. Keep >=15GB free (17GB now).
+
+
+## Subsequent save correction
+
+The city save-and-run brick found that the courtyard and block palette preparers
+were not attaching the existing DerivedComponents tag. Real viewport saves could
+therefore include process-local rendering indices. The subsequent city branch
+fixes both preparers and adds a prepared-scene save/reload regression. Earlier
+headless smoke success did not establish correctness of a GUI viewport save.
+See HANDOFF-2026-10-19-city-editor-run-export.md and ADR-0097 for final evidence.
