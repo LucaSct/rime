@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/home/next/projects/rime/tests/fluids/verify_thermal_field.py", line 243, in <module>
+    main()
+    ~~~~^^
+  File "/home/next/projects/rime/tests/fluids/verify_thermal_field.py", line 235, in main
+    summary = verify(inputs, result.stdout)
+  File "/home/next/projects/rime/tests/fluids/verify_thermal_field.py", line 169, in verify
+    assert c[1:] == current_wire and next_tick == tick and now == published, 'partial publication on refusal/no-op'
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: partial publication on refusal/no-op

@@ -1,0 +1,189 @@
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:325:
+TEST CASE:  thermal field: insulated cosine rod converges under spatial refinement
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:36: SUCCESS: REQUIRE( result ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:36: SUCCESS: REQUIRE( result ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:36: SUCCESS: REQUIRE( result ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:27: SUCCESS: REQUIRE( sample ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:36: SUCCESS: REQUIRE( result ) is correct!
+  values: REQUIRE( {?} )
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:362: SUCCESS: CHECK( coarse / medium > 3.5 ) is correct!
+  values: CHECK( 3.87018 >  3.5 )
+  logged: coarse := 0.0312724
+          medium := 0.00808035
+          fine := 0.00203663
+          finer_time := 0.00200659
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:363: SUCCESS: CHECK( coarse / medium < 4.5 ) is correct!
+  values: CHECK( 3.87018 <  4.5 )
+  logged: coarse := 0.0312724
+          medium := 0.00808035
+          fine := 0.00203663
+          finer_time := 0.00200659
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:364: SUCCESS: CHECK( medium / fine > 3.5 ) is correct!
+  values: CHECK( 3.9675 >  3.5 )
+  logged: coarse := 0.0312724
+          medium := 0.00808035
+          fine := 0.00203663
+          finer_time := 0.00200659
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:365: SUCCESS: CHECK( medium / fine < 4.5 ) is correct!
+  values: CHECK( 3.9675 <  4.5 )
+  logged: coarse := 0.0312724
+          medium := 0.00808035
+          fine := 0.00203663
+          finer_time := 0.00200659
+
+/home/next/projects/rime/tests/fluids/thermal_field_test.cpp:366: SUCCESS: CHECK( std::abs(fine - finer_time) < fine * 0.1 ) is correct!
+  values: CHECK( 3.00454e-05 <  0.000203663 )
+  logged: coarse := 0.0312724
+          medium := 0.00808035
+          fine := 0.00203663
+          finer_time := 0.00200659
+
+===============================================================================
+[doctest] test cases:  1 |  1 passed | 0 failed | 45 skipped
+[doctest] assertions: 53 | 53 passed | 0 failed |
+[doctest] Status: SUCCESS!
