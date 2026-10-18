@@ -1,0 +1,7 @@
+--- phase_change.cpp
++++ rounded-boundary.cpp
+@@ -150,3 +150 @@
+-    if (next < minimum_energy_j_ || next > maximum_energy_j_ ||
+-        (next == minimum_energy_j_ && sum->error < 0.0) ||
+-        (next == maximum_energy_j_ && sum->error > 0.0))
++    if (next < minimum_energy_j_ || next > maximum_energy_j_)

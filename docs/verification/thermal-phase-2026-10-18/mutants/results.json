@@ -1,0 +1,16 @@
+{
+  "production_source_sha256": "1aa5ef75a0cf9940d3b61b47a3eb01b7eef88964b78613aee623121b1628baeb",
+  "mutants": {
+    "rounded-boundary": {
+      "source_sha256": "820572d098af659ab874bb10d30ffa38ade65abf904bf8763d2aa5e4560aa7f0",
+      "exit_code": 1,
+      "exact_checker_rejected": true
+    },
+    "collapsed-mixture": {
+      "source_sha256": "f0611fb5f54d882b52002f3e735935e3031180853485327a2b680e0c34df8f40",
+      "exit_code": 1,
+      "exact_checker_rejected": true
+    }
+  },
+  "checker_sha256": "0edb6f505be0838035ec6e4eaae150328e4e1c720a57d3693fd6b11b5e4ef8c7"
+}
