@@ -248,12 +248,16 @@ int demo(const std::string& path,
             "LEFT / COOLING  -100 kW", "CENTER / MELTING  +100 kW", "RIGHT / CONTROL  0 W"};
         for (unsigned i = 0; i < 3; ++i) {
             const float x = 38 + float(i) * (w - 76) / 3;
+            const float label_size = std::clamp(
+                ((w - 76) / 3 - 18) / render::text::HudRenderer::text_width(names[i], 1.f),
+                9.f,
+                14.f);
             hud.text(x,
                      static_cast<float>(ctx.extent.height) - 91,
                      names[i],
                      i == 1 ? render::text::Color{1, .69f, .32f, 1}
                             : render::text::Color{.58f, .81f, .95f, 1},
-                     14);
+                     label_size);
             hud.text(x, static_cast<float>(ctx.extent.height) - 61, values[i], {}, 18);
         }
         if (thermal.status() == fluids_scene::PreviewStatus::StepRefused)

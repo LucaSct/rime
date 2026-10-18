@@ -103,3 +103,22 @@ runner17GBfree,minimum15. OwnXvfb/demo processesstopped afterchecks. Olduntracke
 notesbelongtoothers; neveradd-all/delete/reset. Actualglobalrules at
 `/home/next/.claude-switch/profiles/default/CLAUDE.md`; projectCLAUDE,roadmaps,
 brick-deliveryskill. Explicitstage, ownbranches, RESTdraftPR, no mergewithoutgates.
+
+## Final delivery snapshot
+
+Draft demo **#341** https://github.com/LucaSct/rime/pull/341; initial pushed demo
+head dcb4753, followed by narrow-window HUD label spacing polish and these final
+metadata updates. The 36-second native screenshot and actual tiled-window capture
+were rerun for that polish. Implementation remains8727f98 plus this small sample
+follow-up; no numerical/runtime-renderer changes after the boundary proofs.
+
+Parent#340 actual check snapshot: SDK,TSan,lint pass; ASan cancelled; Linux still
+inprogress; hosted checksskipped. Read actual Editor-smoke failure job117795067317,
+run39167968400: only same three blockcollapse/locality claims during authoring
+roundtrip, not a thermal compile defect. Filtered failure retained. Demo#341CI
+is new/pending at snapshot; no finalCI/three-OS green claimed. No merge.
+
+Latest user question answered: editor has visible phase + live thermal inspector,
+smoke/fire and thermal component authoring; browser has no new thermal UI or
+new deployment. Working demo is standalone/native-editor today. Do not start a
+browser rewrite just to finish this session; that is an explicit next brick.

@@ -1,0 +1,12 @@
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39169970599/job/117800833392","name":"Editor smoke (editor ⇄ live engine)","status":"completed"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39169970599/job/117800827485","name":"SDK consumer (out-of-tree install)","status":"completed"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39169970599/job/117800823907","name":"sanitizer (TSan, Clang)","status":"completed"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39169970599/job/117800818032","name":"sanitizer (ASan + UBSan)","status":"completed"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39169970599/job/117800797954","name":"format, lint \u0026 license","status":"completed"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39169970599/job/117800797310","name":"build \u0026 test (${{ matrix.os }})","status":"completed"}
+{"conclusion":null,"details_url":"https://github.com/LucaSct/rime/actions/runs/39169955384/job/117800751267","name":"self-hosted sanitizer (ASan + UBSan)","status":"queued"}
+{"conclusion":null,"details_url":"https://github.com/LucaSct/rime/actions/runs/39169955384/job/117800751266","name":"self-hosted build \u0026 test (rime-linux)","status":"queued"}
+{"conclusion":null,"details_url":"https://github.com/LucaSct/rime/actions/runs/39169955384/job/117800751237","name":"self-hosted sanitizer (TSan, Clang)","status":"queued"}
+{"conclusion":null,"details_url":"https://github.com/LucaSct/rime/actions/runs/39169955384/job/117800751173","name":"self-hosted Editor smoke (editor \u003c-\u003e live engine)","status":"queued"}
+{"conclusion":"success","details_url":"https://github.com/LucaSct/rime/actions/runs/39169955384/job/117800751168","name":"self-hosted SDK consumer (out-of-tree install)","status":"completed"}
+{"conclusion":null,"details_url":"https://github.com/LucaSct/rime/actions/runs/39169955384/job/117800751013","name":"self-hosted format, lint \u0026 license","status":"in_progress"}

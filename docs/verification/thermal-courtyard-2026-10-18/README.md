@@ -123,3 +123,10 @@ Scratch: `/home/next/reports/rime-thermal-courtyard-2026-10-18/`.
 All PNGs are direct rendered PPM-to-PNG conversions without retouching. The two
 companion readmes document actual commands; external CI status is recorded in
 the final handoff, separately from these local results.
+
+Final PR snapshot: draft [#341](https://github.com/LucaSct/rime/pull/341), with
+small station-label scaling polish verified on the actual narrow native window.
+Parent #340 SDK/TSan/lint pass; ASan cancelled; Linux in progress at snapshot.
+Its Editor-smoke job 117795067317 fails only the inherited three block claims
+in the saved block roundtrip (filtered actual log retained). New child CI is
+pending; hosted draft jobs can be skipped. No external green or merge claimed.
