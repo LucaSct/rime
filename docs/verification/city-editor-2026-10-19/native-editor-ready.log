@@ -1,0 +1,8 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] editor-host: loaded 625 entities, 1858 components, 0 skipped (/home/next/projects/rime/build/release/city-editor.rscene) (/home/next/projects/rime/engine/app/editor_host_app.cpp:153)
+[INFO] editor-host: asset settle took 3 round(s); 0 material(s) resolved, 0 pending (/home/next/projects/rime/engine/app/editor_host_app.cpp:509)
+[INFO] the-block-host: palette applied — 573 materialed, 4 meshed (+569 slab previews), 0 roles missing, 0 unknown patterns (/home/next/projects/rime/samples/99-the-block/block_host_main.cpp:135)
+editor-host: editor host + viewport on /tmp/rime-editor-gui-2749436-1792364390921249498.sock (960x540, 'NVIDIA GeForce RTX 3060')

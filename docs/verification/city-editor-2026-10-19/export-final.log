@@ -1,0 +1,31 @@
+[1/2] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/main.cpp.o
+[2/2] Linking CXX executable bin/the_block
+Test project /home/next/projects/rime/build/release
+      Start 26: block_demo_cook_wall_bg
+ 1/11 Test #26: block_demo_cook_wall_bg ..........   Passed    0.09 sec
+      Start 27: block_demo_cook_wall_hero
+ 2/11 Test #27: block_demo_cook_wall_hero ........   Passed    0.09 sec
+      Start 28: block_demo_cook_side_bg
+ 3/11 Test #28: block_demo_cook_side_bg ..........   Passed    0.08 sec
+      Start 29: block_demo_cook_side_hero
+ 4/11 Test #29: block_demo_cook_side_hero ........   Passed    0.09 sec
+      Start 30: block_demo_cook_floor_bg
+ 5/11 Test #30: block_demo_cook_floor_bg .........   Passed    0.08 sec
+      Start 31: block_demo_cook_floor_hero
+ 6/11 Test #31: block_demo_cook_floor_hero .......   Passed    0.09 sec
+      Start 32: block_demo_cook_half_bg
+ 7/11 Test #32: block_demo_cook_half_bg ..........   Passed    0.10 sec
+      Start 33: block_demo_cook_half_hero
+ 8/11 Test #33: block_demo_cook_half_hero ........   Passed    0.09 sec
+      Start 34: block_demo_cook_crate
+ 9/11 Test #34: block_demo_cook_crate ............   Passed    0.09 sec
+      Start 35: block_demo_cook_ground
+10/11 Test #35: block_demo_cook_ground ...........   Passed    2.48 sec
+      Start 42: block_demo_cook_viewmodel
+11/11 Test #42: block_demo_cook_viewmodel ........   Passed    0.01 sec
+
+100% tests passed out of 11
+
+Total Test time (real) =   3.29 sec
+City development bundle: /home/next/rime-exports/city-demo-2026-10-19
+Manifest SHA-256: f58514e4655dd132da0f7369dadc4a5ea3c3a325dddde0297ef5deb5e13d7022

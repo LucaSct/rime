@@ -1,0 +1,7 @@
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] editor-host: loaded 625 entities, 3004 components, 0 skipped (/home/next/reports/rime-city-editor-launch-2026-10-19/city-demo.rscene) (/home/next/projects/rime/engine/app/editor_host_app.cpp:153)
+[INFO] editor-host: asset settle took 3 round(s); 0 material(s) resolved, 0 pending (/home/next/projects/rime/engine/app/editor_host_app.cpp:509)
+[INFO] the-block-host: palette applied — 573 materialed, 4 meshed (+0 slab previews), 0 roles missing, 0 unknown patterns (/home/next/projects/rime/samples/99-the-block/block_host_main.cpp:134)
+editor-host: editor host + viewport on /tmp/rime-editor-2712678-1792363579398966365.sock (960x540, 'llvmpipe (LLVM 23.1.1, 256 bits)')
+editor --smoke FAILED: picking the brightest rendered pixel (411,203) claimed empty space
