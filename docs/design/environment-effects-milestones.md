@@ -283,3 +283,22 @@ preview state on Play/Stop, and show phase from validated state. Moving-basin
 liquid/solid mass and transported-energy accounting remains a prerequisite for
 freezing flowing water. The existing smoke/fire authoring path stays available;
 combustion heat remains separate from its scripted cosmetic source.
+
+## M-FL2 bounded field progress, 2026-10-18
+
+`fluids::ThermalField` now owns a bounded graph of fixed-mass cells, canonical
+links and signed constant power sources. Sources then contacts advance staged
+state in bounded substeps. Cells, clock and the full primitive energy journal
+commit together; failure retains the previous publication. Exact offline checks
+include product/partition rounding and tick allocations. Temporal order and a
+single-phase finite-volume spatial witness qualify this particular reference;
+sequential pair updates are not promoted to a global implicit solver.
+See [ADR-0093](../adr/0093-bounded-journaled-thermal-field.md).
+
+Next is reflected **thermal field/source authoring**, including validated initial
+temperature AND mass fraction, reconstructible Play/Stop state, inspector
+undo/save/reload and bounded preview diagnostics. Start with explicit fixed cells
+and links so editor behavior can be checked against this CPU oracle. Visible
+temperature/phase follows validated state; moving water, solid geometry and
+breakable ice retain their separate mass/transport/authority proofs. The existing
+cosmetic fire source must not acquire thermal authority by implication.
