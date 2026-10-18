@@ -28,6 +28,7 @@
 
 #include <fmt/core.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -78,6 +79,7 @@
 #include "rime/stream/frame_streamer.hpp"
 #include "rime/stream/protocol.hpp"
 #include "rime/stream/video_codec.hpp"
+#include "rime/vfx_scene/effects.hpp"
 
 namespace {
 
@@ -463,6 +465,7 @@ int serve_viewport(std::string_view socket_path,
     // demo). Either way the registries above are populated so MeshRef/MaterialRef indices resolve.
     editorhost::HostedScene hosted;
     if (scene_path.empty()) {
+        registrar(app.world());
         build_viewport_scene(app.world(), meshes, materials);
     } else {
         load_viewport_scene(app.world(), meshes, materials, scene_path, hosted, registrar);
@@ -554,6 +557,10 @@ int serve_viewport(std::string_view socket_path,
     std::uint64_t gizmo_editor_id = editorhost::kNoEditorId;
     std::unique_ptr<physics::PhysicsWorld> physics_world;
     physics::PhysicsSync physics_sync;
+    vfx_scene::Effects effects;
+    std::uint64_t effects_tick = 0;
+    std::vector<render::GpuParticle> effect_particles;
+    effect_particles.reserve(vfx_scene::Effects::max_particles);
 
     // ── Client input (m18 Track H, ADR-0054) ─────────────────────────────────────────────────
     // The browser page sends `stream::InputEvent`s over the same connection the editor band uses,
@@ -591,6 +598,7 @@ int serve_viewport(std::string_view socket_path,
         if (play_tick) {
             play_tick(w, app.frame_input(), dt);
         }
+        (void)effects.tick(w, ++effects_tick, static_cast<float>(dt));
     });
 
     render::RGTexture last_ldr{};
@@ -609,6 +617,34 @@ int serve_viewport(std::string_view socket_path,
             // it, and never be given the `MaterialRef` that makes it draw.
             (void)bridge.resolve_material_assets(ctx.world);
         }
+        // Authoring state is reflected; presentation is a disposable side table. In particular,
+        // never create PointLight components for fire: saving during Play would bake those lights
+        // into the level and resurrect them after extinguish. Paused removals reconcile too.
+        if (play_session.phase() != editorhost::PlayPhase::Edit)
+            effects.reconcile(ctx.world);
+        effect_particles.clear();
+        for (const auto& p : effects.field().particles()) {
+            const float opacity = 0.3f * std::max(0.0f, 1.0f - p.age / p.lifetime);
+            effect_particles.push_back({{p.position.x, p.position.y, p.position.z, p.size},
+                                        {0.35f, 0.35f, 0.35f, opacity}});
+        }
+        render::FxSettings fx{};
+        fx.enabled = !effect_particles.empty();
+        fx.max_particles = vfx_scene::Effects::max_particles;
+        renderer.set_smoke_particles(effect_particles, fx);
+        std::array<render::GpuPointLight, vfx_scene::Effects::max_sources> fire_lights{};
+        std::size_t fire_light_count = 0;
+        for (const auto& light : effects.lights()) {
+            auto& row = fire_lights[fire_light_count++];
+            row.position[0] = light.position.x;
+            row.position[1] = light.position.y;
+            row.position[2] = light.position.z;
+            row.position[3] = light.radius;
+            row.radiance[0] = light.color.x * light.intensity;
+            row.radiance[1] = light.color.y * light.intensity;
+            row.radiance[2] = light.color.z * light.intensity;
+        }
+        renderer.set_transient_point_lights({fire_lights.data(), fire_light_count});
         last_ldr = renderer.render(*ctx.graph, ctx.world, ctx.extent, true).ldr;
         // One lens per frame, shared by the gizmo pass and the ViewportCamera message — computed
         // AFTER the tick (the callback runs post-tick), so it sees the same WorldTransforms the
@@ -744,6 +780,7 @@ int serve_viewport(std::string_view socket_path,
             first_frame; // always render the very first frame (the viewport is blank)
         first_frame = false;
         bool snapshot_requested = false;
+        bool derive_after_edits = false;
         // Armed by a Step message below, consumed once by frame_dt right after this drain — exactly
         // one extra fixed tick THIS iteration (m9.7's "step = exactly one tick").
         bool pending_step = false;
@@ -888,6 +925,8 @@ int serve_viewport(std::string_view socket_path,
                     const bool was_edit = play_session.phase() == editorhost::PlayPhase::Edit;
                     play_session.play(app.world());
                     if (was_edit) {
+                        effects.reset();
+                        effects_tick = 0;
                         physics_world = std::make_unique<physics::PhysicsWorld>();
                         physics_sync = physics::PhysicsSync{};
                     }
@@ -899,6 +938,8 @@ int serve_viewport(std::string_view socket_path,
                     const bool was_edit = play_session.phase() == editorhost::PlayPhase::Edit;
                     play_session.pause(app.world()); // ensure a snapshot + a Paused steady state
                     if (was_edit) {
+                        effects.reset();
+                        effects_tick = 0;
                         physics_world = std::make_unique<physics::PhysicsWorld>();
                         physics_sync = physics::PhysicsSync{};
                     }
@@ -916,6 +957,8 @@ int serve_viewport(std::string_view socket_path,
                         // whatever the old roster remembered.
                         physics_world.reset();
                         physics_sync = physics::PhysicsSync{};
+                        effects.reset();
+                        effects_tick = 0;
                     }
                     app.timestep().reset();
                 } else {
@@ -924,6 +967,7 @@ int serve_viewport(std::string_view socket_path,
                     // waits on before it commits a step.
                     const editorhost::EditOutcome outcome =
                         editorhost::apply_editor_edit(app.world(), editor_ids, msg, e.payload);
+                    derive_after_edits = derive_after_edits || outcome.ok;
                     if (outcome.reply &&
                         !conn.send_message(
                             static_cast<stream::MessageType>(editorhost::EditorMessage::EditResult),
@@ -935,6 +979,12 @@ int serve_viewport(std::string_view socket_path,
             }
             pending.clear();
         }
+
+        // A newly authored source has LocalTransform but no derived WorldTransform yet. The
+        // usual propagation only updates existing pairs, so derive missing poses after edits,
+        // before either a Play tick or a paused render tries to consume the new entity.
+        if (derive_after_edits)
+            scene::derive_world_transforms(app.world(), app.jobs());
 
         // A key held when the relay stops must not stay stuck (the brick's own rule). The receiver
         // thread sets `stop` on a `Bye` or a dead socket, and this is the first place the main
@@ -1156,6 +1206,17 @@ int serve_viewport(std::string_view socket_path,
               input_translator.unknown_usages(),
               input_translator.unknown_buttons(),
               input_translator.held_count());
+    RIME_INFO("editor-host: effects closed — {} ticks, {} lit ticks, {} spawned, {} cleared, "
+              "{} source-cap visits dropped, {} invalid source visits, {} emission-budget "
+              "particles dropped, {} pool particles dropped",
+              effects.stats().accepted_ticks,
+              effects.stats().lit_ticks,
+              effects.field().stats().spawned_particles,
+              effects.field().stats().cleared_particles,
+              effects.stats().source_cap_drops,
+              effects.stats().invalid_sources,
+              effects.stats().emission_budget_dropped_particles,
+              effects.field().stats().dropped_capacity);
 
     stop.store(true, std::memory_order_relaxed);
     receiver.join();

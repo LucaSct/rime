@@ -386,6 +386,11 @@ Entries are grouped roughly by area and kept short on purpose.
 
 ## Physics & destruction
 
+- **Enthalpy / latent heat (phase-change plan).** The planned water/ice reference stores an
+  energy quantity and derives temperature and liquid fraction from it. Latent heat is the energy
+  absorbed or released while material changes phase; temperature alone cannot describe how much
+  of a mixed water/ice sample has melted. See the
+  [M-FL2 brick sequence](design/environment-effects-milestones.md#environment-and-editor-sequence-2026-10-18).
 - **Heightfield.** Terrain stored as a regular grid of heights over the ground plane (one height
   per grid point, each cell split into two triangles along a fixed diagonal). Cheaper and more
   structured than a triangle mesh — "which triangles are under this point" is a division, not a

@@ -352,6 +352,22 @@ void SceneRenderer::set_smoke_particles(std::span<const GpuParticle> particles,
     smoke_particles_dropped_ += particles.size() - count;
 }
 
+void SceneRenderer::set_transient_point_lights(std::span<const GpuPointLight> lights) {
+    transient_point_lights_.clear();
+    for (const auto& light : lights) {
+        bool valid = true;
+        for (unsigned i = 0; i < 4; ++i)
+            valid = valid && std::isfinite(light.position[i]) && std::isfinite(light.radiance[i]);
+        valid = valid && light.position[3] > 0.0f && light.radiance[0] >= 0.0f &&
+                light.radiance[1] >= 0.0f && light.radiance[2] >= 0.0f;
+        if (!valid || transient_point_lights_.size() == 16) {
+            ++transient_point_lights_dropped_;
+            continue;
+        }
+        transient_point_lights_.push_back(light);
+    }
+}
+
 void SceneRenderer::ensure_draw_capacity(std::uint32_t draw_count) {
     // Grows only THIS FRAME'S SLOT. That is what makes destroy-and-recreate safe again: the slot is
     // one the ring has come back round to, so its previous submission has already been waited on by
@@ -421,6 +437,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     ubo_slot_ = (ubo_slot_ + 1) % static_cast<std::uint32_t>(frame_ubos_.size());
 
     ExtractedScene scene = extract_scene(world);
+    scene.point_lights.insert(
+        scene.point_lights.end(), transient_point_lights_.begin(), transient_point_lights_.end());
     if (camera_override)
         scene.camera = *camera_override;
     // Before ANY registry lookup: a MeshRef can name a mesh this registry does not hold (a scene

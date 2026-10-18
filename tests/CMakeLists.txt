@@ -61,6 +61,7 @@ add_subdirectory(blockkit) # the block as content: assembly, .rscene round trip,
 add_subdirectory(ground) # the ground's seam: drawn extent == collider extent, proven by raycast — GPU-free (m17.8)
 add_subdirectory(terrain_collision) # regional collision: permuted-completion determinism, deferred admission, the stall — GPU-free (m19.8c)
 add_subdirectory(worldkit) # the component profile: the block's scene loads with zero unknown types — GPU-free (m14.1)
+add_subdirectory(vfx_scene) # source authoring, save/reload and disposable Play presentation
 if(RIME_BUILD_CAPI)
     add_subdirectory(capi) # the C ABI (M6.9), driven through librime_capi — GPU-free
 endif()

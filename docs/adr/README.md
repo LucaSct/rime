@@ -117,3 +117,4 @@ is* to anyone who arrives later — including our future selves.
 
 - [ADR-0088](0088-environment-effects-as-separate-milestones.md) — separate smoke, destruction smoke, water/buoyancy and fire milestones; initial CPU seams may start before M18, while enabled workloads retain their budget gates.
 - [ADR-0089](0089-conservative-plain-contact-midphase.md) — proposed conservative plain-contact bounds, per-build cache lifetime, unchanged CCD and frozen-contact/world-hash proofs.
+- [ADR-0090](0090-environment-source-authoring.md) — reflected smoke/fire source authoring with disposable Play presentation; temperature-driven ice starts as a separate energy/phase milestone.

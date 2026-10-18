@@ -51,10 +51,10 @@ mod imp {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use rime_protocol::{
-        decode_value, encode_value, AssetKind, AssetList, Connection, EditorMessage, FrameMessage,
-        GizmoAxis, GizmoMode, GizmoState, MessageType, PickRequest, PickResult, SaveResult,
-        SaveScene, SceneLoadReport, Schema, SetComponent, Snapshot, SnapshotComponent,
-        SnapshotEntity, SpawnEntity, Value, ViewportCamera,
+        decode_value, encode_value, AssetKind, AssetList, ComponentRef, Connection, EditorMessage,
+        FrameMessage, GizmoAxis, GizmoMode, GizmoState, MessageType, PickRequest, PickResult,
+        PlayPhase, PlayState, SaveResult, SaveScene, SceneLoadReport, Schema, SetComponent,
+        Snapshot, SnapshotComponent, SnapshotEntity, SpawnEntity, Value, ViewportCamera,
     };
 
     // A tiny cook manifest the smoke hands the engine (--assets) to prove the browse path end to end:
@@ -379,6 +379,10 @@ mod imp {
             return Err("engine sent an empty schema".into());
         }
 
+        if frames > 0 && args.iter().any(|a| a == "--effect-sources") {
+            verify_effect_sources(&mut conn, &schema, &snapshot, true)?;
+        }
+
         let summary = if frames > 0 {
             // Streamed-viewport mode: receive + decode N frames — the render → capture → LZ4 → wire →
             // decode path end to end — then close.
@@ -556,6 +560,11 @@ mod imp {
             // Browse (m9.5): the engine parsed the --assets manifest and sends it after the snapshot.
             let assets = AssetList::decode(&expect_editor(&mut conn, EditorMessage::AssetList)?)
                 .map_err(|e| format!("decode asset list: {e}"))?;
+            // Consume the opener's AssetList before snapshot helpers start skipping unrelated
+            // messages, or a source proof would discard it and strand the browser check below.
+            if args.iter().any(|a| a == "--effect-sources") {
+                verify_effect_sources(&mut conn, &schema, &snapshot, false)?;
+            }
             if let Some(p) = &manifest_path {
                 let _ = std::fs::remove_file(p);
             }
@@ -745,6 +754,156 @@ mod imp {
             return Err(format!("engine exited with {status}"));
         }
         Ok(summary)
+    }
+
+    // Exercise the same schema/value codec and inverse SetComponent bytes as the inspector,
+    // against the real engine's new components. A second snapshot after each command prevents
+    // an optimistic local mirror from being mistaken for a successful engine edit.
+    fn verify_effect_sources(
+        conn: &mut Connection<UnixStream>,
+        schema: &Schema,
+        snapshot: &Snapshot,
+        viewport: bool,
+    ) -> Result<(), String> {
+        conn.send_editor(
+            EditorMessage::SpawnEntity,
+            &SpawnEntity {
+                editor_id: 0,
+                exact: false,
+                components: vec![],
+            }
+            .encode(),
+        )
+        .map_err(|e| format!("spawn source: {e}"))?;
+        conn.send_editor(EditorMessage::RequestSnapshot, &[])
+            .map_err(|e| format!("request spawned source: {e}"))?;
+        let spawned = recv_snapshot(conn)?;
+        let id = spawned
+            .entities
+            .iter()
+            .find(|e| {
+                !snapshot
+                    .entities
+                    .iter()
+                    .any(|old| old.editor_id == e.editor_id)
+            })
+            .ok_or("spawned source missing from live snapshot")?
+            .editor_id;
+        for name in [
+            "rime::vfx_scene::SmokeEmitter",
+            "rime::vfx_scene::FireEmitter",
+        ] {
+            let hash = schema
+                .types
+                .iter()
+                .find(|t| t.name == name && t.is_component)
+                .ok_or_else(|| format!("engine schema has no {name}"))?
+                .type_hash;
+            conn.send_editor(
+                EditorMessage::AddComponent,
+                &ComponentRef {
+                    editor_id: id,
+                    type_hash: hash,
+                }
+                .encode(),
+            )
+            .map_err(|e| format!("add source: {e}"))?;
+            conn.send_editor(EditorMessage::RequestSnapshot, &[])
+                .map_err(|e| format!("request source defaults: {e}"))?;
+            let snap = recv_snapshot(conn)?;
+            let original = snap
+                .entities
+                .iter()
+                .find(|e| e.editor_id == id)
+                .and_then(|e| e.components.iter().find(|c| c.type_hash == hash))
+                .ok_or("added source missing from live snapshot")?
+                .data
+                .clone();
+            let mut value =
+                decode_value(schema, hash, &original).map_err(|e| format!("decode source: {e}"))?;
+            let Value::Struct(fields) = &mut value else {
+                return Err("source is not a struct".into());
+            };
+            let enabled = fields
+                .iter_mut()
+                .find(|(n, _)| n == "enabled")
+                .ok_or("source has no enabled field")?;
+            if enabled.1 != Value::Bool(false) {
+                return Err("new source must default disabled".into());
+            }
+            enabled.1 = Value::Bool(true);
+            let rate = fields
+                .iter_mut()
+                .find(|(n, _)| n == "particles_per_second")
+                .ok_or("source has no rate field")?;
+            rate.1 = Value::F32(20.0);
+            let changed = encode_value(&value);
+            // Edit, undo, redo, confirming each authoritative byte blob. The final descriptions
+            // remain in the scene so --save also exercises engine-owned source serialization.
+            for blob in [&changed, &original, &changed] {
+                conn.send_editor(
+                    EditorMessage::SetComponent,
+                    &SetComponent {
+                        editor_id: id,
+                        type_hash: hash,
+                        blob: blob.clone(),
+                    }
+                    .encode(),
+                )
+                .map_err(|e| format!("set source: {e}"))?;
+                conn.send_editor(EditorMessage::RequestSnapshot, &[])
+                    .map_err(|e| format!("request edited source: {e}"))?;
+                let current = recv_snapshot(conn)?;
+                let got = current
+                    .entities
+                    .iter()
+                    .find(|e| e.editor_id == id)
+                    .and_then(|e| e.components.iter().find(|c| c.type_hash == hash))
+                    .ok_or("edited source missing from live snapshot")?;
+                if got.data != *blob {
+                    return Err(format!(
+                        "{name}: authoritative source edit/undo/redo disagrees"
+                    ));
+                }
+            }
+        }
+        if viewport {
+            // Wait after each Step: sending a batch would intentionally coalesce into one
+            // fixed tick in the host. This exercises a NEW entity's derived transform too.
+            for tick in 1..=12 {
+                conn.send_editor(EditorMessage::Step, &[])
+                    .map_err(|e| format!("step source preview: {e}"))?;
+                wait_play_state(conn, PlayPhase::Paused, tick)?;
+            }
+            conn.send_editor(EditorMessage::Stop, &[])
+                .map_err(|e| format!("stop source preview: {e}"))?;
+            wait_play_state(conn, PlayPhase::Edit, 0)?;
+            println!("editor: source preview completed 12 acknowledged steps and Stop");
+        }
+        println!("editor: smoke/fire schema, disabled defaults and typed edit/undo/redo verified");
+        Ok(())
+    }
+
+    fn wait_play_state(
+        conn: &mut Connection<UnixStream>,
+        phase: PlayPhase,
+        tick: u64,
+    ) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            let (ty, payload) = conn.recv().map_err(|e| format!("recv play state: {e}"))?;
+            if ty == MessageType::Other(EditorMessage::PlayState.to_code()) {
+                let state =
+                    PlayState::decode(&payload).map_err(|e| format!("decode play state: {e}"))?;
+                if state.phase == phase && state.tick_count == tick {
+                    return Ok(());
+                }
+                if state.tick_count > tick && phase == PlayPhase::Paused {
+                    return Err("source preview advanced more than one tick per Step".into());
+                }
+            }
+        }
+        Err("source preview play-state acknowledgement timed out".into())
     }
 
     /// Receive and decode `n` viewport frames. Each must LZ4-decode to `width*height*4` RGBA bytes

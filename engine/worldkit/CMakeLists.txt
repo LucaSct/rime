@@ -29,6 +29,7 @@ target_link_libraries(rime_worldkit
     PRIVATE rime::physics
             rime::render
             rime::ground
+            rime::vfx_scene
             rime::destruction
             rime::destruction_net
             rime::gameplay

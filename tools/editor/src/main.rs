@@ -63,6 +63,7 @@ fn print_usage() {
          \x20                              launch the docking shell (needs --features gui)"
     );
     eprintln!("  editor --smoke [--frames N] [--engine <rime-engine>] [--scene <file.rscene>]");
+    eprintln!("      --effect-sources  verify smoke/fire defaults and typed edit/undo/redo");
     eprintln!(
         "      --frames N   receive+decode N streamed viewport frames (else the editor channel)"
     );

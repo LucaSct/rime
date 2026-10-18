@@ -10,6 +10,7 @@ simulators. Existing M18 performance and multiplayer-shipment work remain open.
 | M-FX2 Destruction smoke | dust/smoke at actual breaks and collapses, with meaningful zero-impulse events | immutable destruction events, M-FX1 emission/rendering, stable source/tick identity |
 | M-FL1 Water/buoyancy | a bounded basin with visible waves and a buoy that disturbs the water | core math, public physics impulse seam, surface samples, later render graph surface |
 | M-FX3 Fire lighting/smoke | an ignition source visibly drives smoke and bounded reflected light, then extinguishes | M-FX1 smoke, clustered point lights, canonical ignition snapshots and event fan-out |
+| M-FL2 Temperature-driven freezing/melting | cooling freezes water and heating melts it, with measured energy/phase accounting | M-FL1 cell/surface identity, a separate thermal CPU oracle, later water transport and visible ice |
 
 Dependencies are small: general smoke supplies the visual substrate for destruction
 and fire; water's CPU reference and coupling interface are independent. Initial
@@ -191,3 +192,50 @@ and smoke, and destruction adapter together. Ordinary play leaves these off.
 `--effects-smoke` freezes simulation while toggling presentation and measures a
 visible delta against a drift control. The static pond still represents authored
 reflective art; these CPU basin tests do not turn it into simulated water.
+
+## Environment and editor sequence, 2026-10-18
+
+The owner requested temperature-driven freezing/melting first for ice. It is a
+new milestone, not a claim of existing collision, fracture or thermal simulation.
+[ADR-0090](../adr/0090-environment-source-authoring.md) records the authoring seam.
+
+1. **Source authoring (current implementation):** reflected smoke/fire components
+   use the existing typed inspector, undo/redo and `.rscene` writer. The editor
+   host previews a bounded shared pool and transient fire lights during Play/Step,
+   freezes time during Pause and clears presentation on Stop. Defaults remain off.
+   Edit/inverse, fresh-world save/load and lifecycle tests exercise the C++ seams;
+   a clicked GUI proof and enabled-scene hardware cost are still required. See
+   [`vfx_scene`](../../engine/vfx_scene/README.md) for usage and actual limits.
+2. **Ice energy/phase oracle (next CPU brick):** select documented material
+   parameters and implement a bounded water/ice sample whose stored energy gives
+   temperature and liquid fraction. Cooling/heating must account for latent heat,
+   rather than flip a Boolean at a threshold. Prove cooling → freeze → colder ice
+   and heating → melt → warmer water; zero heat is unchanged, opposite equal heat
+   restores energy, phase fraction stays in range, and malformed/nonfinite input
+   refuses atomically. A deliberately latent-heat-disabled control must fail the
+   phase-duration/energy witness. No transport, geometry or rigid-body forces yet.
+3. **Water two-way coupling:** consume solid displacement and compatible momentum
+   through public body/probe and basin interfaces. Prove mass accounting, drop,
+   bobbing and settling. The current flat-bed basin has no vertical momentum: do
+   not claim full momentum conservation by merely recording the reaction impulse.
+4. **Water/thermal authoring and visible surface:** add reflected bounded-basin
+   settings, probes, initial temperature and heat-source descriptions, with invalid
+   combinations refused and reported. Preview from the validated numerical state;
+   save descriptions rather than solver buffers. Show moving water, floating body,
+   cooling/freezing and heating/melting with surface/body alignment. Coupling ice
+   to moving water first needs explicit liquid/solid mass and transported-energy
+   accounting; a painted white surface is not proof. Solid collision/thickness
+   changes and breakable sheets are subsequent bricks with their own authority.
+5. **Smoke and fire fidelity:** soft smoke intersections, lighting/temporal
+   response, destruction relevance/late-join lifecycle and collapse cost; then
+   canonical ignition/extinguish controls. Fuel, heat transport and spread each
+   need their own state and witnesses before they affect damage or ice.
+6. **Complete the creator pipeline:** clicked editor undo/save/reopen/Play proof,
+   export the authored scene through the existing validated game bundle, and run
+   an exported server plus two clients with late join and compatibility refusal.
+   Preserve the separate Blender-authored M16 material/asset proof. Components
+   appearing in an inspector do not complete that asset or shipment pipeline.
+
+Each item is itself split at a reviewable numerical, authoring or visual result.
+M18 remains open; CPU references and opt-in authoring can progress, while new
+default-on rendering and gameplay-coupled water/ice retain budget/network gates.
