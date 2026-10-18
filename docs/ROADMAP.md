@@ -62,6 +62,15 @@ planned again before it's built. A milestone is **"done" only when its proof run
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
 
+**Environment/editor continuation (2026-10-18):** the next integration brick adds
+reflected, disabled-by-default smoke/fire sources to the existing inspector,
+undo/save/reload and bounded Play preview path. Temperature-driven freezing and
+melting is now a separate M-FL2 track at the owner's request: the next CPU brick
+is an energy/phase oracle, then water coupling, visible state and editor controls.
+The [ordered bricks](design/environment-effects-milestones.md#environment-and-editor-sequence-2026-10-18)
+and [ADR-0090](adr/0090-environment-source-authoring.md) distinguish implemented
+authoring seams from outstanding clicked, hardware, numerical and network proofs.
+
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
 > been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the

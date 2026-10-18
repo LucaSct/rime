@@ -14,6 +14,7 @@
 #include "rime/ground/surface.hpp"
 #include "rime/physics/components.hpp"
 #include "rime/render/components.hpp"
+#include "rime/vfx_scene/components.hpp"
 
 namespace rime::worldkit {
 
@@ -43,6 +44,7 @@ std::size_t register_engine_components(ecs::World& world) {
     gameplay::register_gameplay_components(world);
     gameplay_net::register_gameplay_net_components(world);
     ground::register_ground_components(world);
+    vfx_scene::register_vfx_scene_components(world);
 
     return world.registered_component_count();
 }

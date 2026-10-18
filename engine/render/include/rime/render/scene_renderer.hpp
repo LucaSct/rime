@@ -503,6 +503,15 @@ public:
     // TAA can ghost moving puffs. No vfx module dependency is implied.
     void set_smoke_particles(std::span<const GpuParticle> particles, FxSettings settings);
 
+    // Copied cosmetic light rows, appended after authored scene lights. They never enter ECS or
+    // scene saves. At most 16 finite, nonnegative rows are retained; empty input clears them.
+    // Existing clustered/forward lighting budgets still apply to the combined scene.
+    void set_transient_point_lights(std::span<const GpuPointLight> lights);
+
+    [[nodiscard]] std::uint64_t transient_point_lights_dropped() const noexcept {
+        return transient_point_lights_dropped_;
+    }
+
     // Cumulative rejects from the owned-list cap and FxParticlePass validation/draw budget.
     [[nodiscard]] std::uint64_t smoke_particles_dropped() const noexcept {
         return smoke_particles_dropped_ + (smoke_pass_ ? smoke_pass_->particles_dropped() : 0);
@@ -554,6 +563,8 @@ private:
     std::vector<GpuParticle> smoke_particles_;
     FxSettings smoke_settings_{};
     std::uint64_t smoke_particles_dropped_ = 0;
+    std::vector<GpuPointLight> transient_point_lights_;
+    std::uint64_t transient_point_lights_dropped_ = 0;
     std::vector<DrawItem> frame_first_person_draws_;
     std::vector<rhi::TextureHandle> first_person_base_color_;
     std::vector<rhi::TextureHandle> first_person_metallic_roughness_;

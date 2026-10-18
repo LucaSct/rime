@@ -588,3 +588,59 @@ TEST_CASE("SceneRenderer declares smoke only when enabled, after SSR and before 
     for (std::size_t i = 0; i < disabled.pass_count(); ++i)
         CHECK(disabled.pass_name(static_cast<std::uint32_t>(i)) != "fx-smoke");
 }
+
+TEST_CASE("transient scene lights illuminate without authored components and clear exactly") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    MaterialRegistry materials;
+    const auto cube = meshes.add(make_cube(0.5f), "transient-light-cube");
+    const auto material = materials.add({{0.8f, 0.8f, 0.8f, 1.0f}, 0.0f, 0.8f});
+    ecs::World world;
+    register_render_components(world);
+    (void)world.spawn_with(ecs::WorldTransform{}, Camera{});
+    core::Transform pose{};
+    pose.translation = {0.0f, 0.0f, -3.0f};
+    (void)world.spawn_with(ecs::WorldTransform{pose}, MeshRef{cube}, MaterialRef{material});
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_temporal_jitter_enabled(false);
+    renderer.set_taa_resolve_enabled(false);
+    renderer.set_ambient(0.0f, 0.0f, 0.0f);
+    const auto frame = [&] {
+        RenderGraph graph(*device);
+        const auto out = renderer.render(graph, world, {kSize, kSize}, true);
+        graph.export_texture(out.hdr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        return read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8);
+    };
+    const auto off = frame();
+    GpuPointLight light{{0.0f, 0.0f, -1.0f, 8.0f}, {8.0f, 2.0f, 0.5f, 0.0f}};
+    renderer.set_transient_point_lights({&light, 1});
+    const auto on = frame();
+    const auto image = decode_hdr(on, kSize, kSize);
+    const auto dark = decode_hdr(off, kSize, kSize);
+    CHECK(image.luminance(kSize / 2, kSize / 2) > dark.luminance(kSize / 2, kSize / 2) + 0.01f);
+    CHECK(extract_scene(world).point_lights.empty());
+    renderer.set_transient_point_lights({});
+    CHECK(frame() == off);
+
+    auto bad = light;
+    bad.position[0] = std::numeric_limits<float>::quiet_NaN();
+    std::vector<GpuPointLight> rows(18, light);
+    rows.insert(rows.begin(), bad);
+    renderer.set_transient_point_lights(rows);
+    CHECK(renderer.transient_point_lights_dropped() == 3);
+    // Copy ownership: changing the caller's storage after set cannot extinguish accepted rows.
+    for (auto& row : rows)
+        row.radiance[0] = row.radiance[1] = row.radiance[2] = 0.0f;
+    CHECK(frame() != off);
+    renderer.set_transient_point_lights({&bad, 1});
+    CHECK(renderer.transient_point_lights_dropped() == 4);
+    CHECK(frame() == off);
+}

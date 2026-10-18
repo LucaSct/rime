@@ -392,6 +392,7 @@ add_subdirectory(engine/assets)   # cooked-asset loading: RMA1 reader, registry,
 add_subdirectory(engine/destruction) # part-based destruction: patterns, instances, fracture (M8, ADR-0029)
 add_subdirectory(engine/audio)    # audio seam: play(sound, position, gain) + null backend (M8.4)
 add_subdirectory(engine/vfx)      # destruction dust stub: CPU billboard particles (M8.4, fx1 replaces)
+add_subdirectory(engine/vfx_scene) # reflected smoke/fire descriptions and bounded ECS presentation
 add_subdirectory(engine/fluids)   # removable CPU buoyancy exchange seam; no water solver yet
 add_subdirectory(engine/render)   # render graph + high-level renderer (M5)
 add_subdirectory(engine/stream)   # graphics streaming: frame capture → encode → transport (Track S)
