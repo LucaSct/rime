@@ -1,0 +1,26 @@
+[1/26] Building CXX object engine/editorhost/CMakeFiles/rime_editorhost.dir/src/thermal_preview.cpp.o
+[2/26] Building CXX object engine/fluids_scene/CMakeFiles/rime_fluids_scene.dir/src/preview.cpp.o
+[3/26] Linking CXX static library lib/librime_fluids_scene.a
+[4/26] Building CXX object engine/worldkit/CMakeFiles/rime_worldkit.dir/src/profile.cpp.o
+[5/26] Linking CXX static library lib/librime_worldkit.a
+[6/26] Building CXX object engine/editorhost/CMakeFiles/rime_editorhost.dir/src/editor_host.cpp.o
+[7/26] Linking CXX static library lib/librime_editorhost.a
+[8/26] Building CXX object engine/app/CMakeFiles/rime_editorhost_app.dir/editor_host_app.cpp.o
+[9/26] Linking CXX static library lib/librime_editorhost_app.a
+[10/26] Building CXX object tests/stream/CMakeFiles/rime_protocol_fixtures_tests.dir/protocol_fixtures_test.cpp.o
+[11/26] Building CXX object tests/fluids_scene/CMakeFiles/rime_fluids_scene_tests.dir/preview_test.cpp.o
+[12/26] Building CXX object tests/editorhost/CMakeFiles/rime_editorhost_tests.dir/editor_identity_test.cpp.o
+[13/26] Building CXX object tests/app/CMakeFiles/rime_app_tests.dir/editor_play_test.cpp.o
+[14/26] Linking CXX executable bin/rime-engine
+[15/26] Linking CXX executable bin/target_range
+[16/26] Linking CXX executable bin/target-range-host
+[17/26] Building CXX object tests/editorhost/CMakeFiles/rime_editorhost_tests.dir/editor_host_test.cpp.o
+[18/26] Building CXX object tests/vfx_scene/CMakeFiles/rime_vfx_scene_tests.dir/effects_test.cpp.o
+[19/26] Linking CXX executable bin/rime_fluids_scene_tests
+[20/26] Linking CXX executable bin/rime_protocol_fixtures_tests
+[21/26] Linking CXX executable bin/the-block-host
+[22/26] Linking CXX executable bin/rime_editorhost_tests
+[23/26] Linking CXX executable bin/rime_worldkit_tests
+[24/26] Linking CXX executable bin/rime_vfx_scene_tests
+[25/26] Linking CXX executable bin/the_block
+[26/26] Linking CXX executable bin/rime_app_tests

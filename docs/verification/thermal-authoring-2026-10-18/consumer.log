@@ -1,0 +1,22 @@
+-- Using Conan toolchain: /home/next/projects/rime/build/release/conan_toolchain.cmake
+-- Conan toolchain: Defining architecture flag: -m64
+-- Conan toolchain: C++ Standard 20 with extensions OFF
+-- Conan: Component target declared 'fmt::fmt'
+-- Conan: Component target declared 'libjpeg-turbo::jpeg-static'
+-- Conan: Component target declared 'libjpeg-turbo::turbojpeg-static'
+-- Conan: Target declared 'libjpeg-turbo::libjpeg-turbo'
+-- Conan: Target declared 'LZ4::lz4_static'
+-- Conan: Component target declared 'libsvtav1::encoder'
+-- Conan: Target declared 'libsvtav1::libsvtav1'
+-- Conan: Target declared 'dav1d::dav1d'
+-- Conan: Component target declared 'Vulkan::Headers'
+-- Conan: Component target declared 'Vulkan::Registry'
+-- Conan: Target declared 'vulkan-headers::vulkan-headers'
+-- Conan: Component target declared 'volk::volk'
+-- Conan: Component target declared 'volk::volk_headers'
+-- Conan: Target declared 'GPUOpen::VulkanMemoryAllocator'
+-- Configuring done (0.0s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/next/reports/rime-thermal-authoring-2026-10-18/consumer-build
+[1/2] Building CXX object CMakeFiles/thermal_consumer.dir/main.cpp.o
+[2/2] Linking CXX executable thermal_consumer

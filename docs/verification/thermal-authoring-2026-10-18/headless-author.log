@@ -1,0 +1,5 @@
+editor-host: editor host listening on /tmp/rime-editor-2432650-1792358216603746185.sock (4 entities)
+editor: thermal defaults, typed edit/inverse/redo and remapped references verified (reload=false)
+[INFO] editorhost: saved 8 entities to /home/next/reports/rime-thermal-authoring-2026-10-18/thermal.rscene (2996 bytes) (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:1150)
+editor-host: editor session closed (8 entities)
+editor <-> engine OK: 32 schema types, 4 entities, 2 assets browsed; typed field edit 0 -> 1 applied and confirmed via snapshot; pick answered honestly (no viewport => miss); saved 8 entities to /home/next/reports/rime-thermal-authoring-2026-10-18/thermal.rscene (2996 bytes); clean shutdown
