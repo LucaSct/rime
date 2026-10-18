@@ -175,10 +175,11 @@ lying flat cannot seesaw on a single arbitrary one.
 
 ## 7. Tolerances
 
-All constants are absolute at metre scale (the engine's working range, bodies $\sim$0.05–10 m),
-because the algorithms compare squared lengths and dot products directly. They are **calibration
+Geometric tolerances use metre scale (the engine's working range, bodies $\sim$0.05–10 m).
+Arithmetic degeneracy and convergence guards also scale with the products being evaluated:
+rounding a large product cannot be bounded by a fixed length or volume. These are **calibration
 points, not truths** — chosen to stop iterating once float's $\sim$7 significant digits are spent
-— and are revisited against the M7.10 debris-scale stress harness:
+— and are revisited against measured fixtures:
 
 | Constant | Meaning | Value |
 |---|---|---|
@@ -187,6 +188,30 @@ points, not truths** — chosen to stop iterating once float's $\sim$7 significa
 | EPA `kGrowthEps` | face growth (m) below which a face is on the boundary | $10^{-4}$ |
 | EPA `kPlaneEps` | plane-side slop for face visibility | $10^{-5}$ |
 | clip `kFaceTieEps` | reference-face tie bias (prefer $a$; keeps ids stable) | $10^{-4}$ |
+
+### Nearly flat tetrahedra (2026-10-18)
+
+The tetrahedron containment test depends on the signs of its face planes. Its signed volume
+is the scalar triple product $D=(e_1\times e_2)\cdot e_3$, whose rounding error scales with
+$\lVert e_1\rVert\lVert e_2\rVert\lVert e_3\rVert$. A fixed `kTinyVol` floor alone admitted
+nearly coplanar simplexes as solid: the two captured collapse pairs left float determinants
+$1.49\times10^{-8}$ and $1.86\times10^{-8}$, above the old $10^{-9}$ floor, despite positive
+world-AABB gaps of 18.45 mm and 5.41 mm. No convex combination of those vertices can contain
+the origin; the face-sign verdict was cancellation noise. EPA subsequently clamped a negative
+face distance to zero and the clipping fallback emitted a ghost contact.
+
+`solve_simplex` now declines solid containment when
+$|D|\le\texttt{kTinyVol}+\texttt{kDegenerateRel}\lVert e_1\rVert\lVert e_2\rVert\lVert e_3\rVert$.
+It searches all faces instead. Every returned face point remains on the simplex, so it remains
+a valid distance upper bound; if the float walk stalls, the existing double-precision polish
+settles separation or overlap. The coefficient is the existing arithmetic degeneracy budget,
+not an enlarged collision margin. Touch, speculative-contact and clipping tolerances are unchanged.
+
+`tests/physics/separated_hull_test.cpp` preserves the exact runtime inputs, checks separation
+and genuine-overlap controls at three scales and both pair orders, and exercises all 24 vertex
+orders of each bad simplex. Thin enclosing tetrahedra guard the fallback's ability to retain
+real overlap. This intentionally corrects contact semantics; world hashes may change. It does
+not validate a broadphase shortcut or connect these contacts to the separate replication defect.
 
 ## References
 

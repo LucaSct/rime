@@ -24,6 +24,13 @@ playable repairs include weapon timing/presentation and city readability; these 
 not close M18's outstanding performance gate. The dated October 5 snapshot below
 is historical, including its then-unmerged M19 stack and older post-M19 ordering.
 
+**Collision follow-up (2026-10-18, isolated candidate):** the two saved
+separated-hull contacts reproduce as false GJK tetrahedron containment caused by
+float cancellation. A scale-aware degeneracy guard removes both contacts, with
+separation/overlap controls and compiler/sanitizer proofs. This deliberately changes
+contact semantics; the chaotic block's locality thresholds are red, and no safe
+filter or collapse speedup is claimed. [Evidence and remaining gates](perf/gjk-flat-tetrahedron-2026-10-18/README.md).
+
 Water, fire and smoke are planned simulation work, not completed by the present
 reflective pond or muzzle effects. [ADR-0042](adr/0042-fluids-track-reopened.md)
 orders destruction smoke/particle capacity (fx1b), heightfield water with two-way
