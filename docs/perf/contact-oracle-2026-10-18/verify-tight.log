@@ -1,0 +1,9 @@
+exact mismatch: physics.client.step step 360 pair 0:0 / 846:0
+exact mismatch: physics.client.step step 360 pair 1450:0 / 1452:0
+exact mismatch: physics.client.step step 380 pair 0:0 / 416:1
+exact mismatch: physics.server.step step 280 pair 0:0 / 1191:0
+exact mismatch: physics.server.step step 340 pair 775:1 / 886:1
+exact mismatch: physics.server.step step 380 pair 0:0 / 692:0
+exact mismatch: physics.server.step step 420 pair 0:0 / 692:0
+exact mismatch: physics.server.step step 420 pair 0:0 / 694:0
+candidate tight: 11 exact mismatches, 58887 skipped calls; refusing timing

@@ -21,6 +21,8 @@ rime_add_test(rime_physics_tests
     hull_test.cpp
     heightfield_test.cpp
     compound_test.cpp
+    contact_capture_test.cpp
+    contact_workload_test.cpp
     contact_profile_test.cpp
     unregister_test.cpp
     stats_test.cpp)

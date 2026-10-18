@@ -30,6 +30,11 @@ float cancellation. A scale-aware degeneracy guard removes both contacts, with
 separation/overlap controls and compiler/sanitizer proofs. This deliberately changes
 contact semantics; the chaotic block's locality thresholds are red, and no safe
 filter or collapse speedup is claimed. [Evidence and remaining gates](perf/gjk-flat-tetrahedron-2026-10-18/README.md).
+The subsequent [frozen contact oracle](perf/contact-oracle-2026-10-18/README.md)
+replays 166,374 queries exactly. Tight bounds still discard 11 reference contacts;
+the existing child margin plus outward rounding passes the corpus and an external
+cached-filter variant preserves all 900 world hashes. This is measured groundwork
+for a runtime optimization; the production filter and frame-budget gates remain separate.
 
 Water, fire and smoke are planned simulation work, not completed by the present
 reflective pond or muzzle effects. [ADR-0042](adr/0042-fluids-track-reopened.md)

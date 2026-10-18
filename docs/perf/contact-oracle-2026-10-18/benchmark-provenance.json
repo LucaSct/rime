@@ -1,0 +1,35 @@
+{
+  "build_type": "RelWithDebInfo",
+  "source_parent": "35435d2b56f7e40ad2996efc5c6576f7b0117908",
+  "source_sha256": {
+    "samples/contact_bench/capture.hpp": "8a2eac3b90a1e19375d5935224ea39407a91a5d4f484726150422e40e1280bf1",
+    "samples/contact_bench/workload.hpp": "ee6cf37034b80856293bc29ea657f124c7a74e6a4cb46b9a93d61a1124af329d",
+    "samples/contact_bench/main.cpp": "c7af4797ae438be07f11cd6900ad493e1fb4cee12396caac733585ede8ec42c8",
+    "samples/contact_bench/prepare_capture.py": "f3811a651c17e81d9268cdc89bde9cc1d68ab2a3d3b4940eef677246278ae451",
+    "samples/contact_bench/measure.py": "5b9c32356399486d52fbfd48f3de95a6ceb58fa27d1ede9623ed3ed65e27c2fb"
+  },
+  "binary_sha256": "90402087b32fac411695bc872b1d9bea2c6510de5b1cbc9181a2d8e0a18f0a7a",
+  "corpus_sha256": "bcdade9cd51373bbefb9c642cef2f6946cf562f2354fa21d3ed30b22b050f372",
+  "compile_commands": [
+    {
+      "directory": "/home/next/projects/rime/build/release",
+      "command": "/usr/bin/c++ -I/home/next/projects/rime/engine/physics/src -I/home/next/projects/rime/engine/physics/include -I/home/next/projects/rime/engine/core/include -I/home/next/projects/rime/engine/ecs/include -isystem /home/next/.conan2/p/b/fmt9d943314ec67a/p/include -m64 -O2 -g -DNDEBUG -std=c++20 -fPIE -fvisibility=hidden -fvisibility-inlines-hidden -Wall -Wextra -Wpedantic -Werror -o samples/contact_bench/CMakeFiles/contact_bench.dir/main.cpp.o -c /home/next/projects/rime/samples/contact_bench/main.cpp",
+      "file": "/home/next/projects/rime/samples/contact_bench/main.cpp",
+      "output": "/home/next/projects/rime/build/release/samples/contact_bench/CMakeFiles/contact_bench.dir/main.cpp.o"
+    },
+    {
+      "directory": "/home/next/projects/rime/build/release",
+      "command": "/usr/bin/c++ -DDOCTEST_CONFIG_USE_STD_HEADERS -DRIME_PHYSICS_SEAM_COUNTER -I/home/next/projects/rime/tests -I/home/next/projects/rime/engine/physics/src -I/home/next/projects/rime/engine/physics/include -I/home/next/projects/rime/engine/core/include -I/home/next/projects/rime/engine/ecs/include -isystem /home/next/.conan2/p/docte2fe58cbe17539/p/include -isystem /home/next/.conan2/p/b/fmt9d943314ec67a/p/include -m64 -O2 -g -DNDEBUG -std=c++20 -fPIE -fvisibility=hidden -fvisibility-inlines-hidden -Wall -Wextra -Wpedantic -Werror -o tests/physics/CMakeFiles/rime_physics_tests.dir/contact_workload_test.cpp.o -c /home/next/projects/rime/tests/physics/contact_workload_test.cpp",
+      "file": "/home/next/projects/rime/tests/physics/contact_workload_test.cpp",
+      "output": "/home/next/projects/rime/build/release/tests/physics/CMakeFiles/rime_physics_tests.dir/contact_workload_test.cpp.o"
+    },
+    {
+      "directory": "/home/next/projects/rime/build/release",
+      "command": "/usr/bin/c++ -DDOCTEST_CONFIG_USE_STD_HEADERS -DRIME_PHYSICS_SEAM_COUNTER -I/home/next/projects/rime/tests -I/home/next/projects/rime/engine/physics/src -I/home/next/projects/rime/engine/physics/include -I/home/next/projects/rime/engine/core/include -I/home/next/projects/rime/engine/ecs/include -isystem /home/next/.conan2/p/docte2fe58cbe17539/p/include -isystem /home/next/.conan2/p/b/fmt9d943314ec67a/p/include -m64 -O2 -g -DNDEBUG -std=c++20 -fPIE -fvisibility=hidden -fvisibility-inlines-hidden -Wall -Wextra -Wpedantic -Werror -o tests/physics/CMakeFiles/rime_physics_tests.dir/contact_capture_test.cpp.o -c /home/next/projects/rime/tests/physics/contact_capture_test.cpp",
+      "file": "/home/next/projects/rime/tests/physics/contact_capture_test.cpp",
+      "output": "/home/next/projects/rime/build/release/tests/physics/CMakeFiles/rime_physics_tests.dir/contact_capture_test.cpp.o"
+    }
+  ],
+  "gcc": "c++ (GCC) 16.2.1 20260810",
+  "clang": "clang version 23.1.1"
+}
