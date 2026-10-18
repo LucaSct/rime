@@ -88,6 +88,15 @@ the next thermal consumer is a bounded spatial field, then temperature/heat-sour
 editor authoring and visible phase. Water displacement/body feedback remains a
 separate open brick. See [ADR-0092](adr/0092-transactional-thermal-contact.md).
 
+**Bounded thermal field (2026-10-18):** fixed-mass samples now have a CPU graph
+consumer with canonical explicit contacts, signed power sources, preallocated
+tick buffers, bounded substeps/work and atomic publication of state plus the
+complete energy journal. Multi-hop phase changes, exact source/rounding accounting
+and temporal/spatial refinement are tested. It is an ordered first-order
+reference, not global implicit diffusion, rendered ice or moving-water freezing.
+Next: reflected thermal descriptions and editor Play/Stop reconstruction, then
+validated visible phase. [ADR-0093](adr/0093-bounded-journaled-thermal-field.md).
+
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
 > been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the

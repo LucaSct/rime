@@ -77,3 +77,34 @@ The diagnostic checks exact two-sided energy accounting, range/order, both sign
 certificates, zero controls and atomic failure against the actual compiled
 archive. See [ADR-0092](../../docs/adr/0092-transactional-thermal-contact.md) and
 the [contact research note](../../docs/research/2026-10-18-thermal-contact.md).
+
+`thermal_field.hpp` adds a bounded fixed-mass graph with explicit cell indices,
+conductive links and constant signed power sources. `ThermalField::create`
+copies and canonicalizes descriptions, rejecting invalid or duplicate links and
+multiple sources for one cell. `advance(dt)` applies sources then contacts in
+sorted order over bounded uniform substeps. This is an ordered first-order
+reference, not a global implicit solve. Timestep subdivision and node relabeling
+can change results; geometry, flow and authority remain caller responsibilities.
+
+Creation reserves all tick buffers. Fields are move-only. Receipt and worst-case
+contact-trial budgets are checked before work; any primitive failure rolls back
+the entire tick, including the previously published journal. The result reports
+the failing operation and underlying status. Zero dt preserves state, ordinal
+tick and journal. Positive successful calls publish a complete operation journal
+and `last_step()` metadata. Borrowed views are replaced on success; consume or
+copy the journal before advancing again if history is needed.
+
+The journal retains before/after energies and each primitive receipt, without
+rounding them into a cumulative scalar. Their exact telescope gives field energy
+change plus update residuals equal to rounded source requests. Immutable powers
+and recorded dt/substep duration/count additionally retain all operands needed
+to check multiplication and partition rounding against ideal P*dt offline.
+
+```sh
+python3 tests/fluids/verify_thermal_field.py --library build/release/lib/librime_fluids.a --work-dir /path/to/field-scratch
+```
+
+This exact diagnostic also interposes allocations during `advance()`. Portable
+tests exercise multi-hop freezing/melting, no-contact controls, rollback and
+temporal/spatial refinement. [ADR-0093](../../docs/adr/0093-bounded-journaled-thermal-field.md)
+documents caps, accuracy and the remaining field/editor integration work.

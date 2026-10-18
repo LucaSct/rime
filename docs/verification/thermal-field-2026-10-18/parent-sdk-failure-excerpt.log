@@ -1,0 +1,2 @@
+2026-10-18T19:14:38.7097943Z /home/runner/actions-runner/_work/rime/rime/ci-sdk/tests/fluids/thermal_contact_test.cpp:100:21: error: loop variable 'inputs' creates a copy from type 'const std::pair<double, double>' [-Werror=range-loop-construct]
+2026-10-18T19:14:38.7101655Z /home/runner/actions-runner/_work/rime/rime/ci-sdk/tests/fluids/thermal_contact_test.cpp:100:21: note: use reference type to prevent copying
