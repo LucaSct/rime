@@ -119,3 +119,14 @@ Contains full build/test logs, probes, input/output corpus, binaries, ASan objec
 mutants, installed consumer and private credit snapshots. The docs proof helpers
 must be copied to a scratch directory before running; do not generate objects
 inside docs. No tools/jobs need to remain running after delivery.
+
+## CI follow-up during the next brick
+
+Parent SDK job `117764263487` in run `39157706199` failed compiling the contact
+TEST in Debug: `-Werror=range-loop-construct` rejected copying a const
+`std::pair<double,double>` in the zero-control loop. The loop now binds a const
+reference. Local contact tests still pass (12 cases / 1,048 assertions), and
+Clang Debug syntax with explicit `-Wrange-loop-construct -Werror` passes. This
+fix is pushed to the parent PR separately from the thermal-field implementation.
+The parent Linux job confirms the same three inherited block-collapse failures;
+SDK CI must rerun on this fix before calling that external gate passed.

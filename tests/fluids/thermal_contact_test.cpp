@@ -97,7 +97,7 @@ TEST_CASE("thermal contact: analytic sensible exchange and swapped arguments") {
 }
 
 TEST_CASE("thermal contact: disabled exchange and isothermal phases keep exact state") {
-    for (const auto inputs : {std::pair{0.0, 1.0}, std::pair{1.0, -0.0}}) {
+    for (const auto& inputs : {std::pair{0.0, 1.0}, std::pair{1.0, -0.0}}) {
         auto a = water(1.0, kMelting + 10.0, 1.0);
         auto b = water(1.0, kMelting - 10.0, 0.0);
         const auto before_a = a;
