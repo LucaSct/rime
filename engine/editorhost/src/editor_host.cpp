@@ -241,6 +241,7 @@ bool message_affects_frame(EditorMessage msg) noexcept {
         case EditorMessage::AssetList:
         case EditorMessage::PickResult:
         case EditorMessage::ViewportCamera:
+        case EditorMessage::ThermalPreview:
         case EditorMessage::PlayState:
             return false;
     }

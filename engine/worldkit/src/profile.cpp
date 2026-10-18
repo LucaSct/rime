@@ -9,6 +9,7 @@
 #include "rime/ecs/render_transform.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/fluids_scene/components.hpp"
 #include "rime/gameplay/components.hpp"
 #include "rime/gameplay_net/components.hpp"
 #include "rime/ground/surface.hpp"
@@ -45,6 +46,7 @@ std::size_t register_engine_components(ecs::World& world) {
     gameplay_net::register_gameplay_net_components(world);
     ground::register_ground_components(world);
     vfx_scene::register_vfx_scene_components(world);
+    fluids_scene::register_fluids_scene_components(world);
 
     return world.registered_component_count();
 }

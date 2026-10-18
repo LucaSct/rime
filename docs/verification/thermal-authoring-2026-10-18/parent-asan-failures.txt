@@ -1,0 +1,14 @@
+2026-10-18T20:43:18.6050252Z     [FAIL] collapse: the far side of the street is untouched
+2026-10-18T20:43:18.6050420Z     [FAIL] collapse: most of the block is still standing
+2026-10-18T20:43:18.6050585Z     [FAIL] collapse: the damage stayed local to a few buildings
+2026-10-18T20:43:18.6050749Z     [ ok ] audio: destruction drove the mixer
+2026-10-18T20:43:18.6050886Z     [ ok ] audio: nothing clipped
+2026-10-18T20:43:18.6051010Z     [ ok ] render: frames were drawn
+2026-10-18T20:56:42.2162203Z 99% tests passed, 1 tests failed out of 88
+2026-10-18T20:56:42.2162358Z
+2026-10-18T20:56:42.2162468Z Total Test time (real) = 971.38 sec
+2026-10-18T20:56:42.2162582Z
+2026-10-18T20:56:42.2162666Z The following tests FAILED:
+2026-10-18T20:56:42.2162988Z Errors while running CTest
+2026-10-18T20:56:42.2163161Z 	 35 - the_block_headless (Failed)
+2026-10-18T20:56:42.2181430Z ##[error]Process completed with exit code 8.

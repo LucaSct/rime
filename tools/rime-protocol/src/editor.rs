@@ -78,6 +78,8 @@ pub enum EditorMessage {
     /// load; the editor must refuse to adopt a replacement and must say why. `ok` with a non-zero
     /// `skipped_components` is a partial load by tool policy: adopt it, and warn.
     SceneLoadReport,
+    /// engine -> editor: optional read-only thermal diagnostics.
+    ThermalPreview,
     /// editor → engine: set a component's bytes on an entity.
     SetComponent,
     /// editor → engine: spawn an entity with a default placement — under a fresh id (`0`), or
@@ -130,6 +132,7 @@ impl EditorMessage {
             EditorMessage::SaveResult => 0x0207,
             EditorMessage::EditResult => 0x0208,
             EditorMessage::SceneLoadReport => 0x0209,
+            EditorMessage::ThermalPreview => 0x020A,
             EditorMessage::SetComponent => 0x0210,
             EditorMessage::Spawn => 0x0211,
             EditorMessage::Despawn => 0x0212,
@@ -159,6 +162,7 @@ impl EditorMessage {
             0x0207 => Some(EditorMessage::SaveResult),
             0x0208 => Some(EditorMessage::EditResult),
             0x0209 => Some(EditorMessage::SceneLoadReport),
+            0x020A => Some(EditorMessage::ThermalPreview),
             0x0210 => Some(EditorMessage::SetComponent),
             0x0211 => Some(EditorMessage::Spawn),
             0x0212 => Some(EditorMessage::Despawn),
