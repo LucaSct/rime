@@ -1,0 +1,21 @@
+{
+  "world_steps": 900,
+  "production_mismatches": 0,
+  "reference_vs_oracle_parent_mismatches": 0,
+  "reference": {
+    "plain_pairs": 3318450,
+    "exact_narrowphase_calls": 3365643,
+    "produced_manifolds": 992631,
+    "plain_bounds_tests": 0,
+    "plain_bounds_rejected": 0,
+    "plain_bounds_bodies": 0
+  },
+  "production": {
+    "plain_pairs": 3318450,
+    "exact_narrowphase_calls": 2205878,
+    "produced_manifolds": 992631,
+    "plain_bounds_tests": 3318450,
+    "plain_bounds_rejected": 1159765,
+    "plain_bounds_bodies": 516931
+  }
+}

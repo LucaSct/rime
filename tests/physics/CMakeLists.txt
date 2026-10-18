@@ -36,6 +36,9 @@ target_link_libraries(rime_physics_tests
 # hull fixture also needs exact runtime bits: re-registering its geometry re-centres the vertices.
 # Each file explains its exception. solver_test.cpp uses the same access for bitwise equivalence
 # of the velocity-phase inertia cache's two overloads. Other proofs should drive PhysicsWorld.
+# Contact replay additionally needs the unfiltered private dispatch as an independent oracle;
+# otherwise the bounds sweep could compare the optimized path with itself. Cache lifetime and
+# CCD are separately pinned through the public world seam in plain_bounds_test.cpp.
 target_include_directories(rime_physics_tests PRIVATE ${CMAKE_SOURCE_DIR}/engine/physics/src)
 
 # The heightfield seam rule is unreachable by ordinary rays, so the test that pins it must SEE it

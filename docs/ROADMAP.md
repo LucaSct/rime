@@ -34,7 +34,13 @@ The subsequent [frozen contact oracle](perf/contact-oracle-2026-10-18/README.md)
 replays 166,374 queries exactly. Tight bounds still discard 11 reference contacts;
 the existing child margin plus outward rounding passes the corpus and an external
 cached-filter variant preserves all 900 world hashes. This is measured groundwork
-for a runtime optimization; the production filter and frame-budget gates remain separate.
+for a runtime optimization. The subsequent
+[runtime bounds cache](perf/plain-contact-bounds-2026-10-18/README.md), isolated on
+`perf/plain-contact-bounds`, preserves those 900 hashes while removing 1,159,765
+exact calls. Controlled frozen CPU replay costs about 21% less with the actual
+cache. The new 1080p attempt remains unqualified and sim.block p99 is 8.074 ms
+against 6.000; M18 and city convergence remain open. See
+[ADR-0089](adr/0089-conservative-plain-contact-midphase.md).
 
 Water, fire and smoke are planned simulation work, not completed by the present
 reflective pond or muzzle effects. [ADR-0042](adr/0042-fluids-track-reopened.md)

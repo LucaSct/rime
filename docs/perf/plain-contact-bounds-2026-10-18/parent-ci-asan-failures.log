@@ -1,0 +1,7 @@
+2026-10-18T12:33:23.9582905Z 99-the-block: 3 of 30 claims failed
+2026-10-18T12:33:23.9590421Z     [FAIL] collapse: the far side of the street is untouched
+2026-10-18T12:33:23.9590596Z     [FAIL] collapse: most of the block is still standing
+2026-10-18T12:33:23.9590768Z     [FAIL] collapse: the damage stayed local to a few buildings
+2026-10-18T12:47:53.9263655Z 99% tests passed, 1 tests failed out of 87
+2026-10-18T12:47:53.9265526Z The following tests FAILED:
+2026-10-18T12:47:53.9352489Z ##[error]Process completed with exit code 8.
