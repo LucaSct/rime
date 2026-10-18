@@ -1,0 +1,10 @@
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+editor-host: editor host + viewport on /tmp/rime-editor-1190674-1792341153952048664.sock (960x540, 'llvmpipe (LLVM 23.1.1, 256 bits)')
+editor: source preview completed 12 acknowledged steps and Stop
+editor: smoke/fire schema, disabled defaults and typed edit/undo/redo verified
+[INFO] editor-host: stream closed — codec lz4, 27 frame(s) sent, 0 produced no packet, 0 encode failure(s) (/home/next/projects/rime/engine/app/editor_host_app.cpp:1192)
+[INFO] editor-host: input closed — 0 malformed, 0 unknown key usage(s), 0 unknown button(s), 0 still held (/home/next/projects/rime/engine/app/editor_host_app.cpp:1203)
+[INFO] editor-host: effects closed — 12 ticks, 12 lit ticks, 8 spawned, 8 cleared, 0 source-cap visits dropped, 0 invalid source visits, 0 emission-budget particles dropped, 0 pool particles dropped (/home/next/projects/rime/engine/app/editor_host_app.cpp:1209)
+editor-host: viewport session closed after 27 frames (8 entities)
+editor <-> engine viewport OK: 7 entities; 3 frames decoded to 960x540 RGBA (47.3% covered); pick at (274,52) hit entity 0:0, background (4,4) missed; viewport-camera lens verified (vp*inv=I, err 1.5e-5); gizmo translate -3 -> -2 applied; clean shutdown
