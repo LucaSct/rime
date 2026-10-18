@@ -1,0 +1,36 @@
+{
+  "parent": "06d16dad8cda4ff37341a0d0c6a314b81e7a54e7",
+  "sources": {
+    "engine/fluids_render/include/rime/fluids_render/phase_surface.hpp": "4307887b1537704ebd9e396a9b3ffbf1f35dcdf406c77f2a841528eb4d6a0ef2",
+    "engine/fluids_render/src/phase_surface.cpp": "db76c24676b078674efc04a2a2709f9a42fd0aa09929ec29ca1a82d92927b590",
+    "samples/thermal-courtyard/scene.cpp": "766116be562eb946567ace1f3adb190ec6be3961e644713c6c278e51b5ee144d",
+    "samples/thermal-courtyard/main.cpp": "ca0b25115355e44ec08ff810a0b936ace168e71c44e6ac67adb5ef69c7772451",
+    "samples/thermal-courtyard/scene.hpp": "6532f745055f1ab0ca8b9ac83eff87bb7f366a1de9ec7dd250800155a397b901",
+    "samples/thermal-courtyard/courtyard.rscene": "b31bb8f7ea17b692bebda627308c5ac3c9d3013bf5d9e6379c8df4c99fdb238f",
+    "scripts/thermal-courtyard.sh": "7bc5e5c1fd4757998a05c4970dbf9796e87f42be0695fb711161b4a9e454e41e",
+    "tests/fluids_render/phase_surface_test.cpp": "41e8e08e351c1cc1411c2b066b949bcb8dec850043c67c245e9001db02abbc20",
+    "engine/render/src/scene_renderer.cpp": "1af52a5b8da2f69506fe47b5711141b16f1b540f2edc22a3214c0a4ddef5e0ec",
+    "engine/render/include/rime/render/scene_renderer.hpp": "ca961220f5c5021b34e1f321ffb8a8f7faf1c411c89cda16ba6e8e492b1dc455",
+    "tools/editor/src/smoke.rs": "fbc78052fd34de50062449a0eaec7fced22d74d4cca5129d1f453951ac7c309e"
+  },
+  "binaries": {
+    "/home/next/projects/rime/build/release/bin/thermal-courtyard": "4575b21ef40093ad46701f95e42def7c0cc2c1a40501a127fe5d6335cd27b57a",
+    "/home/next/projects/rime/build/release/bin/rime_fluids_render_tests": "2cfe33a54db7af895ac7508cc75e1b91818f4c0e49d7560f2fbccafde48f90bb",
+    "/home/next/projects/rime/build/release/lib/librime_fluids_render.a": "57c34e0a089503cb25b195c7510275c49b6ea8953f72c704721d2dcfb464bf88",
+    "/home/next/projects/rime/build/release/lib/librime_render.a": "6dfa39e71c214f502a25a9264ab925f87198d96575dabda412f3f0cda4a67b93",
+    "/home/next/projects/rime/tools/target/debug/editor": "9433e2ab85e879ee752e7073d6f37c5d664fcd96a71bdf08e3c65f2941a4359e",
+    "/home/next/reports/rime-thermal-courtyard-2026-10-18/asan-tests": "e8093650da6a42f3a8be12792f6fdc9ebb56802ed12cb50811f72f9c231eea9f",
+    "/home/next/projects/rime/build/release/sdk-consumer-build/sdk_consumer": "4be7e7209bc8a00b3e7200be8833fdf6d77f15e35b2bd9697909126f3201b2af"
+  },
+  "captures": {
+    "yard-0s.png": "4904971f9e571ff2e4be4bc792b6a22875ceb3daab97d3de72fd3cdccb285f87",
+    "yard-30s.png": "85515e5b88767d1e90b2ff2509d8c298fa2aadaedc425fce0e82e003814b9745",
+    "yard-36s.png": "e14322f8b2e963f2fee0f195fac621b7c1bf3c16419766b0b52242bed530501b",
+    "yard-native.png": "87ddff4fdc4c323bdfc5a8a4d4149dd914639a7cd2f38d3942f9a8f25b22346a",
+    "window-native.png": "f86c626ceea846e544a74c1fe98fc0aaa2d079d3d3ec055350de5e82c134fe80",
+    "window-x11.png": "7eabd93f36a3e9ed69b3e08160090a8b38be18c08b42b55206f1601f8402994b"
+  },
+  "native_device": "NVIDIA GeForce RTX 3060, driver 615.78.08; functional capture, not qualified performance",
+  "software_device": "llvmpipe LLVM 23.1.1 Vulkan 1.4.354",
+  "note": "Final sample source includes resize-safe capture and copied camera framing; full suite plus focused final sample, input, capture and Clang checks. Ordinary rendered frame captures; no retouching."
+}

@@ -1,0 +1,15 @@
+ninja: no work to do.
+   Compiling editor v0.0.1 (/home/next/projects/rime/tools/editor)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.10s
+     Running `tools/target/debug/editor --engine /home/next/projects/rime/build/release/bin/thermal-courtyard --scene /home/next/projects/rime/samples/thermal-courtyard/courtyard.rscene --help`
+usage:
+  editor [--engine <rime-engine>] [--scene <file.rscene>] [--assets <manifest>]
+                               launch the docking shell (needs --features gui)
+  editor --smoke [--frames N] [--engine <rime-engine>] [--scene <file.rscene>]
+      --courtyard-preview  verify the saved three-station thermal city demo
+      --thermal-sources  verify thermal authoring and bounded live preview
+      --thermal-reload   verify a saved thermal graph and its live preview
+      --effect-sources  verify smoke/fire defaults and typed edit/undo/redo
+      --frames N   receive+decode N streamed viewport frames (else the editor channel)
+      --engine P   the rime-engine binary to launch (else $RIME_ENGINE_BIN)
+      --scene  P   a .rscene for the engine to load into the world (else a default scene)

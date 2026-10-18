@@ -1,0 +1,15 @@
+{
+  "model": "gpt-6-astra",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Read-only independent design question, give YOUR OWN proposal <=450 words, no tools/implementation. User wants a working city courtyard demo by day end with visible water/ice freezing/melting plus separate smoke/fire. Existing fixed-mass enthalpy solver ThermalField has transactional cells/contact/source; editor ThermalPreview max16cells holds accepted state outside ECS with edit rebuild, Pause, Stop reset and readonly diagnostics. Renderer extracts ECS into DrawItem plus parallel generation-safe entities then resolves submeshes/material sets. MaterialRegistry append/update PBR data, immutable per-frame copied GPU uniforms. SceneRenderer already copies transient lights and particles, no material override seam. Need simplest honest opt-in validated phase presentation and repeatable saved scene + editor/standalone demo. Constraints: never mutate authored components or shared registry material, no collision/flow/thickness claims from mass fraction, clearing Stop/invalid graphs must restore authored appearance, failed step may show visibly marked last accepted state, preserve original paths when no inputs. Propose API/layering/lifecycle and decisive pixel/sensitivity/negative tests. Favor small reusable transient renderer seam plus removable adapter over shader changes, and bounded memory/no stale entity retargeting. We own edits and verify independently."
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "reasoning_effort": "low",
+  "max_tokens": 8000
+}
