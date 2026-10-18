@@ -699,6 +699,7 @@ impl eframe::App for EditorApp {
             pick,
             camera,
             play_state,
+            thermal,
         ) = {
             let mut s = self.shared.lock().unwrap();
             let new_image = match &s.frame {
@@ -727,6 +728,7 @@ impl eframe::App for EditorApp {
                 pick,
                 s.camera, // Copy: the newest render lens (gizmo math reads it, never consumes)
                 s.play_state, // Copy: the newest play phase + tick count (m9.7), never consumed
+                s.thermal.clone(),
             )
         };
 
@@ -1200,6 +1202,7 @@ impl eframe::App for EditorApp {
             frame_tex: self.frame_tex.as_ref(),
             frame_dims,
             play_phase: play_state.phase,
+            thermal: thermal.as_ref(),
             entities: &entities,
             schema: &schema,
             addable: &addable,
@@ -1277,6 +1280,7 @@ struct EditorTabs<'a> {
     frame_dims: Option<(u32, u32)>,
     // The engine's play/edit phase (m9.7) — the viewport border's state colour.
     play_phase: PlayPhase,
+    thermal: Option<&'a rime_protocol::ThermalPreview>,
     entities: &'a [SnapshotEntity],
     schema: &'a Schema,
     addable: &'a [(u64, String)],
@@ -1351,16 +1355,19 @@ impl TabViewer for EditorTabs<'_> {
             Tab::Outliner => {
                 outliner_ui(ui, self.schema, self.entities, self.selected, self.actions)
             }
-            Tab::Inspector => inspector_ui(
-                ui,
-                self.entities,
-                self.schema,
-                self.addable,
-                *self.selected,
-                self.actions,
-                self.active_edit,
-                self.stack,
-            ),
+            Tab::Inspector => {
+                thermal_preview_ui(ui, self.thermal, *self.selected);
+                inspector_ui(
+                    ui,
+                    self.entities,
+                    self.schema,
+                    self.addable,
+                    *self.selected,
+                    self.actions,
+                    self.active_edit,
+                    self.stack,
+                );
+            }
             Tab::Assets => assets_ui(
                 ui,
                 self.assets,
@@ -2179,6 +2186,69 @@ pub mod protocol_input {
         PointerMove { x: i32, y: i32 },
         PointerDown { x: i32, y: i32, button: u32 },
         PointerUp { x: i32, y: i32, button: u32 },
+    }
+}
+
+/// Runtime-only information. Settings edits restart all cells from authored initial values;
+/// this panel never emits SetComponent or enters undo/save state.
+fn thermal_preview_ui(
+    ui: &mut egui::Ui,
+    preview: Option<&rime_protocol::ThermalPreview>,
+    selected: Option<EntityId>,
+) {
+    let Some(m) = preview else {
+        return;
+    };
+    egui::CollapsingHeader::new("Thermal preview")
+        .default_open(true)
+        .show(ui, |ui| {
+            let status = match m.status {
+                0 => "Stopped / no enabled thermal graph",
+                1 => "Ready",
+                2 => "Invalid thermal description",
+                3 => "Thermal preview capacity exceeded",
+                _ => "Step refused — showing last committed state",
+            };
+            ui.label(status);
+            ui.label(format!("Tick {} · revision {}", m.field_tick, m.revision));
+            if m.problem_editor_id != 0 {
+                ui.label(format!("Check entity {}", m.problem_editor_id));
+            }
+            if m.status == 4 {
+                ui.label(thermal_refusal_message(m));
+                ui.label(format!("Last accepted host tick {}", m.accepted_host_tick));
+            }
+            if let Some(c) = m.cells.iter().find(|c| Some(c.editor_id) == selected) {
+                ui.label(format!("Temperature: {:.3} K", c.temperature_kelvin));
+                ui.label(format!(
+                    "Liquid mass: {:.3}%",
+                    c.liquid_mass_fraction * 100.
+                ));
+                ui.label(format!("Energy: {:.3e} J", c.energy_joules));
+            }
+            ui.small(
+                "Changing thermal settings restarts the whole preview from its initial state.",
+            );
+        });
+    ui.separator();
+}
+
+fn thermal_refusal_message(m: &rime_protocol::ThermalPreview) -> &'static str {
+    match m.field_status {
+        1 => "Invalid thermal time step",
+        2 => "Unsupported arithmetic mode",
+        3 => "Time step exceeds the substep budget",
+        4 => "Thermal operation budget exceeded",
+        5 => "Thermal solve budget exceeded",
+        6 if m.heat_status == 2 => "Heat source exceeds the material temperature range",
+        6 if m.heat_status == 4 => "Unsupported arithmetic mode",
+        6 => "Source heat cannot be represented at this scale",
+        7 if m.contact_status == 3 => "Contact exceeds the material temperature range",
+        7 if m.contact_status == 5 => "Unsupported arithmetic mode",
+        7 if m.contact_status == 6 => "Contact could not meet the accuracy limit",
+        7 => "Contact heat cannot be represented at this scale",
+        8 => "Thermal tick limit reached",
+        _ => "Thermal step refused",
     }
 }
 

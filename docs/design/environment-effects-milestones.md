@@ -302,3 +302,25 @@ and links so editor behavior can be checked against this CPU oracle. Visible
 temperature/phase follows validated state; moving water, solid geometry and
 breakable ice retain their separate mass/transport/authority proofs. The existing
 cosmetic fire source must not acquire thermal authority by implication.
+
+## M-FL2 editor authoring progress, 2026-10-18
+
+The next consumer now exists: disabled-by-default reflected thermal cells,
+contacts and explicit signed-power sources, with existing scene/session entity
+remapping. `fluids_scene` reconstructs an entire bounded fixed graph on relevant
+edits and Play, freezes time on Pause and discards it on Stop. Invalid descriptions
+clear old rows; numerical refusal retains visibly marked last committed values.
+A separate optional diagnostic message drives a read-only selected-cell inspector
+for temperature, liquid mass percentage and energy. Runtime buffers are never
+saved as authored components. See [ADR-0094](../adr/0094-thermal-editor-preview.md)
+and the [module usage](../../engine/fluids_scene/README.md).
+
+Real-host smoke checks authoring/inverse/redo/save/reload, 12 latent melting and
+12 freezing steps, source-disabled sensitivity, Pause, refusal and Stop/new Play.
+GUI tests prove display/freshness; they do not claim clicked thermal graph creation.
+Next thermal brick: visible fixed-cell temperature/phase presentation driven by
+validated values, then clicked authoring/save/reopen proof. Moving-water ice still
+requires separate liquid/solid mass and energy transport, and geometry/thickness
+and collision need independent models. Water displacement/body feedback and smoke
+intersection/lighting fidelity remain separate next bricks; cosmetic fire has no
+automatic heating authority.

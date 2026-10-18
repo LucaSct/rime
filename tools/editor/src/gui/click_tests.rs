@@ -2788,3 +2788,55 @@ fn keys_are_never_forwarded_to_the_engine() {
     assert!(rig.host.inputs.is_empty());
     assert!(rig.host.commands().is_empty());
 }
+
+#[test]
+fn thermal_preview_is_selected_cell_readonly_state() {
+    let mut rig = Rig::new();
+    rig.harness.state_mut().selected = Some(CRATE);
+    {
+        let mut s = rig.app().shared.lock().unwrap();
+        s.play_state = rime_protocol::PlayState {
+            phase: rime_protocol::PlayPhase::Paused,
+            tick_count: 12,
+        };
+        s.thermal = Some(rime_protocol::ThermalPreview {
+            status: 1,
+            phase: 2,
+            session_id: 1,
+            revision: 2,
+            host_tick: 12,
+            accepted_host_tick: 12,
+            field_tick: 12,
+            cells: vec![rime_protocol::ThermalPreviewCell {
+                editor_id: CRATE,
+                temperature_kelvin: 273.15,
+                liquid_mass_fraction: 0.25,
+                energy_joules: 83375.,
+            }],
+            ..Default::default()
+        });
+    }
+    rig.settle();
+    assert!(rig.has_text("Temperature: 273.150 K"));
+    assert!(rig.has_text("Liquid mass: 25.000%"));
+    assert!(rig.has_text("Energy: 8.338e4 J"));
+    assert!(
+        rig.host.commands().is_empty(),
+        "Reading preview must not author components"
+    );
+    rig.harness.state_mut().selected = Some(LIGHT);
+    rig.settle();
+    assert!(!rig.has_text("Temperature: 273.150 K"));
+    assert!(rig.has_text("Ready"));
+    {
+        let mut s = rig.app().shared.lock().unwrap();
+        let m = s.thermal.as_mut().unwrap();
+        m.status = 4;
+        m.field_status = 6;
+        m.heat_status = 2;
+    }
+    rig.settle();
+    assert!(rig.has_text("Step refused — showing last committed state"));
+    assert!(rig.has_text("Heat source exceeds the material temperature range"));
+    assert!(rig.host.commands().is_empty());
+}

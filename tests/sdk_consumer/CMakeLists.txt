@@ -22,4 +22,4 @@ target_compile_features(sdk_consumer PRIVATE cxx_std_20)
 # Link the highest-level modules this app uses; their PUBLIC interfaces pull the rest transitively
 # (rime::app → render/rhi/ecs/platform/core; rime::assets → core). Naming only what we use is the
 # honest consumer shape — and the strongest test of the export set's transitive correctness.
-target_link_libraries(sdk_consumer PRIVATE rime::app rime::assets)
+target_link_libraries(sdk_consumer PRIVATE rime::app rime::assets rime::fluids_scene rime::editorhost)

@@ -383,6 +383,20 @@ mod imp {
             verify_effect_sources(&mut conn, &schema, &snapshot, true)?;
         }
 
+        if frames > 0
+            && args
+                .iter()
+                .any(|a| a == "--thermal-sources" || a == "--thermal-reload")
+        {
+            verify_thermal_sources(
+                &mut conn,
+                &schema,
+                &snapshot,
+                true,
+                args.iter().any(|a| a == "--thermal-reload"),
+            )?;
+        }
+
         let summary = if frames > 0 {
             // Streamed-viewport mode: receive + decode N frames — the render → capture → LZ4 → wire →
             // decode path end to end — then close.
@@ -564,6 +578,18 @@ mod imp {
             // messages, or a source proof would discard it and strand the browser check below.
             if args.iter().any(|a| a == "--effect-sources") {
                 verify_effect_sources(&mut conn, &schema, &snapshot, false)?;
+            }
+            if args
+                .iter()
+                .any(|a| a == "--thermal-sources" || a == "--thermal-reload")
+            {
+                verify_thermal_sources(
+                    &mut conn,
+                    &schema,
+                    &snapshot,
+                    false,
+                    args.iter().any(|a| a == "--thermal-reload"),
+                )?;
             }
             if let Some(p) = &manifest_path {
                 let _ = std::fs::remove_file(p);
@@ -759,6 +785,381 @@ mod imp {
     // Exercise the same schema/value codec and inverse SetComponent bytes as the inspector,
     // against the real engine's new components. A second snapshot after each command prevents
     // an optimistic local mirror from being mistaken for a successful engine edit.
+    fn thermal_set(value: &mut Value, name: &str, replacement: Value) -> Result<(), String> {
+        let Value::Struct(fields) = value else {
+            return Err("thermal component is not a struct".into());
+        };
+        fields
+            .iter_mut()
+            .find(|(n, _)| n == name)
+            .ok_or_else(|| format!("missing thermal field {name}"))?
+            .1 = replacement;
+        Ok(())
+    }
+    fn thermal_blob(snapshot: &Snapshot, id: u64, hash: u64) -> Result<Vec<u8>, String> {
+        snapshot
+            .entities
+            .iter()
+            .find(|e| e.editor_id == id)
+            .and_then(|e| e.components.iter().find(|c| c.type_hash == hash))
+            .map(|c| c.data.clone())
+            .ok_or_else(|| format!("thermal component {hash} missing from {id}"))
+    }
+    fn thermal_apply(
+        conn: &mut Connection<UnixStream>,
+        id: u64,
+        hash: u64,
+        blob: &[u8],
+    ) -> Result<(), String> {
+        conn.send_editor(
+            EditorMessage::SetComponent,
+            &SetComponent {
+                editor_id: id,
+                type_hash: hash,
+                blob: blob.to_vec(),
+            }
+            .encode(),
+        )
+        .map_err(|e| format!("thermal edit: {e}"))?;
+        conn.send_editor(EditorMessage::RequestSnapshot, &[])
+            .map_err(|e| format!("thermal snapshot: {e}"))?;
+        if thermal_blob(&recv_snapshot(conn)?, id, hash)? != blob {
+            return Err("thermal authoritative edit/inverse bytes disagree".into());
+        }
+        Ok(())
+    }
+    fn thermal_message(
+        conn: &mut Connection<UnixStream>,
+        tick: u64,
+        minimum_revision: u64,
+    ) -> Result<rime_protocol::ThermalPreview, String> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < deadline {
+            let (ty, payload) = conn.recv().map_err(|e| format!("thermal recv: {e}"))?;
+            if ty == MessageType::Other(EditorMessage::ThermalPreview.to_code()) {
+                let m = rime_protocol::ThermalPreview::decode(&payload)
+                    .map_err(|e| format!("thermal diagnostic: {e}"))?;
+                if m.host_tick == tick && m.revision >= minimum_revision {
+                    return Ok(m);
+                }
+            }
+        }
+        Err("no frame-correlated thermal diagnostic".into())
+    }
+    fn verify_thermal_sources(
+        conn: &mut Connection<UnixStream>,
+        schema: &Schema,
+        _snapshot: &Snapshot,
+        viewport: bool,
+        reload: bool,
+    ) -> Result<(), String> {
+        conn.send_editor(EditorMessage::RequestSnapshot, &[])
+            .map_err(|e| e.to_string())?;
+        let fresh = recv_snapshot(conn)?;
+        let snapshot = &fresh;
+        let hashes: [u64; 3] = ["ThermalCell", "ThermalContact", "ThermalSource"].map(|name| {
+            schema
+                .types
+                .iter()
+                .find(|t| t.name == format!("rime::fluids_scene::{name}") && t.is_component)
+                .map(|t| t.type_hash)
+                .unwrap_or(0)
+        });
+        if hashes.contains(&0) {
+            return Err("engine lacks thermal authoring schema".into());
+        }
+        let entity_ref = |id| Value::Struct(vec![("editor_id".to_string(), Value::U64(id))]);
+        let (cold, source, source_blob, cold_blob) = if reload {
+            let e = snapshot
+                .entities
+                .iter()
+                .find(|e| e.components.iter().any(|c| c.type_hash == hashes[2]))
+                .ok_or("saved thermal source missing")?;
+            let blob = thermal_blob(snapshot, e.editor_id, hashes[2])?;
+            let decoded = decode_value(schema, hashes[2], &blob)
+                .map_err(|e| format!("decode saved source: {e}"))?;
+            let Value::Struct(fields) = decoded else {
+                return Err("saved thermal source is not a struct".into());
+            };
+            let target = fields
+                .iter()
+                .find(|(n, _)| n == "cell")
+                .ok_or("saved thermal source lacks cell")?;
+            let id = rime_protocol::decode_entity_ref(&encode_value(&target.1))
+                .map_err(|e| format!("saved thermal reference: {e}"))?;
+            (
+                id,
+                e.editor_id,
+                blob,
+                thermal_blob(snapshot, id, hashes[0])?,
+            )
+        } else {
+            let mut current = snapshot.clone();
+            let mut ids = Vec::new();
+            let mut blobs = Vec::new();
+            for (i, hash) in [hashes[0], hashes[0], hashes[1], hashes[2]]
+                .into_iter()
+                .enumerate()
+            {
+                conn.send_editor(
+                    EditorMessage::SpawnEntity,
+                    &SpawnEntity {
+                        editor_id: 0,
+                        exact: false,
+                        components: vec![],
+                    }
+                    .encode(),
+                )
+                .map_err(|e| format!("spawn thermal: {e}"))?;
+                conn.send_editor(EditorMessage::RequestSnapshot, &[])
+                    .map_err(|e| e.to_string())?;
+                let spawned = recv_snapshot(conn)?;
+                let id = spawned
+                    .entities
+                    .iter()
+                    .find(|e| {
+                        !current
+                            .entities
+                            .iter()
+                            .any(|old| old.editor_id == e.editor_id)
+                    })
+                    .ok_or("new thermal entity missing")?
+                    .editor_id;
+                conn.send_editor(
+                    EditorMessage::AddComponent,
+                    &ComponentRef {
+                        editor_id: id,
+                        type_hash: hash,
+                    }
+                    .encode(),
+                )
+                .map_err(|e| e.to_string())?;
+                conn.send_editor(EditorMessage::RequestSnapshot, &[])
+                    .map_err(|e| e.to_string())?;
+                current = recv_snapshot(conn)?;
+                let original = thermal_blob(&current, id, hash)?;
+                let mut value = decode_value(schema, hash, &original).map_err(|e| e.to_string())?;
+                let Value::Struct(fields) = &value else {
+                    return Err("thermal default is not a struct".into());
+                };
+                if fields.iter().find(|(n, _)| n == "enabled").map(|(_, v)| v)
+                    != Some(&Value::Bool(false))
+                {
+                    return Err("thermal defaults must be disabled".into());
+                }
+                thermal_set(&mut value, "enabled", Value::Bool(true))?;
+                match i {
+                    0 | 1 => {
+                        thermal_set(
+                            &mut value,
+                            "temperature_kelvin",
+                            Value::F64(if i == 0 { 283.15 } else { 273.15 }),
+                        )?;
+                        thermal_set(
+                            &mut value,
+                            "liquid_mass_fraction",
+                            Value::F64(if i == 0 { 1.0 } else { 0.0 }),
+                        )?;
+                    }
+                    2 => {
+                        thermal_set(&mut value, "first", entity_ref(ids[0]))?;
+                        thermal_set(&mut value, "second", entity_ref(ids[1]))?;
+                        thermal_set(&mut value, "conductance_w_k", Value::F64(100.0))?;
+                    }
+                    _ => {
+                        thermal_set(&mut value, "cell", entity_ref(ids[1]))?;
+                        thermal_set(&mut value, "power_watts", Value::F64(500000.0))?;
+                    }
+                }
+                let changed = encode_value(&value);
+                for blob in [&changed, &original, &changed] {
+                    thermal_apply(conn, id, hash, blob)?;
+                }
+                ids.push(id);
+                blobs.push(changed);
+                conn.send_editor(EditorMessage::RequestSnapshot, &[])
+                    .map_err(|e| e.to_string())?;
+                current = recv_snapshot(conn)?;
+            }
+            (ids[1], ids[3], blobs[3].clone(), blobs[1].clone())
+        };
+        if viewport {
+            let mut enabled_fraction = 0.0;
+            let mut first_energy = 0.0;
+            let mut session_id = 0;
+            for tick in 1..=12 {
+                conn.send_editor(EditorMessage::Step, &[])
+                    .map_err(|e| e.to_string())?;
+                wait_play_state(conn, PlayPhase::Paused, tick)?;
+                let m = thermal_message(conn, tick, 0)?;
+                if m.status != 1
+                    || m.field_tick != tick
+                    || m.accepted_host_tick != tick
+                    || m.cells.len() != 2
+                {
+                    return Err(format!("thermal step refused or stale: {m:?}"));
+                }
+                let c = m
+                    .cells
+                    .iter()
+                    .find(|c| c.editor_id == cold)
+                    .ok_or("thermal cell diagnostic missing")?;
+                if c.temperature_kelvin != 273.15 || c.liquid_mass_fraction <= enabled_fraction {
+                    return Err("thermal melting did not advance on latent plateau".into());
+                }
+                if tick == 1 {
+                    first_energy = c.energy_joules;
+                    session_id = m.session_id;
+                }
+                if m.session_id != session_id {
+                    return Err("thermal session changed while stepping".into());
+                }
+                enabled_fraction = c.liquid_mass_fraction;
+            }
+            conn.send_editor(EditorMessage::Pause, &[])
+                .map_err(|e| e.to_string())?;
+            wait_play_state(conn, PlayPhase::Paused, 12)?;
+            let paused = thermal_message(conn, 12, 0)?;
+            if paused
+                .cells
+                .iter()
+                .find(|c| c.editor_id == cold)
+                .ok_or("paused cell missing")?
+                .liquid_mass_fraction
+                != enabled_fraction
+            {
+                return Err("Pause advanced thermal state".into());
+            }
+            thermal_apply(conn, cold, hashes[0], &cold_blob)?; // Snapshot remains AUTHORED, not melted state.
+            let mut disabled =
+                decode_value(schema, hashes[2], &source_blob).map_err(|e| e.to_string())?;
+            thermal_set(&mut disabled, "enabled", Value::Bool(false))?;
+            thermal_apply(conn, source, hashes[2], &encode_value(&disabled))?;
+            let mut control = paused.clone();
+            for tick in 13..=24 {
+                conn.send_editor(EditorMessage::Step, &[])
+                    .map_err(|e| e.to_string())?;
+                wait_play_state(conn, PlayPhase::Paused, tick)?;
+                control = thermal_message(conn, tick, paused.revision + 1)?;
+                if control.status != 1 || control.field_tick != tick - 12 {
+                    return Err("disabled-source control refused or stale".into());
+                }
+            }
+            let fraction = control
+                .cells
+                .iter()
+                .find(|c| c.editor_id == cold)
+                .ok_or("control cell missing")?
+                .liquid_mass_fraction;
+            if control.status != 1
+                || control.field_tick != 12
+                || enabled_fraction <= fraction * 100.0
+            {
+                return Err("disabled-source control failed sensitivity".into());
+            }
+            let mut freezing_cell =
+                decode_value(schema, hashes[0], &cold_blob).map_err(|e| e.to_string())?;
+            thermal_set(&mut freezing_cell, "liquid_mass_fraction", Value::F64(1.0))?;
+            thermal_apply(conn, cold, hashes[0], &encode_value(&freezing_cell))?;
+            let mut cooling =
+                decode_value(schema, hashes[2], &source_blob).map_err(|e| e.to_string())?;
+            thermal_set(&mut cooling, "power_watts", Value::F64(-500000.0))?;
+            thermal_apply(conn, source, hashes[2], &encode_value(&cooling))?;
+            let mut freezing_fraction = 1.0;
+            for tick in 25..=36 {
+                conn.send_editor(EditorMessage::Step, &[])
+                    .map_err(|e| e.to_string())?;
+                wait_play_state(conn, PlayPhase::Paused, tick)?;
+                let m = thermal_message(conn, tick, control.revision + 1)?;
+                let c = m
+                    .cells
+                    .iter()
+                    .find(|c| c.editor_id == cold)
+                    .ok_or("freezing cell missing")?;
+                if m.status != 1
+                    || m.field_tick != tick - 24
+                    || c.temperature_kelvin != 273.15
+                    || c.liquid_mass_fraction >= freezing_fraction
+                {
+                    return Err("thermal cooling did not freeze on latent plateau".into());
+                }
+                freezing_fraction = c.liquid_mass_fraction;
+            }
+            // A representable power outside the admitted temperature domain must refuse the
+            // whole numerical tick and publish initial values, not a clipped/partially heated cell.
+            thermal_set(&mut cooling, "power_watts", Value::F64(1e15))?;
+            thermal_apply(conn, source, hashes[2], &encode_value(&cooling))?;
+            conn.send_editor(EditorMessage::Step, &[])
+                .map_err(|e| e.to_string())?;
+            wait_play_state(conn, PlayPhase::Paused, 37)?;
+            let refused = thermal_message(conn, 37, control.revision + 2)?;
+            if refused.status != 4
+                || refused.field_status != 6
+                || refused.heat_status != 2
+                || refused.field_tick != 0
+                || refused.accepted_host_tick != 0
+                || refused
+                    .cells
+                    .iter()
+                    .find(|c| c.editor_id == cold)
+                    .ok_or("refused cell missing")?
+                    .energy_joules
+                    != 333500.0
+            {
+                return Err(format!(
+                    "thermal numerical refusal lost last committed state: {refused:?}"
+                ));
+            }
+            let mut invalid =
+                decode_value(schema, hashes[0], &cold_blob).map_err(|e| e.to_string())?;
+            thermal_set(&mut invalid, "temperature_kelvin", Value::F64(10.0))?;
+            thermal_apply(conn, cold, hashes[0], &encode_value(&invalid))?;
+            let bad = thermal_message(conn, 37, refused.revision + 1)?;
+            if bad.status != 2 || !bad.cells.is_empty() {
+                return Err("invalid thermal edit exposed stale samples".into());
+            }
+            conn.send_editor(EditorMessage::Stop, &[])
+                .map_err(|e| e.to_string())?;
+            wait_play_state(conn, PlayPhase::Edit, 0)?;
+            let stopped = thermal_message(conn, 0, 0)?;
+            if stopped.status != 0 || !stopped.cells.is_empty() || stopped.session_id != session_id
+            {
+                return Err("Stop retained thermal samples or changed session".into());
+            }
+            conn.send_editor(EditorMessage::Step, &[])
+                .map_err(|e| e.to_string())?;
+            wait_play_state(conn, PlayPhase::Paused, 1)?;
+            let again = thermal_message(conn, 1, 0)?;
+            if again.status != 1
+                || again.session_id <= session_id
+                || again.field_tick != 1
+                || again.accepted_host_tick != 1
+                || again
+                    .cells
+                    .iter()
+                    .find(|c| c.editor_id == cold)
+                    .ok_or("new Play cell missing")?
+                    .energy_joules
+                    != first_energy
+            {
+                return Err("new Play did not reconstruct thermal initial conditions".into());
+            }
+            conn.send_editor(EditorMessage::Stop, &[])
+                .map_err(|e| e.to_string())?;
+            wait_play_state(conn, PlayPhase::Edit, 0)?;
+            let stopped = thermal_message(conn, 0, 0)?;
+            if stopped.status != 0
+                || !stopped.cells.is_empty()
+                || stopped.session_id != again.session_id
+            {
+                return Err("second Stop retained thermal samples or changed session".into());
+            }
+            println!("editor: thermal preview verified 12 melting + 12 freezing latent steps, Pause, disabled-source control, numerical refusal, invalid edit, Stop and fresh Play; melt fraction={enabled_fraction:.6}, control={fraction:.6}, freeze fraction={freezing_fraction:.6}");
+        }
+        println!("editor: thermal defaults, typed edit/inverse/redo and remapped references verified (reload={reload})");
+        Ok(())
+    }
+
     fn verify_effect_sources(
         conn: &mut Connection<UnixStream>,
         schema: &Schema,

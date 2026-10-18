@@ -61,6 +61,8 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/editorhost/editor_host.hpp"
+#include "rime/editorhost/thermal_preview.hpp"
+#include "rime/fluids_scene/preview.hpp"
 #include "rime/ground/bind.hpp"
 #include "rime/physics/physics.hpp" // umbrella: body/shape/world/components/sync (m9.7 Play)
 #include "rime/platform/event.hpp"
@@ -558,6 +560,9 @@ int serve_viewport(std::string_view socket_path,
     std::unique_ptr<physics::PhysicsWorld> physics_world;
     physics::PhysicsSync physics_sync;
     vfx_scene::Effects effects;
+    fluids_scene::ThermalPreview thermal;
+    std::uint64_t thermal_session = 0;
+    bool thermal_sent_active = false;
     std::uint64_t effects_tick = 0;
     std::vector<render::GpuParticle> effect_particles;
     effect_particles.reserve(vfx_scene::Effects::max_particles);
@@ -599,6 +604,7 @@ int serve_viewport(std::string_view socket_path,
             play_tick(w, app.frame_input(), dt);
         }
         (void)effects.tick(w, ++effects_tick, static_cast<float>(dt));
+        (void)thermal.tick(w, play_session.tick_count(), dt);
     });
 
     render::RGTexture last_ldr{};
@@ -622,6 +628,8 @@ int serve_viewport(std::string_view socket_path,
         // into the level and resurrect them after extinguish. Paused removals reconcile too.
         if (play_session.phase() != editorhost::PlayPhase::Edit)
             effects.reconcile(ctx.world);
+        if (play_session.phase() != editorhost::PlayPhase::Edit)
+            thermal.reconcile(ctx.world);
         effect_particles.clear();
         for (const auto& p : effects.field().particles()) {
             const float opacity = 0.3f * std::max(0.0f, 1.0f - p.age / p.lifetime);
@@ -926,6 +934,8 @@ int serve_viewport(std::string_view socket_path,
                     play_session.play(app.world());
                     if (was_edit) {
                         effects.reset();
+                        thermal.reset();
+                        ++thermal_session;
                         effects_tick = 0;
                         physics_world = std::make_unique<physics::PhysicsWorld>();
                         physics_sync = physics::PhysicsSync{};
@@ -939,6 +949,8 @@ int serve_viewport(std::string_view socket_path,
                     play_session.pause(app.world()); // ensure a snapshot + a Paused steady state
                     if (was_edit) {
                         effects.reset();
+                        thermal.reset();
+                        ++thermal_session;
                         effects_tick = 0;
                         physics_world = std::make_unique<physics::PhysicsWorld>();
                         physics_sync = physics::PhysicsSync{};
@@ -958,6 +970,7 @@ int serve_viewport(std::string_view socket_path,
                         physics_world.reset();
                         physics_sync = physics::PhysicsSync{};
                         effects.reset();
+                        thermal.reset();
                         effects_tick = 0;
                     }
                     app.timestep().reset();
@@ -1054,6 +1067,49 @@ int serve_viewport(std::string_view socket_path,
                         editorhost::serialize_play_state(pstate))) {
                     break; // client disconnected
                 }
+            }
+
+            // Optional readonly diagnostics follow the same frame's PlayState. Simulation
+            // samples never become ECS components, so Save during Play cannot bake them in.
+            if (thermal.active() || thermal_sent_active) {
+                (void)editor_ids.assign_missing(app.world());
+                editorhost::ThermalPreviewMsg diagnostic;
+                diagnostic.status = static_cast<std::uint8_t>(thermal.status());
+                diagnostic.phase = static_cast<std::uint8_t>(play_session.phase());
+                diagnostic.session_id = thermal_session;
+                diagnostic.revision = thermal.revision();
+                diagnostic.host_tick = play_session.tick_count();
+                diagnostic.accepted_host_tick = thermal.accepted_host_tick();
+                const auto& result = thermal.last_result();
+                diagnostic.field_status = static_cast<std::uint8_t>(result.status);
+                diagnostic.heat_status = static_cast<std::uint8_t>(result.heat_status);
+                diagnostic.contact_status = static_cast<std::uint8_t>(result.contact_status);
+                diagnostic.failed_substep = static_cast<std::uint32_t>(result.failed_substep);
+                diagnostic.failed_descriptor = static_cast<std::uint32_t>(result.failed_descriptor);
+                if (const auto* id =
+                        app.world().get<editorhost::EditorId>(thermal.problem_entity()))
+                    diagnostic.problem_editor_id = id->value;
+                if (const auto* field = thermal.field()) {
+                    diagnostic.field_tick = field->tick();
+                    const auto entities = thermal.entities();
+                    for (std::size_t i = 0; i < entities.size(); ++i) {
+                        const auto* id = app.world().get<editorhost::EditorId>(entities[i]);
+                        if (!id)
+                            continue;
+                        const auto& cell = field->cells()[i];
+                        diagnostic.cells.push_back({id->value,
+                                                    cell.state().temperature_kelvin,
+                                                    cell.state().liquid_mass_fraction,
+                                                    cell.energy_joules()});
+                    }
+                }
+                const auto bytes = editorhost::serialize_thermal_preview(diagnostic);
+                if (bytes.empty() ||
+                    !conn.send_message(
+                        static_cast<stream::MessageType>(editorhost::EditorMessage::ThermalPreview),
+                        bytes))
+                    break;
+                thermal_sent_active = thermal.active();
             }
 
             // Ship the frame's exact lens (m9.6b): the editor's gizmo hover/drag math unprojects
@@ -1217,6 +1273,14 @@ int serve_viewport(std::string_view socket_path,
               effects.stats().invalid_sources,
               effects.stats().emission_budget_dropped_particles,
               effects.field().stats().dropped_capacity);
+
+    RIME_INFO("editor-host: thermal closed — {} accepted ticks, {} refused ticks, {} invalid "
+              "builds, {} capacity refusals, revision {}",
+              thermal.stats().accepted_ticks,
+              thermal.stats().refused_ticks,
+              thermal.stats().invalid_builds,
+              thermal.stats().capacity_refusals,
+              thermal.revision());
 
     stop.store(true, std::memory_order_relaxed);
     receiver.join();

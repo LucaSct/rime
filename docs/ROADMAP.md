@@ -97,6 +97,15 @@ reference, not global implicit diffusion, rendered ice or moving-water freezing.
 Next: reflected thermal descriptions and editor Play/Stop reconstruction, then
 validated visible phase. [ADR-0093](adr/0093-bounded-journaled-thermal-field.md).
 
+**Thermal editor preview (2026-10-18):** reflected fixed cells, contacts and signed
+power sources now feed a bounded disposable Play/Step preview. The read-only
+inspector shows validated temperature, liquid mass fraction and energy; Pause,
+relevant edits, invalid settings, numerical refusal, Stop and save/reload have
+explicit semantics and real-host checks. Defaults stay disabled. Next: visible
+fixed-cell phase presentation and clicked thermal authoring proof, with water
+mass/energy transport, ice geometry/collision and combustion authority separate.
+See [ADR-0094](adr/0094-thermal-editor-preview.md). No M18 or shipment gate closes.
+
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
 > been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the

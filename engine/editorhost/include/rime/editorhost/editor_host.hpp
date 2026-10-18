@@ -50,6 +50,7 @@ enum class EditorMessage : std::uint16_t {
     EditResult = 0x0208,     // engine -> editor: ok + EditorId, per structural edit (ADR-0075)
     SceneLoadReport =
         0x0209, // engine -> editor: the --scene load's outcome, once after the schema (E3)
+    ThermalPreview = 0x020A,  // engine -> editor: optional bounded readonly thermal diagnostics
     SetComponent = 0x0210,    // editor -> engine: set a component's bytes on an entity
     Spawn = 0x0211,           // editor -> engine: spawn an empty entity
     Despawn = 0x0212,         // editor -> engine: despawn an entity

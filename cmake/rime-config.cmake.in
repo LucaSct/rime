@@ -24,6 +24,8 @@ find_dependency(Threads)
 # Streaming codecs — PRIVATE usage requirements of rime::stream; static, so they reach the link.
 find_dependency(libjpeg-turbo)
 find_dependency(lz4)
+find_dependency(libsvtav1)
+find_dependency(dav1d)
 
 # Vulkan RHI backend deps — only when Rime was built with the backend (the token below is
 # substituted with ON/OFF at install-config time). volk is the loader, VMA the allocator.
