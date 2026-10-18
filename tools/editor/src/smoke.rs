@@ -454,7 +454,15 @@ mod imp {
                     hit.index, hit.generation
                 ));
             }
-            let miss_at = background_pixel(&pixels, w);
+            // The courtyard has an opaque backdrop: black shadowed geometry is not empty
+            // background. Use an authoritative out-of-viewport negative control there instead
+            // of guessing absence from RGB. Keep the existing empty-background fixture elsewhere.
+            let courtyard = args.iter().any(|a| a == "--courtyard-preview");
+            let miss_at = if courtyard {
+                Some((-1, -1))
+            } else {
+                background_pixel(&pixels, w)
+            };
             if let Some((mx, my)) = miss_at {
                 conn.send_editor(
                     EditorMessage::PickRequest,
@@ -557,6 +565,9 @@ mod imp {
             }
 
             let miss_note = match miss_at {
+                Some((mx, my)) if mx < 0 || my < 0 => {
+                    "out-of-viewport negative pick missed".to_string()
+                }
                 Some((mx, my)) => format!("background ({mx},{my}) missed"),
                 // Said out loud rather than silently skipped: a frame with no background left is a
                 // scene that covers every pixel, and then this run simply has no negative case.

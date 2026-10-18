@@ -24,7 +24,12 @@ checkpoint; no merge/performance/shipment qualification. See
   held-right-drag movement, wheel routing, filters and accessible icon selection
   across List/Tiles. Default + GUI Clippy with warnings denied, format/license pass.
 - Real saved courtyard host: 155 entities/317 components/0 skipped, Step/Pause/
-  Stop/new Play smoke passes with live phase detail; standalone endpoint and real
+  Stop/new Play thermal checks pass with live phase detail. Initial whole smoke
+  failed on both software/native paths: RGB-black shadow geometry was mistaken for
+  absent background by the generic picker heuristic. The fully backed courtyard
+  now uses an explicit out-of-viewport negative pick instead; final whole smoke
+  passes, including a real positive mesh pick and gizmo edit. Both initial logs
+  are retained; no unchanged generic fixture was weakened. The standalone endpoint and real
   Application Pause/Resume/Restart checks pass. Native RTX 3060 functional capture
   has 2160 ticks/zero refusal. It is not a hardware performance benchmark.
 - Actual GUI was launched with the script's host/scene arguments. A separate

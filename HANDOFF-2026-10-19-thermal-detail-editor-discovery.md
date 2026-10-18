@@ -21,7 +21,10 @@ actual hello-game player/trigger/export foundations and missing authoring links.
 Verification: full build pass; CTest92/93 only same inherited block collapse/locality
 claims; adapter5/7142; ASan/UBSan samepass (GPU LSan off per CI), CPU LSan3/631pass;
 Clang seven TUs; GUI128pass; Rust workspace/default+GUI Clippy/format/license pass.
-Real editor lifecycle + native endpoint/controls pass. Actual GUI source/icon view
+Real editor lifecycle + native endpoint/controls pass. Final whole smoke passes
+with an explicit out-of-viewport negative pick for the fully backed courtyard.
+Initial native/software whole smokes failed because black shadow geometry was
+mistaken for empty background; both failures retained, not claimed green. Actual GUI source/icon view
 captured on OWN Xvfb; those own processes stopped. No performance run on this
 shared build/CI host; gates remain open and nothing merged. Evidence:
 docs/verification/thermal-ripples-2026-10-19/; scratch matching /home/next/reports/.

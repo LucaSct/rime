@@ -11,12 +11,13 @@
     "tests/fluids_render/phase_surface_test.cpp": "4b5ddf728d13825bce1904a33287934a7be4461cec96300bdf06577377981e12",
     "tools/editor/src/gui.rs": "843b67a92b881342c43bd3ca85144d2e14c7d9ada6ebc847d57a771ae7a8aacb",
     "tools/editor/src/gui/outliner.rs": "d8c8bc0497285beadc376965551f909bf917ed3efd69e82b9601ecaea542ab2c",
-    "tools/editor/src/gui/click_tests.rs": "2a92a91718cc1b226353caecb7debe1c9bd2c1d4a3042d942ad7b26dc2b9c47c"
+    "tools/editor/src/gui/click_tests.rs": "2a92a91718cc1b226353caecb7debe1c9bd2c1d4a3042d942ad7b26dc2b9c47c",
+    "tools/editor/src/smoke.rs": "6f5db4075e90688fd52d33190d50cec0d6f6293b464f5229f15e7c7e18171024"
   },
   "binaries": {
     "build/release/bin/thermal-courtyard": "026a4c93ba0247b38269bef5547acbdeeaa114a484f9f52b07715ca960dd429b",
     "build/release/bin/rime_fluids_render_tests": "c825473a258687300be1e786500e9a7cde6f12f77c6d23678b39e8a74423106c",
-    "tools/target/debug/editor": "35fb055fbc07342544adada640b5ce363e99a7384838a0e116fc24cbc0bf162d"
+    "tools/target/debug/editor": "963544cd477b96e4b9e2765f2fe385a8a2803e2b72d69fe3bdcfa06c4018889b"
   },
   "captures": {
     "final-native.png": "6083ff34ce38b14cd817b589fd258a463d3bce00eaaa50e2b3ab1a785680be43",
