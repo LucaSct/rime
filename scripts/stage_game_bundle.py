@@ -110,13 +110,13 @@ def requirements(binary: Path, architecture: str) -> dict[str, str]:
     return result
 
 
-def notices(meta: dict[str, str], destination: Path) -> list[str]:
-    if meta["profile"] != "hello-game-linux-vulkan-v1":
+def notices(meta: dict[str, str], destination: Path, *, profile: str = "hello-game-linux-vulkan-v1", title: str = "hello-game") -> list[str]:
+    if meta["profile"] != profile:
         raise ValueError("no reviewed redistribution profile for this game")
     required = ["LICENSE", "NOTICE", "LICENSES/CONTENTS.txt"]
     destination.joinpath("LICENSES").mkdir()
     inventory = [
-        "hello-game Linux/Vulkan redistribution inventory, profile v1.",
+        f"{title} Linux/Vulkan redistribution inventory, profile {profile}.",
         "The root NOTICE is Rime's broader attribution document; this inventory names this artifact.",
         "System shared libraries and Vulkan drivers are host prerequisites, not copied payloads.",
         "Tool-only dependencies and streaming codecs are not incorporated in this target.", "",

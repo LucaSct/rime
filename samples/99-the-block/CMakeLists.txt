@@ -20,7 +20,7 @@ add_executable(the_block
     play_world.cpp)
 
 target_link_libraries(the_block
-    PRIVATE rime::app
+    PRIVATE rime::app rime::app_game
             rime::worldkit
             rime::blockkit rime::ground
             rime::scene
@@ -42,20 +42,24 @@ target_link_libraries(the_block
 target_link_libraries(the_block PRIVATE rime::vfx)
 
 rime_apply_common_target_options(the_block)
+# Same binary/content/provenance seam as hello-game, with a distinct development profile.
+include(${CMAKE_CURRENT_SOURCE_DIR}/bundle-metadata.cmake)
+rime_game_content(the_block ${CMAKE_CURRENT_BINARY_DIR}/city-content
+    BUNDLE_METADATA "${CITY_BUNDLE_METADATA}")
 
 # ── The demo's own editor host (m15.2) ──────────────────────────────────────────────────────────
 # The whole point of ADR-0038's §2: a game that wants its components in the editor's inspector
 # builds its own host from the engine's library and adds its module on top. Nine lines of C++, one
 # CMake target, and nothing in engine/ knows this game exists. Point the editor at it with
 # `editor --engine build/dev/bin/the-block-host`.
-add_executable(the_block_host block_host_main.cpp)
+add_executable(the_block_host block_host_main.cpp play_city.cpp)
 set_target_properties(the_block_host PROPERTIES OUTPUT_NAME the-block-host)
 # rime::gameplay + rime::platform arrive with m18 Track H: the host's play-mode `PlayTick` hook
 # flies a `gameplay::FlyCamera` from the browser's input, which is this game deciding what a key
 # MEANS — the third thing ADR-0038 says a game's own host binary is for.
 target_link_libraries(the_block_host
     PRIVATE rime::editorhost_app rime::worldkit rime::blockkit rime::ecs rime::render
-            rime::destruction rime::gameplay rime::platform rime::core)
+            rime::destruction rime::destruction_render rime::gameplay rime::platform rime::core)
 rime_apply_common_target_options(the_block_host)
 
 # ── The cooked block ────────────────────────────────────────────────────────────────────────────
@@ -228,4 +232,13 @@ if(BLOCK_HAVE_VIEWMODEL_ART)
     add_test(NAME block_demo_cook_viewmodel
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --target the_block_viewmodel_cook)
     set_tests_properties(block_demo_cook_viewmodel PROPERTIES FIXTURES_SETUP viewmodel_cook)
+endif()
+
+# Authoring -> strict runtime parity, independent of the chaotic collapse/performance sample gates.
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME the_block_city_scene
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/test_city_scene.py
+                $<TARGET_FILE:the_block>)
+    set_tests_properties(the_block_city_scene PROPERTIES FIXTURES_REQUIRED block_demo_cook)
 endif()

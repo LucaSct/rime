@@ -6,6 +6,26 @@ The vision demo. Every piece of that sentence had been built and proved on its o
 first process that runs them together — a cooked destructible city block, the M10 lighting stack, a
 replicated server, a predicted client, a first-person camera, a window and a mixer, in one frame.
 
+Open the editable expanded city and launch the full weapon game from its toolbar:
+
+```sh
+./scripts/city-editor.sh
+# In the editor: Run game (save succeeds first, then a separate player window opens).
+./scripts/export-city.sh "$HOME/rime-exports/my-city"
+"$HOME/rime-exports/my-city/the_block"
+```
+
+The default saved map is `build/release/city-editor.rscene`; relaunching preserves
+it. Supply `--scene /absolute/path/map.rscene` to either script for another saved
+map. The generator `the_block --write-city NEWFILE` refuses overwrites. Saved
+maps own their sun/sky lighting; the generated no-scene Play path retains sunset.
+The editor previews intact slabs plus the same procedural lamp/barrier volumes;
+the full runtime owns player input, weapons and fracture parts. Runtime draw IDs
+are excluded from editor saves. See the [creator workflow](../../docs/creator-workflow.md)
+for navigation, effects, maps/events/animation, Unity/Frostbite comparisons and
+current limitations. The city export is a Linux development folder with prepared
+weapons/arms and attribution, not a production installer or closed performance gate.
+
 ```bash
 build/dev/bin/the_block --headless          # the CI-gated proof
 build/dev/bin/the_block --play              # walk around it and shoot

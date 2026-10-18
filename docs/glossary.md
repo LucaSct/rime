@@ -1029,3 +1029,11 @@ See also **Determinism / replication** under *Physics & destruction*.
   it. It is not a heat/energy receipt.
 - **Prefab.** A reusable authored object or object hierarchy with configured
   components. An engine module is code, not automatically a prefab/library item.
+
+### Run game (city editor)
+
+The native editor action that saves the current document, confirms success, then
+launches the configured full game executable with that scene. It opens a separate
+window and does not replace the editor's scene-system Preview. See
+[creator workflow](creator-workflow.md#open-the-city-with-weapons-and-run-the-game)
+and [ADR-0097](adr/0097-city-editor-run-and-development-bundle.md).

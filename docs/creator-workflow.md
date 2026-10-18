@@ -18,6 +18,44 @@ If the window shows the courtyard and Play/Pause work, the launcher succeeded.
 An existing window keeps its old binary: close it and rerun after an update.
 For a simple standalone demonstration, omit `--editor`.
 
+## Open the city with weapons and run the game
+
+```sh
+./scripts/city-editor.sh
+```
+
+This opens the expanded city in the native editor. Its persistent map is
+`build/release/city-editor.rscene`; subsequent launches preserve your edits.
+Use `./scripts/city-editor.sh --scene /absolute/path/map.rscene` to open an
+existing map. The launcher supplies the game's component/preview host and cooks.
+
+Press **Run game** in the top toolbar. The editor saves the current document,
+waits for success, then opens the full city game in a separate window. A save
+refusal never launches an older copy. Stop editor Preview first if Run is disabled.
+The bottom status shows launch/exit information; hover for the game's output log.
+Closing the editor leaves the launched game running; Escape closes that game.
+
+In the game: **WASD** moves, mouse looks, **left mouse** shoots, **Q/right mouse**
+aims, **R** reloads, **1/2/3** selects SCAR-H/M4A1/MSR, and **F** detonates the
+sample charge. The game's player spawn/camera policy is sample-owned. The editor
+camera position is not a player spawn authoring tool. Preview's triangle runs
+scene systems in the editor; it does not possess the complete weapon player.
+
+Export the saved city to a new folder outside the checkout:
+
+```sh
+./scripts/export-city.sh "$HOME/rime-exports/my-city"
+"$HOME/rime-exports/my-city/the_block"
+```
+
+Add `--scene /absolute/path/map.rscene` to export another saved map. Save your
+editor document before exporting: the exporter reads the file on disk. Keep the
+binary beside its `content/` directory, notices and manifest. The copied binary
+starts Play with no arguments. This Linux x86_64 development profile includes the
+cooked city and prepared weapons/arms, verifies payload hashes and records host
+requirements. Production installation, clean second-machine compatibility and
+performance qualification remain open. There is no GUI Export button yet.
+
 ## Move the editor camera
 
 Point into the viewport. **Keep the right mouse button held** while pressing
@@ -175,19 +213,19 @@ build/release/bin/hello_game play
 For the currently supported Linux development export, follow
 [getting started: verified export](getting-started.md#4-export-a-verified-linux-development-build).
 It packages the audited hello_game profile, verifies notices/content/provenance and
-runs a proof with the repository and Vulkan hidden. That is not yet a reviewed city
-bundle or a GUI Export button; clean-machine release compatibility remains open.
+runs a proof with the repository and Vulkan hidden. The city development folder is described above.
+There is no GUI Export button; clean-machine release compatibility remains open.
 
 ## Rime's next playable slice
 
 | Capability | Working today | Missing authoring step |
 | --- | --- | --- |
-| Map | Saved scenes, placement/transforms, imported mesh assets, lights, terrain/destruction foundations | Friendly names, prefabs/presets, better search and map editing tools |
+| Map | Saved scenes, placement/transforms, imported mesh assets, lights, terrain/destruction foundations | Persistent custom names, prefabs/presets, better search and map editing tools |
 | Effects | Reflected smoke/fire, thermal cell/source preview, live phase appearance | Preset library, viewport emitter icons, entity reference picker |
-| Player | GameDefinition/InputMap and hello-game player/sensor gameplay exist | Editor currently forwards pointer input, not a complete keyboard action/possession workflow; editor fly camera is not a player controller |
+| Player | GameDefinition/InputMap and hello-game gameplay; city Run game launches the existing full player/weapon runtime | In-viewport possession and general action/spawn authoring; editor fly camera is not a player controller |
 | Events | Sensor TriggerEvents and example gameplay rules work in C++ | Inspector wiring from sensors to actions/objectives and event debugging |
 | Animation | Sample-specific procedural motion; asset formats/cooking contain animation-related data | General clip playback, skeletal runtime, Animator-style editor and timeline workflow |
-| Export | Verified Linux hello_game development bundle, cooked content, SDK checks | City export profile, GUI Export, and clean-machine release validation |
+| Export | Verified Linux hello_game profile and city development folder with cooked weapons, notices and integrity checks | GUI Export and clean-machine release validation |
 
 The next useful **playable** brick is a small possessed-player/input slice in a
 saved test map, with explicit editor focus and restart behavior. Follow that with

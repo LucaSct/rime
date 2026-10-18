@@ -138,6 +138,8 @@ void prepare(ecs::World& world, render::MeshRegistry& meshes, render::MaterialRe
     for (const auto& [e, p] : parts) {
         if (p.shape >= mesh.size() || p.palette >= ids.size())
             continue;
+        // Part is authored; registry indices are rebuilt for each viewport session.
+        world.add_component<ecs::DerivedComponents>(e, {});
         world.add_component<render::MeshRef>(e, {mesh[p.shape]});
         world.add_component<render::MaterialRef>(e, {ids[p.palette]});
     }

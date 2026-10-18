@@ -1160,19 +1160,13 @@ fn a_refused_save_is_shown_with_the_engines_reason() {
 }
 
 #[test]
-fn a_refused_save_as_still_becomes_the_sessions_scene() {
-    // DOCUMENTS A DEFECT (minor): Save As adopts its path BEFORE the engine answers, so after a
-    // refusal the editor believes a scene is open at a path nothing was written to. `Save` turns
-    // on; what it sends is an empty path, which the engine resolves against what IT opened — here
-    // nothing — so the user gets a second, differently worded failure.
+fn a_refused_save_as_does_not_adopt_a_path_that_was_never_written() {
     let mut rig = Rig::new();
     rig.open_file_menu_and_type_path("/refused/x.rscene");
     rig.click("Write");
-    assert_eq!(rig.app().scene_path.as_deref(), Some("/refused/x.rscene"));
+    assert_eq!(rig.app().scene_path, None);
     rig.click("File");
-    assert!(rig.enabled(SAVE));
-    rig.click(SAVE);
-    assert!(rig.has("no scene path to save to"));
+    assert!(!rig.enabled(SAVE));
 }
 
 #[test]
@@ -2963,4 +2957,132 @@ fn outliner_tiles_keep_selection_filters_and_clickable_role_icons() {
     rig.click("List");
     rig.key(egui::Key::Escape);
     assert!(rig.toggled(ROW_CRATE));
+}
+
+#[cfg(unix)]
+fn configure_echo_game(rig: &mut Rig) {
+    rig.harness.state_mut().game.config = Some(game_run::Config {
+        executable: "/bin/echo".into(),
+        args: vec!["--play".into()],
+    });
+    rig.settle();
+}
+
+#[test]
+#[cfg(unix)]
+fn run_game_saves_the_current_document_before_spawning_exact_argv() {
+    let mut rig = Rig::with_scene("/tmp/a city scene.rscene");
+    configure_echo_game(&mut rig);
+    rig.click(ROW_LIGHT);
+    rig.type_into_number_field(0, "12.5");
+    rig.click("Run game");
+    assert!(rig.host.files.contains_key("/tmp/a city scene.rscene"));
+    assert_eq!(
+        rig.app().scene_path.as_deref(),
+        Some("/tmp/a city scene.rscene")
+    );
+    let path = rig
+        .app()
+        .game
+        .log
+        .clone()
+        .expect("game launched after save");
+    for _ in 0..100 {
+        if std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .contains("--scene /tmp/a city scene.rscene")
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("--play --scene /tmp/a city scene.rscene"));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn stale_same_path_success_cannot_launch_after_a_fresh_save_refusal() {
+    let mut rig = Rig::with_scene("/refused/city.rscene");
+    configure_echo_game(&mut rig);
+    rig.host.shared.lock().unwrap().last_save = Some(SaveResult {
+        ok: true,
+        path: "/refused/city.rscene".into(),
+        ..Default::default()
+    });
+    rig.click("Run game");
+    assert!(rig.app().game.log.is_none());
+    assert!(rig.has_text("refused: the load skipped 213 unregistered components"));
+}
+
+#[test]
+#[cfg(unix)]
+fn save_in_flight_blocks_run_and_document_switching() {
+    let mut rig = Rig::with_scene("/tmp/city.rscene");
+    configure_echo_game(&mut rig);
+    rig.click("File");
+    rig.harness
+        .get_by_role_and_label(Role::Button, SAVE)
+        .click();
+    rig.harness.step(); // send the save, deliberately do not let the fake host acknowledge yet
+    rig.harness.step(); // redraw the now-disabled controls without pumping the host
+    assert!(rig.app().save_pending.is_some());
+    assert!(!rig.enabled("Run game"));
+    rig.host.pump();
+    rig.settle();
+    assert!(rig.app().save_pending.is_none());
+    assert!(
+        rig.app().game.log.is_none(),
+        "a manual save must not launch a game"
+    );
+}
+
+#[test]
+fn city_roles_name_geometry_and_keep_semantic_source_priority() {
+    let mut schema = fake_schema();
+    schema.types.push(SchemaEntry {
+        type_hash: 0x9002,
+        name: "rime::blockkit::SlabRole".into(),
+        is_component: true,
+        fields: ["building", "storey", "kind", "tint"]
+            .iter()
+            .map(|name| field(name, FieldKind::U32, 0))
+            .collect(),
+    });
+    let mut entity = SnapshotEntity {
+        index: 0,
+        generation: 0,
+        editor_id: 1,
+        components: vec![SnapshotComponent {
+            type_hash: 0x9002,
+            data: encode_value(&Value::Struct(vec![
+                ("building".into(), Value::U32(3)),
+                ("storey".into(), Value::U32(1)),
+                ("kind".into(), Value::U32(2)),
+                ("tint".into(), Value::U32(0)),
+            ])),
+        }],
+    };
+    assert_eq!(
+        outliner_label(&schema, 5, &entity),
+        "5  Doorway wall · B4 / level 2"
+    );
+    // Real camera/light components take precedence over their generic city placement role.
+    entity.components.push(SnapshotComponent {
+        type_hash: H_CAMERA,
+        data: vec![],
+    });
+    assert_eq!(outliner_label(&schema, 5, &entity), "5  Camera");
+    entity.components.remove(1);
+    entity.components[0].data = encode_value(&Value::Struct(vec![
+        ("building".into(), Value::U32(0xc17a_0002)),
+        ("storey".into(), Value::U32(0)),
+        ("kind".into(), Value::U32(5)),
+        ("tint".into(), Value::U32(0)),
+    ]));
+    assert_eq!(outliner_label(&schema, 5, &entity), "5  Street lamp 3");
+    entity.components[0].data.clear();
+    assert_eq!(outliner_label(&schema, 5, &entity), "5  City part");
 }

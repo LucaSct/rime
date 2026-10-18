@@ -24,6 +24,16 @@ playable repairs include weapon timing/presentation and city readability; these 
 not close M18's outstanding performance gate. The dated October 5 snapshot below
 is historical, including its then-unmerged M19 stack and older post-M19 ordering.
 
+**Editor/demo checkpoint (2026-10-19, unmerged stack):** Frost Yard previews
+fixed-mass freezing/melting, smoke/fire, static frost veins and cosmetic liquid
+ripples. Native editor navigation adds wheel dolly and hold-RMB guidance; Outliner
+has readable roles and compact List/Tiles type icons. The city editor can save and
+launch the existing weapon runtime in a separate window. A separate Linux city
+development export packages the saved map, cooked weapons and notices, with
+checkout-hidden functional execution. This does not close M18, collapse locality,
+production packaging or browser authoring gates. See [creator workflow](creator-workflow.md)
+and [ADR-0097](adr/0097-city-editor-run-and-development-bundle.md).
+
 **Collision follow-up (2026-10-18, isolated candidate):** the two saved
 separated-hull contacts reproduce as false GJK tetrahedron containment caused by
 float cancellation. A scale-aware degeneracy guard removes both contacts, with
