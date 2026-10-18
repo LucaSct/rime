@@ -396,6 +396,7 @@ add_subdirectory(engine/vfx_scene) # reflected smoke/fire descriptions and bound
 add_subdirectory(engine/fluids)   # CPU buoyancy, bounded shallow-water basin and thermal reference
 add_subdirectory(engine/fluids_scene) # authored thermal graphs and bounded previews
 add_subdirectory(engine/render)   # render graph + high-level renderer (M5)
+add_subdirectory(engine/fluids_render) # opt-in committed phase appearance
 add_subdirectory(engine/stream)   # graphics streaming: frame capture → encode → transport (Track S)
 add_subdirectory(engine/editorhost) # editor-as-client host: serve the world over the channel (M9, ADR-0031)
 add_subdirectory(engine/scene)    # .rscene text scene format: reflection-serialized world save/load (M9, ADR-0031)

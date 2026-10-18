@@ -132,6 +132,15 @@ struct FirstPersonDeformation {
     std::span<const core::Vec3> previous_positions;
 };
 
+// Copied presentation factors for a whole entity, after submesh/material-set resolution.
+// This intentionally replaces RGB and roughness only: geometry, alpha, texture ownership and
+// every other authored material property remain the normal renderer's responsibility.
+struct SurfaceAppearance {
+    ecs::Entity entity{};
+    core::Vec3 base_color{1.0f, 1.0f, 1.0f};
+    float roughness = 0.5f;
+};
+
 // ── The renderer ──────────────────────────────────────────────────────────────────────────────
 
 class SceneRenderer {
@@ -503,6 +512,15 @@ public:
     // TAA can ghost moving puffs. No vfx module dependency is implied.
     void set_smoke_particles(std::span<const GpuParticle> particles, FxSettings settings);
 
+    // Whole bounded batch admission. Null/duplicate entities, nonfinite/out-of-range factors,
+    // or more than 16 rows refuse AND clear previous rows. Empty input restores authored looks.
+    // Generations are matched exactly; no ECS or shared registry writes. Owned until replaced.
+    [[nodiscard]] bool set_surface_appearances(std::span<const SurfaceAppearance> rows);
+
+    [[nodiscard]] std::uint64_t surface_appearance_refusals() const noexcept {
+        return surface_appearance_refusals_;
+    }
+
     // Copied cosmetic light rows, appended after authored scene lights. They never enter ECS or
     // scene saves. At most 16 finite, nonnegative rows are retained; empty input clears them.
     // Existing clustered/forward lighting budgets still apply to the combined scene.
@@ -665,6 +683,9 @@ private:
     // unsampled (m10.2). 2 layers so it gets a 2-D-ARRAY view compatible with sampler2DArrayShadow.
     rhi::TextureHandle dummy_shadow_array_;
 
+    std::array<SurfaceAppearance, 16> surface_appearances_{};
+    std::size_t surface_appearance_count_ = 0;
+    std::uint64_t surface_appearance_refusals_ = 0;
     float ambient_[3] = {0.02f, 0.02f, 0.02f};
     bool warned_lights_ = false;
     bool warned_no_camera_ = false;

@@ -16,6 +16,7 @@
 #include "rime/app/application.hpp" // rime::app  → transitively rime::render/rhi/ecs/platform/core
 #include "rime/assets/cooked_reader.hpp" // rime::assets
 #include "rime/editorhost/thermal_preview.hpp"
+#include "rime/fluids_render/phase_surface.hpp"
 #include "rime/fluids_scene/preview.hpp"
 
 int main(int argc, char** argv) {
@@ -66,6 +67,10 @@ int main(int argc, char** argv) {
     if (!thermal.tick(world, 1, 1.0 / 60.0) || !thermal.field() ||
         thermal.field()->cells()[0].state().liquid_mass_fraction <= 0.0)
         return 5;
+    rime::fluids_render::register_fluids_render_components(world);
+    world.add_component<rime::fluids_render::ThermalSurface>(target, {true});
+    if (rime::fluids_render::phase_surfaces(world, thermal).count != 1)
+        return 7;
     rime::editorhost::ThermalPreviewMsg diagnostic, decoded;
     const auto encoded = rime::editorhost::serialize_thermal_preview(diagnostic);
     if (!rime::editorhost::parse_thermal_preview(encoded, decoded))

@@ -397,6 +397,10 @@ mod imp {
             )?;
         }
 
+        if frames > 0 && args.iter().any(|a| a == "--courtyard-preview") {
+            verify_courtyard_preview(&mut conn, &schema, &snapshot)?;
+        }
+
         let summary = if frames > 0 {
             // Streamed-viewport mode: receive + decode N frames — the render → capture → LZ4 → wire →
             // decode path end to end — then close.
@@ -846,6 +850,129 @@ mod imp {
         }
         Err("no frame-correlated thermal diagnostic".into())
     }
+    // A saved demo uses three preauthored stations, so verify it without spawning a second
+    // graph or assuming the generic two-cell diagnostic fixture describes the whole world.
+    fn verify_courtyard_preview(
+        conn: &mut Connection<UnixStream>,
+        schema: &Schema,
+        snapshot: &Snapshot,
+    ) -> Result<(), String> {
+        let hash = schema
+            .types
+            .iter()
+            .find(|t| t.name == "courtyard::Station")
+            .ok_or("courtyard station schema missing")?
+            .type_hash;
+        let mut ids = [None; 3];
+        for e in &snapshot.entities {
+            if let Some(c) = e.components.iter().find(|c| c.type_hash == hash) {
+                let bytes: [u8; 4] = c
+                    .data
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| "bad station blob")?;
+                let kind = u32::from_le_bytes(bytes) as usize;
+                if kind >= 3 || ids[kind].replace(e.editor_id).is_some() {
+                    return Err("invalid or duplicate courtyard station".into());
+                }
+            }
+        }
+        let ids = [
+            ids[0].ok_or("cooling station missing")?,
+            ids[1].ok_or("melting station missing")?,
+            ids[2].ok_or("control station missing")?,
+        ];
+        let mut previous = [3335000., 0., 3335000.];
+        let mut first = previous;
+        let mut session = 0;
+        for tick in 1..=120 {
+            conn.send_editor(EditorMessage::Step, &[])
+                .map_err(|e| e.to_string())?;
+            wait_play_state(conn, PlayPhase::Paused, tick)?;
+            let m = thermal_message(conn, tick, 0)?;
+            if m.status != 1
+                || m.field_tick != tick
+                || m.accepted_host_tick != tick
+                || m.cells.len() != 3
+            {
+                return Err(format!("courtyard refused/stale step: {m:?}"));
+            }
+            let mut energy = [0.; 3];
+            for i in 0..3 {
+                let cell = m
+                    .cells
+                    .iter()
+                    .find(|c| c.editor_id == ids[i])
+                    .ok_or("courtyard diagnostic cell missing")?;
+                if cell.temperature_kelvin != 273.15 {
+                    return Err("courtyard left latent plateau too early".into());
+                }
+                energy[i] = cell.energy_joules;
+            }
+            if energy[0] >= previous[0] || energy[1] <= previous[1] || energy[2] != previous[2] {
+                return Err("courtyard cooling/melting/control failed".into());
+            }
+            if tick == 1 {
+                first = energy;
+                session = m.session_id;
+            }
+            if m.session_id != session {
+                return Err("courtyard session changed during Step".into());
+            }
+            previous = energy;
+        }
+        conn.send_editor(EditorMessage::Pause, &[])
+            .map_err(|e| e.to_string())?;
+        wait_play_state(conn, PlayPhase::Paused, 120)?;
+        let paused = thermal_message(conn, 120, 0)?;
+        for i in 0..3 {
+            if paused
+                .cells
+                .iter()
+                .find(|c| c.editor_id == ids[i])
+                .ok_or("paused courtyard cell missing")?
+                .energy_joules
+                != previous[i]
+            {
+                return Err("courtyard Pause advanced heat".into());
+            }
+        }
+        conn.send_editor(EditorMessage::Stop, &[])
+            .map_err(|e| e.to_string())?;
+        wait_play_state(conn, PlayPhase::Edit, 0)?;
+        let stopped = thermal_message(conn, 0, 0)?;
+        if stopped.status != 0 || !stopped.cells.is_empty() {
+            return Err("courtyard Stop retained state".into());
+        }
+        conn.send_editor(EditorMessage::Step, &[])
+            .map_err(|e| e.to_string())?;
+        wait_play_state(conn, PlayPhase::Paused, 1)?;
+        let again = thermal_message(conn, 1, 0)?;
+        if again.status != 1 || again.field_tick != 1 || again.session_id <= session {
+            return Err("courtyard new Play stale".into());
+        }
+        for i in 0..3 {
+            if again
+                .cells
+                .iter()
+                .find(|c| c.editor_id == ids[i])
+                .ok_or("restarted courtyard cell missing")?
+                .energy_joules
+                != first[i]
+            {
+                return Err("courtyard new Play did not reconstruct initial heat".into());
+            }
+        }
+        conn.send_editor(EditorMessage::Stop, &[])
+            .map_err(|e| e.to_string())?;
+        wait_play_state(conn, PlayPhase::Edit, 0)?;
+        if thermal_message(conn, 0, 0)?.status != 0 {
+            return Err("courtyard final Stop failed".into());
+        }
+        println!("editor: courtyard verified 120 cooling/melting/control steps, Pause, Stop and fresh Play over the real viewport host");
+        Ok(())
+    }
+
     fn verify_thermal_sources(
         conn: &mut Connection<UnixStream>,
         schema: &Schema,

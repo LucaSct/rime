@@ -63,6 +63,7 @@ fn print_usage() {
          \x20                              launch the docking shell (needs --features gui)"
     );
     eprintln!("  editor --smoke [--frames N] [--engine <rime-engine>] [--scene <file.rscene>]");
+    eprintln!("      --courtyard-preview  verify the saved three-station thermal city demo");
     eprintln!("      --thermal-sources  verify thermal authoring and bounded live preview");
     eprintln!("      --thermal-reload   verify a saved thermal graph and its live preview");
     eprintln!("      --effect-sources  verify smoke/fire defaults and typed edit/undo/redo");

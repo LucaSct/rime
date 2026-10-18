@@ -1015,3 +1015,8 @@ See also **Determinism / replication** under *Physics & destruction*.
 - **Accepted host tick.** The host simulation tick that last committed thermal
   state. A refused thermal step can leave it behind the current host tick; the
   inspector marks those retained values explicitly.
+
+- **Transient surface appearance.** Copied per-frame RGB/roughness values applied
+  to an entity's draws without changing its authored material or shared registry.
+  Empty input restores the normal appearance. Frost Yard uses this to display
+  accepted thermal phase on a fixed mesh; it is not a geometric ice model.
