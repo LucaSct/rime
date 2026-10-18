@@ -71,6 +71,14 @@ The [ordered bricks](design/environment-effects-milestones.md#environment-and-ed
 and [ADR-0090](adr/0090-environment-source-authoring.md) distinguish implemented
 authoring seams from outstanding clicked, hardware, numerical and network proofs.
 
+**Thermal continuation (2026-10-18):** M-FL2 now has a bounded fixed-mass CPU
+energy/phase reference with explicit latent heat and transactional heat accounting.
+Fable 5.1 and GPT-6 Astra supplied independent proposals; locally reproduced
+numerical edge cases informed the final guards. This is not spatial freezing or
+visible ice. Next are conservative sample-to-sample heat exchange and the separate
+water displacement/coupling brick, followed by field/authoring/surface consumers.
+See [ADR-0091](adr/0091-fixed-mass-thermal-phase-reference.md).
+
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
 > been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the

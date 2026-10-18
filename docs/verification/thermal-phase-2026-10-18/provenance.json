@@ -1,0 +1,71 @@
+{
+  "implementation_commit": "d15783dd6d9b005b1df0277758e0c69eb4b2a4cd",
+  "parent_commit": "ab201bd32cd4bd86cfe03600922d5c2012002602",
+  "recorded_utc": "2026-10-18T18:29:10.993265+00:00",
+  "source_sha256": {
+    "CMakeLists.txt": "4ee0b956d2ab5e6e7b80cb1037a276eeae648a9290cfa39a6e0e203e581c06d6",
+    "engine/fluids/CMakeLists.txt": "972f1fa73bfbde9d7f39d0c8fc61acbe772735e69380ef394f28704abd98384d",
+    "engine/fluids/include/rime/fluids/phase_change.hpp": "98f2beb4bc21f201ae221ed3efd1ab5836fbc4c2d9da9f04a392174b308560bb",
+    "engine/fluids/src/phase_change.cpp": "1aa5ef75a0cf9940d3b61b47a3eb01b7eef88964b78613aee623121b1628baeb",
+    "tests/fluids/CMakeLists.txt": "998f3c244d62648865c25d2b7659c9aba43c2497e9e76cc2d171c3b74389fce1",
+    "tests/fluids/phase_change_test.cpp": "df081d4261b44eef51d5426742846eb1c3166f8a8f4e92e35ded7e5b1af31ad1",
+    "tests/fluids/verify_phase_change.py": "0edb6f505be0838035ec6e4eaae150328e4e1c720a57d3693fd6b11b5e4ef8c7"
+  },
+  "binary_sha256": {
+    "build/release/lib/librime_fluids.a": "f063e7e13bbf951e114a0adb7085bd7b26d7eceba89f8f410ec4409947e7d6b3",
+    "build/release/bin/rime_fluids_tests": "4d3a9c22d7d1e9180adc53db4d9f3ca8640f5198b774e21e2a3142200f68e39f"
+  },
+  "full_ctest": {
+    "passed": 89,
+    "total": 90,
+    "exit_code": 8,
+    "seconds": 356.03,
+    "inherited_failure": "the_block_headless: same three locality/collapse claims"
+  },
+  "phase_asan_ubsan": {
+    "cases": 11,
+    "assertions": 5701,
+    "scope": "new phase runtime translation unit and phase tests, fully instrumented standalone executable"
+  },
+  "exact_probe": {
+    "transactions": 2838,
+    "creation_refused": 438,
+    "accepted_exact_balance": 1325,
+    "refused_atomically": 1075,
+    "compiler": "clang++",
+    "input_sha256": "c310365cb048c9c7031fa8809377fe672aa62255b6901df7f5205463b0a701dd",
+    "output_sha256": "be273948341566f29856d3a6c9f2b9f533acc8258625eddc7e0bad7631ed2726",
+    "library_sha256": "f063e7e13bbf951e114a0adb7085bd7b26d7eceba89f8f410ec4409947e7d6b3",
+    "arithmetic_reference": "Python fractions.Fraction; no tolerance for energy identities"
+  },
+  "clang_phase_probe": {
+    "transactions": 2838,
+    "creation_refused": 438,
+    "accepted_exact_balance": 1325,
+    "refused_atomically": 1075,
+    "compiler": "clang++",
+    "input_sha256": "c310365cb048c9c7031fa8809377fe672aa62255b6901df7f5205463b0a701dd",
+    "output_sha256": "be273948341566f29856d3a6c9f2b9f533acc8258625eddc7e0bad7631ed2726",
+    "library_sha256": "fed8a7479855028b463d0083b56adff1bec43648a4dac34e75b491bb7d0e075b",
+    "arithmetic_reference": "Python fractions.Fraction; no tolerance for energy identities"
+  },
+  "mutation_controls": "both weakened guard variants rejected by final exact checker",
+  "review": "complete diff self-review; independent Fable/Astra proposals locally checked",
+  "consultations": {
+    "route": "devpass gateway, read-only chat requests without tools",
+    "models": [
+      "claude-fable-5-1",
+      "gpt-6-astra"
+    ],
+    "pricing_usd_per_million": {
+      "input": 10,
+      "output": 50
+    },
+    "max_output_tokens_per_call": 8000,
+    "reasoning_effort": "low",
+    "reported_total_cost_usd": 0.1965,
+    "observed_plan_spend_usd": 0.1965,
+    "availability_and_credit_checks": "live before and after calls; credential and personal credit responses deliberately excluded"
+  },
+  "native_performance": "not measured; CPU-only unconsumed reference adds no default frame workload"
+}

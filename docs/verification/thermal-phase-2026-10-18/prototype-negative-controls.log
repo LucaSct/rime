@@ -1,0 +1,26 @@
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/fluids/phase_change_test.cpp:227:
+TEST CASE:  thermal reference: a rounded boundary cannot admit heat outside the model
+
+/home/next/projects/rime/tests/fluids/phase_change_test.cpp:237: ERROR: CHECK( sample->apply_heat(1.25 * ulp).status == HeatStatus::TemperatureLimit ) is NOT correct!
+  values: CHECK( 0 == 2 )
+
+/home/next/projects/rime/tests/fluids/phase_change_test.cpp:238: ERROR: CHECK( sample->energy_joules() == before ) is NOT correct!
+  values: CHECK( 500660 == 500660 )
+
+===============================================================================
+/home/next/projects/rime/tests/fluids/phase_change_test.cpp:241:
+TEST CASE:  thermal reference: an interior mixture cannot round into an all-solid phase
+
+/home/next/projects/rime/tests/fluids/phase_change_test.cpp:244: ERROR: CHECK( sample->apply_heat(std::numeric_limits<double>::denorm_min()).status == HeatStatus::Unrepresentable ) is NOT correct!
+  values: CHECK( 0 == 3 )
+
+/home/next/projects/rime/tests/fluids/phase_change_test.cpp:246: ERROR: CHECK( sample->energy_joules() == 0.0 ) is NOT correct!
+  values: CHECK( 4.94066e-324 == 0 )
+
+===============================================================================
+[doctest] test cases: 2 | 0 passed | 2 failed | 19 skipped
+[doctest] assertions: 7 | 3 passed | 4 failed |
+[doctest] Status: FAILURE!

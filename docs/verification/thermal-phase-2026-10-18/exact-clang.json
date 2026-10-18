@@ -1,0 +1,11 @@
+{
+  "transactions": 2838,
+  "creation_refused": 438,
+  "accepted_exact_balance": 1325,
+  "refused_atomically": 1075,
+  "compiler": "clang++",
+  "input_sha256": "c310365cb048c9c7031fa8809377fe672aa62255b6901df7f5205463b0a701dd",
+  "output_sha256": "be273948341566f29856d3a6c9f2b9f533acc8258625eddc7e0bad7631ed2726",
+  "library_sha256": "fed8a7479855028b463d0083b56adff1bec43648a4dac34e75b491bb7d0e075b",
+  "arithmetic_reference": "Python fractions.Fraction; no tolerance for energy identities"
+}

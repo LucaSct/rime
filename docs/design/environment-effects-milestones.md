@@ -239,3 +239,27 @@ new milestone, not a claim of existing collision, fracture or thermal simulation
 Each item is itself split at a reviewable numerical, authoring or visual result.
 M18 remains open; CPU references and opt-in authoring can progress, while new
 default-on rendering and gameplay-coupled water/ice retain budget/network gates.
+
+## M-FL2 reference progress, 2026-10-18
+
+The first thermal CPU brick is implemented as `fluids::ThermalSample`. It stores
+energy for a fixed mass and derives temperature and liquid mass fraction through
+solid warming/cooling, the latent-heat plateau and liquid warming/cooling. Both
+initial temperature and phase are required. Heat and power/time updates validate
+before committing, expose rounding accounting, and refuse unsupported arithmetic
+or out-of-range states without clipping energy. It creates no frame workload.
+
+The [research and independent Fable/Astra consultation findings](../research/2026-10-18-water-ice-phase.md)
+and [ADR-0091](../adr/0091-fixed-mass-thermal-phase-reference.md) describe coefficients,
+scope, adopted and rejected advice. Tests include a no-latent-heat counterfactual,
+changed latent heat versus changed capacities, sub-ulp input, signed zero, strict
+range admission and atomic failure. The built library is also checked by exact
+Python fractions; Python is not a runtime dependency.
+
+The next **thermal** brick is conservative heat exchange between fixed-mass
+samples: warm/cold exchange with an equal-and-opposite energy ledger, equilibrium
+and an exchange-disabled control, followed by a bounded spatial thermal field. The
+next **water** brick remains solid displacement/body feedback. Joining the two
+requires liquid/solid mass and transported energy accounting before a moving
+basin can freeze. Temperature/heat-source editor authoring and visible phase
+remain separate work; there is no rendered or collidable ice in this reference.

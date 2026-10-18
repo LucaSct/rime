@@ -1,0 +1,16 @@
+{
+  "route": "devpass gateway, read-only chat requests without tools",
+  "models": [
+    "claude-fable-5-1",
+    "gpt-6-astra"
+  ],
+  "pricing_usd_per_million": {
+    "input": 10,
+    "output": 50
+  },
+  "max_output_tokens_per_call": 8000,
+  "reasoning_effort": "low",
+  "reported_total_cost_usd": 0.1965,
+  "observed_plan_spend_usd": 0.1965,
+  "availability_and_credit_checks": "live before and after calls; credential and personal credit responses deliberately excluded"
+}

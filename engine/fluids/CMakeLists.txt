@@ -1,5 +1,5 @@
-# A removable, CPU-only buoyancy seam. Physics is a consumer, never a dependency.
-add_library(rime_fluids STATIC src/buoyancy.cpp src/basin.cpp)
+# Removable CPU water/thermal references. Physics is a consumer, never a dependency.
+add_library(rime_fluids STATIC src/buoyancy.cpp src/basin.cpp src/phase_change.cpp)
 add_library(rime::fluids ALIAS rime_fluids)
 
 target_include_directories(rime_fluids
