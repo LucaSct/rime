@@ -20,19 +20,22 @@ repeats after verification; it includes dispatch, bound computation and semantic
 checksumming, excludes parsing, and never advances physics. Reported percentiles
 describe whole-corpus repetitions, not individual-query latency. The experimental
 `tight` candidate is a sensitivity control, and fails the committed city corpus.
-`child` uses the compound midphase's existing 1 mm margin, plus one outward ULP.
-Neither candidate is enabled in the production physics library by this tool.
+`child` computes the compound midphase's existing 1 mm margin plus one outward ULP
+per pair. `cached` uses the same private per-build bounds cache as the production
+runtime. `none` always calls the unfiltered private narrowphase. The CLI validates
+both exact and speculative results against that reference before timing.
 
 For Linux CPU measurements, use the guarded ABBA runner while builds, tests and
 other benchmarks are absent:
 
 ```sh
 python3 samples/contact_bench/measure.py --binary build/release/bin/contact_bench \
-  --input /path/to/city.contacts --out /path/to/report/cpu.json
+  --input /path/to/city.contacts --candidate cached --out /path/to/report/cpu.json
 ```
 
 It pins its child to one allowed CPU, records clocks, CPU/cache/governor, binary
-and input SHA-256, refuses competing work, and stops only its own child if new
+and input SHA-256, refuses a foreign process above 50% CPU or aggregate foreign
+CPU above 80%, and stops only its own child if new
 competition appears. Missing clocks or run-median clock drift above 5% refuses
 comparison. This is a CPU-only narrowphase measurement, never the hardware
 frame-budget gate or a claim about multiplayer capacity.
@@ -78,9 +81,10 @@ python3 samples/contact_bench/prepare_capture.py --build-dir build/release \
   --candidate child --oracle /path/to/city.contacts
 ```
 
-Its lazy body bounds are scoped to one contact build, and CCD remains intact.
-This is an experimental executable, not a production toggle. A passing sampled
-corpus must still be followed by the full per-step hash comparison.
+This compiles the actual production source with its cache. The default `none`
+preparation defines `RIME_PHYSICS_UNFILTERED_CONTACTS` only for its replacement
+world object, yielding an unfiltered reference without a runtime toggle. A
+passing sampled corpus must still be followed by the full per-step hash comparison.
 
 The text container is version 1 and diagnostic-only. Float components are decimal
 uint32 bit patterns, so parsing changes neither signed zero nor precision and

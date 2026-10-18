@@ -15,6 +15,7 @@
 #include <utility>
 #include <vector>
 
+#include "contact_bounds.hpp"
 #include "narrowphase.hpp"
 
 // A diagnostic format, not an asset or gameplay protocol. Decimal uint32 float BITS avoid both
@@ -370,19 +371,8 @@ inline bool exact(const Workload& w, const Pair& p, physics::Manifold& m) {
 enum class Candidate { None, Tight, Child };
 
 inline bool bounds_may_touch(const physics::Aabb& a, const physics::Aabb& b, Candidate candidate) {
-    auto expanded = physics::expanded(a, candidate == Candidate::Child ? 1e-3f : 0.0f);
-    if (candidate == Candidate::Child) {
-        // One outward ULP makes the rounded expansion conservative even when adding 1 mm is
-        // below the coordinate's representable spacing. This only retains MORE candidates.
-        const float inf = std::numeric_limits<float>::infinity();
-        expanded.min = {std::nextafter(expanded.min.x, -inf),
-                        std::nextafter(expanded.min.y, -inf),
-                        std::nextafter(expanded.min.z, -inf)};
-        expanded.max = {std::nextafter(expanded.max.x, inf),
-                        std::nextafter(expanded.max.y, inf),
-                        std::nextafter(expanded.max.z, inf)};
-    }
-    return physics::overlaps(expanded, b);
+    return physics::overlaps(
+        candidate == Candidate::Child ? physics::contact_bounds_detail::padded(a) : a, b);
 }
 
 inline bool reject_bounds(const Workload& w, const Pair& p, Candidate candidate) {
@@ -403,11 +393,11 @@ struct Evaluation {
     bool exact = false, contact = false, speculative = false, skipped = false;
 };
 
-inline Evaluation evaluate(const Workload& w, const Pair& p, Candidate candidate) {
+inline Evaluation evaluate_decision(const Workload& w, const Pair& p, bool skip) {
     Evaluation e;
     e.manifold.a = p.a;
     e.manifold.b = p.b;
-    e.skipped = reject_bounds(w, p, candidate);
+    e.skipped = skip;
     e.exact = !e.skipped && exact(w, p, e.manifold);
     e.contact = e.exact;
     // Rejecting the CURRENT overlap test never rejects CCD: an approaching pair may still
@@ -428,6 +418,10 @@ inline Evaluation evaluate(const Workload& w, const Pair& p, Candidate candidate
         e.speculative = e.contact;
     }
     return e;
+}
+
+inline Evaluation evaluate(const Workload& w, const Pair& p, Candidate candidate) {
+    return evaluate_decision(w, p, reject_bounds(w, p, candidate));
 }
 
 inline bool same_float(float a, float b) {

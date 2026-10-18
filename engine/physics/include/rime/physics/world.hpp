@@ -296,6 +296,12 @@ struct ContactProfile {
     std::uint64_t compound_speculative_ns = 0;
     std::uint64_t heightfield_ns = 0;
     std::uint64_t warmcache_ns = 0;
+    // Plain midphase only. These partition eligible exact tests into retained/rejected calls;
+    // CCD fallback is still evaluated independently. Bounds time includes cache initialization.
+    std::uint64_t plain_bounds_tests = 0;
+    std::uint64_t plain_bounds_rejected = 0;
+    std::uint64_t plain_bounds_bodies = 0;
+    std::uint64_t plain_bounds_ns = 0;
 };
 
 class PhysicsWorld {

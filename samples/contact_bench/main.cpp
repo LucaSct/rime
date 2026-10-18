@@ -57,14 +57,40 @@ void fold_manifold(std::uint64_t& hash, bool hit, const physics::Manifold& m) {
 }
 
 struct Results {
-    std::uint64_t exact = 0, speculative = 0, mismatch = 0, skipped = 0;
+    std::uint64_t exact = 0, speculative = 0, mismatch = 0, skipped = 0, bound_builds = 0;
     std::uint64_t hash = core::kFnv1a64OffsetBasis;
 };
 
-Results replay(const cw::Workload& w, bool verify, cw::Candidate candidate) {
+Results replay(const cw::Workload& w, bool verify, cw::Candidate candidate, bool cached = false) {
     Results r;
+    physics::contact_bounds_detail::Cache cache;
+    std::string_view world;
+    std::uint64_t step = 0;
+    std::size_t slots = 0;
+    if (cached)
+        for (const auto& p : w.pairs)
+            slots = std::max(slots, static_cast<std::size_t>(p.b.index) + 1);
     for (const auto& p : w.pairs) {
-        const auto e = cw::evaluate(w, p, candidate);
+        cw::Evaluation e;
+        if (cached) {
+            if (world != p.world || step != p.step) {
+                r.bound_builds += cache.computed();
+                cache.begin(slots);
+                world = p.world;
+                step = p.step;
+            }
+            const auto* ha = cw::hull(w, p.sa);
+            const auto* hb = cw::hull(w, p.sb);
+            bool skip = false;
+            if (physics::contact_bounds_detail::eligible(p.sa.desc, ha) &&
+                physics::contact_bounds_detail::eligible(p.sb.desc, hb)) {
+                const auto& a = cache.get(p.a.index, p.sa.desc, p.pa, p.qa, ha);
+                const auto& b = cache.get(p.b.index, p.sb.desc, p.pb, p.qb, hb);
+                skip = !physics::overlaps(a.padded, b.tight);
+            }
+            e = cw::evaluate_decision(w, p, skip);
+        } else
+            e = cw::evaluate(w, p, candidate);
         const bool hit = e.exact;
         const auto& m = e.manifold;
         if (e.skipped)
@@ -94,6 +120,8 @@ Results replay(const cw::Workload& w, bool verify, cw::Candidate candidate) {
             ++r.speculative;
         fold_manifold(r.hash, e.contact, m);
     }
+    if (cached)
+        r.bound_builds += cache.computed();
     return r;
 }
 } // namespace
@@ -101,6 +129,7 @@ Results replay(const cw::Workload& w, bool verify, cw::Candidate candidate) {
 int main(int argc, char** argv) {
     bool verify_only = true;
     cw::Candidate candidate = cw::Candidate::None;
+    bool cached = false;
     std::string_view candidate_name = "none";
     const char* path = nullptr;
     for (int i = 1; i < argc; ++i) {
@@ -109,7 +138,12 @@ int main(int argc, char** argv) {
             verify_only = false;
         else if (arg == "--candidate" && i + 1 < argc) {
             candidate_name = argv[++i];
-            if (candidate_name == "tight")
+            cached = false;
+            candidate = cw::Candidate::None;
+            if (candidate_name == "cached") {
+                candidate = cw::Candidate::Child;
+                cached = true;
+            } else if (candidate_name == "tight")
                 candidate = cw::Candidate::Tight;
             else if (candidate_name == "child")
                 candidate = cw::Candidate::Child;
@@ -123,7 +157,7 @@ int main(int argc, char** argv) {
             path = argv[++i];
         else {
             fmt::print(stderr,
-                       "usage: contact_bench --input FILE [--candidate none|tight|child] "
+                       "usage: contact_bench --input FILE [--candidate none|tight|child|cached] "
                        "[--time|--verify-only]\n");
             return 2;
         }
@@ -152,6 +186,12 @@ int main(int argc, char** argv) {
         fmt::print(stderr, "input read failed\n");
         return 2;
     }
+    if (cached && std::any_of(w.pairs.begin(), w.pairs.end(), [](const auto& p) {
+            return p.b.index >= 1000000;
+        })) {
+        fmt::print(stderr, "cache slot capacity exceeds diagnostic limit\n");
+        return 2;
+    }
     const auto reference = replay(w, true, cw::Candidate::None);
     if (reference.mismatch != 0) {
         fmt::print(stderr,
@@ -160,7 +200,8 @@ int main(int argc, char** argv) {
                    w.pairs.size());
         return 1;
     }
-    const auto proposed = candidate == cw::Candidate::None ? reference : replay(w, true, candidate);
+    const auto proposed =
+        candidate == cw::Candidate::None ? reference : replay(w, true, candidate, cached);
     if (proposed.mismatch != 0 || proposed.hash != reference.hash) {
         fmt::print(stderr,
                    "candidate {}: {} exact mismatches, {} skipped calls; refusing timing\n",
@@ -182,6 +223,7 @@ int main(int argc, char** argv) {
                candidate_name,
                w.pairs.size() - proposed.skipped,
                proposed.skipped);
+    fmt::print(",\"cached_bound_builds\":{}", proposed.bound_builds);
     fmt::print(",\"input_fnv1a64\":\"{:016x}\"", input_hash);
     if (!verify_only) {
         // Each repeat starts from the SAME immutable inputs. No integration, destruction, settling
@@ -190,12 +232,13 @@ int main(int argc, char** argv) {
         std::array<double, 21> ms{};
         for (auto& value : ms) {
             const auto start = std::chrono::steady_clock::now();
-            const auto r = replay(w, false, candidate);
+            const auto r = replay(w, false, candidate, cached);
             value =
                 std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
                     .count();
             if (r.hash != reference.hash || r.exact != reference.exact ||
-                r.speculative != reference.speculative) {
+                r.speculative != reference.speculative || r.skipped != proposed.skipped ||
+                r.bound_builds != proposed.bound_builds) {
                 fmt::print(stderr, "nonrepeatable workload; refusing report\n");
                 return 1;
             }

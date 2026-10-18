@@ -36,12 +36,16 @@ def snapshot():
 def competing(previous, current, exclude):
     elapsed = current[0]-previous[0]
     result = []
+    total_percent = 0.0
     for pid, (name, ticks) in current[1].items():
         if pid in exclude:
             continue
         percent = max(0, ticks-previous[1].get(pid, (name, ticks))[1])/os.sysconf('SC_CLK_TCK')/elapsed*100
+        total_percent += percent
         if name in HEAVY or (name.startswith('rime_') and 'test' in name) or percent > 50:
             result.append({'pid': pid, 'name': name, 'cpu_percent': round(percent, 1)})
+    if total_percent > 80:
+        result.append({'aggregate_foreign_cpu_percent':round(total_percent,1)})
     return result
 
 
@@ -62,6 +66,7 @@ def main():
     p.add_argument('--binary', type=Path, required=True)
     p.add_argument('--input', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
+    p.add_argument('--candidate',choices=['child','cached'],default='cached')
     args = p.parse_args()
     binary, corpus, out = (v.resolve() for v in (args.binary, args.input, args.out))
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -70,12 +75,12 @@ def main():
     model = next((line.split(':',1)[1].strip() for line in Path('/proc/cpuinfo').read_text().splitlines()
                   if line.startswith('model name')), 'unknown')
     report = {'scope': 'CPU-only frozen narrowphase; whole-corpus time includes dispatch, bounds and checksum',
-              'order': ['none','child','child','none'], 'qualified': False, 'cpu': cpu,
+              'order': ['none',args.candidate,args.candidate,'none'], 'qualified': False, 'cpu': cpu,
               'model': model, 'platform': platform.platform(),
               'governor': read(cpuroot / 'cpufreq/scaling_governor'),
               'l3_shared_cpus': read(cpuroot / 'cache/index3/shared_cpu_list'),
               'binary_sha256': sha(binary), 'input_sha256': sha(corpus),
-              'clock_median_drift_limit': 0.05, 'foreign_cpu_limit_percent': 50,
+              'clock_median_drift_limit': 0.05, 'foreign_cpu_limit_percent': 50, 'aggregate_foreign_cpu_limit_percent':80,
               'runs': [], 'refusals': []}
     def save(): out.write_text(json.dumps(report, indent=2)+'\n')
     previous = snapshot()
