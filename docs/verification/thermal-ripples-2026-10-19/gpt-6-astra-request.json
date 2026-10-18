@@ -1,0 +1,15 @@
+{
+  "model": "gpt-6-astra",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Read-only independent architecture consultation. Give your OWN minimum safe design <=350 words, no tools or edits. User sees opaque flat ice as concrete and wants small water waves/motion that settle as thermal fraction freezes. Fixed-mass ThermalPreview max16 cells has committed enthalpy fraction, accepted_host_tick and field tick; rebuild resets field tick, Pause no ticks, failure retains last committed state. SceneRenderer already copies max16 generation-safe SurfaceAppearance{entity,RGB,roughness} and modifies private per-draw PbrMaterialDesc after submesh resolution. PBR descriptor has borrowed normal_texture and normal_scale, base_color_texture; renderer normal map sampling already works across forward/Gbuffer, immutable GPU maps uploaded during init. Need visual improvement by day end; no physical flow/thickness authority and no shader/depth/shadow ABI divergence. Propose lifetime/API/time source, graceful allocation fallback, strongest structural pixel tests. Candidate minimal approach is removable fluids_render GPU appearance owner with precomputed periodic normal-map frames (e.g.32x128square); generic transient rows optionally override borrowed normal map/scale and base texture for icy veins; use accepted simulated time not render wall clock, zero water ripple at liquid0, frozen veins static. Rendering geometry stays fixed. Device must outlive maps; map owner must outlive renderer including pending GPU completion. We own implementation, budget $0.25 for this consult. Flag where candidate is wrong and suggest simpler if possible."
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "reasoning_effort": "low",
+  "max_tokens": 8000
+}

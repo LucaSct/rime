@@ -129,6 +129,7 @@ int demo(const std::string& path,
     if (!load(app.world(), path))
         return 2;
     courtyard::prepare(app.world(), meshes, materials);
+    fluids_render::PhaseDetail phase_detail(*app.device());
     render::SceneRenderer renderer(*app.device(), meshes, materials);
     renderer.set_frames_in_flight(app.frames_in_flight());
     renderer.set_ambient(.07f, .095f, .14f);
@@ -174,7 +175,7 @@ int demo(const std::string& path,
         scene::derive_world_transforms(ctx.world, ctx.jobs);
         thermal.reconcile(ctx.world);
         effects.reconcile(ctx.world);
-        const auto surfaces = fluids_render::phase_surfaces(ctx.world, thermal);
+        const auto surfaces = phase_detail.surfaces(ctx.world, thermal);
         (void)renderer.set_surface_appearances(surfaces.span());
         particles.clear();
         for (const auto& p : effects.field().particles())

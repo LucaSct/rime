@@ -133,12 +133,16 @@ struct FirstPersonDeformation {
 };
 
 // Copied presentation factors for a whole entity, after submesh/material-set resolution.
-// This intentionally replaces RGB and roughness only: geometry, alpha, texture ownership and
-// every other authored material property remain the normal renderer's responsibility.
+// Optional detail maps are borrowed immutable resources: the owner must outlive this renderer
+// AND pending GPU work. Geometry, alpha and other authored properties stay unchanged.
 struct SurfaceAppearance {
     ecs::Entity entity{};
     core::Vec3 base_color{1.0f, 1.0f, 1.0f};
     float roughness = 0.5f;
+    // false inherits authored maps; true with invalid handles explicitly selects flat/white.
+    bool override_detail = false;
+    rhi::TextureHandle normal_texture{}, base_color_texture{};
+    float normal_scale = 1.0f;
 };
 
 // ── The renderer ──────────────────────────────────────────────────────────────────────────────

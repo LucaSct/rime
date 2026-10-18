@@ -1,0 +1,508 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.34s
+warning: the following packages contain code that will be rejected by a future version of Rust: nalgebra v0.26.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src/lib.rs (tools/target/debug/deps/asset_pipeline-b14a6874f9464a5c)
+
+running 124 tests
+test clip::tests::schema_hash_is_the_constant_the_engine_pins ... ok
+test clip::tests::wire_enum_values_match_the_engine ... ok
+test cook_cache::tests::a_wrong_cooker_version_or_hash_is_not_fresh ... ok
+test cooked::tests::container_round_trips_through_read_header ... ok
+test cooked::tests::fnv_matches_published_vectors ... ok
+test cooked::tests::read_header_rejects_bad_magic_and_short_files ... ok
+test bcn::tests::bc5_round_trips_two_channels_within_a_bound ... ok
+test material::tests::alpha_mode_wire_values_match_the_engine_enum ... ok
+test material::tests::cook_is_byte_stable_and_carries_the_material_kind_and_schema ... ok
+test material::tests::defaults_are_the_gltf_defaults ... ok
+test cook_cache::tests::a_v2_cache_is_dropped_rather_than_misread ... ok
+test material::tests::schema_hash_is_the_constant_the_engine_pins ... ok
+test heightfield::tests::grids_that_are_not_surfaces_are_refused ... ok
+test heightfield::tests::sidecar_refuses_typos_duplicates_and_nonsense ... ok
+test math::tests::identity_is_a_no_op ... ok
+test heightfield::tests::layer_keys_are_hex_only_unique_nonzero_and_need_layer0 ... ok
+test heightfield::tests::splat_refusals_name_the_texel ... ok
+test math::tests::non_uniform_scale_uses_the_inverse_transpose_for_normals ... ok
+test cook_cache::tests::malformed_lines_are_dropped ... ok
+test clip::tests::cook_is_byte_stable_and_carries_the_clip_kind_and_schema ... ok
+test cook_cache::tests::round_trips_through_render_and_parse ... ok
+test math::tests::translation_moves_points_but_not_normals ... ok
+test mesh::tests::computed_normals_of_a_planar_quad_face_plus_z ... ok
+test mesh::tests::tangents_widen_the_stride_and_set_the_flag ... ok
+test mesh::tests::a_skin_sets_the_joint_weight_flags_and_widens_the_stride ... ok
+test heightfield::tests::no_layers_still_emits_v1_without_a_splat_block ... ok
+test mesh::tests::aabb_spans_the_vertices ... ok
+test heightfield::tests::v2_payload_layout_matches_the_reader ... ok
+test heightfield::tests::payload_layout_matches_the_reader ... ok
+test ground::tests::the_road_is_never_metal ... ok
+test bcn::tests::a_flat_block_survives_within_the_formats_own_precision ... ok
+test ground::tests::generation_is_deterministic ... ok
+test heightfield::tests::cook_is_byte_identical_run_to_run ... ok
+test mesh::tests::weights_renormalize_to_sum_one ... ok
+test manifest::tests::renders_sorted_tab_separated_lines_with_a_banner ... ok
+test sdf::tests::angle_at_a_right_angle_corner_is_a_quarter_turn ... ok
+test sdf::tests::sign_near_a_shared_vertex_uses_the_angle_weighted_pseudonormal_not_one_face_alone ... ok
+test sdf::tests::edge_pseudonormal_is_the_normalized_sum_of_its_two_adjacent_face_normals ... ok
+test sdf::tests::triangulate_convex_faces_fans_a_quad_into_two_triangles ... ok
+test fracture::tests::every_part_is_a_valid_convex_shape ... ok
+test skin::tests::cook_is_byte_stable_and_carries_the_skeleton_kind_and_schema ... ok
+test skin::tests::schema_hash_is_the_constant_the_engine_pins ... ok
+test fracture::tests::cook_is_byte_stable_and_carries_the_kind_and_schema ... ok
+test fracture::tests::volume_is_conserved ... ok
+test fracture::tests::bonds_are_canonical_and_the_graph_is_connected_from_anchors ... ok
+test ground::tests::seam_is_invisible ... ok
+test fracture::tests::a_different_seed_gives_a_different_partition ... ok
+test bcn::tests::the_error_bound_rejects_a_block_decoded_as_the_wrong_format ... ok
+test sdf::tests::a_thin_wall_triggers_the_thin_feature_warning ... ok
+test sdf::tests::a_single_open_triangle_reports_non_manifold_edges_and_still_returns_a_finite_answer ... ok
+test stl::tests::a_crease_keeps_its_seam_vertices_distinct ... ok
+test stl::tests::a_truncated_binary_stl_is_rejected ... ok
+test stl::tests::ascii_stl_is_rejected_clearly ... ok
+test tangent::tests::a_degenerate_index_buffer_is_rejected_cleanly ... ok
+test stl::tests::two_triangles_sharing_an_edge_dedup_to_four_vertices ... ok
+test terrain_bake::tests::every_byte_round_trips_through_the_transfer_functions ... ok
+test tangent::tests::tangents_are_finite_and_unit_length ... ok
+test tangent::tests::tangent_points_along_increasing_u_and_the_handedness_matches_gltf ... ok
+test terrain_layer::tests::schema_hash_is_the_constant_the_engine_pins ... ok
+test terrain_layer::tests::a_negative_or_non_finite_contrast_is_refused ... ok
+test ground::tests::the_maps_actually_vary ... ok
+test terrain_layer::tests::every_missing_key_is_refused_by_name ... ok
+test terrain_layer::tests::unknown_duplicate_and_unquoted_keys_are_refused ... ok
+test terrain_layer::tests::a_zero_or_malformed_material_id_is_refused ... ok
+test terrain_world::tests::a_root_grid_covers_a_world_that_is_not_a_power_of_two_square ... ok
+test terrain_world::tests::palette_dir_is_optional_quoted_and_given_once ... ok
+test terrain_world::tests::every_refusal_is_counted_and_explained ... ok
+test tangent::tests::generation_is_deterministic ... ok
+test terrain_world::tests::levels_one_is_the_m19_8a_world_and_needs_no_even_cell_count ... ok
+test terrain_world::tests::a_four_by_four_world_nests_exactly_up_to_a_single_root ... ok
+test terrain_bake::tests::the_layer_table_resolves_cooked_materials_and_terrain_layers ... ok
+test terrain_layer::tests::a_good_sidecar_parses_every_field ... ok
+test terrain_bake::tests::averages_are_taken_in_linear_light ... ok
+test terrain_layer::tests::a_non_finite_or_non_positive_uv_scale_is_refused ... ok
+test terrain_world::tests::spacing_doubles_bit_exactly_and_quantisation_is_shared ... ok
+test terrain_layer::tests::the_record_is_28_bytes_in_wire_order ... ok
+test terrain_world::tests::geometric_error_matches_a_brute_force_and_is_zero_for_a_plane ... ok
+test terrain_bake::tests::the_description_cook_reads_the_palette_directory_and_bakes ... ok
+test terrain_layer::tests::the_sidecar_name_must_carry_the_suffix ... ok
+test terrain_world::tests::the_description_is_strict ... ok
+test texture::tests::a_flat_colour_survives_downsampling_unchanged ... ok
+test texture::tests::gamma_correct_mip_of_an_srgb_checker_is_light_grey_not_dark ... ok
+test texture::tests::cook_is_byte_stable_and_carries_the_texture_kind ... ok
+test texture::tests::plain_mip_of_a_linear_checker_is_the_direct_average ... ok
+test texture::tests::mip_dimensions_halve_down_to_one_by_one ... ok
+test texture::tests::srgb_transfer_round_trips_every_byte ... ok
+test texture::tests::terrain_height_mips_are_a_plain_average_not_coverage_rescaled ... ok
+test texture::tests::terrain_pack_takes_rgb_from_albedo_and_a_from_height_exactly ... ok
+test texture::tests::terrain_pack_refuses_mismatched_sizes_and_non_opaque_albedo ... ok
+test terrain_world::tests::the_manifest_lists_every_level_with_ten_fields ... ok
+test virtual_geometry::tests::cook_wraps_as_virtual_geometry_rma1_and_hashes_payload ... ok
+test virtual_geometry::tests::from_mesh_is_deterministic_and_preserves_leaf_ranges ... ok
+test virtual_geometry::tests::from_mesh_rejects_malformed_ranges ... ok
+test virtual_geometry::tests::from_mesh_keeps_multiple_material_ranges_as_clusters ... ok
+test terrain_world::tests::min_max_bound_every_descendant_sample_and_are_tight ... ok
+test texture::tests::terrain_texture_cook_is_byte_stable ... ok
+test texture::tests::sixteen_bit_height_rounds_to_nearest ... ok
+test virtual_geometry::tests::from_mesh_never_crosses_material_boundaries_when_partitioning ... ok
+test virtual_geometry::tests::payload_has_the_cxx_header_and_table_sizes ... ok
+test virtual_geometry::tests::from_mesh_partitions_triangles_deterministically_with_local_bounds ... ok
+test bcn::tests::bc7_round_trips_a_gradient_within_a_bound ... ok
+test terrain_bake::tests::a_parent_over_a_tile_without_a_palette_gets_no_bake_and_an_unknown_layer_is_refused ... ok
+test terrain_bake::tests::shared_parent_edges_carry_identical_texels ... ok
+test texture::tests::mip_alpha_preserves_coverage_and_the_tolerance_would_have_caught_the_old_behaviour ... ok
+test virtual_geometry_dag::tests::tiny_and_degenerate_inputs_cook_to_a_valid_single_level ... ok
+test bcn::tests::compressed_size_is_the_promised_fraction_and_rounds_up_to_whole_blocks ... ok
+test terrain_bake::tests::the_bake_equals_a_brute_force_on_a_randomised_world ... ok
+test fracture::tests::the_configurations_that_used_to_produce_open_cells_now_cook_clean ... ok
+test sdf::tests::sign_is_negative_deep_inside_and_positive_well_outside_a_box ... ok
+test sdf::tests::destructible_part_preset_is_coarser_than_the_mesh_preset ... ok
+test sdf::tests::box_sdf_matches_analytic_distance_at_every_voxel_centre ... ok
+test heightfield::tests::apportionment_always_sums_to_255_and_keeps_normalized_texels ... ok
+test virtual_geometry_dag::tests::material_ranges_survive_every_level ... ok
+test virtual_geometry_dag::tests::dag_fixture_matches_the_committed_bytes ... ok
+test sdf::tests::cook_is_byte_stable ... ok
+test ground::tests::tilt_is_resolution_independent ... ok
+test fracture::tests::every_seed_in_a_sweep_produces_closed_cells ... ok
+test sdf::tests::sphere_sdf_matches_analytic_distance_at_every_voxel_centre ... ok
+test virtual_geometry_dag::tests::dag_has_many_levels_and_roughly_halves_triangles_per_level ... ok
+test fracture::tests::welding_costs_volume_but_not_much ... ok
+test virtual_geometry_dag::tests::every_replacement_edge_is_monotone ... ok
+test virtual_geometry_dag::tests::group_boundaries_are_bit_identical_across_every_level ... ok
+test virtual_geometry_dag::tests::dag_cook_is_byte_deterministic ... ok
+test virtual_geometry_dag::tests::every_selected_cut_is_complete_unique_and_watertight ... ok
+
+test result: ok. 124 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.17s
+
+     Running tests/cook_cache.rs (tools/target/debug/deps/cook_cache-ccabdbbdac1eabf2)
+
+running 3 tests
+test a_deleted_cooked_file_forces_a_recook_even_when_the_source_is_unchanged ... ok
+test unchanged_source_hits_cache_changed_source_recooks ... ok
+test a_cache_hit_reproduces_the_full_cook_manifest_for_sub_assets ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/cook_fixture.rs (tools/target/debug/deps/cook_fixture-3f333f421c64da90)
+
+running 23 tests
+test bc7_cooks_to_a_file_whose_levels_round_up_to_whole_blocks ... ok
+test committed_checker_fixture_carries_the_gamma_correct_mip ... ok
+test bake_world_cooks_to_the_committed_fixture_bytes ... ok
+test checker_png_cooks_to_the_committed_texture_fixture_bytes ... ok
+test wall_fractures_to_the_committed_fixture_bytes ... ok
+test terrain_png_cooks_to_the_committed_heightfield_fixture_bytes ... ok
+test terrain_splat_png_cooks_to_the_committed_v2_heightfield_fixture_bytes ... ok
+test terrain_layer_sidecar_cooks_to_the_committed_fixture_bytes ... ok
+test lod_world_cooks_to_the_committed_fixture_bytes ... ok
+test missing_normals_are_computed_from_geometry ... ok
+test quad_import_flattens_the_node_translation ... ok
+test quad_cooks_to_the_committed_fixture_bytes ... ok
+test material_textures_dedup_by_image_and_color_space ... ok
+test cook_is_byte_stable ... ok
+test material_import_maps_the_gltf_factors ... ok
+test skinned_skeleton_and_clip_cook_to_the_committed_fixture_bytes ... ok
+test two_sources_sharing_a_stem_are_refused_rather_than_silently_overwriting ... ok
+test skinned_import_reorders_joints_parent_first_and_maps_clip_targets ... ok
+test a_normal_mapped_gltf_cooks_tangents_and_a_plain_one_does_not ... ok
+test cook_gltf_writes_every_asset_deterministically ... ok
+test splat_world_cooks_to_the_committed_fixture_bytes ... ok
+test cube_sdf_cooks_to_the_committed_fixture_bytes ... ok
+test cube_sdf_cook_is_byte_stable ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.11s
+
+     Running unittests src/main.rs (tools/target/debug/deps/editor-6b1eee1250adbf1d)
+
+running 15 tests
+test gizmo::tests::closest_t_on_axis_known_cases_and_degeneracy ... ok
+test gizmo::tests::hover_finds_the_handle_under_the_cursor ... ok
+test gizmo::tests::project_then_unproject_round_trips ... ok
+test gizmo::tests::degenerate_grabs_refuse_and_degenerate_updates_hold ... ok
+test gizmo::tests::project_point_rejects_points_behind_the_eye ... ok
+test gizmo::tests::ray_plane_intersect_hits_misses_and_degenerates ... ok
+test gizmo::tests::rotate_drag_snaps_to_the_angular_grid ... ok
+test gizmo::tests::rotate_drag_turns_about_the_axis_by_the_swept_angle ... ok
+test gizmo::tests::scale_drag_multiplies_the_grabbed_axis ... ok
+test gizmo::tests::signed_angle_is_quadrant_correct ... ok
+test gizmo::tests::snapping_quantizes_symmetrically ... ok
+test gizmo::tests::tan_half_fov_recovers_the_lens_fov ... ok
+test gizmo::tests::translate_drag_moves_by_the_expected_delta_and_keeps_the_inverse_bit_exact ... ok
+test gizmo::tests::translate_drag_snaps_to_the_linear_grid ... ok
+test gizmo::tests::trs_blob_round_trips_bit_exact ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
+     Running unittests src/lib.rs (tools/target/debug/deps/rime_auth-06466baad5873c39)
+
+running 50 tests
+test ceremony::tests::a_challenge_id_never_prints_itself ... ok
+test flow::pair::tests::announcement_times_are_utc_calendar_dates ... ok
+test codes::tests::expired_challenge_rejects_even_the_correct_code ... ok
+test ceremony::tests::a_malformed_relying_party_is_a_configuration_error ... ok
+test mail::tests::header_injection_in_subject_or_recipient_is_refused_before_connecting ... ok
+test codes::tests::mint_then_verify_accepts ... ok
+test codes::tests::verify_rejects_a_wrong_code_and_decrements_attempts ... ok
+test codes::tests::a_code_minted_for_one_email_does_not_verify_for_another ... ok
+test mail::tests::a_relay_that_rejects_rcpt_to_yields_a_rejected_error_naming_the_step ... ok
+test ceremony::tests::authenticating_an_account_with_no_credential_is_refused ... ok
+test codes::tests::fifth_wrong_attempt_exhausts_and_a_correct_code_after_it_still_fails ... ok
+test tests::a_session_authenticates_until_it_expires_or_is_revoked ... ok
+test tests::a_store_open_elsewhere_is_refused_until_it_closes ... ok
+test tests::a_tokens_debug_output_is_redacted ... ok
+test tests::a_value_with_a_tab_is_refused_rather_than_mangled ... ok
+test tests::an_account_cannot_be_created_twice_for_one_mailbox ... ok
+test tests::crc32_matches_the_known_check_value ... ok
+test tests::an_unknown_record_kind_is_corruption_rather_than_something_to_skip ... ok
+test tests::a_torn_final_record_is_discarded_and_a_damaged_middle_one_is_refused ... ok
+test tests::an_invitation_is_single_use_and_survives_a_reopen ... ok
+test flow::tests::a_transaction_expires ... ok
+test flow::tests::the_passkey_step_is_unreachable_without_the_code ... ok
+test flow::tests::a_wrong_code_is_refused_and_the_fifth_one_ends_the_transaction ... ok
+test flow::pair::tests::the_sixty_fifth_live_pairing_is_refused ... ok
+test tests::credentials_are_kept_as_opaque_blobs_and_revocation_is_recorded ... ok
+test tests::disabling_an_account_stops_its_live_sessions_immediately ... ok
+test tests::every_invitation_failure_looks_the_same_to_the_caller_and_different_in_the_counters ... ok
+test tests::the_store_never_holds_a_token_in_the_clear ... ok
+test tests::revoking_all_sessions_leaves_none_working ... ok
+test ceremony::tests::the_pending_map_is_bounded ... ok
+test ceremony::tests::an_expired_ceremony_is_refused_even_with_a_valid_response ... ok
+test ceremony::tests::a_challenge_finished_from_another_browser_is_refused ... ok
+test ceremony::tests::a_ceremony_can_be_finished_exactly_once ... ok
+test flow::tests::a_registration_goes_invitation_then_code_then_passkey ... ok
+test flow::tests::the_account_is_created_with_the_id_the_authenticator_signed ... ok
+test flow::tests::an_invitation_is_spent_only_by_a_completed_registration ... ok
+test flow::tests::recovery_refuses_each_proof_on_its_own ... ok
+test ceremony::tests::an_assertion_does_not_satisfy_a_different_ceremony ... ok
+test ceremony::tests::a_registered_passkey_can_then_authenticate ... ok
+test flow::tests::a_login_mails_nothing ... ok
+test flow::pair::tests::five_wrong_codes_kill_the_pairing ... ok
+test flow::pair::tests::a_login_challenge_cannot_approve_a_pairing ... ok
+test flow::tests::a_completed_recovery_revokes_the_old_passkeys_sessions_and_secret ... ok
+test flow::pair::tests::another_browser_gets_the_refusal_an_unknown_id_gets ... ok
+test flow::pair::tests::the_desktop_can_refuse_the_account_it_is_shown ... ok
+test flow::pair::tests::only_the_first_approval_wins_and_none_after_expiry ... ok
+test flow::pair::tests::a_pairing_signs_in_exactly_one_desktop_and_mails_once ... ok
+test flow::pair::tests::two_pairings_do_not_cross ... ok
+test mail::tests::smtp_dialogue_is_exactly_the_expected_sequence ... ok
+test codes::tests::ten_thousand_codes_are_eight_digits_and_every_digit_appears_in_every_position ... ok
+
+test result: ok. 50 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.09s
+
+     Running unittests src/main.rs (tools/target/debug/deps/rime-f971238ddbb2373b)
+
+running 1 test
+test tests::banner_has_name_and_version ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (tools/target/debug/deps/rime_ffi-27e09411873b1dc1)
+
+running 4 tests
+test tests::headless_app_create_tick_destroy ... ignored, RIME_CAPI_DIR unset: no librime_capi
+test tests::rejects_a_corrupt_file_with_a_message ... ignored, RIME_CAPI_DIR unset: no librime_capi
+test tests::validates_the_golden_mesh_fixture ... ignored, RIME_CAPI_DIR unset: no librime_capi
+test tests::version_matches_workspace ... ignored, RIME_CAPI_DIR unset: no librime_capi
+
+test result: ok. 0 passed; 0 failed; 4 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (tools/target/debug/deps/rime_gateway-274bb5e6379145ad)
+
+running 143 tests
+test admission::tests::the_default_policy_is_the_measured_starbase_tier ... ok
+test admission::tests::the_play_cap_is_separate_from_the_total ... ok
+test admission::tests::the_slot_is_taken_at_admission_not_at_attach ... ok
+test admission::tests::an_unknown_id_cannot_be_attached_or_released ... ok
+test admission::tests::the_total_cap_refuses_and_counts ... ok
+test admission::tests::releasing_a_play_session_frees_its_slot ... ok
+test admission::tests::session_ids_are_random_and_not_sequential ... ok
+test http::tests::a_204_carries_neither_content_type_nor_content_length ... ok
+test http::tests::a_closed_connection_is_not_an_error_worth_logging ... ok
+test http::tests::a_body_is_read_to_its_declared_length_and_no_further ... ok
+test http::tests::a_connection_that_closes_inside_the_headers_is_a_truncated_request ... ok
+test api::tests::a_client_cannot_name_a_program_only_a_catalogue_entry ... ok
+test api::tests::wrong_methods_answer_405_with_allow ... ok
+test api::tests::a_malformed_session_id_is_a_400_and_a_well_formed_unknown_one_is_a_404 ... ok
+test api::tests::a_surface_the_entry_does_not_offer_is_refused ... ok
+test api::tests::a_host_that_requires_an_account_refuses_every_anonymous_route ... ok
+test api::tests::unknown_routes_and_trailing_slashes_do_not_produce_two_spellings ... ok
+test api::tests::an_unknown_surface_name_is_refused_rather_than_defaulted ... ok
+test http::tests::a_duplicate_key_is_refused_rather_than_resolved ... ok
+test http::tests::a_flat_object_round_trips_through_its_own_escaping ... ok
+test http::tests::a_plain_get_parses ... ok
+test http::tests::a_query_string_is_split_off_the_path ... ok
+test http::tests::a_response_carries_an_exact_content_length ... ok
+test http::tests::a_short_body_is_a_truncated_request_not_a_short_one ... ok
+test http::tests::a_space_before_the_header_colon_is_refused ... ok
+test http::tests::an_over_large_declared_body_is_refused_before_it_is_read ... ok
+test http::tests::an_over_long_request_line_is_refused_not_truncated ... ok
+test http::tests::chunked_is_refused_and_wins_over_content_length ... ok
+test http::tests::anything_richer_than_a_flat_string_object_is_refused ... ok
+test http::tests::header_names_are_matched_case_insensitively ... ok
+test http::tests::json_strings_escape_quotes_backslashes_and_control_bytes ... ok
+test http::tests::malformed_request_lines_and_versions_are_distinguished ... ok
+test http::tests::the_unspecified_address_is_refused_and_a_real_one_is_not ... ok
+test http::tests::one_enormous_header_is_refused_by_the_byte_budget ... ok
+test identity::tests::a_cookie_is_matched_by_its_whole_name ... ok
+test http::tests::many_small_headers_are_refused_by_count_before_the_byte_budget ... ok
+test identity::tests::a_missing_or_malformed_cookie_header_yields_nothing ... ok
+test identity::tests::an_account_reads_the_same_here_as_in_the_store ... ok
+test limits::tests::a_burst_is_allowed_and_then_it_is_not ... ok
+test limits::tests::a_clock_that_goes_backwards_does_not_mint_tokens ... ok
+test limits::tests::a_partial_refill_is_carried_rather_than_discarded ... ok
+test limits::tests::a_zero_rate_refuses_everything_rather_than_dividing_by_zero ... ok
+test limits::tests::keys_do_not_share_a_budget ... ok
+test limits::tests::tokens_come_back_at_the_stated_rate_and_no_faster ... ok
+test media::tests::a_pool_hands_out_each_port_once_until_it_is_released ... ok
+test media::tests::a_pool_refuses_an_empty_or_oversized_range ... ok
+test media::tests::a_pool_refuses_the_unspecified_address ... ok
+test media::tests::a_public_address_is_returned_unchanged ... ok
+test media::tests::an_exhausted_pool_returns_none_and_a_dropped_lease_frees_its_port ... ok
+test proxy_v2::tests::a_bad_signature_is_refused ... ok
+test api::tests::a_post_without_the_json_media_type_is_refused ... ok
+test proxy_v2::tests::a_blackstar_v4_header_parses_and_leaves_the_tls_bytes_unread ... ok
+test proxy_v2::tests::a_length_too_short_for_the_family_is_refused ... ok
+test api::tests::a_malformed_request_is_answered_from_its_parse_error ... ok
+test api::tests::the_catalogue_never_serialises_a_program_path_or_argv ... ok
+test api::tests::serve_connection_answers_over_a_transport ... ok
+test api::tests::creating_a_session_assigns_the_surface_and_returns_a_capability ... ok
+test api::tests::a_failed_launch_gives_the_slot_back ... ok
+test api::tests::the_play_cap_is_enforced_and_is_a_503_not_a_400 ... ok
+test api::tests::ice_is_owner_only_and_empty_by_default ... ok
+test api::tests::an_account_is_capped_before_the_host_is ... ok
+test api::tests::signalling_refuses_a_stranger_before_it_looks_at_anything_else ... ok
+test api::tests::a_second_account_can_neither_see_nor_touch_the_first_ones_session ... ok
+test api::tests::the_total_cap_is_enforced_after_the_play_cap ... ok
+test api::tests::a_session_can_be_fetched_and_deleted_and_then_is_gone ... ok
+test api::tests::ice_mints_a_turn_credential_when_configured ... ok
+test api::tests::the_per_account_cap_does_not_shut_down_an_anonymous_host ... ok
+test api::tests::the_offer_without_media_configured_is_503 ... ok
+test api::tests::the_listing_is_ordered_so_two_identical_requests_agree ... ok
+test proxy_v2::tests::a_v6_header_parses ... ok
+test proxy_v2::tests::other_commands_and_families_are_refused ... ok
+test proxy_v2::tests::a_truncated_header_is_refused ... ok
+test proxy_v2::tests::a_local_command_has_no_source ... ok
+test proxy_v2::tests::a_mixed_pair_written_as_v6_comes_back_as_v4 ... ok
+test proxy_v2::tests::an_oversized_length_is_refused ... ok
+test api::tests::delete_stops_the_relay ... ok
+test api::tests::the_offer_route_requires_sdp ... ok
+test api::tests::a_second_offer_is_409 ... ok
+test api::tests::a_strangers_offer_is_404 ... ok
+test limits::tests::the_map_is_bounded_and_refuses_rather_than_growing ... ok
+test serve::tests::a_catalogue_entry_missing_its_program_is_refused ... ok
+test serve::tests::a_loopback_request_without_forwarded_for_is_400 ... ok
+test serve::tests::a_wildcard_bind_is_refused_before_binding ... ok
+test proxy_v2::tests::tlvs_after_the_address_block_are_skipped_not_interpreted ... ok
+test serve::tests::a_request_with_no_bytes_writes_nothing ... ok
+test serve::tests::a_session_path_reaches_the_session_router ... ok
+test media::tests::the_public_address_refuses_private_and_loopback_answers ... ok
+test serve::tests::an_account_route_without_accounts_configured_is_503 ... ok
+test serve::tests::forwarded_for_is_ignored_from_a_non_loopback_peer ... ok
+test serve::tests::an_unknown_catalogue_key_is_refused ... ok
+test serve::tests::forwarded_for_is_ignored_without_the_flag ... ok
+test serve::tests::the_catalogue_config_round_trips_two_entries ... ok
+test serve::tests::the_last_forwarded_entry_is_the_client ... ok
+test tests::a_blocked_message_does_not_desynchronise_the_frame_reader ... ok
+test tests::a_play_session_drops_the_editor_band_and_counts_it ... ok
+test tests::a_play_session_refuses_to_send_the_editor_band ... ok
+test supervisor::tests::a_missing_program_is_a_spawn_error ... ok
+test tests::an_edit_session_carries_the_editor_band ... ok
+test tests::the_editor_band_is_exactly_0x0200_through_0x02ff ... ok
+test relay::tests::a_disconnected_transport_stops_the_relay ... ok
+test relay::tests::engine_eof_stops_the_relay_and_returns_the_port ... ok
+test api::tests::a_relay_that_stopped_on_its_own_frees_its_slot_on_the_next_request ... ok
+test supervisor::tests::a_child_that_dies_before_binding_is_reported_as_such ... ok
+test serve::tests::a_connection_over_the_cap_is_refused_at_once ... ok
+test transport::tests::the_unspecified_address_is_refused_for_the_media_socket_too ... ok
+test serve::tests::an_idle_connection_does_not_stall_the_next_one ... ok
+test relay::tests::no_common_codec_stops_the_relay ... ok
+test turn::tests::a_short_secret_is_refused ... ok
+test turn::tests::base64_pads_every_remainder ... ok
+test turn::tests::debug_never_prints_the_secret ... ok
+test turn::tests::mint_matches_a_known_vector ... ok
+test turn::tests::the_ice_json_is_the_shape_the_page_passes_to_rtcpeerconnection ... ok
+test supervisor::tests::a_stale_socket_file_does_not_block_a_new_session ... ok
+test supervisor::tests::a_dropped_handle_actually_reaps_the_child ... ok
+test transport::tests::a_malformed_offer_is_refused_before_a_socket_is_kept ... ok
+test transport::tests::the_loop_ends_when_its_owner_is_gone_even_without_close ... ok
+test transport::tests::the_answer_selects_only_av1_for_video ... ok
+test transport::tests::video_before_the_track_is_writable_is_dropped_and_counted ... ok
+test transport::tests::a_peer_that_cannot_reach_the_host_candidate_connects_through_the_public_address ... ok
+test transport::tests::with_a_public_address_set_the_private_path_still_connects ... ok
+test api::tests::an_exhausted_port_pool_and_an_unnegotiable_offer_are_told_apart ... ok
+test relay::tests::a_bye_in_either_direction_is_forwarded_and_then_stops_the_relay ... ok
+test relay::tests::an_av1_keyframe_from_the_engine_becomes_send_video ... ok
+test relay::tests::a_keyframe_request_from_the_browser_side_reaches_the_engine ... ok
+test relay::tests::an_unexpected_message_from_the_engine_is_counted_not_forwarded ... ok
+test relay::tests::a_message_the_browser_may_not_send_never_reaches_the_engine ... ok
+test relay::tests::input_from_the_browser_reaches_the_engine ... ok
+test relay::tests::stop_is_idempotent ... ok
+test transport::tests::an_av1_keyframe_reaches_the_peer_through_a_negotiated_video_track ... ok
+test transport::tests::a_real_webrtc_connection_carries_a_datachannel_message_each_way ... ok
+test transport::tests::a_pli_from_the_peer_becomes_a_keyframe_request_event ... ok
+test relay::tests::a_real_offer_carries_av1_to_a_str0m_peer ... ok
+test relay::tests::capabilities_are_rewritten_to_av1_only_without_lan_lossless ... ok
+test relay::tests::a_non_av1_frame_is_refused_without_lan_lossless ... ok
+test relay::tests::a_busy_video_queue_drops_deltas_until_a_keyframe_and_asks_once ... ok
+test transport::tests::an_offer_without_video_still_carries_the_datachannel_and_counts_video_drops ... ok
+test relay::tests::the_editor_band_is_refused_on_a_play_surface ... ok
+test supervisor::tests::a_child_that_never_binds_times_out ... ok
+test transport::tests::queued_sends_are_bounded_and_the_drops_are_counted ... ok
+test transport::tests::delta_frames_before_the_first_keyframe_are_dropped_and_counted ... ok
+test transport::tests::the_track_becoming_writable_asks_for_a_keyframe_once ... ok
+test serve::tests::a_trickled_request_is_cut_off_at_its_deadline_not_per_read ... ok
+test relay::tests::a_stalled_control_path_stops_the_relay_rather_than_dropping_the_message ... ok
+
+test result: ok. 143 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.03s
+
+     Running unittests src/bin/rime-gateway.rs (tools/target/debug/deps/rime_gateway-0880b2ad4f11d5b9)
+
+running 3 tests
+test tests::a_bad_port_range_or_bind_address_is_a_startup_error ... ok
+test tests::turn_needs_both_of_its_flags ... ok
+test tests::the_media_flags_come_as_a_complete_set_or_not_at_all ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src/bin/rime-turn-proxy.rs (tools/target/debug/deps/rime_turn_proxy-0bfab975df444aa3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/turn_proxy.rs (tools/target/debug/deps/turn_proxy-8ad61a4fc9b496e4)
+
+running 5 tests
+test a_peer_that_is_not_trusted_is_closed_unanswered_and_never_reaches_upstream ... ok
+test a_wildcard_listen_address_is_refused_at_startup ... ok
+test a_trusted_peer_without_a_header_is_refused_and_counted ... ok
+test a_trusted_peer_gets_the_payload_back_with_the_header_stripped ... ok
+test connections_beyond_the_limit_are_refused_not_queued ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
+
+     Running unittests src/lib.rs (tools/target/debug/deps/rime_protocol-a4f4882ce613baf9)
+
+running 1 test
+test thermal::tests::bounded_roundtrip_and_malformed_packets ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (tools/target/debug/deps/conformance-2bfed8692f36e000)
+
+running 25 tests
+test a_reserved_frame_flag_bit_is_refused ... ok
+test an_av1_delta_frame_carries_a_clear_keyframe_flag_byte_exact ... ok
+test asset_list_decodes_and_re_encodes_byte_exact ... ok
+test entity_ref_carries_the_whole_u64_id ... ok
+test edit_result_decodes_and_re_encodes_byte_exact ... ok
+test component_ref_decodes_and_re_encodes_byte_exact ... ok
+test handshake_bytes_match_the_golden ... ok
+test input_event_decodes_and_re_encodes_byte_exact ... ok
+test frame_message_decodes_and_re_encodes_byte_exact ... ok
+test gizmo_state_decodes_and_re_encodes_byte_exact ... ok
+test message_type_and_editor_codes_are_stable ... ok
+test lz4_frame_decodes_to_the_pixels_cpp_compressed ... ok
+test pick_result_decodes_and_re_encodes_byte_exact ... ok
+test play_state_decodes_and_re_encodes_byte_exact ... ok
+test pick_request_decodes_and_re_encodes_byte_exact ... ok
+test save_result_round_trips_and_a_refusal_stays_a_refusal ... ok
+test save_scene_round_trips_including_the_empty_path ... ok
+test connection_handshakes_and_exchanges_a_message ... ok
+test scene_load_report_decodes_and_re_encodes_byte_exact ... ok
+test schema_decodes_field_layout_and_re_encodes_byte_exact ... ok
+test set_component_decodes_and_re_encodes_byte_exact ... ok
+test snapshot_components_decode_to_typed_values_and_re_encode_exact ... ok
+test snapshot_decodes_structure_and_re_encodes_byte_exact ... ok
+test spawn_entity_decodes_and_re_encodes_byte_exact ... ok
+test viewport_camera_decodes_and_re_encodes_byte_exact ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests asset_pipeline
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rime_auth
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rime_ffi
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rime_gateway
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rime_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

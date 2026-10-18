@@ -458,6 +458,7 @@ int serve_viewport(std::string_view socket_path,
     // still reference mesh buffers, and its destructor drains that first).
     render::MeshRegistry meshes(*app.device());
     render::MaterialRegistry materials;
+    fluids_render::PhaseDetail phase_detail(*app.device());
     render::SceneRenderer renderer(*app.device(), meshes, materials);
     // Size the renderer's uniform ring to this backend's actual frame depth rather than leaving it
     // on the safe default. Same rule Application applies to its own per-frame command buffers.
@@ -631,7 +632,7 @@ int serve_viewport(std::string_view socket_path,
             effects.reconcile(ctx.world);
         if (play_session.phase() != editorhost::PlayPhase::Edit)
             thermal.reconcile(ctx.world);
-        const auto phase_surfaces = fluids_render::phase_surfaces(ctx.world, thermal);
+        const auto phase_surfaces = phase_detail.surfaces(ctx.world, thermal);
         (void)renderer.set_surface_appearances(phase_surfaces.span());
         effect_particles.clear();
         for (const auto& p : effects.field().particles()) {

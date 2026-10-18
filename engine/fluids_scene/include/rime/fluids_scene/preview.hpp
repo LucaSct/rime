@@ -35,6 +35,10 @@ public:
 
     [[nodiscard]] std::uint64_t accepted_host_tick() const noexcept { return accepted_host_tick_; }
 
+    // Cosmetic clock only: sum of accepted requested durations in this graph revision. It is
+    // NOT an energy/transport receipt. Rebuild/Stop reset it; Pause and refusal leave it unchanged.
+    [[nodiscard]] double presentation_seconds() const noexcept { return presentation_seconds_; }
+
     [[nodiscard]] ecs::Entity problem_entity() const noexcept { return problem_; }
 
     [[nodiscard]] const PreviewStats& stats() const noexcept { return stats_; }
@@ -77,6 +81,7 @@ private:
     bool has_description_ = false, has_tick_ = false;
     std::uint64_t revision_ = 0, last_host_tick_ = 0, accepted_host_tick_ = 0;
     fluids::ThermalFieldResult last_result_{};
+    double presentation_seconds_ = 0;
     PreviewStats stats_{};
 };
 } // namespace rime::fluids_scene
