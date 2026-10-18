@@ -386,11 +386,19 @@ Entries are grouped roughly by area and kept short on purpose.
 
 ## Physics & destruction
 
-- **Enthalpy / latent heat (phase-change plan).** The planned water/ice reference stores an
+- **Enthalpy / latent heat (phase-change reference).** The water/ice CPU reference stores an
   energy quantity and derives temperature and liquid fraction from it. Latent heat is the energy
   absorbed or released while material changes phase; temperature alone cannot describe how much
   of a mixed water/ice sample has melted. See the
   [M-FL2 brick sequence](design/environment-effects-milestones.md#environment-and-editor-sequence-2026-10-18).
+- **Liquid mass fraction.** The liquid's mass divided by the total liquid-plus-solid mass.
+  It ranges from zero (all solid) to one (all liquid). It differs from a liquid volume fraction
+  when the phases have different densities; the thermal reference does not derive ice thickness
+  or displaced volume from this fraction alone.
+- **Error-free transformation.** An arithmetic algorithm that represents an exact operation on
+  floating-point inputs as multiple floating-point outputs. The thermal reference's ordered
+  FastTwoSum returns a rounded sum and the part that rounded away, rather than losing that part
+  in a claimed exact heat ledger. It requires the documented rounding/underflow mode.
 - **Heightfield.** Terrain stored as a regular grid of heights over the ground plane (one height
   per grid point, each cell split into two triangles along a fixed diagonal). Cheaper and more
   structured than a triangle mesh — "which triangles are under this point" is a division, not a
