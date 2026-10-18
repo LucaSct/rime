@@ -995,8 +995,8 @@ const SAVE: &str = "Save\tCtrl+S";
 const UNDO: &str = "Undo\tCtrl+Z";
 const REDO: &str = "Redo\tCtrl+Y";
 const ROW_CAMERA: &str = "0  Camera";
-const ROW_LIGHT: &str = "1  PointLight";
-const ROW_CRATE: &str = "2  MeshAsset";
+const ROW_LIGHT: &str = "1  Point light";
+const ROW_CRATE: &str = "2  Mesh asset";
 
 fn set_of(payload: &[u8]) -> SetComponent {
     SetComponent::decode(payload).expect("SetComponent")
@@ -1475,7 +1475,7 @@ fn two_u64_fields_in_one_component_round_trip_independently() {
     });
     rig.host.shared.lock().unwrap().schema = schema;
     rig.settle();
-    rig.click(ROW_CRATE);
+    rig.click("2  IdPair");
 
     // Each value is committed with Enter, the way a person finishes a field, before the next is typed.
     retype_field(&mut rig, "1", &A.to_string());
@@ -2201,7 +2201,7 @@ fn place_spawns_an_entity_referencing_the_mesh() {
         spawn.components,
         [(H_MESH_ASSET, MESH_BARREL_ID.to_le_bytes().to_vec())]
     );
-    assert!(rig.has("3  MeshAsset"));
+    assert!(rig.has("3  Mesh asset"));
     assert!(rig.has("4 entities"));
     // Placed at the engine's default transform, and NOT selected: the user has to find the new row
     // (or click the mesh in the viewport) before they can move it.
@@ -2242,7 +2242,7 @@ fn place_is_on_screen_in_the_default_panel_for_a_real_source_path() {
         .get_by_role_and_label(Role::Button, "place")
         .click();
     rig.settle();
-    assert!(rig.has("3  MeshAsset"));
+    assert!(rig.has("3  Mesh asset"));
 }
 
 #[test]
@@ -2734,6 +2734,20 @@ fn wasd_flies_the_camera_while_the_right_button_is_held() {
 }
 
 #[test]
+fn movement_continues_after_right_dragging_to_look() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    right_button_down(&mut rig, (400.0, 270.0));
+    rig.pointer_move((500.0, 300.0));
+    let before = rig.host.translation(CAMERA);
+    rig.hold_key(egui::Key::W);
+    let after = rig.host.translation(CAMERA);
+    assert_ne!(after, before, "W moves during the same held right-drag");
+    right_button_up(&mut rig, (500.0, 300.0));
+    assert!(!rig.app().stack.can_undo());
+}
+
+#[test]
 fn wasd_over_the_viewport_does_not_fly_with_the_right_button_up() {
     // Without the fly button, S is nothing to the viewport.
     let mut rig = Rig::new();
@@ -2839,4 +2853,114 @@ fn thermal_preview_is_selected_cell_readonly_state() {
     assert!(rig.has_text("Step refused — showing last committed state"));
     assert!(rig.has_text("Heat source exceeds the material temperature range"));
     assert!(rig.host.commands().is_empty());
+}
+
+#[test]
+fn wheel_dollies_camera_without_an_undo_edit_or_object_selection() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.pointer_move((480.0, 270.0));
+    let before = rig.host.translation(CAMERA);
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::NONE,
+        });
+    rig.settle();
+    assert!(rig.host.translation(CAMERA)[2] < before[2]);
+    assert_eq!(rig.app().selected, None);
+    assert!(!rig.app().stack.can_undo());
+    // The same wheel over the Outliner must not move the view.
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(egui::pos2(20.0, 150.0)));
+    rig.settle();
+    let before = rig.host.translation(CAMERA);
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::NONE,
+        });
+    rig.settle();
+    assert_eq!(rig.host.translation(CAMERA), before);
+}
+
+#[test]
+fn effects_filter_can_be_opened_and_reset_without_despawning_anything() {
+    let mut rig = Rig::new();
+    let entities = rig.host.world.len();
+    rig.click("Filter");
+    rig.click("Effects (smoke / fire)");
+    rig.key(egui::Key::Escape);
+    assert!(!rig.has(ROW_CRATE));
+    assert!(rig.has("Effects filter active"));
+    assert_eq!(rig.host.world.len(), entities);
+    rig.click("Filter");
+    rig.click("All entities");
+    rig.key(egui::Key::Escape);
+    assert!(rig.has(ROW_CRATE));
+}
+
+#[test]
+fn a_bodyless_emitter_remains_selectable_and_movable_through_the_effects_filter() {
+    let mut rig = Rig::new();
+    const H_SMOKE: u64 = 0x9001;
+    {
+        let mut shared = rig.host.shared.lock().unwrap();
+        shared.schema.types.push(SchemaEntry {
+            type_hash: H_SMOKE,
+            name: "rime::vfx_scene::SmokeEmitter".into(),
+            is_component: true,
+            fields: vec![field("enabled", FieldKind::Bool, 0)],
+        });
+    }
+    // A transform + source description, no MeshRef or collider to ray-pick.
+    rig.host.world.push(SnapshotEntity {
+        editor_id: 9001,
+        index: 9,
+        generation: 0,
+        components: vec![comp(H_LOCAL, trs_at(0.0, 0.0, 0.0)), comp(H_SMOKE, vec![1])],
+    });
+    rig.host.publish_snapshot();
+    rig.settle();
+    rig.click("Filter");
+    rig.click("Effects (smoke / fire)");
+    rig.key(egui::Key::Escape);
+    assert!(rig.has("3  Smoke emitter"));
+    assert!(!rig.has(ROW_CRATE));
+    rig.click("3  Smoke emitter");
+    assert_eq!(rig.app().selected, Some(9001));
+    // The transform's first numeric field is translation.x; no visual body is required.
+    rig.type_into_number_field(0, "2.5");
+    assert_eq!(rig.host.translation(9001)[0], 2.5);
+    rig.chord(CTRL, egui::Key::Z);
+    assert_eq!(rig.host.translation(9001)[0], 0.0);
+}
+
+#[test]
+fn outliner_tiles_keep_selection_filters_and_clickable_role_icons() {
+    let mut rig = Rig::new();
+    rig.click(ROW_LIGHT);
+    rig.host.log.clear();
+    rig.click("Display");
+    rig.click("Tiles");
+    rig.key(egui::Key::Escape);
+    assert_eq!(rig.app().selected, Some(LIGHT));
+    rig.click("Select 2  Mesh asset"); // the picture itself is an accessible button
+    assert_eq!(rig.app().selected, Some(CRATE));
+    assert!(
+        rig.host.commands().is_empty(),
+        "display/selection changes are not world edits"
+    );
+    rig.click("Display");
+    rig.click("List");
+    rig.key(egui::Key::Escape);
+    assert!(rig.toggled(ROW_CRATE));
 }

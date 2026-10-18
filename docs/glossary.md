@@ -1020,3 +1020,12 @@ See also **Determinism / replication** under *Physics & destruction*.
   to an entity's draws without changing its authored material or shared registry.
   Empty input restores the normal appearance. Frost Yard uses this to display
   accepted thermal phase on a fixed mesh; it is not a geometric ice model.
+
+- **Camera dolly.** Moving a camera closer/farther in world space. Unlike image
+  magnification, it renders geometry from a new viewpoint; unlike lens zoom, it
+  changes the camera position.
+- **Phase presentation clock.** A cosmetic sum of accepted thermal preview step
+  durations within one graph revision. Pause/refusal holds it; rebuild/Stop reset
+  it. It is not a heat/energy receipt.
+- **Prefab.** A reusable authored object or object hierarchy with configured
+  components. An engine module is code, not automatically a prefab/library item.

@@ -11,7 +11,7 @@
 //!   * **Inspector** — the selected entity's components as **editable, reflection-typed fields**
 //!     (m9.4): each field decoded from the schema, edited with a drag-number / checkbox, and pushed
 //!     back as a `SetComponent`. Add/remove a component; undo/redo edits.
-//!   * **Assets** — a placeholder (the manifest-driven browser is m9.5).
+//!   * **Assets** — cooked manifest assets; scene effects are components in the Inspector.
 //!
 //! Everything below the window is the same `rime-protocol` wire the headless `--smoke` exercises, so
 //! the plumbing is CI-proven; only the on-screen result is Mac-eyeballed (a windowed UI is not
@@ -37,6 +37,9 @@ use crate::gizmo::{self, DragSession, Snapping};
 #[cfg(test)]
 mod click_tests;
 mod commands;
+mod outliner;
+#[cfg(test)]
+use outliner::label as outliner_label;
 mod session;
 
 use commands::{Awaiting, Command, CommandStack, Edit, EntityId, PendingStep};
@@ -317,6 +320,7 @@ struct EditorApp {
     active_edit: Option<ActiveEdit>,
     // Asset browser (m9.5) filter state.
     asset_search: String,
+    outliner_options: outliner::Options,
     asset_kind_filter: Option<AssetKind>,
     // Gizmo interaction state (m9.6b). `gizmo_mode` None = hidden. `gizmo_hover` is the axis the
     // cursor is over (drives the engine highlight); `gizmo_drag` is the live drag, if any;
@@ -392,6 +396,7 @@ impl EditorApp {
             stack: CommandStack::default(),
             active_edit: None,
             asset_search: String::new(),
+            outliner_options: outliner::Options::default(),
             asset_kind_filter: None,
             gizmo_mode: None,
             gizmo_hover: None,
@@ -1209,6 +1214,7 @@ impl eframe::App for EditorApp {
             assets: &assets,
             mesh_asset_hash,
             asset_search: &mut self.asset_search,
+            outliner_options: &mut self.outliner_options,
             asset_kind_filter: &mut self.asset_kind_filter,
             selected: &mut self.selected,
             out_tx: &self.out_tx,
@@ -1287,6 +1293,7 @@ struct EditorTabs<'a> {
     assets: &'a [AssetEntry],
     mesh_asset_hash: Option<u64>,
     asset_search: &'a mut String,
+    outliner_options: &'a mut outliner::Options,
     asset_kind_filter: &'a mut Option<AssetKind>,
     selected: &'a mut Option<EntityId>,
     out_tx: &'a Sender<Outbound>,
@@ -1352,9 +1359,14 @@ impl TabViewer for EditorTabs<'_> {
                     },
                 );
             }
-            Tab::Outliner => {
-                outliner_ui(ui, self.schema, self.entities, self.selected, self.actions)
-            }
+            Tab::Outliner => outliner::ui(
+                ui,
+                self.schema,
+                self.entities,
+                self.selected,
+                self.actions,
+                self.outliner_options,
+            ),
             Tab::Inspector => {
                 thermal_preview_ui(ui, self.thermal, *self.selected);
                 inspector_ui(
@@ -1414,6 +1426,7 @@ fn assets_ui(
     });
     ui.separator();
 
+    ui.weak("Scene effects: Outliner → + spawn → Inspector → + add component");
     if assets.is_empty() {
         ui.weak("(no cooked assets — launch the engine with --assets <manifest>)");
         return;
@@ -1531,7 +1544,7 @@ fn viewport_fly(
     // keys from firing on their other meanings: WASD typed into an inspector field never flies (the
     // pointer is not over the viewport), W/E/Q switch the gizmo while the button is up, and Ctrl+S
     // over the viewport saves without moving the camera (the Command modifier is excluded here).
-    let flying = response.hovered()
+    let flying = (response.hovered() || response.dragged_by(egui::PointerButton::Secondary))
         && ui.input(|i| {
             i.pointer.button_down(egui::PointerButton::Secondary) && !i.modifiers.command
         });
@@ -1573,6 +1586,26 @@ fn viewport_fly(
         }
     }
 
+    // Wheel dolly moves the camera along its sight line, rather than magnifying the streamed
+    // image. Consume only vertical scrolling over this panel; inspector scrolling stays local.
+    if response.hovered()
+        && !ui.input(|i| i.modifiers.command || i.modifiers.alt || i.pointer.primary_down())
+    {
+        let delta = ui.input_mut(|i| {
+            let d = i.smooth_scroll_delta.y;
+            i.smooth_scroll_delta.y = 0.0;
+            d
+        });
+        if delta.is_finite() && delta != 0.0 {
+            let distance = delta.clamp(-120.0, 120.0) * 0.03;
+            let (sy, cy) = fly.yaw.sin_cos();
+            let (sp, cp) = fly.pitch.sin_cos();
+            fly.pos[0] -= sy * cp * distance;
+            fly.pos[1] += sp * distance;
+            fly.pos[2] -= cy * cp * distance;
+            changed = true;
+        }
+    }
     if !changed {
         return;
     }
@@ -1613,6 +1646,18 @@ fn viewport_ui(
         );
         viewport_input(out_tx, &response, rect, frame_dims, gz);
         viewport_fly(ui, &response, fly, &mut *gz.actions);
+        let navigating = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
+        ui.painter().text(
+            rect.left_bottom() + egui::vec2(10.0, -10.0),
+            egui::Align2::LEFT_BOTTOM,
+            if navigating {
+                "NAVIGATING: keep right mouse held + WASD / Q down / E up / Shift faster"
+            } else {
+                "Hold right mouse + WASD to move | Right-drag to look | Wheel closer / farther"
+            },
+            egui::FontId::proportional(12.0),
+            egui::Color32::WHITE,
+        );
     } else {
         ui.painter()
             .rect_filled(rect, 0.0, egui::Color32::from_gray(20));
@@ -1803,86 +1848,6 @@ fn viewport_input(
             });
         }
     }
-}
-
-/// A readable name for an outliner row (m15.3).
-///
-/// The block opens as 213 entities, and `entity 0 · 3 components` … `entity 212 · 3 components` is
-/// a list you cannot work in. There is no `Name` component to fall back on: reflection has no
-/// string type at all (`FieldType` is Bool/Int/UInt/Float/Double/Struct) and ECS components must be
-/// trivially-copyable PODs, so an authored name needs `FieldType::String` threaded through the
-/// serializer, the scene format, the schema wire and the inspector — a brick of its own, ruled in
-/// ADR-0038 and not smuggled in here.
-///
-/// So the label is DERIVED from what the entity already carries: its most distinctive component's
-/// short type name. That is free, it works for every scene including ones authored before any
-/// naming existed, and for the block it turns an unreadable list into `SlabRole`, `PointLight`,
-/// `Camera`. An entity is still addressed by index — this changes what a human reads, not what the
-/// protocol says.
-fn outliner_label(schema: &Schema, index: usize, entity: &SnapshotEntity) -> String {
-    // Least-common-first: a `Camera` or a `SlabRole` says far more about an entity than the
-    // `LocalTransform` almost everything has, so the ranking is by how much the type narrows things
-    // down rather than by declaration order.
-    const BORING: [&str; 4] = [
-        "rime::ecs::LocalTransform",
-        "rime::ecs::WorldTransform",
-        "rime::ecs::Parent",
-        "rime::ecs::RenderTransform",
-    ];
-    let mut best: Option<&str> = None;
-    for component in &entity.components {
-        let Some(entry) = schema.type_by_hash(component.type_hash) else {
-            continue;
-        };
-        if BORING.contains(&entry.name.as_str()) {
-            continue;
-        }
-        best = Some(&entry.name);
-        break;
-    }
-    let short = best.map(|full| full.rsplit("::").next().unwrap_or(full));
-    match short {
-        Some(name) => format!("{index}  {name}"),
-        // Nothing distinctive: a freshly spawned entity, or one that is only a transform.
-        None => format!("{index}  entity"),
-    }
-}
-
-fn outliner_ui(
-    ui: &mut egui::Ui,
-    schema: &Schema,
-    entities: &[SnapshotEntity],
-    selected: &mut Option<EntityId>,
-    actions: &mut Vec<Command>,
-) {
-    ui.horizontal(|ui| {
-        if ui.button("+ spawn").clicked() {
-            *selected = None;
-            actions.push(Command::Spawn { id: 0 });
-        }
-    });
-    ui.separator();
-    if entities.is_empty() {
-        ui.weak("(no entities yet)");
-        return;
-    }
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for (i, e) in entities.iter().enumerate() {
-            let label = outliner_label(schema, i, e);
-            let row = ui.selectable_label(*selected == Some(e.editor_id), label);
-            if row.clicked() {
-                *selected = Some(e.editor_id);
-            }
-            // The full picture on hover, so the derived label costs no information.
-            row.on_hover_text(format!(
-                "entity {} ({}:{}) · {} components",
-                i,
-                e.index,
-                e.generation,
-                e.components.len()
-            ));
-        }
-    });
 }
 
 #[allow(clippy::too_many_arguments)] // an inspector genuinely needs its world view + edit sinks
@@ -2290,6 +2255,30 @@ mod outliner_tests {
     // list nobody can work in. There is no Name component to lean on — reflection has no string
     // type at all — so the label is derived from the most DISTINCTIVE component the entity carries.
     #[test]
+    fn source_roles_beat_mesh_storage_regardless_of_component_order() {
+        let schema = Schema {
+            types: vec![
+                entry("rime::render::MeshRef", 1),
+                entry("rime::render::MaterialRef", 2),
+                entry("rime::vfx_scene::FireEmitter", 3),
+                entry("rime::fluids_scene::ThermalCell", 4),
+            ],
+        };
+        assert_eq!(
+            outliner_label(&schema, 0, &entity(&[1, 2, 3])),
+            "0  Fire emitter"
+        );
+        assert_eq!(
+            outliner_label(&schema, 0, &entity(&[3, 2, 1])),
+            "0  Fire emitter"
+        );
+        assert_eq!(
+            outliner_label(&schema, 1, &entity(&[1, 4, 2])),
+            "1  Water / ice"
+        );
+    }
+
+    #[test]
     fn a_transform_is_not_what_names_an_entity() {
         let schema = Schema {
             types: vec![
@@ -2307,7 +2296,7 @@ mod outliner_tests {
         let schema = Schema {
             types: vec![entry("rime::render::PointLight", 9)],
         };
-        assert_eq!(outliner_label(&schema, 0, &entity(&[9])), "0  PointLight");
+        assert_eq!(outliner_label(&schema, 0, &entity(&[9])), "0  Point light");
     }
 
     #[test]

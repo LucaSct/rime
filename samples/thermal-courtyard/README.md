@@ -15,8 +15,8 @@ stations visible, including in a narrow tiled window. The demo pauses itself at
 
 | Station, left to right | What happens |
 | --- | --- |
-| Cyan panel, one pip — cooling | 10 kg of liquid water starts at 0 C; explicit -100 kW removes sensible/latent energy. It turns pale/rough as it freezes, then cools below 0 C. |
-| Amber panel, two pips — melting | 10 kg of ice starts at 0 C; explicit +100 kW melts it, then warms the liquid. It turns blue/smooth. |
+| Cyan panel, one pip — cooling | 10 kg of liquid water starts at 0 C; explicit -100 kW removes sensible/latent energy. Moving ripples settle into blue frost veins as it freezes, then cools below 0 C. |
+| Amber panel, two pips — melting | 10 kg of ice starts at 0 C; explicit +100 kW melts it, then warms the liquid. It turns blue/smooth and develops ripples. |
 | Dark panel, three pips — control | The same initial water with no heat source stays unchanged. |
 
 At 36 seconds the measured states are **260.236 K, fully frozen**;
@@ -36,6 +36,21 @@ loading its `.rscene`; generated runtime registry IDs are not baked into it.
 ```sh
 ./scripts/thermal-courtyard.sh --editor
 ```
+
+See the [creator workflow and controls](../../docs/creator-workflow.md).
+**Hold right mouse while pressing WASD** to move; Q/E down/up, Shift faster,
+right-drag to look. Release right mouse for W/E/R object tools. Wheel over the
+viewport moves closer/farther. The editor stream remains 960×540, so a large
+panel can look soft; camera dolly is not image enlargement.
+
+Open View → Outliner to select meshless sources. Filter → Effects (smoke / fire)
+finds emitters, Filter → Thermal (water / ice) finds thermal descriptions, and
+All entities restores the list. Display → List / Tiles switches between
+small role icons beside names and a compact 32-pixel icon grid. Select an emitter, then edit its LocalTransform
+or use the Move gizmo. To create one: + spawn, select the new entity, Inspector →
++ add component → SmokeEmitter/FireEmitter, then enabled. View → Assets is the
+cooked asset browser; this built-in demo has no manifest, so it is empty. A prefab
+library and clickable emitter icons are future work.
 
 Press Play or Step. Click a tray to inspect its `ThermalCell`, opt-in
 `ThermalSurface` and read-only thermal preview values. Edit initial mass,
@@ -84,6 +99,8 @@ content (`scene.cpp`) and a small standalone/editor composition (`main.cpp`).
 This is an opaque **phase presentation on fixed meshes**, not flowing water,
 transparent/refraction optics, geometric ice thickness, expansion, collision or
 breakable sheets. The colour/roughness blend visualizes liquid **mass** fraction;
-it does not infer solid volume. There is no fuel/spread/damage authority or
+immutable mipmapped normal/tint maps add cosmetic ripples and frost veins.
+Pause/refusal hold their committed clock; rebuild restarts it.
+It does not infer solid volume. There is no fuel/spread/damage authority or
 multiplayer shipment proof. M18/performance and inherited city/block gates remain
 open; this is a usable demo checkpoint, with no merge or production claim.

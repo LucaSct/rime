@@ -116,6 +116,17 @@ or add `--editor`. See [demo/controls](../samples/thermal-courtyard/README.md) a
 day-end example; moving water, ice geometry/collision, combustion authority,
 performance qualification and multiplayer shipment remain separate open work.
 
+**Phase detail and creator workflow (2026-10-19):** Frost Yard now uses blue frost
+veins and cosmetic water normal animation driven only by committed thermal time;
+water ripples settle with freezing and hold on Pause/refusal. Editor wheel dolly,
+held-navigation help and Outliner Effects/Thermal filters improve discovery.
+[Creator workflow](creator-workflow.md) maps scene → input/events → animation →
+packaging to Unity/EA public references and current Rime capabilities. Next useful
+playable slice: possessed player + editor action/focus/restart, then one authored
+heater interaction/exit objective; prefab library, emitter icons, animation and
+adaptive viewport resolution remain explicit follow-ups. See
+[ADR-0096](adr/0096-committed-phase-detail-and-editor-discovery.md). No open gate closes.
+
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
 > been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the

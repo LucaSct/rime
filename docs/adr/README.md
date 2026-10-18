@@ -119,3 +119,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0089](0089-conservative-plain-contact-midphase.md) — proposed conservative plain-contact bounds, per-build cache lifetime, unchanged CCD and frozen-contact/world-hash proofs.
 - [ADR-0090](0090-environment-source-authoring.md) — reflected smoke/fire source authoring with disposable Play presentation; temperature-driven ice starts as a separate energy/phase milestone.
 - [ADR-0091](0091-fixed-mass-thermal-phase-reference.md) — provisional fixed-mass water/ice energy reference, explicit liquid mass fraction, transactional heat accounting and exact-arithmetic verification.
+- [ADR-0096](0096-committed-phase-detail-and-editor-discovery.md) — immutable cosmetic water ripples, static frost veins, committed presentation clock, wheel dolly and source discovery.

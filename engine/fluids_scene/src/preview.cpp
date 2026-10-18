@@ -43,6 +43,7 @@ bool same(const ThermalSource& a, const ThermalSource& b) {
 
 void ThermalPreview::reset() {
     field_.reset();
+    presentation_seconds_ = 0;
     descriptions_ = {};
     entities_ = {};
     status_ = PreviewStatus::Empty;
@@ -99,6 +100,7 @@ void ThermalPreview::reconcile(ecs::World& world) {
     has_description_ = true;
     ++revision_;
     field_.reset();
+    presentation_seconds_ = 0;
     entities_ = {};
     problem_ = {};
     accepted_host_tick_ = 0;
@@ -204,6 +206,7 @@ bool ThermalPreview::tick(ecs::World& world, std::uint64_t host_tick, double dt)
         }
         status_ = PreviewStatus::Ready;
         accepted_host_tick_ = host_tick;
+        presentation_seconds_ += dt;
         ++stats_.accepted_ticks;
     }
     has_tick_ = true;

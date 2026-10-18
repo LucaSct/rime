@@ -366,7 +366,9 @@ bool SceneRenderer::set_surface_appearances(std::span<const SurfaceAppearance> r
             !std::isfinite(r.base_color.y) || !std::isfinite(r.base_color.z) ||
             r.base_color.x < 0 || r.base_color.x > 1 || r.base_color.y < 0 || r.base_color.y > 1 ||
             r.base_color.z < 0 || r.base_color.z > 1 || !std::isfinite(r.roughness) ||
-            r.roughness < 0 || r.roughness > 1)
+            r.roughness < 0 || r.roughness > 1 ||
+            (r.override_detail &&
+             (!std::isfinite(r.normal_scale) || r.normal_scale < 0 || r.normal_scale > 2)))
             return refuse();
         for (std::size_t j = 0; j < i; ++j)
             if (rows[j].entity == r.entity)
@@ -688,6 +690,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             material.base_color[1] = appearance.base_color.y;
             material.base_color[2] = appearance.base_color.z;
             material.roughness = appearance.roughness;
+            if (appearance.override_detail) {
+                material.normal_texture = appearance.normal_texture;
+                material.base_color_texture = appearance.base_color_texture;
+                material.normal_scale = appearance.normal_scale;
+            }
             break;
         }
         GpuDrawUniforms du{};

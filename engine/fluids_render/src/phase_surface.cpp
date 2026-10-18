@@ -16,10 +16,10 @@ PhaseSurfaces phase_surfaces(ecs::World& world, const fluids_scene::ThermalPrevi
         const float liquid = static_cast<float>(field->cells()[i].state().liquid_mass_fraction);
         // Presentation blend, not a mixture BRDF or volume model. The numerical oracle has
         // already admitted fraction in [0,1]; never infer phase by thresholding temperature.
-        const core::Vec3 ice{0.70f, 0.88f, 0.95f}, water{0.015f, 0.14f, 0.32f};
+        const core::Vec3 ice{0.40f, 0.78f, 0.92f}, water{0.015f, 0.14f, 0.32f};
         result.rows[result.count++] = {entities[i],
                                        ice * (1 - liquid) + water * liquid,
-                                       0.68f * (1 - liquid) + 0.12f * liquid};
+                                       0.22f * (1 - liquid) + 0.12f * liquid};
     }
     return result;
 }
