@@ -1,0 +1,15 @@
+{
+  "model": "gpt-6-astra",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Independent read-only design consultation, no tools/files or implementation delegation. Give your OWN proposal, <=650 words. C++20 CPU-only water/ice reference. Existing copyable ThermalSample fixed mass has validated immutable config: Tm=273.15K, cs=2052, cl=4179J/kgK, latent L=333500J/kg, allowed253.15..313.15K; custom finite configs accepted. Total enthalpy E referenced to solid at Tm: E<0 uses Tm+E/(m cs), 0<=E<=mL uses Tm and liquid MASS fraction E/(mL), above uses Tm+(E-mL)/(m cl). create explicit T+fraction. apply_heat(Q) atomic, binary64 nearest with gradual underflow only, finite ranges, nonzero ineffective change refuses Unrepresentable, exact prospective out-of-energy-bounds refuses TemperatureLimit. Result applied_hi + applied_lo + roundoff = requested Q as mathematical real values of doubles (FastTwoSum); cached state validated before commit. No other physics. We need next bounded sample-to-sample conductive exchange, G>=0 W/K, dt>=0, copy then commit both, no forced equal phase fractions at same T. Zero G/dt invariant. Two Q/-Q operations do NOT conserve stored total exactly: retain both receipts and explicit exact-accounted numerical residual, no claim exact stored conservation. No geometry/grid/ECS yet. Recommend smallest defensible stable transfer law and refusal contract, large dt no hot/cold overshoot, differing melting points/limits, floating representation limits, bounded iteration, aliasing. Avoid runtime rational framework and speculative architecture. Focus on numerical transactional pair contract and a bounded root/cap algorithm: ordering and equality plateaus, pathological huge/small finite scales, exact accounting from two single-sample receipts, how to detect refusal vs physically zero flow, convergence tolerances. Propose adversarial tests. No implementation exists yet, you are not reviewing a diff."
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "reasoning_effort": "low",
+  "max_tokens": 8000
+}

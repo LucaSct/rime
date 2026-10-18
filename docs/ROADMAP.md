@@ -79,6 +79,15 @@ visible ice. Next are conservative sample-to-sample heat exchange and the separa
 water displacement/coupling brick, followed by field/authoring/surface consumers.
 See [ADR-0091](adr/0091-fixed-mass-thermal-phase-reference.md).
 
+**Thermal contact continuation (2026-10-18):** the next isolated CPU brick now
+exchanges conductive heat between fixed-mass samples, with backward-Euler sign
+brackets, transactional two-sided commit and explicit rounding receipts. Tests
+cover latent plateaus, different melting points, no temperature reversal, zero
+exchange and bounded numerical/range refusal. This remains a draft reference;
+the next thermal consumer is a bounded spatial field, then temperature/heat-source
+editor authoring and visible phase. Water displacement/body feedback remains a
+separate open brick. See [ADR-0092](adr/0092-transactional-thermal-contact.md).
+
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
 > been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the

@@ -44,3 +44,36 @@ python3 tests/fluids/verify_phase_change.py --library build/release/lib/librime_
 
 Python fractions are only used by this diagnostic, never by the runtime. Portable
 C++ phase tests remain part of the normal fluids CTest target on all CI platforms.
+
+`thermal_contact.hpp` adds `exchange_heat(a, b, conductance_w_k, dt_seconds)`.
+This isolated two-sample contact uses backward-Euler conduction, including latent
+plateaus and different material configs. It returns `Exchanged`, `NoExchange`, or
+an explicit refusal. Both samples commit together, after validation of copied
+states. Accepted transfers preserve temperature ordering; disabled contacts and
+equal temperatures leave both states bitwise unchanged, even with different
+liquid fractions. Conductance includes the caller's contact geometry and has
+units W/K; it is not conductivity in W/(m K).
+
+The result retains one `HeatExchange` receipt per argument. Opposite requests
+cancel exactly, and the two applied expansions plus the two residuals sum to
+zero as real values of the returned doubles. Stored total energy alone can drift
+by those residuals; ordinary summation or discarding them is not conservation.
+There is no hidden accumulated heat or mass transfer.
+
+The numerical contract is deliberately bounded: binary64 rounded products and
+cached temperatures define the residual, at most 128 bisection trials bracket
+its sign change to relative heat width `2^-36`, and the non-overshooting lower
+endpoint is committed. Overflow/underflow of nonzero demand, an ineffective or
+undecodable trial, unsupported arithmetic, exhausted iteration budget, or a
+root beyond either configured temperature limit refuses both samples. Limits
+never clip the transfer. This is a first-order isolated-contact reference, not
+a spatial/N-body integrator or a guarantee that every finite input is supported.
+
+```sh
+python3 tests/fluids/verify_thermal_contact.py --library build/release/lib/librime_fluids.a --work-dir /path/to/contact-scratch
+```
+
+The diagnostic checks exact two-sided energy accounting, range/order, both sign
+certificates, zero controls and atomic failure against the actual compiled
+archive. See [ADR-0092](../../docs/adr/0092-transactional-thermal-contact.md) and
+the [contact research note](../../docs/research/2026-10-18-thermal-contact.md).

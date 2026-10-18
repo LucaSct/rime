@@ -1003,3 +1003,6 @@ See also **Determinism / replication** under *Physics & destruction*.
 - **Inverse kinematics (IK).** Solve joint rotations from a desired end contact, such as a wrist on a weapon grip. A two-bone arm uses shoulder/elbow/wrist positions and an elbow pole to choose its bend plane.
 - **Aim down sights (ADS).** Move the weapon so its sights or optic align with the eye. Optical magnification can be confined to a second camera sampled by the scope lens.
 - **Linear blend skinning.** Deform each mesh vertex by a weighted sum of joint pose matrices multiplied by inverse bind matrices; the same pose must transform normals and tangents.
+- **Thermal conductance.** Heat rate per temperature difference, in W/K, including the contact's geometry. Material conductivity instead has units W/(m K).
+- **Backward Euler.** A first-order time integrator that evaluates the rate at the end of the step and solves for that new state. The isolated thermal contact uses a bounded scalar sign bracket; this does not establish an N-body or spatial solver.
+- **Sign bracket.** Two ordered trial values whose evaluated residuals have opposite signs (or zero). Rounded temperature caches can make the residual jump across zero; a narrow bracket need not contain an exactly zero floating-point residual.
