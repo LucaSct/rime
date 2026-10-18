@@ -1,0 +1,44 @@
+{
+  "source_commit": "498b260510333c7e8333732d5fdb71843f46a06b",
+  "build_type": "RelWithDebInfo",
+  "source_sha256": {
+    "engine/physics/src/world.cpp": "6bc6eacd58526c4f3667ad87285d32cace11d4bf7895d1e57f304abe49364413",
+    "engine/physics/src/contact_bounds.hpp": "97c301427be62c4ff5ff03991e090d36ed001100e509a7af3c41af2a99fa2b84",
+    "engine/physics/include/rime/physics/world.hpp": "2546a7162c56a89d8fefa79a22d9927b7a7bafc17fbf67eef8c0f3a9d95ead07",
+    "samples/contact_bench/main.cpp": "48ae9feecccd26441fccf02d28e65caffe5ad7299e011fa65298eb2db17f9979",
+    "samples/contact_bench/workload.hpp": "771a7e939e5b62373449040f92eee6b64402e7f2f5be69267a92799f19829b3a",
+    "samples/contact_bench/measure.py": "23d421fddcefffaf188a8cb6584e874e5c7c9f03c647cc4c2155ff19188e7016",
+    "samples/contact_bench/prepare_capture.py": "b55cadaaa0f3192ddf1e23a17a12e4b0316cd6c11aac3c8d724d13f574d8fa22",
+    "tests/physics/plain_bounds_test.cpp": "5bb6c638d465361fa891daeba131f89aded710bcda1a5ce2b042baba302fb0fe"
+  },
+  "native_binary_sha256": "0eea5d9210f4d2de59198efef255092eeb2223d05642688cabbca0bf129ede61",
+  "replay_binary_sha256": "fb02e07abfb1d64129f5d6f2de5022bb4dba0a83ee01dc66fed8f88c84ee825b",
+  "input_sha256": "bcdade9cd51373bbefb9c642cef2f6946cf562f2354fa21d3ed30b22b050f372",
+  "compile_commands": [
+    {
+      "directory": "/home/next/projects/rime/build/release",
+      "command": "/usr/bin/c++ -I/home/next/projects/rime/engine/physics/include -I/home/next/projects/rime/engine/physics/src -I/home/next/projects/rime/engine/core/include -I/home/next/projects/rime/engine/ecs/include -isystem /home/next/.conan2/p/b/fmt9d943314ec67a/p/include -m64 -O2 -g -DNDEBUG -std=c++20 -fPIC -fvisibility=hidden -fvisibility-inlines-hidden -Wall -Wextra -Wpedantic -Werror -o engine/physics/CMakeFiles/rime_physics.dir/src/world.cpp.o -c /home/next/projects/rime/engine/physics/src/world.cpp",
+      "file": "/home/next/projects/rime/engine/physics/src/world.cpp",
+      "output": "/home/next/projects/rime/build/release/engine/physics/CMakeFiles/rime_physics.dir/src/world.cpp.o"
+    },
+    {
+      "directory": "/home/next/projects/rime/build/release",
+      "command": "/usr/bin/c++ -I/home/next/projects/rime/engine/physics/src -I/home/next/projects/rime/engine/physics/include -I/home/next/projects/rime/engine/core/include -I/home/next/projects/rime/engine/ecs/include -isystem /home/next/.conan2/p/b/fmt9d943314ec67a/p/include -m64 -O2 -g -DNDEBUG -std=c++20 -fPIE -fvisibility=hidden -fvisibility-inlines-hidden -Wall -Wextra -Wpedantic -Werror -o samples/contact_bench/CMakeFiles/contact_bench.dir/main.cpp.o -c /home/next/projects/rime/samples/contact_bench/main.cpp",
+      "file": "/home/next/projects/rime/samples/contact_bench/main.cpp",
+      "output": "/home/next/projects/rime/build/release/samples/contact_bench/CMakeFiles/contact_bench.dir/main.cpp.o"
+    },
+    {
+      "directory": "/home/next/projects/rime/build/release",
+      "command": "/usr/bin/c++ -DDOCTEST_CONFIG_USE_STD_HEADERS -DRIME_PHYSICS_SEAM_COUNTER -I/home/next/projects/rime/tests -I/home/next/projects/rime/engine/physics/src -I/home/next/projects/rime/engine/physics/include -I/home/next/projects/rime/engine/core/include -I/home/next/projects/rime/engine/ecs/include -isystem /home/next/.conan2/p/docte2fe58cbe17539/p/include -isystem /home/next/.conan2/p/b/fmt9d943314ec67a/p/include -m64 -O2 -g -DNDEBUG -std=c++20 -fPIE -fvisibility=hidden -fvisibility-inlines-hidden -Wall -Wextra -Wpedantic -Werror -o tests/physics/CMakeFiles/rime_physics_tests.dir/plain_bounds_test.cpp.o -c /home/next/projects/rime/tests/physics/plain_bounds_test.cpp",
+      "file": "/home/next/projects/rime/tests/physics/plain_bounds_test.cpp",
+      "output": "/home/next/projects/rime/build/release/tests/physics/CMakeFiles/rime_physics_tests.dir/plain_bounds_test.cpp.o"
+    }
+  ],
+  "validation": {
+    "ctest_passed": 88,
+    "ctest_total": 89,
+    "sanitized_world_and_related_assertions": 1175,
+    "native_perf_exit": 1
+  },
+  "review": "root self-review; no new independent consultation"
+}

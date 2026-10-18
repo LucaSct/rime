@@ -1,0 +1,149 @@
+{
+  "scope": "CPU-only frozen narrowphase; whole-corpus time includes dispatch, bounds and checksum",
+  "order": [
+    "none",
+    "cached",
+    "cached",
+    "none"
+  ],
+  "qualified": true,
+  "cpu": 0,
+  "model": "AMD Ryzen 9 9950X3D 16-Core Processor",
+  "platform": "Linux-7.2.10-1-cachyos-x86_64-with-glibc2.44",
+  "governor": "performance",
+  "l3_shared_cpus": "0-7,16-23",
+  "binary_sha256": "fb02e07abfb1d64129f5d6f2de5022bb4dba0a83ee01dc66fed8f88c84ee825b",
+  "input_sha256": "bcdade9cd51373bbefb9c642cef2f6946cf562f2354fa21d3ed30b22b050f372",
+  "clock_median_drift_limit": 0.05,
+  "foreign_cpu_limit_percent": 50,
+  "aggregate_foreign_cpu_limit_percent": 80,
+  "runs": [
+    {
+      "rows": 166374,
+      "hulls": 302,
+      "stride": 20,
+      "total_queries": 3318610,
+      "exact_contacts": 48879,
+      "speculative_contacts": 0,
+      "contact_hash": "6f2d7846c7037783",
+      "mismatches": 0,
+      "candidate": "none",
+      "exact_calls": 166374,
+      "skipped_exact": 0,
+      "cached_bound_builds": 0,
+      "input_fnv1a64": "32b65a26aa3c6adb",
+      "repeats": 21,
+      "corpus_ms": {
+        "min": 110.852832,
+        "p50": 110.988671,
+        "p99": 111.257894,
+        "max": 111.257894
+      },
+      "clock_khz": [
+        5514083,
+        5513317,
+        5512659,
+        5515148,
+        5506985,
+        2982259
+      ],
+      "clock_median_khz": 5512988.0,
+      "mode": "none"
+    },
+    {
+      "rows": 166374,
+      "hulls": 302,
+      "stride": 20,
+      "total_queries": 3318610,
+      "exact_contacts": 48879,
+      "speculative_contacts": 0,
+      "contact_hash": "6f2d7846c7037783",
+      "mismatches": 0,
+      "candidate": "cached",
+      "exact_calls": 108366,
+      "skipped_exact": 58008,
+      "cached_bound_builds": 25900,
+      "input_fnv1a64": "32b65a26aa3c6adb",
+      "repeats": 21,
+      "corpus_ms": {
+        "min": 87.571495,
+        "p50": 87.663685,
+        "p99": 88.2473,
+        "max": 88.2473
+      },
+      "clock_khz": [
+        5510964,
+        5514946,
+        5514865,
+        5507043,
+        4324545
+      ],
+      "clock_median_khz": 5510964,
+      "mode": "cached"
+    },
+    {
+      "rows": 166374,
+      "hulls": 302,
+      "stride": 20,
+      "total_queries": 3318610,
+      "exact_contacts": 48879,
+      "speculative_contacts": 0,
+      "contact_hash": "6f2d7846c7037783",
+      "mismatches": 0,
+      "candidate": "cached",
+      "exact_calls": 108366,
+      "skipped_exact": 58008,
+      "cached_bound_builds": 25900,
+      "input_fnv1a64": "32b65a26aa3c6adb",
+      "repeats": 21,
+      "corpus_ms": {
+        "min": 87.735654,
+        "p50": 87.865396,
+        "p99": 88.415539,
+        "max": 88.415539
+      },
+      "clock_khz": [
+        5509103,
+        5508450,
+        5505905,
+        5500023,
+        2982259
+      ],
+      "clock_median_khz": 5505905,
+      "mode": "cached"
+    },
+    {
+      "rows": 166374,
+      "hulls": 302,
+      "stride": 20,
+      "total_queries": 3318610,
+      "exact_contacts": 48879,
+      "speculative_contacts": 0,
+      "contact_hash": "6f2d7846c7037783",
+      "mismatches": 0,
+      "candidate": "none",
+      "exact_calls": 166374,
+      "skipped_exact": 0,
+      "cached_bound_builds": 0,
+      "input_fnv1a64": "32b65a26aa3c6adb",
+      "repeats": 21,
+      "corpus_ms": {
+        "min": 111.040777,
+        "p50": 111.266888,
+        "p99": 111.527709,
+        "max": 111.527709
+      },
+      "clock_khz": [
+        5514779,
+        5507684,
+        5505506,
+        5510822,
+        5508029,
+        4326894
+      ],
+      "clock_median_khz": 5507856.5,
+      "mode": "none"
+    }
+  ],
+  "refusals": []
+}

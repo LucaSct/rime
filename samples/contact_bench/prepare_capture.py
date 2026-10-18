@@ -23,7 +23,7 @@ def exactly(text, old, new):
     return text.replace(old, new, 1)
 
 
-def instrument(source, header, candidate=False):
+def instrument(source, header):
     source = exactly(source, '#include "narrowphase.hpp"',
                      '#include "narrowphase.hpp"\n#include ' + json.dumps(str(header)))
     anchor = 'void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) const {\n'
@@ -40,35 +40,11 @@ def instrument(source, header, candidate=False):
     source = exactly(source,end,
         "    if (::contact_capture::hashes_enabled())\n"
         "        ::contact_capture::hash_step(p.zone(StepZone::Step), world_hash());\n" + end)
-    if candidate:
-        start = source.index('void PhysicsWorld::Impl::build_contacts(')
-        finish = source.index('void PhysicsWorld::Impl::build_compound_contacts(',start)
-        region = source[start:finish]
-        region = exactly(region,'    out.clear();', '''    // External candidate only: lazy bounds are valid for THIS contact build, whose poses
-    // cannot change until solving begins. Resetting validity each call prevents teleport,
-    // registration, slot reuse or dense compaction from reusing an old pose's bound.
-    std::vector<Aabb> capture_bounds(count());
-    std::vector<std::uint8_t> capture_valid(count(),0);
-    const auto bound = [&](std::uint32_t dense, const ConvexHull* hull) -> const Aabb& {
-        if (capture_valid[dense] == 0) {
-            capture_bounds[dense] = hull ? hull_world_aabb(*hull,position[dense],orientation[dense])
-                : compute_aabb(shape[dense],position[dense],orientation[dense]);
-            capture_valid[dense] = 1;
-        }
-        return capture_bounds[dense];
-    };
-    out.clear();''')
-        region = exactly(region,'        bool touching;\n', '''        bool touching = false;
-        const bool eligible =
-            (shape[da].type != ShapeType::ConvexHull || ha != nullptr) &&
-            (shape[db].type != ShapeType::ConvexHull || hb != nullptr);
-        if (!eligible || ::contact_workload::bounds_may_touch(bound(da,ha),bound(db,hb),
-                ::contact_workload::Candidate::Child)) {
-''')
-        region = exactly(region,'        ::contact_capture::record(',
-                         '        } // external exact-call filter; CCD below is untouched\n'
-                         '        ::contact_capture::record(')
-        source=source[:start]+region+source[finish:]
+    # The actual runtime cache is shared with replay. The unfiltered reference is selected at
+    # compile time below, so the hash proof exercises the final production source, not a copy.
+    if source.count('plain_bounds.begin(') != 1 or 'RIME_PHYSICS_UNFILTERED_CONTACTS' not in source:
+        raise ValueError('expected the production plain-contact cache and reference guard')
+
     return source
 
 
@@ -87,7 +63,7 @@ def main():
     if args.candidate != 'none':
         if args.oracle is None: parser.error('--candidate requires --oracle')
         verification=subprocess.run([str(build/'bin/contact_bench'),'--input',str(args.oracle.resolve()),
-            '--candidate',args.candidate,'--verify-only'],check=True,text=True,capture_output=True)
+            '--candidate','cached','--verify-only'],check=True,text=True,capture_output=True)
         oracle_result=json.loads(verification.stdout)
 
     # Reuse the existing three-building charge, physics hash ledger and content witnesses.
@@ -100,7 +76,7 @@ def main():
     subprocess.run(cmd, check=True)
     source = root / 'engine/physics/src/world.cpp'
     generated = out / 'capture-world.cpp'
-    generated.write_text(instrument(source.read_text(), root / 'samples/contact_bench/capture.hpp',args.candidate == 'child'))
+    generated.write_text(instrument(source.read_text(), root / 'samples/contact_bench/capture.hpp'))
     entries = json.loads((build / 'compile_commands.json').read_text())
     matches = [e for e in entries if Path(e['file']).resolve() == source]
     if len(matches) != 1:
@@ -113,6 +89,8 @@ def main():
     compile_cmd[compile_cmd.index(str(source))] = str(generated)
     compile_cmd[compile_cmd.index('-o') + 1] = str(obj)
     compile_cmd += ['-I' + str(root / 'samples/contact_bench')]
+    if args.candidate == 'none':
+        compile_cmd.append('-DRIME_PHYSICS_UNFILTERED_CONTACTS')
     info = json.loads((city / 'provenance.json').read_text())
     link = info['link_command'].copy()
     archives = [i for i, token in enumerate(link) if token.endswith('librime_physics.a')]
@@ -125,6 +103,9 @@ def main():
     files = [source, generated, root / 'samples/contact_bench/capture.hpp',
              root / 'samples/contact_bench/workload.hpp', Path(__file__).resolve()]
     files.extend(sorted((root / 'engine/physics/src').glob('*.hpp')))
+    files.extend(sorted((root / 'engine/physics/include').rglob('*.hpp')))
+    files.extend([root/'docs/perf/play-city-profile-2026-10-17/profile.hpp',
+                  root/'docs/perf/play-city-profile-2026-10-17/prepare.py'])
     info.update({'candidate': args.candidate, 'oracle_sha256':sha(args.oracle) if args.oracle else None, 'oracle_result':oracle_result, 'capture_source_sha256': {str(p): sha(p) for p in files},
                  'capture_compile': compile_cmd, 'capture_link': link,
                  'capture_binary_sha256': None, 'capture_scope': 'plain exact calls only; warm cache excluded'})

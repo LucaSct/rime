@@ -6,6 +6,10 @@ a perfect first contribution.
 
 Entries are grouped roughly by area and kept short on purpose.
 
+- **ULP (unit in the last place).** The spacing between neighboring representable
+  floating-point values near a number. It grows with magnitude. Rounding a bound
+  outward by one ULP retains the next representable value beyond that face.
+
 ## Architecture & core
 
 - **Engine vs. game.** The *engine* is the reusable machinery (rendering, physics,

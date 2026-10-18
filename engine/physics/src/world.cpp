@@ -17,6 +17,7 @@
 
 #include "aabb_tree.hpp"
 #include "compound.hpp"
+#include "contact_bounds.hpp"
 #include "heightfield.hpp"
 #include "hull.hpp"
 #include "islands.hpp"
@@ -54,7 +55,7 @@ namespace {
 // comfortably covers the NGS resting slop (5 mm keeps resting shapes genuinely overlapped, so
 // this is belt-and-braces against a kissing contact being culled by a rounding ulp) while still
 // culling essentially every genuinely separated child pair.
-constexpr float kChildCullMargin = 1e-3f;
+constexpr float kChildCullMargin = contact_bounds_detail::kCullMargin;
 
 using ContactClock = std::chrono::steady_clock;
 
@@ -323,6 +324,7 @@ struct PhysicsWorld::Impl {
     mutable std::uint32_t broadphase_pairs_last = 0;
     bool contact_profile_enabled = false;
     mutable ContactProfile contact_profile_last{};
+    mutable contact_bounds_detail::Cache plain_bounds;
 
     // Simulation events (M7.9, events.hpp). step() emits contact and sleep events as a pure READ of
     // the just-solved state, in the sequential tail — so events never write body state, never
@@ -580,6 +582,15 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
     compute_pairs(pairs, contact_profile_enabled);
     broadphase_pairs_last = static_cast<std::uint32_t>(pairs.size());
 
+    // The macro exists only for the external frozen-workload reference executable. Ordinary
+    // builds always use the validated margin; there is no production runtime toggle to drift.
+#if !defined(RIME_PHYSICS_UNFILTERED_CONTACTS)
+    {
+        ContactTimer bounds_time(contact_profile_enabled, contact_profile_last.plain_bounds_ns);
+        plain_bounds.begin(pairs.empty() ? 0 : slots.size());
+    }
+#endif
+
     std::uint32_t warm = 0;
     hf_patch_merges_last = 0;
     hf_ccd_skipped_last = 0;
@@ -626,8 +637,25 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
         // Hull ids resolve to store pointers HERE — below the seam, above the dispatch (ADR-0027).
         const ConvexHull* ha = hull_of(shape[da]);
         const ConvexHull* hb = hull_of(shape[db]);
-        bool touching;
-        {
+        bool keep_exact = true;
+#if !defined(RIME_PHYSICS_UNFILTERED_CONTACTS)
+        if (contact_bounds_detail::eligible(shape[da], ha) &&
+            contact_bounds_detail::eligible(shape[db], hb)) {
+            ContactTimer bounds_time(contact_profile_enabled, contact_profile_last.plain_bounds_ns);
+            const auto& a =
+                plain_bounds.get(pr.a.index, shape[da], position[da], orientation[da], ha);
+            const auto& b =
+                plain_bounds.get(pr.b.index, shape[db], position[db], orientation[db], hb);
+            keep_exact = overlaps(a.padded, b.tight);
+            if (contact_profile_enabled) {
+                ++contact_profile_last.plain_bounds_tests;
+                if (!keep_exact)
+                    ++contact_profile_last.plain_bounds_rejected;
+            }
+        }
+#endif
+        bool touching = false;
+        if (keep_exact) {
             ContactTimer narrow_time(contact_profile_enabled, contact_profile_last.plain_exact_ns);
             if (contact_profile_enabled) {
                 ++contact_profile_last.exact_narrowphase_calls;
@@ -695,6 +723,9 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
     }
     warm_started_last = warm;
     if (contact_profile_enabled) {
+#if !defined(RIME_PHYSICS_UNFILTERED_CONTACTS)
+        contact_profile_last.plain_bounds_bodies = plain_bounds.computed();
+#endif
         contact_profile_last.produced_manifolds = out.size();
     }
 }

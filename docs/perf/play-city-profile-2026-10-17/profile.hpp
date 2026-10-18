@@ -42,7 +42,7 @@ struct StepKey { std::uint64_t frame, step; const char* world; };
 struct ContactRow {
     std::uint64_t frame, step;
     std::string world;
-    std::array<std::uint64_t, 22> values;
+    std::array<std::uint64_t, 26> values;
 };
 
 // The zone sink runs on both the caller and the server job. Keep its frame window,
@@ -90,7 +90,8 @@ public:
              p.exact_narrowphase_calls, p.speculative_calls, p.heightfield_pairs,
              p.produced_manifolds, p.pair_query_ns, p.pair_canonicalize_ns, p.plain_exact_ns,
              p.plain_speculative_ns, p.compound_pose_ns, p.compound_midphase_ns,
-             p.compound_exact_ns, p.compound_speculative_ns, p.heightfield_ns, p.warmcache_ns}});
+             p.compound_exact_ns, p.compound_speculative_ns, p.heightfield_ns, p.warmcache_ns, p.plain_bounds_tests,
+             p.plain_bounds_rejected, p.plain_bounds_bodies, p.plain_bounds_ns}});
     }
     std::size_t contact_rows() const {
         const std::lock_guard lock(mutex_);
@@ -118,11 +119,11 @@ public:
             if (contacts_.size() != static_cast<std::size_t>(step_rows))
                 throw std::runtime_error("contact profile rows do not match physics step zones");
             auto contacts = open("contact-profile.csv");
-            contacts << "frame,world,step,raw_candidate_keys,unique_pairs,duplicate_keys,plain_pairs,compound_pairs,posed_children,tested_child_pairs,culled_child_pairs,exact_narrowphase_calls,speculative_calls,heightfield_pairs,produced_manifolds,pair_query_ns,pair_canonicalize_ns,plain_exact_ns,plain_speculative_ns,compound_pose_ns,compound_midphase_ns,compound_exact_ns,compound_speculative_ns,heightfield_ns,warmcache_ns\n";
+            contacts << "frame,world,step,raw_candidate_keys,unique_pairs,duplicate_keys,plain_pairs,compound_pairs,posed_children,tested_child_pairs,culled_child_pairs,exact_narrowphase_calls,speculative_calls,heightfield_pairs,produced_manifolds,pair_query_ns,pair_canonicalize_ns,plain_exact_ns,plain_speculative_ns,compound_pose_ns,compound_midphase_ns,compound_exact_ns,compound_speculative_ns,heightfield_ns,warmcache_ns,plain_bounds_tests,plain_bounds_rejected,plain_bounds_bodies,plain_bounds_ns\n";
             for (const auto& row : contacts_) {
                 const auto& v = row.values;
                 if (v[0] != v[1] + v[2] || v[1] != v[3] + v[4] + v[10] ||
-                    v[7] > v[6])
+                    v[7] > v[6] || v[22] > v[3] || v[23] > v[22] || v[24] > 2*v[22])
                     throw std::runtime_error("contact profile pair accounting failed");
                 contacts << row.frame << ',' << row.world << ',' << row.step;
                 for (auto value : v) contacts << ',' << value;

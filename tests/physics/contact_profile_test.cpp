@@ -111,6 +111,10 @@ TEST_CASE("contact profile counts all dispatch arms without changing contact res
         CHECK(profile.unique_pairs ==
               profile.plain_pairs + profile.compound_pairs + profile.heightfield_pairs);
         CHECK(profile.plain_pairs > 0);
+        CHECK(profile.plain_bounds_tests == profile.plain_pairs);
+        CHECK(profile.plain_bounds_rejected <= profile.plain_bounds_tests);
+        CHECK(profile.plain_bounds_bodies > 0);
+        CHECK(profile.plain_bounds_ns > 0);
         CHECK(profile.compound_pairs > 0);
         CHECK(profile.heightfield_pairs > 0);
         CHECK(profile.duplicate_keys > 0);

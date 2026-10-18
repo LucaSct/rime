@@ -1,0 +1,6 @@
+2026-10-18T12:32:29.9111901Z authoring-round-trip.sh: the demo FAILED on build/dev/round-trip/block.rscene
+2026-10-18T12:32:29.9120932Z 99-the-block: 3 of 29 claims failed
+2026-10-18T12:32:29.9121321Z     [FAIL] collapse: the far side of the street is untouched
+2026-10-18T12:32:29.9121769Z     [FAIL] collapse: most of the block is still standing
+2026-10-18T12:32:29.9122550Z     [FAIL] collapse: the damage stayed local to a few buildings
+2026-10-18T12:32:29.9139658Z ##[error]Process completed with exit code 1.
