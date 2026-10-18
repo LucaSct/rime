@@ -263,3 +263,23 @@ next **water** brick remains solid displacement/body feedback. Joining the two
 requires liquid/solid mass and transported energy accounting before a moving
 basin can freeze. Temperature/heat-source editor authoring and visible phase
 remain separate work; there is no rendered or collidable ice in this reference.
+
+## M-FL2 contact progress, 2026-10-18
+
+The isolated `fluids::exchange_heat` contact now consumes two fixed-mass samples.
+It transfers heat using a bounded backward-Euler sign bracket, checks actual
+temperature ordering, retains both rounding receipts, and commits both samples
+or neither. Equal-temperature mixtures retain their distinct phase fractions.
+Zero-contact, latent/conductance sensitivity, phase crossings, first-order step
+refinement and exact-fraction ledger checks exercise the numerical contract.
+[ADR-0092](../adr/0092-transactional-thermal-contact.md) records scale/iteration
+refusals and the independent consultation disagreement.
+
+Next is a **bounded thermal field** with explicit contact topology, fixed ordering,
+whole-tick transactionality, source-energy accounting and spatial/refinement
+controls. It must not inherit a claim of N-body accuracy from isolated pair tests.
+Then add reflected initial temperature/phase and heat-source authoring, reconstruct
+preview state on Play/Stop, and show phase from validated state. Moving-basin
+liquid/solid mass and transported-energy accounting remains a prerequisite for
+freezing flowing water. The existing smoke/fire authoring path stays available;
+combustion heat remains separate from its scripted cosmetic source.
