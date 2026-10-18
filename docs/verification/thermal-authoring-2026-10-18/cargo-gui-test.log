@@ -127,4 +127,3 @@ test gui::click_tests::undo_and_redo_are_refused_while_playing_and_play_edits_le
 test gui::click_tests::two_u64_fields_in_one_component_round_trip_independently ... ok
 
 test result: ok. 122 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.68s
-
