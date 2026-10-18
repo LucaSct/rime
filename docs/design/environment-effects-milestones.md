@@ -324,3 +324,21 @@ requires separate liquid/solid mass and energy transport, and geometry/thickness
 and collision need independent models. Water displacement/body feedback and smoke
 intersection/lighting fidelity remain separate next bricks; cosmetic fire has no
 automatic heating authority.
+
+
+## Working city demo checkpoint, 2026-10-18
+
+[Frost Yard](../../samples/thermal-courtyard/README.md) now provides the requested
+working day-end scene: cooling, melting and insulated fixed samples, plus a
+separate cosmetic fire and chimney plume in a small city courtyard. A removable
+`fluids_render` adapter maps accepted liquid mass fraction into an opt-in opaque
+RGB/roughness preview on fixed meshes. It writes neither ECS authoring nor shared
+materials, clears on invalid/reset graphs, and retains visibly diagnosed refused
+state. Numerical changes, control sample, neighbor isolation, clearing, real
+editor save/reopen, native/windowed render and actual input controls are checked.
+
+This closes a bounded visible phase/demo consumer, not moving-water ice,
+thickness/collision or the complete clicked creator/shipment pipeline. Next:
+clicked thermal authoring controls and asset/export proof; independent M-FL1
+solid displacement/body feedback; smoke intersection/lighting/temporal fidelity;
+then authoritative ignition/fuel/heat transport. Preserve M18/city budget gates.

@@ -106,6 +106,16 @@ fixed-cell phase presentation and clicked thermal authoring proof, with water
 mass/energy transport, ice geometry/collision and combustion authority separate.
 See [ADR-0094](adr/0094-thermal-editor-preview.md). No M18 or shipment gate closes.
 
+**Frost Yard demo checkpoint (2026-10-18):** a saved, runnable city courtyard now
+shows actual fixed-mass cooling/freezing, heating/melting and an unheated control,
+with separate smoke/fire effects. The standalone 36-second demo and editor host
+share validated thermal state and an opt-in transient RGB/roughness presentation;
+scene materials and geometry stay authored. Run `./scripts/thermal-courtyard.sh`
+or add `--editor`. See [demo/controls](../samples/thermal-courtyard/README.md) and
+[ADR-0095](adr/0095-transient-phase-surfaces-and-courtyard.md). This is a working
+day-end example; moving water, ice geometry/collision, combustion authority,
+performance qualification and multiplayer shipment remain separate open work.
+
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
 > been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the

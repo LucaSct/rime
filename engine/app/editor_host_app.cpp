@@ -62,6 +62,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/editorhost/editor_host.hpp"
 #include "rime/editorhost/thermal_preview.hpp"
+#include "rime/fluids_render/phase_surface.hpp"
 #include "rime/fluids_scene/preview.hpp"
 #include "rime/ground/bind.hpp"
 #include "rime/physics/physics.hpp" // umbrella: body/shape/world/components/sync (m9.7 Play)
@@ -630,6 +631,8 @@ int serve_viewport(std::string_view socket_path,
             effects.reconcile(ctx.world);
         if (play_session.phase() != editorhost::PlayPhase::Edit)
             thermal.reconcile(ctx.world);
+        const auto phase_surfaces = fluids_render::phase_surfaces(ctx.world, thermal);
+        (void)renderer.set_surface_appearances(phase_surfaces.span());
         effect_particles.clear();
         for (const auto& p : effects.field().particles()) {
             const float opacity = 0.3f * std::max(0.0f, 1.0f - p.age / p.lifetime);

@@ -1,0 +1,12 @@
+{"conclusion":"success","details_url":"https://github.com/LucaSct/rime/actions/runs/39167968400/job/117795067439","name":"self-hosted SDK consumer (out-of-tree install)","status":"completed"}
+{"conclusion":"cancelled","details_url":"https://github.com/LucaSct/rime/actions/runs/39167968400/job/117795067361","name":"self-hosted sanitizer (ASan + UBSan)","status":"completed"}
+{"conclusion":"success","details_url":"https://github.com/LucaSct/rime/actions/runs/39167968400/job/117795067321","name":"self-hosted format, lint \u0026 license","status":"completed"}
+{"conclusion":"failure","details_url":"https://github.com/LucaSct/rime/actions/runs/39167968400/job/117795067317","name":"self-hosted Editor smoke (editor \u003c-\u003e live engine)","status":"completed"}
+{"conclusion":"success","details_url":"https://github.com/LucaSct/rime/actions/runs/39167968400/job/117795067301","name":"self-hosted sanitizer (TSan, Clang)","status":"completed"}
+{"conclusion":null,"details_url":"https://github.com/LucaSct/rime/actions/runs/39167968400/job/117795067150","name":"self-hosted build \u0026 test (rime-linux)","status":"in_progress"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39167972189/job/117794875360","name":"sanitizer (ASan + UBSan)","status":"completed"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39167972189/job/117794872785","name":"sanitizer (TSan, Clang)","status":"completed"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39167972189/job/117794872491","name":"Editor smoke (editor ⇄ live engine)","status":"completed"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39167972189/job/117794869376","name":"SDK consumer (out-of-tree install)","status":"completed"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39167972189/job/117794849443","name":"format, lint \u0026 license","status":"completed"}
+{"conclusion":"skipped","details_url":"https://github.com/LucaSct/rime/actions/runs/39167972189/job/117794848955","name":"build \u0026 test (${{ matrix.os }})","status":"completed"}

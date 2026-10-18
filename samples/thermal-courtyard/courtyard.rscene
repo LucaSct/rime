@@ -1,0 +1,2217 @@
+# Rime scene v1 (.rscene) — reflection-serialized world. Human-diffable; hand-edit or regenerate.
+rime_scene 1
+
+entity 0 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y -0.24 z -1 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 25 y 0.4 z 22 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 0
+  }
+}
+
+entity 1 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y -0.015 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 15 y 0.12 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 1
+  }
+}
+
+entity 2 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 3 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -5 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 4 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 5 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -3 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 6 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 7 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -1 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 8 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 9 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 1 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 10 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 11 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 12 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 4 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 13 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 5 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 14 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.018 y 0.012 z 9 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 15 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.05 z -4 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 15 y 0.012 z 0.018 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 16 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.05 z -3 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 15 y 0.012 z 0.018 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 17 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.05 z -2 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 15 y 0.012 z 0.018 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 18 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.05 z -1 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 15 y 0.012 z 0.018 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 19 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 15 y 0.012 z 0.018 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 20 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.05 z 1 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 15 y 0.012 z 0.018 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 21 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.05 z 2 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 15 y 0.012 z 0.018 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 22 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.05 z 3 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 15 y 0.012 z 0.018 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 23 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.05 z 4 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 15 y 0.012 z 0.018 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 24 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10 y 2.25 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.6 y 4.5 z 2.6 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 0
+  }
+}
+
+entity 25 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10 y 4.62 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.85 y 0.24 z 2.85 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 26 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10.95 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 27 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 28 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -9.05 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 29 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10.95 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 30 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 31 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -9.05 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 32 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10.95 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 33 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 34 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -9.05 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 35 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 3.05 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.6 y 6.1 z 2.6 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 36 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 6.22 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.85 y 0.24 z 2.85 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 37 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6.95 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 38 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 39 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -5.0499997 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 40 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6.95 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 41 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 42 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -5.0499997 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 43 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6.95 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 44 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 45 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -5.0499997 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 46 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6.95 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 47 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 48 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -5.0499997 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 49 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 3.85 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.6 y 7.7 z 2.6 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 0
+  }
+}
+
+entity 50 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 7.8199997 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.85 y 0.24 z 2.85 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 51 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2.95 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 52 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 53 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -1.0500001 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 54 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2.95 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 55 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 56 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -1.0500001 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 57 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2.95 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 58 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 59 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -1.0500001 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 60 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2.95 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 61 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 62 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -1.0500001 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 63 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2.95 y 6 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 64 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 6 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 65 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -1.0500001 y 6 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 66 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y 2.25 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.6 y 4.5 z 2.6 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 67 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y 4.62 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.85 y 0.24 z 2.85 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 68 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 1.05 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 69 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 70 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2.9499998 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 71 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 1.05 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 72 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 73 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2.9499998 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 74 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 1.05 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 75 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 76 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2.9499998 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 77 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y 3.05 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.6 y 6.1 z 2.6 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 0
+  }
+}
+
+entity 78 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y 6.22 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.85 y 0.24 z 2.85 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 79 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 5.05 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 80 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 81 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6.9500003 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 82 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 5.05 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 83 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 84 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6.9500003 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 85 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 5.05 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 86 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 87 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6.9500003 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 88 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 5.05 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 89 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 90 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6.9500003 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 91 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 3.85 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.6 y 7.7 z 2.6 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 92 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 7.8199997 z -7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.85 y 0.24 z 2.85 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 93 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 9.05 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 94 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 95 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10.95 y 1 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 96 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 9.05 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 97 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 98 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10.95 y 2.25 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 99 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 9.05 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 100 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 101 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10.95 y 3.5 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 102 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 9.05 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 103 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 104 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10.95 y 4.75 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 105 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 9.05 y 6 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 106 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 6 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 107 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10.95 y 6 z -5.68 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.58 y 0.72 z 0.035 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 108 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -3.8 y 0.2 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.3 z 2.55 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 109 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -3.8 y 0.43 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.6 y 0.22 z 2.15 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 0
+  }
+}
+
+entity 110 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.98 y 0.62 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.35 z 2.05 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 111 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -3.8 y 0.62 z -0.96 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.45 y 0.35 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 112 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2.62 y 0.62 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.35 z 2.05 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 113 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -3.8 y 0.62 z 0.96 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.45 y 0.35 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 114 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -3.8 y 0.63 z 1.25 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1.3 y 0.35 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 6
+  }
+}
+
+entity 115 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.1 y 0.68 z 1.33 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.12 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 1
+    palette 5
+  }
+}
+
+entity 116 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.2 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.3 z 2.55 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 117 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.43 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.6 y 0.22 z 2.15 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 0
+  }
+}
+
+entity 118 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -1.18 y 0.62 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.35 z 2.05 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 119 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.62 z -0.96 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.45 y 0.35 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 120 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 1.18 y 0.62 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.35 z 2.05 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 121 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.62 z 0.96 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.45 y 0.35 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 122 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.63 z 1.25 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1.3 y 0.35 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 123 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -0.3 y 0.68 z 1.33 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.12 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 1
+    palette 5
+  }
+}
+
+entity 124 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.68 z 1.33 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.12 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 1
+    palette 5
+  }
+}
+
+entity 125 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3.8 y 0.2 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.3 z 2.55 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 126 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3.8 y 0.43 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.6 y 0.22 z 2.15 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 0
+  }
+}
+
+entity 127 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2.62 y 0.62 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.35 z 2.05 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 128 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3.8 y 0.62 z -0.96 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.45 y 0.35 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 129 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 4.98 y 0.62 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.35 z 2.05 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 130 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3.8 y 0.62 z 0.96 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.45 y 0.35 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 131 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3.8 y 0.63 z 1.25 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1.3 y 0.35 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 132 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3.5 y 0.68 z 1.33 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.12 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 1
+    palette 5
+  }
+}
+
+entity 133 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3.8 y 0.68 z 1.33 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.12 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 1
+    palette 5
+  }
+}
+
+entity 134 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 4.1 y 0.68 z 1.33 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.12 z 0.12 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 1
+    palette 5
+  }
+}
+
+entity 135 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.35 z -2.8 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 0.6 z 1 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 136 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.73 z -2.8 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.68 y 0.22 z 0.68 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 1
+    palette 7
+  }
+}
+
+entity 137 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 1.35 z -3.7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.75 y 2.65 z 0.75 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 138 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 2.65 z -3.7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1.05 y 0.2 z 1.05 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 3
+  }
+}
+
+entity 139 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7 y 1.5 z 1.8 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.08 y 3 z 0.08 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 140 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7 y 3.05 z 1.8 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.45 y 0.15 z 0.45 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 141 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 7 y 1.5 z 1.8 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.08 y 3 z 0.08 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 2
+  }
+}
+
+entity 142 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 7 y 3.05 z 1.8 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.45 y 0.15 z 0.45 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 7
+  }
+}
+
+entity 143 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 12 z -12 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 400 y 200 z 0.3 }
+    }
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 8
+  }
+}
+
+entity 144 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -3.8 y 0.68 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.22 y 0.055 z 1.8 }
+    }
+  }
+  rime::fluids_scene::ThermalCell 0x7cb777a70bc2a09e {
+    mass_kg 10
+    temperature_kelvin 273.15
+    liquid_mass_fraction 1
+    material { melting_kelvin 273.15 solid_heat_capacity_j_kg_k 2052 liquid_heat_capacity_j_kg_k 4179 latent_heat_j_kg 333500 minimum_kelvin 253.15 maximum_kelvin 313.15 }
+    enabled true
+  }
+  rime::fluids_render::ThermalSurface 0xd636ac2524155a41 {
+    enabled true
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 4
+  }
+  courtyard::Station 0x70b964283bb9ef68 {
+    kind 0
+  }
+}
+
+entity 145 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.68 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.22 y 0.055 z 1.8 }
+    }
+  }
+  rime::fluids_scene::ThermalCell 0x7cb777a70bc2a09e {
+    mass_kg 10
+    temperature_kelvin 273.15
+    liquid_mass_fraction 0
+    material { melting_kelvin 273.15 solid_heat_capacity_j_kg_k 2052 liquid_heat_capacity_j_kg_k 4179 latent_heat_j_kg 333500 minimum_kelvin 253.15 maximum_kelvin 313.15 }
+    enabled true
+  }
+  rime::fluids_render::ThermalSurface 0xd636ac2524155a41 {
+    enabled true
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 5
+  }
+  courtyard::Station 0x70b964283bb9ef68 {
+    kind 1
+  }
+}
+
+entity 146 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3.8 y 0.68 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 2.22 y 0.055 z 1.8 }
+    }
+  }
+  rime::fluids_scene::ThermalCell 0x7cb777a70bc2a09e {
+    mass_kg 10
+    temperature_kelvin 273.15
+    liquid_mass_fraction 1
+    material { melting_kelvin 273.15 solid_heat_capacity_j_kg_k 2052 liquid_heat_capacity_j_kg_k 4179 latent_heat_j_kg 333500 minimum_kelvin 253.15 maximum_kelvin 313.15 }
+    enabled true
+  }
+  rime::fluids_render::ThermalSurface 0xd636ac2524155a41 {
+    enabled true
+  }
+  courtyard::Part 0x88a002d9c263bab7 {
+    shape 0
+    palette 4
+  }
+  courtyard::Station 0x70b964283bb9ef68 {
+    kind 2
+  }
+}
+
+entity 147 {
+  rime::fluids_scene::ThermalSource 0xbf24625798e720cb {
+    cell @144
+    power_watts -100000
+    enabled true
+  }
+}
+
+entity 148 {
+  rime::fluids_scene::ThermalSource 0xbf24625798e720cb {
+    cell @145
+    power_watts 100000
+    enabled true
+  }
+}
+
+entity 149 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0.83 z -2.8 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::vfx_scene::FireEmitter 0xbcac94d9dcd11c9b {
+    half_x 0.18
+    half_y 0.1
+    half_z 0.18
+    particles_per_second 14
+    intensity 1
+    enabled true
+  }
+}
+
+entity 150 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 2.86 z -3.7 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::vfx_scene::SmokeEmitter 0x9144dd5eca5c83ea {
+    half_x 0.14
+    half_y 0.1
+    half_z 0.14
+    particles_per_second 9
+    intensity 0.75
+    enabled true
+  }
+}
+
+entity 151 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7 y 2.9 z 1.8 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::PointLight 0xdc6ff08e4829f9f1 {
+    color_r 1
+    color_g 0.74
+    color_b 0.43
+    intensity 38
+    radius 8
+  }
+}
+
+entity 152 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 7 y 2.9 z 1.8 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::PointLight 0xdc6ff08e4829f9f1 {
+    color_r 1
+    color_g 0.74
+    color_b 0.43
+    intensity 38
+    radius 8
+  }
+}
+
+entity 153 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 9 y 8.5 z 14 }
+      rotation { x -0.19173427 y 0.2566885 z 0.052033335 w 0.9458549 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::Camera 0x42cdb0b7ddc97dbc {
+    fov_y 0.82
+    z_near 0.1
+    z_far 150
+    active true
+  }
+}
+
+entity 154 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x -0.41862178 y -0.24451366 z -0.118113555 w 0.866613 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::DirectionalLight 0x0279ad2e8762ff9a {
+    color_r 1
+    color_g 0.9
+    color_b 0.78
+    intensity 2.5
+  }
+}

@@ -352,6 +352,31 @@ void SceneRenderer::set_smoke_particles(std::span<const GpuParticle> particles,
     smoke_particles_dropped_ += particles.size() - count;
 }
 
+bool SceneRenderer::set_surface_appearances(std::span<const SurfaceAppearance> rows) {
+    surface_appearance_count_ = 0;
+    const auto refuse = [&] {
+        ++surface_appearance_refusals_;
+        return false;
+    };
+    if (rows.size() > surface_appearances_.size())
+        return refuse();
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const auto& r = rows[i];
+        if (!r.entity.is_valid() || !std::isfinite(r.base_color.x) ||
+            !std::isfinite(r.base_color.y) || !std::isfinite(r.base_color.z) ||
+            r.base_color.x < 0 || r.base_color.x > 1 || r.base_color.y < 0 || r.base_color.y > 1 ||
+            r.base_color.z < 0 || r.base_color.z > 1 || !std::isfinite(r.roughness) ||
+            r.roughness < 0 || r.roughness > 1)
+            return refuse();
+        for (std::size_t j = 0; j < i; ++j)
+            if (rows[j].entity == r.entity)
+                return refuse();
+    }
+    std::copy(rows.begin(), rows.end(), surface_appearances_.begin());
+    surface_appearance_count_ = rows.size();
+    return true;
+}
+
 void SceneRenderer::set_transient_point_lights(std::span<const GpuPointLight> lights) {
     transient_point_lights_.clear();
     for (const auto& light : lights) {
@@ -651,8 +676,20 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         const DrawItem& item = frame_draws_[i];
         // Out-of-range material ids are a caller bug, but a defensive default keeps a bad id
         // from becoming an out-of-bounds read.
-        const PbrMaterialDesc material =
+        PbrMaterialDesc material =
             item.material < materials_.size() ? materials_.get(item.material) : PbrMaterialDesc{};
+        // Change the private frame copy, never the registry or authored components. Matching
+        // after resolve_draws applies the same diagnostic appearance to every submesh of a cell.
+        for (std::size_t j = 0; j < surface_appearance_count_; ++j) {
+            const auto& appearance = surface_appearances_[j];
+            if (appearance.entity != scene.draw_entities[i])
+                continue;
+            material.base_color[0] = appearance.base_color.x;
+            material.base_color[1] = appearance.base_color.y;
+            material.base_color[2] = appearance.base_color.z;
+            material.roughness = appearance.roughness;
+            break;
+        }
         GpuDrawUniforms du{};
         du.model = item.model;
         du.prev_model = item.model;

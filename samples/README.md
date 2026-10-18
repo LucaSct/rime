@@ -51,3 +51,9 @@ Samples build with the engine (`scripts/build.sh`) and land in `build/<preset>/b
 gates on take a `--headless` or `--offscreen` flag and exit non-zero on failure; several read cooked
 assets and are registered in `ctest` behind a cook fixture, so `ctest --preset dev` runs them the way
 CI does. Each sample directory has its own README with the details and the reasoning.
+
+
+The [Frost Yard thermal courtyard](thermal-courtyard/README.md) is a saved city
+diorama demonstrating temperature-driven freezing/melting, an insulated control,
+and separate smoke/fire effects. `./scripts/thermal-courtyard.sh` runs the
+36-second demo; `--editor` opens the same scene in its editor host.

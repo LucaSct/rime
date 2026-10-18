@@ -105,3 +105,12 @@ objects/binary/logs beside itself and uses the checkout's real compile database.
 SDK rebuild. Source and binary artifacts remain at
 `/home/next/reports/rime-thermal-authoring-2026-10-18/`; logs and the small authored
 scene/fixture are retained here. No private credential/credit files are committed.
+
+
+Correction recorded during the following courtyard brick: setting `DISPLAY=:99`
+did not disable the ambient `WAYLAND_DISPLAY`; the earlier individual input
+recheck does not establish an isolated X11 backend. The courtyard verification
+now uses a separately owned Xvfb with Wayland explicitly unset and asserts a real
+window was presented. Retained original logs/results remain historical; the
+[following verification](../thermal-courtyard-2026-10-18/README.md) records the
+corrected backend distinction.
