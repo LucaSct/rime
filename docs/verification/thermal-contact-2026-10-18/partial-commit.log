@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/home/next/projects/rime/tests/fluids/verify_thermal_contact.py", line 203, in <module>
+    main()
+    ~~~~^^
+  File "/home/next/projects/rime/tests/fluids/verify_thermal_contact.py", line 193, in main
+    summary = verify(inputs, completed.stdout)
+  File "/home/next/projects/rime/tests/fluids/verify_thermal_contact.py", line 135, in verify
+    assert hi + lo == delta, (index, 'stored delta')
+           ^^^^^^^^^^^^^^^^
+AssertionError: (1, 'stored delta')

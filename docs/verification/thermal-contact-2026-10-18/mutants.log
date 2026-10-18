@@ -1,0 +1,2 @@
+partial-commit correctly rejected 1 AssertionError: (1, 'stored delta')
+lost-residual correctly rejected 1 AssertionError: (2, 'single ledger')

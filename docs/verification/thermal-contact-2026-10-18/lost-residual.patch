@@ -1,0 +1,4 @@
+--- original
++++ lost-residual
+@@ -112,0 +113 @@
++            result.second.roundoff_joules = 0.0;

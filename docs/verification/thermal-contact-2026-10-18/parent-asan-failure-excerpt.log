@@ -1,0 +1,5 @@
+2026-10-18T18:38:47.0720005Z 99-the-block: 3 of 30 claims failed
+2026-10-18T18:38:47.0727242Z     [FAIL] collapse: the far side of the street is untouched
+2026-10-18T18:38:47.0727411Z     [FAIL] collapse: most of the block is still standing
+2026-10-18T18:38:47.0727630Z     [FAIL] collapse: the damage stayed local to a few buildings
+2026-10-18T18:51:43.6242751Z 99% tests passed, 1 tests failed out of 88
