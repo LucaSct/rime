@@ -1,0 +1,42 @@
+{
+  "base": "7be38d253a61cad46bff54cb9c553ee67bba0498",
+  "existing_candidate": "f9371dea7b81c543dfac2fa1fad150a58471e412",
+  "candidate_ancestor": true,
+  "physics_tests_replay_diff": "",
+  "sha256": {
+    "/home/next/projects/rime-wt/player-roadmap-perf/engine/physics/src/contact_bounds.hpp": "97c301427be62c4ff5ff03991e090d36ed001100e509a7af3c41af2a99fa2b84",
+    "/home/next/projects/rime-wt/player-roadmap-perf/engine/physics/src/world.cpp": "6bc6eacd58526c4f3667ad87285d32cace11d4bf7895d1e57f304abe49364413",
+    "/home/next/projects/rime-wt/player-roadmap-perf/tests/physics/plain_bounds_test.cpp": "5bb6c638d465361fa891daeba131f89aded710bcda1a5ce2b042baba302fb0fe",
+    "/home/next/projects/rime-wt/player-roadmap-perf/samples/contact_bench/main.cpp": "48ae9feecccd26441fccf02d28e65caffe5ad7299e011fa65298eb2db17f9979",
+    "/home/next/projects/rime-wt/player-roadmap-perf/samples/contact_bench/workload.hpp": "771a7e939e5b62373449040f92eee6b64402e7f2f5be69267a92799f19829b3a",
+    "/home/next/projects/rime-wt/player-roadmap-perf/docs/perf/contact-oracle-2026-10-18/city.contacts.gz": "b1675dafdccd2f46ecef9ef42a1b8551532abe40d9e562244f4e0b43adc3f45a",
+    "/home/next/projects/rime/build/release/bin/contact_bench": "fb02e07abfb1d64129f5d6f2de5022bb4dba0a83ee01dc66fed8f88c84ee825b",
+    "/home/next/projects/rime/build/release/bin/rime_physics_tests": "3d8c2ac385caac0400b8dd5ae8389555b34c8230e58e6e76c719de9b8370275e",
+    "/home/next/reports/rime-player-performance-2026-10-19/city.contacts": "bcdade9cd51373bbefb9c642cef2f6946cf562f2354fa21d3ed30b22b050f372"
+  },
+  "fresh_execution_exit_status": {
+    "none": 0,
+    "cached": 0,
+    "tight": 1,
+    "cache-tests": 0
+  },
+  "inherited_profile_rows": 720,
+  "inherited_instrumented_timing_sums_ns": {
+    "pair_query_ns": 328145258,
+    "pair_canonicalize_ns": 196210160,
+    "plain_exact_ns": 2017793355,
+    "plain_speculative_ns": 0,
+    "compound_pose_ns": 18941791,
+    "compound_midphase_ns": 4453251,
+    "compound_exact_ns": 42511547,
+    "compound_speculative_ns": 0,
+    "heightfield_ns": 25078631,
+    "warmcache_ns": 107288448,
+    "plain_bounds_ns": 143664840
+  },
+  "inherited_bounds_fraction_of_summed_contact_substages": 0.04981293074812461,
+  "notes": [
+    "No timing flag, hardware/GPU run, new build tree or source edits. Existing binaries date Oct18; physics, direct tests and replay sources are identical to integrated candidate. Fresh execution is not a fresh compilation.",
+    "The first test invocation used an unsupported positional filter and therefore ran the complete physics executable successfully; retained separately."
+  ]
+}
