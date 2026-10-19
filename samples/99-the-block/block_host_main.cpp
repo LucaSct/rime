@@ -21,6 +21,7 @@
 #include <utility>
 #include <vector>
 
+#include "editor_fly_camera.hpp"
 #include "play_city.hpp"
 #include "rime/app/editor_host_app.hpp"
 #include "rime/blockkit/block.hpp"
@@ -179,40 +180,17 @@ public:
             return; // a scene with no active camera: nothing to fly, and nothing being rendered
         }
 
-        // SEED FROM THE SCENE, ONCE PER SESSION. Starting the fly camera at the origin looking
-        // down −Z would teleport the viewer away from the shot the scene was authored to open on,
-        // the first time they nudge the mouse. Yaw/pitch are recovered from the camera's own
-        // forward vector — exact, because `eye_transform` builds the rotation as yaw-then-pitch
-        // and this inverts precisely that.
-        if (!seeded_) {
-            const rime::core::Vec3 forward =
-                rime::core::rotate(current.rotation, rime::core::Vec3{0.0f, 0.0f, -1.0f});
-            fly_.position = current.translation;
-            fly_.view.yaw = std::atan2(-forward.x, -forward.z);
-            fly_.view.pitch = std::asin(std::clamp(forward.y, -1.0f, 1.0f));
-            seeded_ = true;
-        }
-
-        // Pointer capture is the browser page's job (it calls `requestPointerLock` before it
-        // forwards anything), and the page only sends input while locked — so look does NOT
-        // require a held button here. This is the one place `look_requires_drag` is set from
-        // knowledge the engine does not have: what the CLIENT did, not what this process asked
-        // for.
-        fly_.bindings.look_requires_drag = false;
-        fly_.update(events, static_cast<float>(dt));
-
+        // The editor writes this same camera while inspecting a running simulation. Hand its
+        // current authored pose to the controller so a cached play pose cannot overwrite it.
+        const auto eye = fly_.update(current, events, dt);
         if (auto* local = world.get<rime::ecs::LocalTransform>(camera)) {
-            // Scale is preserved rather than overwritten: a camera's scale is meaningless to the
-            // lens but it is the author's data, and a play session must give back what it took.
-            const rime::core::Transform eye = fly_.transform();
             local->value.translation = eye.translation;
             local->value.rotation = eye.rotation;
         }
     }
 
 private:
-    rime::gameplay::FlyCamera fly_{};
-    bool seeded_ = false;
+    block_editor::FlyCamera fly_{};
 };
 
 } // namespace

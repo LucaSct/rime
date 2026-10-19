@@ -355,9 +355,11 @@ impl FakeHost {
     }
 
     fn publish_snapshot(&self) {
-        self.shared.lock().unwrap().snapshot = Snapshot {
+        let mut shared = self.shared.lock().unwrap();
+        shared.snapshot = Snapshot {
             entities: self.world.clone(),
         };
+        shared.snapshots_received += 1;
     }
 
     fn answer(&self, ok: bool, editor_id: EntityId) {
@@ -927,7 +929,7 @@ impl Rig {
 
     /// Where a render-extent pixel falls on screen.
     fn screen(&self, px: (f32, f32)) -> egui::Pos2 {
-        let r = self.viewport_rect();
+        let r = viewport_image_rect(self.viewport_rect(), (64, 36));
         egui::pos2(
             r.left() + px.0 / EXTENT.0 * r.width(),
             r.top() + px.1 / EXTENT.1 * r.height(),
@@ -2691,18 +2693,14 @@ fn right_drag_looks_around_by_editing_the_camera_entity() {
 }
 
 #[test]
-fn a_right_drag_leaks_an_unpaired_pointer_up_to_the_engine() {
-    // DOCUMENTS A DEFECT (minor): m17.1 gated the forwarded pointer-DOWN and pointer-MOVE on the
-    // primary button, but not the pointer-UP. So every look-around ends by telling the engine
-    // "left button released" for a press it was never told about. Harmless to today's host, which
-    // ignores it; a game that acts on button-up during Play would see phantom releases.
+fn a_right_drag_does_not_forward_an_unpaired_primary_release() {
     let mut rig = Rig::new();
     rig.present_frame();
     rig.drag(
         egui::PointerButton::Secondary,
         &[(400.5, 270.5), (440.5, 270.5), (500.5, 270.5)],
     );
-    assert_eq!(rig.host.inputs, ["up 500,270 b0"]);
+    assert!(rig.host.inputs.is_empty());
 }
 
 /// Press the right button over the viewport, the way a person does to fly: it is the fly button.
@@ -3085,4 +3083,259 @@ fn city_roles_name_geometry_and_keep_semantic_source_priority() {
     assert_eq!(outliner_label(&schema, 5, &entity), "5  Street lamp 3");
     entity.components[0].data.clear();
     assert_eq!(outliner_label(&schema, 5, &entity), "5  City part");
+}
+
+#[test]
+fn external_camera_edits_rebase_the_next_navigation_gesture() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    right_button_up(&mut rig, (480.0, 270.0));
+    rig.host.entity_mut(CAMERA).unwrap().components[0].data = trs_at(80.0, 16.0, 40.0);
+    rig.host.publish_snapshot();
+    rig.settle();
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.settle();
+    right_button_up(&mut rig, (480.0, 270.0));
+    let [x, y, z] = rig.host.translation(CAMERA);
+    assert_eq!((x, y), (80.0, 16.0));
+    assert!(
+        z < 40.0 && z > 30.0,
+        "movement continues from the external pose: {z}"
+    );
+}
+
+#[test]
+fn stop_restores_camera_and_next_flight_starts_from_restored_pose() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.click("▶");
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    rig.settle();
+    right_button_up(&mut rig, (480.0, 270.0));
+    assert!(rig.host.translation(CAMERA)[2] < EYE_Z);
+    rig.click("⏹");
+    assert_eq!(rig.host.translation(CAMERA), [0.0, 0.0, EYE_Z]);
+    right_button_down(&mut rig, (480.0, 270.0));
+    right_button_up(&mut rig, (480.0, 270.0));
+    let z = rig.host.translation(CAMERA)[2];
+    assert!(
+        z < EYE_Z && z > EYE_Z - 4.0,
+        "rebased to restored camera: {z}"
+    );
+}
+
+#[test]
+fn letterbox_bars_do_not_pick_zoom_or_start_camera_navigation() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    let panel = rig.viewport_rect();
+    let image = viewport_image_rect(panel, (64, 36));
+    let bar = if image.left() > panel.left() + 1.0 {
+        egui::pos2(panel.left() + 0.5, panel.center().y)
+    } else {
+        assert!(image.top() > panel.top() + 1.0, "test needs letterboxing");
+        egui::pos2(panel.center().x, panel.top() + 0.5)
+    };
+    let before = rig.host.translation(CAMERA);
+    rig.host.log.clear();
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(bar));
+    rig.settle();
+    for pressed in [true, false] {
+        rig.harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerButton {
+                pos: bar,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        rig.settle();
+    }
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerButton {
+            pos: bar,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+    rig.hold_key(egui::Key::W);
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 60.0),
+            modifiers: egui::Modifiers::NONE,
+        });
+    rig.settle();
+    assert_eq!(rig.host.translation(CAMERA), before);
+    assert_eq!(rig.host.count(EditorMessage::PickRequest), 0);
+    assert!(rig.host.inputs.is_empty());
+}
+
+#[test]
+fn camera_reconciliation_ignores_repeated_delayed_snapshots_and_accepts_new_owner() {
+    let mut camera = FlyCam::default();
+    let baseline = trs_at(0.0, 0.0, 20.0);
+    camera.sync(CAMERA, &baseline, 1, PlayPhase::Edit);
+    let mut revision = 1;
+    for step in 1..=120 {
+        let latest = trs_at(0.0, 0.0, 20.0 - step as f32 * 0.1);
+        camera.sent(&latest);
+        // The mirror is patched optimistically between real engine snapshots.
+        camera.sync(CAMERA, &latest, revision, PlayPhase::Edit);
+        // A delayed structural snapshot may still show the original pose multiple times.
+        revision += 1;
+        camera.sync(CAMERA, &baseline, revision, PlayPhase::Edit);
+        assert_eq!(camera.last_blob, latest);
+    }
+    let latest = camera.last_blob.clone();
+    camera.sync(CAMERA, &latest, 123, PlayPhase::Edit);
+    assert!(
+        camera.pending.is_empty(),
+        "latest snapshot acknowledges the gesture"
+    );
+    let external = trs_at(-10.0, 5.0, 80.0);
+    camera.sync(CAMERA, &external, 124, PlayPhase::Edit);
+    assert_eq!(camera.pos, [-10.0, 5.0, 80.0]);
+    camera.sync(CAMERA + 10, &baseline, 125, PlayPhase::Edit);
+    assert_eq!(camera.pos, [0.0, 0.0, 20.0], "new camera entity rebases");
+}
+
+#[test]
+fn viewport_image_preserves_stream_aspect_in_wide_and_tall_docks() {
+    for size in [egui::vec2(1200.0, 400.0), egui::vec2(400.0, 900.0)] {
+        let panel = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), size);
+        let image = viewport_image_rect(panel, (960, 540));
+        assert!((image.aspect_ratio() - 16.0 / 9.0).abs() < 0.0001);
+        assert_eq!(image.center(), panel.center());
+        assert!(panel.contains_rect(image));
+    }
+}
+
+#[test]
+fn inactive_camera_is_not_the_navigation_target() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.host
+        .entity_mut(CAMERA)
+        .unwrap()
+        .components
+        .iter_mut()
+        .find(|c| c.type_hash == H_CAMERA)
+        .unwrap()
+        .data = encode_value(&Value::Struct(vec![
+        ("fov_y".into(), Value::F32(1.0)),
+        ("active".into(), Value::Bool(false)),
+    ]));
+    rig.host
+        .entity_mut(LIGHT)
+        .unwrap()
+        .components
+        .push(comp(H_CAMERA, default_blob(H_CAMERA)));
+    rig.host.publish_snapshot();
+    rig.settle();
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    right_button_up(&mut rig, (480.0, 270.0));
+    assert_eq!(rig.host.translation(CAMERA), [0.0, 0.0, EYE_Z]);
+    assert!(rig.host.translation(LIGHT)[2] < 0.0);
+}
+
+#[test]
+fn delayed_engine_snapshots_do_not_reset_continuous_movement_before_release() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    let mut previous = rig.app().fly.pos[2];
+    // Hold the engine queue while the UI keeps processing frames and stale snapshots. This
+    // reproduces a slow streamed viewport rather than the instant pump used by ordinary clicks.
+    for _ in 0..30 {
+        rig.host.publish_snapshot();
+        rig.harness.step();
+        let next = rig.app().fly.pos[2];
+        assert!(
+            next < previous,
+            "each frame accumulates from local navigation"
+        );
+        previous = next;
+    }
+    right_button_up(&mut rig, (480.0, 270.0));
+    assert_eq!(rig.host.translation(CAMERA)[2], previous);
+    assert!(
+        rig.app().fly.pending.is_empty(),
+        "release confirms the last pose"
+    );
+    rig.settle();
+    assert_eq!(
+        rig.host.translation(CAMERA)[2],
+        previous,
+        "no movement after release"
+    );
+}
+
+#[test]
+fn captured_primary_drag_releases_when_pointer_enters_a_letterbox_bar() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.pointer_move((480.0, 270.0));
+    rig.pointer_button((480.0, 270.0), egui::PointerButton::Primary, true);
+    rig.pointer_move((520.0, 300.0));
+    let panel = rig.viewport_rect();
+    let image = viewport_image_rect(panel, (64, 36));
+    let bar = if image.left() > panel.left() + 1.0 {
+        egui::pos2(panel.left() + 0.5, panel.center().y)
+    } else {
+        egui::pos2(panel.center().x, panel.top() + 0.5)
+    };
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(bar));
+    rig.settle();
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerButton {
+            pos: bar,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+    rig.settle();
+    assert!(rig
+        .host
+        .inputs
+        .iter()
+        .any(|event| event.starts_with("down ")));
+    assert!(rig.host.inputs.last().unwrap().starts_with("up "));
+}
+
+#[test]
+fn explicit_camera_edit_can_restore_a_pose_that_is_still_pending() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    assert!(rig.app().fly.pos[2] < EYE_Z);
+    assert!(!rig.app().fly.pending.is_empty());
+    // An explicit undo/inspector edit knows it is new intent. It must not be mistaken for a
+    // delayed snapshot just because its bytes equal the navigation gesture's baseline.
+    rig.harness.state_mut().send(Command::SetComponent {
+        id: CAMERA,
+        type_hash: H_LOCAL,
+        blob: trs_at(0.0, 0.0, EYE_Z),
+    });
+    assert_eq!(rig.app().fly.pos, [0.0, 0.0, EYE_Z]);
+    assert!(rig.app().fly.pending.is_empty());
 }
