@@ -12109,3 +12109,516 @@ entity 629 {
     enabled true
   }
 }
+
+# Static timber basin boards; surfaces retain their own thermal state.
+entity 630 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.56 y 0.06 z -3 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.115 z 3 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 631 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.06 z -4.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.115 z 0.12 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 632 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.56 y 0.187 z -3 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.115 z 3 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 633 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.187 z -4.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.115 z 0.12 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 634 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.55 y 0.275 z -3 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.055 z 3.1 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 635 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.275 z -4.55 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.1 y 0.055 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 636 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.56 y 0.16 z -4.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.36 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 637 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.56 y 0.16 z -1.44 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.36 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 638 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.44 y 0.06 z -3 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.115 z 3 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 639 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.06 z -1.44 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.115 z 0.12 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 640 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.44 y 0.187 z -3 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.115 z 3 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 641 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.187 z -1.44 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.115 z 0.12 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 642 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.45 y 0.275 z -3 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.055 z 3.1 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 643 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.275 z -1.45 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.1 y 0.055 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 644 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.44 y 0.16 z -4.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.36 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 645 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.44 y 0.16 z -1.44 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.36 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 646 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.56 y 0.06 z 1 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.115 z 3 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 647 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.06 z -0.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.115 z 0.12 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 648 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.56 y 0.187 z 1 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.115 z 3 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 649 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.187 z -0.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.115 z 0.12 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 650 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.55 y 0.275 z 1 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.055 z 3.1 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 651 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.275 z -0.55 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.1 y 0.055 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 652 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.56 y 0.16 z -0.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.36 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 653 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.56 y 0.16 z 2.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.36 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 654 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.44 y 0.06 z 1 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.115 z 3 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 655 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.06 z 2.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.115 z 0.12 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 656 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.44 y 0.187 z 1 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.12 y 0.115 z 3 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 657 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.187 z 2.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3 y 0.115 z 0.12 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 658 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.45 y 0.275 z 1 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.055 z 3.1 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 659 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.275 z 2.55 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.1 y 0.055 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 660 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.44 y 0.16 z -0.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.36 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}
+
+entity 661 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.44 y 0.16 z 2.56 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 0.2 y 0.36 z 0.2 }
+    }
+  }
+  rime::blockkit::SlabRole 0x3f51d745b75a387c {
+    building 4294967295
+    storey 0
+    kind 12
+    tint 0
+  }
+}

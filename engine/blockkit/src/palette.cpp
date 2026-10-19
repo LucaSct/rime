@@ -101,6 +101,13 @@ PaletteStats apply_palette(ecs::World& world, const BlockPalette& palette) {
             case slab_kind::kCrate:
                 material = palette.crate;
                 break;
+            case slab_kind::kTimber:
+                // Reuse the warm, rough wood appearance, but give static boards a unit cube.
+                // A cooked crate gets its mesh from destruction; an edging board must also
+                // reconstruct in a fresh editor/game from its saved role and transform alone.
+                material = palette.crate;
+                mesh = palette.unit_cube;
+                break;
             case slab_kind::kStreet:
                 // MATERIAL ONLY since m17.8: the street's MESH is derived from its
                 // `ground::GroundSurface` by `ground::apply_ground`, because the surface's size is

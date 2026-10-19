@@ -45,6 +45,12 @@ Pause and rejected ticks do not animate them. Removal, invalid edits, disable,
 extinguish and Stop clear flames alongside the light. Residual smoke keeps its
 normal lifetime. No flame state is written into ECS or a saved scene.
 
+The root tongue stays comparatively steady while side tongues surge, lean, lift
+and fade independently. Each combines two seeded integer harmonics of the
+eight-second loop, so both values and slopes join at the wrap without a random
+frame seed. Opacity and warm radiance vary with the surge; the three-row budget
+and original smoke/light adapters remain unchanged.
+
 Smoke now has smooth procedural density, soft birth/retirement, cooler ambient
 colour and bounded warm illumination from the same local fire lights. This is an
 approximate incident-light calculation, not self-shadowing or a density solver.
