@@ -31,8 +31,8 @@ existing map. The launcher supplies the game's component/preview host and cooks.
 
 For the V2 showcase, run `./scripts/city-v2.sh`. It creates an editable
 `build/release/city-v2.rscene` copy on first launch, with a player spawn, fire,
-smoke, a rippling water sheet and a blue frost sheet in low timber basins. Later launches keep your
-edits. Press Preview to inspect effects in the editor, or Run game for weapons
+smoke, a rippling water sheet and a blue frost sheet in low timber basins. Later
+launches keep your edits. Press Preview to inspect effects in the editor, or Run game for weapons
 and the authored player position. Frost Yard remains the freezing/melting demo.
 
 Press **Run game** in the top toolbar. The editor saves the current document,

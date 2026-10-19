@@ -10,7 +10,8 @@ Read `CLAUDE.md`, the global rulebook at
 ./scripts/city-v2.sh
 ```
 
-The native editor was reopened on the RTX 3060, PID 92772 at this handoff.
+The native editor was reopened on the RTX 3060 as PID 92772 during verification;
+that process has since exited without an error in its output.
 It loads the persistent `build/release/city-v2.rscene`, initially copied from
 `samples/99-the-block/city-v2.rscene`: 630 entities, 569 destructible previews,
 an enabled PlayerSpawn, fire, smoke, water and frost sheets. Preview animates
@@ -110,3 +111,27 @@ possession inside Preview, event wiring, prefab library and adaptive editor
 stream resolution. Avoid presenting those as implemented.
 
 No browser deployment changed.
+
+## Follow-up: timber basins and fire dynamics
+
+Draft PR **#344** is the delivery PR for `feat/environment-editor-v2`, stacked
+on #343. The follow-up adds 32 static timber boards (662 total entities) to the
+source showcase and the saved live copy without rewriting existing entity text.
+Both sheets have grounded wooden sides, caps and posts. SlabRole kind 12 derives
+the existing wood material and cube mesh; editor labels read “Timber board”.
+Fire now has a steadier root and independently surging/lifting/fading side tongues
+with smooth eight-second loop joins. Claude Sonnet 5.5 implemented the fire leaf;
+root implemented surrounds and verified the integration.
+
+Updated standalone: `/home/next/rime-exports/city-v2-timber-2026-10-19/the_block`.
+Both earlier exports remain intact. The new bundle passed isolation, integrity,
+refusal and actual weapon-window checks. SHA-256:
+`7f4cca9c8c2abe7e1c490142cb24de16171d422e04e71512c510dfca70c9d0eb`.
+
+See `docs/verification/timber-fire-2026-10-19/README.md`: 151 GUI checks, 7
+blockkit cases, 10 VFX cases, 9 authored runtime Vulkan cases, and 17 focused
+ASan/UBSan+LSan cases pass. Initial concurrent GUI child-process deadline
+failures are retained; the idle rerun passed with no assertion/deadline change.
+Full CTest was not repeated for this presentation follow-up. The fresh hardware
+run again failed clock stability, budgets and fingerprint comparison; rejected
+receipt is in `docs/perf/timber-fire-2026-10-19/`. Nothing merged; gates remain open.
