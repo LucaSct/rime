@@ -1,5 +1,11 @@
 # Run-game floor lighting follow-up — 2026-10-19
 
+**Work stopped at the owner's request. The later clarification—tree silhouettes
+on house walls and beneath trees—remains unresolved.** The results below establish
+the separate floor GI-band correction. A current tree-wall observation recording
+is retained locally; the exact next experiment and camera targets are in the
+[handoff](../../../HANDOFF-2026-10-19-runtime-ground-lighting.md).
+
 Feature commits: `84f3126` (Claude's bounded shadow range) and `b340d44`
 (receiving-side diffuse query, runtime profile and GPU regressions), based on
 `727c851` / draft PR #346. See [ADR-0102](../../adr/0102-runtime-floor-lighting.md).

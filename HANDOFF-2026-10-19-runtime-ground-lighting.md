@@ -1,7 +1,57 @@
 # Run-game floor follow-up — 2026-10-19
 
+**Stopped at the owner's request. The tree/house-wall flicker is not yet verified
+fixed. No unattended continuation is running.**
+
 Branch `fix/runtime-ground-lighting`, based on `727c851` / draft PR #346.
-Implementation: `84f3126` and `b340d44`. Nothing merged or browser-deployed.
+Implementation: `84f3126` and `b340d44`; evidence `86f5525`. Draft
+[PR #347](https://github.com/LucaSct/rime/pull/347) is pushed. Nothing merged or
+browser-deployed. The local test results below are not remote CI completion.
+
+## Latest clarification and exact resume point
+
+The owner clarified the main symptom is **between buildings, beneath trees, and
+tree silhouettes on house walls**. The verified floor GI-band correction below
+is separate; do not present it as completing this clarified case.
+
+A new actual Run-game recording captures a tree against a brick wall:
+`/home/next/reports/rime-runtime-ground-2026-10-19/ground-tree-wall-current.mp4`.
+The accompanying `tree-wall-current-contact.png` and `record-tree-wall.py` retain
+the view/input sequence. Current production code already includes the GI query
+correction and 160-unit shadow range. This is an observation recording, not a
+measured before/after tree-shadow acceptance result.
+
+Saved showcase sun travels approximately `(+0.990,-0.140,0)`. Useful targets:
+
+- Tree `(10,0,-8)`, scale about 1.2769; receiver west wall `x≈11.85–12`,
+  `z≈-8`, heights 3–8. Eye `(9,1.6,-5)`, yaw `-0.6435`, pitch `+0.4475`.
+- Tree `(22,0,8)`, scale about 0.9027; receiver west wall `x≈23.85–24`.
+  Eye `(21,1.6,5)`, yaw `-2.498`, pitch `+0.4475`.
+
+The 26 runtime trees are static `PlayEnvironment` meshes, absent from the saved
+editor scene; no wind/deformation explains camera-only changes. Full draw lists
+retain off-screen casters; main-view shadow caster culling defaults off. Wall
+shadow bias uses unperturbed normals. A remaining **hypothesis**, not GPU proof:
+leaf masks have nine ordinary downsampled alpha mips with cutoff 0.5; the actual
+mask's CPU coverage rises from about 52.11% at level zero to 100% at 2×2/1×1.
+Different cascade/mip sampling can therefore change leaf-card silhouettes. Do
+not implement a mip policy merely because this hypothesis sounds plausible.
+
+Next experiment: measure fixed wall points during pure yaw and a short strafe,
+inspect cascade participation/shadow visibility, then independently compare
+the 160-unit cap versus uncapped maps and diagnostic mip-zero/opaque-leaf
+controls. If instability occurs wholly inside one unchanged-scale cascade,
+inspect its own depth image and light-depth clipping rather than blaming blends.
+
+An external probe **compiled but has not been run**:
+`tree-diagnostic.cpp`, `tree-main.inc.cpp`, `build-tree-diagnostic.py` in the raw
+report directory. It preserves the production Play entry and additionally
+supports `--tree-probe MODE OUTPUT`, modes `full`, `no-ddgi`, `no-ssr`, `sun`,
+`clear`; `RIME_DIAG_SHADOW_DISTANCE=0/160` selects range. It exports HDR and
+samples wall anchors. Its assumptions/coordinates/output need checking before
+trusting any result. The generated binary/object were removed after retaining
+hashes to preserve disk reserve; rebuild from these sources if resumed. The
+initial plan is diagnostic only, with all features enabled in final acceptance.
 
 ## User-visible correction
 
