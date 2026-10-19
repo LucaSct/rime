@@ -47,6 +47,7 @@ rime_add_test(rime_render_tests
     sdf_clipmap_test.cpp
     ddgi_test.cpp
     ddgi_history_test.cpp
+    ddgi_surface_query_test.cpp
     gi_thesis_test.cpp
     gbuffer_test.cpp
     ssr_test.cpp

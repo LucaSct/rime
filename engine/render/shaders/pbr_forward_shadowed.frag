@@ -474,7 +474,14 @@ void main() {
     vec3 out_radiance;
     if (ddgi.enabled_pad.x != 0u) {
         bool covered;
-        vec3 indirect = ddgi_sample_irradiance(v_world_pos, normalize(v_world_normal), covered);
+        const vec3 geometric_normal = normalize(v_world_normal);
+        // Query on the receiving side of the surface, as the SSR fallback does. A receiver
+        // exactly on a probe plane otherwise gives its open upper layer zero trilinear weight;
+        // a tiny surviving surface-layer weight can then normalize to a full estimate instead
+        // of using the open neighboring layer. Keep support anchored to the real surface.
+        const float surface_bias = max(0.01, ddgi.grid_origin_spacing.w * 0.025);
+        vec3 indirect = ddgi_sample_irradiance(v_world_pos + geometric_normal * surface_bias,
+                                             geometric_normal, covered);
         if (ddgi.enabled_pad.y != 0u) {
             // Coverage and radiance are separate: an accepted zero inside the core stays dark.
             // Replace ONE diffuse environment term instead of adding sky on top of measured GI.
