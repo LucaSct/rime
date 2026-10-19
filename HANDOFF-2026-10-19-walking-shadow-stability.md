@@ -1,7 +1,10 @@
 # Walking shadow stability — 2026-10-19
 
 Branch: `fix/walking-shadow-stability`, stacked on `feat/editor-player-preview`
-at `38f44c3` (draft PR #345). Nothing merged or browser-deployed.
+at `38f44c3` (draft PR #345). Draft
+[PR #346](https://github.com/LucaSct/rime/pull/346) is pushed. Nothing merged or
+browser-deployed. Remote CI was queued at publication; local results below are
+not a claim of completed remote CI.
 
 ## Ready to use
 
