@@ -23,6 +23,7 @@
 
 #include "editor_fly_camera.hpp"
 #include "play_city.hpp"
+#include "player_spawn.hpp"
 #include "rime/app/editor_host_app.hpp"
 #include "rime/blockkit/block.hpp"
 #include "rime/blockkit/palette.hpp"
@@ -203,8 +204,9 @@ int main(int argc, char** argv) {
         argc,
         argv,
         [](rime::ecs::World& world) {
-            (void)rime::worldkit::register_engine_components(world); // the engine's
-            rime::blockkit::register_blockkit_components(world);     // this game's
+            // The same list the game registers (engine + blockkit + PlayerSpawn), so the
+            // Inspector can author what Play consumes.
+            rime::block_play::register_block_components(world);
         },
         "the-block-host",
         prepare_block_for_viewport,
