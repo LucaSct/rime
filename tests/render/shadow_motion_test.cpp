@@ -143,14 +143,14 @@ TEST_CASE("shadow motion: local world casters move and disappear without manual 
         (void)world.despawn(entity);
     const auto removed = frame(*device, renderer, world);
     CHECK(renderer.local_shadow_stats().rendered == 1);
-    (void)draw(world, torso, material, placed({1.5f, 3, 0}));
-    (void)draw(world, limb, material, placed({1.25f, 2.2f, 0}));
-    (void)draw(world, limb, material, placed({1.75f, 2.2f, 0}));
-    settings.local_shadows_enabled = false;
-    renderer.set_lighting(settings);
-    const auto disabled = frame(*device, renderer, world);
-    const float old_lit = patch(disabled, cam, {3, 0, 0});
-    const float new_lit = patch(disabled, cam, {-3, 0, 0});
+    // Keep the spotlight ON for the reference. The existing local-light feature gate also
+    // removes spotlight shading, so switching it off would measure ambient, not an unoccluded
+    // spot. Explicitly refresh the empty world to obtain a reference independent of the motion
+    // tracker's correctness; the automatic removal frame above must agree with it.
+    renderer.invalidate_shadow_region(WorldAabb{{-8, -1, -8}, {8, 8, 8}});
+    const auto reference = frame(*device, renderer, world);
+    const float old_lit = patch(reference, cam, {3, 0, 0});
+    const float new_lit = patch(reference, cam, {-3, 0, 0});
     REQUIRE(old_lit > 0.05f);
     REQUIRE(new_lit > 0.05f);
     CHECK(patch(camera_only, cam, {3, 0, 0}) < 0.4f * old_lit);

@@ -59,7 +59,10 @@ TEST_CASE("shadows: shared mesh and terrain sampler blends cascade boundaries") 
     // A real scene can disagree through undersampling; a constant/always-lit implementation
     // cannot pass the contrasting interior/exterior controls below. The fragment wrapper includes
     // the exact production sampler shared by terrain and mesh, not a CPU copy of its formula.
-    const auto render = [&](bool depth_sweep, std::uint32_t count, float coarse_depth) {
+    const auto render = [&](bool depth_sweep,
+                            std::uint32_t count,
+                            float coarse_depth,
+                            bool coincident = false) {
         RenderGraph graph(*device);
         graph.reset();
         const auto maps =
@@ -79,8 +82,8 @@ TEST_CASE("shadows: shared mesh and terrain sampler blends cascade boundaries") 
         GpuShadowUniforms uniform{};
         uniform.cascade_view_proj[0] = {};
         uniform.cascade_view_proj[1] = {};
-        uniform.cascade_view_proj[1].at(0, 0) = 0.5f;
-        uniform.cascade_view_proj[1].at(1, 1) = 0.5f;
+        uniform.cascade_view_proj[1].at(0, 0) = coincident ? 1.0f : 0.5f;
+        uniform.cascade_view_proj[1].at(1, 1) = coincident ? 1.0f : 0.5f;
         uniform.cascade_view_proj[1].at(2, 2) = 0.25f;
         uniform.cascade_view_proj[1].at(2, 3) = 0.375f;
         uniform.params[0] = static_cast<float>(count);
@@ -119,15 +122,19 @@ TEST_CASE("shadows: shared mesh and terrain sampler blends cascade boundaries") 
     const auto z = render(true, 2, 1.0f);
     const auto no_shadows = render(false, 0, 1.0f);
     const auto both_shadow = render(false, 2, 0.0f);
+    const auto overlapping = render(false, 2, 0.0f, true);
     const auto visibility = [](const test::HdrImage& image, std::uint32_t i) {
         return image.rgb[(width + i) * 3];
     };
-    float max_x_step = 0.0f, max_z_step = 0.0f;
+    float max_x_step = 0.0f, max_z_step = 0.0f, max_overlap_step = 0.0f;
     for (std::uint32_t i = 1; i < width; ++i) {
         REQUIRE(std::isfinite(visibility(x, i)));
         REQUIRE(std::isfinite(visibility(z, i)));
         max_x_step = std::max(max_x_step, std::abs(visibility(x, i) - visibility(x, i - 1)));
         max_z_step = std::max(max_z_step, std::abs(visibility(z, i) - visibility(z, i - 1)));
+        max_overlap_step =
+            std::max(max_overlap_step,
+                     std::abs(visibility(overlapping, i) - visibility(overlapping, i - 1)));
         CHECK(visibility(no_shadows, i) == doctest::Approx(1.0f));
         CHECK(visibility(both_shadow, i) == doctest::Approx(0.0f));
     }
@@ -138,7 +145,17 @@ TEST_CASE("shadows: shared mesh and terrain sampler blends cascade boundaries") 
     CHECK(visibility(z, width - 1) < 0.01f);
     CHECK(max_x_step < 0.1f); // The old hard switch jumps the entire unit contrast in one pixel.
     CHECK(max_z_step < 0.03f);
-    MESSAGE("cascade transition steps x=", max_x_step, ", z=", max_z_step);
+    // Fine and coarse maps can share an edge. Their transition bands must compose rather
+    // than suddenly acquire a coarse-map fade only when the fine map stops covering.
+    CHECK(visibility(overlapping, 0) > 0.99f);
+    CHECK(visibility(overlapping, width / 2) < 0.01f);
+    CHECK(max_overlap_step < 0.15f);
+    MESSAGE("cascade transition steps x=",
+            max_x_step,
+            ", z=",
+            max_z_step,
+            ", overlapping=",
+            max_overlap_step);
     device->destroy(sampler);
     device->destroy(pipeline);
     device->destroy(fs);

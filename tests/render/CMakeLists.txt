@@ -38,6 +38,8 @@ rime_add_test(rime_render_tests
     pick_test.cpp
     gizmo_test.cpp
     shadow_test.cpp
+    shadow_motion_test.cpp
+    shadow_caster_tracker_test.cpp
     shadow_stability_test.cpp
     shadow_transition_test.cpp
     local_shadow_test.cpp

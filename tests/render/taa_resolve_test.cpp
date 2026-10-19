@@ -767,3 +767,28 @@ TEST_CASE("taa resolve: a camera turn does not smear the background (depth repro
         CHECK(mean_band_err < 0.06);
     }
 }
+
+TEST_CASE("taa resolve: a missing world camera breaks temporal history without an overlay") {
+    auto rig = make_rig();
+    if (!rig)
+        return;
+    (void)rig->spawn_slab({0, 0, -6}, 2.0f);
+    for (int i = 0; i < 4; ++i)
+        (void)rig->step();
+    REQUIRE(rig->taa->renderer.motion_vector_cache_size() > 0);
+    // No first-person overlay was ever supplied. An ordinary editor camera can be removed or
+    // disabled too; after that gap there is no previous rendered pose to reproject against.
+    rig->taa->world.despawn(rig->taa->camera);
+    {
+        RenderGraph graph(*rig->device);
+        const auto out = rig->taa->renderer.render(graph, rig->taa->world, {kSize, kSize}, true);
+        CHECK_FALSE(out.hdr.is_valid());
+        CHECK_FALSE(rig->taa->renderer.last_frame_resolved());
+        CHECK(rig->taa->renderer.motion_vector_cache_size() == 0);
+    }
+    rig->taa->set_camera({});
+    // Raw and resolved see the SAME jitter phase. A resumed first frame must use the new image
+    // whole instead of blending stale history, including at silhouette pixels where it matters.
+    const auto resumed = rig->step();
+    CHECK(max_abs_diff(resumed.ref, resumed.taa) < 1e-3f);
+}

@@ -45,6 +45,10 @@
 // meshes and materials belong to the scene/application; the renderer only reads them.
 namespace rime::render {
 
+namespace detail {
+struct SceneShadowCasters;
+}
+
 // ── Extraction (GPU-free, unit-testable without a device) ────────────────────────────────────
 
 struct ExtractedCamera {
@@ -293,7 +297,7 @@ public:
     [[nodiscard]] bool temporal_jitter_enabled() const noexcept { return temporal_jitter_enabled_; }
 
     // The UNJITTERED view-projection of the most recent render() call, and of the render() before
-    // it. A velocity is `previous - current` of these, so it is pure geometric motion with no
+    // it. A velocity is `current - previous` of these, so it is pure geometric motion with no
     // jitter in it. Before the second render, previous == current (there is no history yet).
     [[nodiscard]] const core::Mat4& view_proj_unjittered() const noexcept {
         return view_proj_unjittered_;
@@ -614,11 +618,12 @@ private:
     TonemapPass tonemap_;
     CascadedShadowMap csm_; // m10.1: directional shadow cascades (only declared when enabled)
     LocalShadowMap local_shadows_; // m10.2: cached spot-light shadows (only declared when enabled)
-    ClusteredLights clustered_;    // m10.3: froxel light culling (only declared when enabled)
-    SdfClipmap sdf_clipmap_;       // m10.4b: the traceable field (only stepped when enabled)
-    DdgiProbes ddgi_; // m10.5a: irradiance/visibility probes (only stepped when enabled)
-    SsrPass ssr_;     // m10.7b: screen-space reflections resolve (only added when enabled)
-    SkyPass sky_;     // m17.0: procedural sky + clouds (only added when enabled)
+    std::unique_ptr<detail::SceneShadowCasters> shadow_casters_;
+    ClusteredLights clustered_; // m10.3: froxel light culling (only declared when enabled)
+    SdfClipmap sdf_clipmap_;    // m10.4b: the traceable field (only stepped when enabled)
+    DdgiProbes ddgi_;           // m10.5a: irradiance/visibility probes (only stepped when enabled)
+    SsrPass ssr_; // m10.7b: screen-space reflections resolve (only added when enabled)
+    SkyPass sky_; // m17.0: procedural sky + clouds (only added when enabled)
 
     // The m10.4b/m10.5a extraction bridge: which SdfRef entities are currently registered with
     // sdf_clipmap_, and the change-detection watermark sync_sdf_instances reads from.

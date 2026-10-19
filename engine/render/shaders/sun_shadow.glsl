@@ -35,31 +35,34 @@ float sun_cascade_pcf(uint cascade, vec3 p, vec2 uv) {
 float sun_shadow(vec3 world_pos, vec3 N) {
     uint count = min(uint(shadow.params.x), 4u);
     vec3 biased = world_pos + N * shadow.params.w;
+    float visibility[4];
+    float weights[4];
+    int covered = 0;
     for (uint c = 0u; c < count; ++c) {
         vec3 p;
         vec2 uv;
         if (!sun_cascade_coordinates(c, biased, p, uv))
             continue;
-        float visibility = sun_cascade_pcf(c, p, uv);
+        visibility[covered] = sun_cascade_pcf(c, p, uv);
         float guard = min(0.25, (max(shadow.params.y, 0.0) + 0.5) * shadow.texel.x);
         float xy_edge = min(min(uv.x, uv.y), min(1.0 - uv.x, 1.0 - uv.y));
         float z_edge = min(p.z, 1.0 - p.z);
         const float blend_width = 0.04;
         float weight = min(smoothstep(guard, guard + blend_width, xy_edge),
                            smoothstep(0.0, blend_width, z_edge));
+        weights[covered++] = weight;
+        // Once a covering map is wholly interior, it completely replaces every coarser
+        // fallback. Interior pixels therefore still take only one nine-tap sample.
         if (weight >= 1.0)
-            return visibility;
-        // Cascades are fitted to separate slices, so skip a coarser map that does not cover
-        // this receiver. Beyond the final coverage, fade to the existing unshadowed fallback.
-        for (uint next = c + 1u; next < count; ++next) {
-            vec3 next_p;
-            vec2 next_uv;
-            if (sun_cascade_coordinates(next, biased, next_p, next_uv))
-                return mix(sun_cascade_pcf(next, next_p, next_uv), visibility, weight);
-        }
-        return mix(1.0, visibility, weight);
+            break;
     }
-    return 1.0;
+    // Compose the SAME coarse result that would be returned without the finer cascade.
+    // Blending to a raw coarse sample would jump if that coarse map is in its own fade band:
+    // the instant the fine map stops covering, its fallback would acquire a second edge fade.
+    float result = 1.0;
+    for (int i = covered - 1; i >= 0; --i)
+        result = mix(result, visibility[i], weights[i]);
+    return result;
 }
 
 #endif
