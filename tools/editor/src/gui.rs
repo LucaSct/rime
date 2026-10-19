@@ -37,6 +37,7 @@ use crate::gizmo::{self, DragSession, Snapping};
 #[cfg(test)]
 mod click_tests;
 mod commands;
+mod entity_picker;
 mod game_run;
 mod outliner;
 #[cfg(test)]
@@ -1986,7 +1987,16 @@ fn inspector_ui(
                             type_hash: comp.type_hash,
                         });
                     }
-                    component_fields_ui(ui, comp, key, schema, actions, active_edit, stack);
+                    component_fields_ui(
+                        ui,
+                        comp,
+                        key,
+                        schema,
+                        entities,
+                        actions,
+                        active_edit,
+                        stack,
+                    );
                 });
         }
     });
@@ -1995,11 +2005,13 @@ fn inspector_ui(
 // Decode one component into typed fields, render an editor per field, and turn edits into a live
 // `SetComponent` + a single undo step per gesture. A component the schema can't describe (or whose
 // bytes don't fit) is shown honestly as read-only.
+#[allow(clippy::too_many_arguments)] // edits also need the snapshot for semantic reference choices
 fn component_fields_ui(
     ui: &mut egui::Ui,
     comp: &rime_protocol::SnapshotComponent,
     key: EntityId,
     schema: &Schema,
+    entities: &[SnapshotEntity],
     actions: &mut Vec<Command>,
     active_edit: &mut Option<ActiveEdit>,
     stack: &mut CommandStack,
@@ -2022,7 +2034,18 @@ fn component_fields_ui(
             // Every field is keyed by its component and its path, so no two fields share an id
             // (see `exact_int_field`).
             let salt = format!("{:016x}/{fname}", comp.type_hash);
-            render_field(ui, &salt, fname, fval, &mut it);
+            if !entity_picker::field_ui(
+                ui,
+                &salt,
+                schema,
+                comp.type_hash,
+                fname,
+                fval,
+                entities,
+                &mut it,
+            ) {
+                render_field(ui, &salt, fname, fval, &mut it);
+            }
         }
     }
 
