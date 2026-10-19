@@ -92,3 +92,29 @@ Inherited 21% frozen CPU speed evidence and 900 matching world hashes remain in
 They are not new results of this brick. Collapse/convergence, standard hardware
 performance, clock qualification and cross-platform delivery gates remain open.
 No baseline replacement, merge or gate relaxation was attempted.
+
+## Integrated verification and hardware receipts
+
+Root's complete Release renderer executable passes 230 cases / 1,707,944
+assertions on the RTX 3060, including existing material/pixel regressions and the
+new binding-state controls. This is integrated regression coverage, not an A/B
+pixel capture of every possible authored city.
+
+Two fresh `scripts/perf.sh --sample the-block --preset release --frames 600
+--commit` attempts are retained below this directory. The first explicitly used
+960×540 (editor extent); the second used the standard default 1920×1080. Both
+were rejected for unstable graphics clocks and an incompatible historical
+baseline fingerprint after the driver update. Raw reports live under
+`hardware-attempt/` and `hardware-standard-attempt/`, with their rejection receipts.
+They are unqualified evidence, not replacement baselines or successful gate runs.
+The first also exceeded frame and simulation budgets. No native speedup claim is
+made and existing performance/collapse gates remain open.
+
+The same integrated renderer suite also passes on lavapipe with
+`RIME_REQUIRE_VULKAN=1`: 230 cases / 1,707,944 assertions. Root then counted the
+**actual current showcase camera** with a diagnostic-only alternate executable:
+three frames submit 108 textured draw instances, with 540 cache attempts and 36
+actual binding calls (504 avoided). [Native city evidence](native-city/README.md)
+retains exact sources/commands/fingerprints and the small-view limitation.
+No product instrumentation remains, and this does not generalize to the default
+600-frame city or establish time saved.

@@ -1,0 +1,20 @@
+[ERROR] editorhost: set-component unknown type_hash 0xdeadbeef (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:481)
+[ERROR] editorhost: set-component on a dead entity (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:475)
+[ERROR] editor-host: scene load failed (/tmp/rime-261751-1085743176/rime_e3_malformed.rscene): unterminated entity 0 (/home/next/projects/rime/engine/app/editor_host_app.cpp:136)
+[WARN] editor-host: 1 component(s) skipped — this build does not register: some::Bogus (/home/next/projects/rime/engine/app/editor_host_app.cpp:150)
+[INFO] editor-host: loaded 1 entities, 0 components, 1 skipped (/tmp/rime-261751-1085743176/rime_e3_unknown.rscene) (/home/next/projects/rime/engine/app/editor_host_app.cpp:154)
+[ERROR] editorhost: refusing SetComponent — no live entity has EditorId 77 (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:949)
+[ERROR] editorhost: refusing Despawn — no live entity has EditorId 77 (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:949)
+[ERROR] editorhost: refusing AddComponent — no live entity has EditorId 77 (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:949)
+[ERROR] editorhost: refusing a rime::ecs::Parent that references EditorId 999, which no live entity holds (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:190)
+[ERROR] editorhost: refusing a rime::ecs::Parent that references EditorId 999, which no live entity holds (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:190)
+[ERROR] editorhost: refusing to respawn under id 50 — this session never issued it (/home/next/projects/rime/engine/editorhost/src/editor_identity.cpp:106)
+[ERROR] editorhost: refusing to respawn under id 1 — a live entity already holds it (/home/next/projects/rime/engine/editorhost/src/editor_identity.cpp:112)
+[ERROR] editorhost: stop restored a rime::ecs::Parent whose reference 1:0 named no entity before play either (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:879)
+[ERROR] editorhost: a component references 1:0, which is not a live entity with an EditorId — sent as dangling (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:128)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  40 |  40 passed | 0 failed | 0 skipped
+[doctest] assertions: 730 | 730 passed | 0 failed |
+[doctest] Status: SUCCESS!

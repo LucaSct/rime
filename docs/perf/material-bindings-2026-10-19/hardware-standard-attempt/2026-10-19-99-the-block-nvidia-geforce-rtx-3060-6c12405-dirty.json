@@ -1,0 +1,938 @@
+{
+  "schema": 1,
+  "run": {
+    "sample": "99-the-block",
+    "commit": "6c12405-dirty",
+    "date": "2026-10-19"
+  },
+  "machine": {
+    "gpu": "NVIDIA GeForce RTX 3060",
+    "driver": "NVIDIA 615.78.08",
+    "os": "linux",
+    "build": "RelWithDebInfo",
+    "sanitizer": "off",
+    "preset": "block-all-lighting-gates",
+    "width": 1920,
+    "height": 1080
+  },
+  "distributions": {
+    "frame": {
+      "count": 600,
+      "min_ms": 3.989,
+      "p50_ms": 8.504,
+      "p95_ms": 15.320,
+      "p99_ms": 15.886,
+      "max_ms": 16.259
+    },
+    "frame.collapse": {
+      "count": 90,
+      "min_ms": 8.072,
+      "p50_ms": 10.153,
+      "p95_ms": 10.961,
+      "p99_ms": 13.064,
+      "max_ms": 13.064
+    },
+    "frame.declare": {
+      "count": 600,
+      "min_ms": 0.363,
+      "p50_ms": 0.797,
+      "p95_ms": 1.434,
+      "p99_ms": 1.493,
+      "max_ms": 1.629
+    },
+    "frame.declare.per_frame": {
+      "count": 600,
+      "min_ms": 0.363,
+      "p50_ms": 0.797,
+      "p95_ms": 1.434,
+      "p99_ms": 1.493,
+      "max_ms": 1.629
+    },
+    "frame.execute": {
+      "count": 600,
+      "min_ms": 0.725,
+      "p50_ms": 0.992,
+      "p95_ms": 1.062,
+      "p99_ms": 1.112,
+      "max_ms": 1.201
+    },
+    "frame.execute.per_frame": {
+      "count": 600,
+      "min_ms": 0.725,
+      "p50_ms": 0.992,
+      "p95_ms": 1.062,
+      "p99_ms": 1.112,
+      "max_ms": 1.201
+    },
+    "frame.player": {
+      "count": 600,
+      "min_ms": 3.915,
+      "p50_ms": 7.943,
+      "p95_ms": 14.928,
+      "p99_ms": 15.431,
+      "max_ms": 15.846
+    },
+    "frame.pump": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "frame.pump.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "frame.render": {
+      "count": 600,
+      "min_ms": 3.902,
+      "p50_ms": 4.879,
+      "p95_ms": 7.597,
+      "p99_ms": 8.110,
+      "max_ms": 8.662
+    },
+    "frame.render.unaccounted": {
+      "count": 600,
+      "min_ms": 0.005,
+      "p50_ms": 0.012,
+      "p95_ms": 0.018,
+      "p99_ms": 0.029,
+      "max_ms": 0.059
+    },
+    "frame.submit": {
+      "count": 600,
+      "min_ms": 2.807,
+      "p50_ms": 3.114,
+      "p95_ms": 5.154,
+      "p99_ms": 5.675,
+      "max_ms": 6.141
+    },
+    "frame.submit.per_frame": {
+      "count": 600,
+      "min_ms": 2.807,
+      "p50_ms": 3.114,
+      "p95_ms": 5.154,
+      "p99_ms": 5.675,
+      "max_ms": 6.141
+    },
+    "frame.submit.per_frame.unaccounted": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.001,
+      "p99_ms": 0.002,
+      "max_ms": 0.005
+    },
+    "frame.unaccounted": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.002,
+      "p95_ms": 0.003,
+      "p99_ms": 0.003,
+      "max_ms": 0.007
+    },
+    "gpu.passes": {
+      "count": 600,
+      "min_ms": 2.204,
+      "p50_ms": 2.418,
+      "p95_ms": 4.043,
+      "p99_ms": 4.533,
+      "max_ms": 5.187
+    },
+    "physics.client.ccd_sweep": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.001
+    },
+    "physics.client.ccd_sweep.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.001
+    },
+    "physics.client.commit": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.075,
+      "p95_ms": 0.200,
+      "p99_ms": 0.327,
+      "max_ms": 0.502
+    },
+    "physics.client.commit.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.075,
+      "p95_ms": 0.200,
+      "p99_ms": 0.327,
+      "max_ms": 0.502
+    },
+    "physics.client.constraints": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.078,
+      "p95_ms": 0.198,
+      "p99_ms": 0.228,
+      "max_ms": 0.301
+    },
+    "physics.client.constraints.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.078,
+      "p95_ms": 0.198,
+      "p99_ms": 0.228,
+      "max_ms": 0.301
+    },
+    "physics.client.contacts": {
+      "count": 600,
+      "min_ms": 0.001,
+      "p50_ms": 1.943,
+      "p95_ms": 4.990,
+      "p99_ms": 5.116,
+      "max_ms": 6.466
+    },
+    "physics.client.contacts.per_frame": {
+      "count": 600,
+      "min_ms": 0.001,
+      "p50_ms": 1.943,
+      "p95_ms": 4.990,
+      "p99_ms": 5.116,
+      "max_ms": 6.466
+    },
+    "physics.client.events": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.014,
+      "p95_ms": 0.033,
+      "p99_ms": 0.036,
+      "max_ms": 0.041
+    },
+    "physics.client.events.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.014,
+      "p95_ms": 0.033,
+      "p99_ms": 0.036,
+      "max_ms": 0.041
+    },
+    "physics.client.integrate_velocity": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.004,
+      "p99_ms": 0.005,
+      "max_ms": 0.009
+    },
+    "physics.client.integrate_velocity.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.004,
+      "p99_ms": 0.005,
+      "max_ms": 0.009
+    },
+    "physics.client.islands": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.017,
+      "p95_ms": 0.061,
+      "p99_ms": 0.082,
+      "max_ms": 0.101
+    },
+    "physics.client.islands.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.017,
+      "p95_ms": 0.061,
+      "p99_ms": 0.082,
+      "max_ms": 0.101
+    },
+    "physics.client.sleep": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.006,
+      "p95_ms": 0.013,
+      "p99_ms": 0.014,
+      "max_ms": 0.015
+    },
+    "physics.client.sleep.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.006,
+      "p95_ms": 0.013,
+      "p99_ms": 0.014,
+      "max_ms": 0.015
+    },
+    "physics.client.solve": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 1.038,
+      "p95_ms": 1.948,
+      "p99_ms": 2.261,
+      "max_ms": 2.399
+    },
+    "physics.client.solve.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 1.038,
+      "p95_ms": 1.948,
+      "p99_ms": 2.261,
+      "max_ms": 2.399
+    },
+    "physics.client.stats": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.002,
+      "p95_ms": 0.005,
+      "p99_ms": 0.006,
+      "max_ms": 0.010
+    },
+    "physics.client.stats.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.002,
+      "p95_ms": 0.005,
+      "p99_ms": 0.006,
+      "max_ms": 0.010
+    },
+    "physics.client.step": {
+      "count": 600,
+      "min_ms": 0.005,
+      "p50_ms": 3.251,
+      "p95_ms": 7.319,
+      "p99_ms": 7.670,
+      "max_ms": 9.111
+    },
+    "physics.client.step.per_frame": {
+      "count": 600,
+      "min_ms": 0.005,
+      "p50_ms": 3.251,
+      "p95_ms": 7.319,
+      "p99_ms": 7.670,
+      "max_ms": 9.111
+    },
+    "physics.client.wake": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.002
+    },
+    "physics.client.wake.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.002
+    },
+    "physics.server.ccd_sweep": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.001,
+      "max_ms": 0.004
+    },
+    "physics.server.ccd_sweep.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.001,
+      "max_ms": 0.004
+    },
+    "physics.server.commit": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.080,
+      "p95_ms": 0.205,
+      "p99_ms": 0.325,
+      "max_ms": 0.484
+    },
+    "physics.server.commit.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.080,
+      "p95_ms": 0.205,
+      "p99_ms": 0.325,
+      "max_ms": 0.484
+    },
+    "physics.server.constraints": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.089,
+      "p95_ms": 0.206,
+      "p99_ms": 0.238,
+      "max_ms": 0.263
+    },
+    "physics.server.constraints.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.089,
+      "p95_ms": 0.206,
+      "p99_ms": 0.238,
+      "max_ms": 0.263
+    },
+    "physics.server.contacts": {
+      "count": 600,
+      "min_ms": 0.001,
+      "p50_ms": 2.097,
+      "p95_ms": 4.949,
+      "p99_ms": 5.153,
+      "max_ms": 6.699
+    },
+    "physics.server.contacts.per_frame": {
+      "count": 600,
+      "min_ms": 0.001,
+      "p50_ms": 2.097,
+      "p95_ms": 4.949,
+      "p99_ms": 5.153,
+      "max_ms": 6.699
+    },
+    "physics.server.events": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.015,
+      "p95_ms": 0.032,
+      "p99_ms": 0.039,
+      "max_ms": 0.050
+    },
+    "physics.server.events.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.015,
+      "p95_ms": 0.032,
+      "p99_ms": 0.039,
+      "max_ms": 0.050
+    },
+    "physics.server.integrate_velocity": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.002,
+      "p95_ms": 0.007,
+      "p99_ms": 0.008,
+      "max_ms": 0.013
+    },
+    "physics.server.integrate_velocity.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.002,
+      "p95_ms": 0.007,
+      "p99_ms": 0.008,
+      "max_ms": 0.013
+    },
+    "physics.server.islands": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.032,
+      "p95_ms": 0.086,
+      "p99_ms": 0.119,
+      "max_ms": 0.156
+    },
+    "physics.server.islands.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.032,
+      "p95_ms": 0.086,
+      "p99_ms": 0.119,
+      "max_ms": 0.156
+    },
+    "physics.server.sleep": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.006,
+      "p95_ms": 0.013,
+      "p99_ms": 0.015,
+      "max_ms": 0.024
+    },
+    "physics.server.sleep.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.006,
+      "p95_ms": 0.013,
+      "p99_ms": 0.015,
+      "max_ms": 0.024
+    },
+    "physics.server.solve": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 1.018,
+      "p95_ms": 1.758,
+      "p99_ms": 2.010,
+      "max_ms": 2.224
+    },
+    "physics.server.solve.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 1.018,
+      "p95_ms": 1.758,
+      "p99_ms": 2.010,
+      "max_ms": 2.224
+    },
+    "physics.server.stats": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.002,
+      "p95_ms": 0.005,
+      "p99_ms": 0.006,
+      "max_ms": 0.013
+    },
+    "physics.server.stats.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.002,
+      "p95_ms": 0.005,
+      "p99_ms": 0.006,
+      "max_ms": 0.013
+    },
+    "physics.server.step": {
+      "count": 600,
+      "min_ms": 0.004,
+      "p50_ms": 3.380,
+      "p95_ms": 7.233,
+      "p99_ms": 7.533,
+      "max_ms": 8.854
+    },
+    "physics.server.step.per_frame": {
+      "count": 600,
+      "min_ms": 0.004,
+      "p50_ms": 3.380,
+      "p95_ms": 7.233,
+      "p99_ms": 7.533,
+      "max_ms": 8.854
+    },
+    "physics.server.wake": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.002
+    },
+    "physics.server.wake.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.002
+    },
+    "rhi.submit.queue": {
+      "count": 600,
+      "min_ms": 0.265,
+      "p50_ms": 0.306,
+      "p95_ms": 0.484,
+      "p99_ms": 0.586,
+      "max_ms": 1.915
+    },
+    "rhi.submit.queue.per_frame": {
+      "count": 600,
+      "min_ms": 0.265,
+      "p50_ms": 0.306,
+      "p95_ms": 0.484,
+      "p99_ms": 0.586,
+      "max_ms": 1.915
+    },
+    "rhi.submit.reclaim": {
+      "count": 600,
+      "min_ms": 0.272,
+      "p50_ms": 0.311,
+      "p95_ms": 0.480,
+      "p99_ms": 0.570,
+      "max_ms": 1.850
+    },
+    "rhi.submit.reclaim.per_frame": {
+      "count": 600,
+      "min_ms": 0.272,
+      "p50_ms": 0.311,
+      "p95_ms": 0.480,
+      "p99_ms": 0.570,
+      "max_ms": 1.850
+    },
+    "rhi.submit.wait": {
+      "count": 600,
+      "min_ms": 2.155,
+      "p50_ms": 2.492,
+      "p95_ms": 4.194,
+      "p99_ms": 4.695,
+      "max_ms": 5.217
+    },
+    "rhi.submit.wait.per_frame": {
+      "count": 600,
+      "min_ms": 2.155,
+      "p50_ms": 2.492,
+      "p95_ms": 4.194,
+      "p99_ms": 4.695,
+      "max_ms": 5.217
+    },
+    "sim.block": {
+      "count": 600,
+      "min_ms": 0.086,
+      "p50_ms": 3.705,
+      "p95_ms": 7.826,
+      "p99_ms": 8.196,
+      "max_ms": 9.543
+    },
+    "sim.block.unaccounted": {
+      "count": 600,
+      "min_ms": 0.063,
+      "p50_ms": 0.193,
+      "p95_ms": 0.338,
+      "p99_ms": 0.411,
+      "max_ms": 0.527
+    },
+    "sim.client": {
+      "count": 600,
+      "min_ms": 0.012,
+      "p50_ms": 3.286,
+      "p95_ms": 7.381,
+      "p99_ms": 7.713,
+      "max_ms": 9.264
+    },
+    "sim.client.unaccounted": {
+      "count": 600,
+      "min_ms": 0.008,
+      "p50_ms": 0.028,
+      "p95_ms": 0.105,
+      "p99_ms": 0.171,
+      "max_ms": 0.251
+    },
+    "sim.collapse": {
+      "count": 90,
+      "min_ms": 3.283,
+      "p50_ms": 5.009,
+      "p95_ms": 5.599,
+      "p99_ms": 7.585,
+      "max_ms": 7.585
+    },
+    "sim.join": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.051,
+      "p95_ms": 0.625,
+      "p99_ms": 0.867,
+      "max_ms": 4.449
+    },
+    "sim.post": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.post.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.pre": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.pre.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.publish": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.publish.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.000
+    },
+    "sim.schedule": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.001
+    },
+    "sim.schedule.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.001
+    },
+    "sim.server": {
+      "count": 600,
+      "min_ms": 0.008,
+      "p50_ms": 3.432,
+      "p95_ms": 7.275,
+      "p99_ms": 7.574,
+      "max_ms": 8.891
+    },
+    "sim.server.unaccounted": {
+      "count": 600,
+      "min_ms": 0.002,
+      "p50_ms": 0.031,
+      "p95_ms": 0.072,
+      "p99_ms": 0.175,
+      "max_ms": 0.327
+    },
+    "sim.tick": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.003
+    },
+    "sim.tick.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.001,
+      "p95_ms": 0.001,
+      "p99_ms": 0.001,
+      "max_ms": 0.003
+    },
+    "sim.transforms": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.001
+    },
+    "sim.transforms.per_frame": {
+      "count": 600,
+      "min_ms": 0.000,
+      "p50_ms": 0.000,
+      "p95_ms": 0.000,
+      "p99_ms": 0.000,
+      "max_ms": 0.001
+    }
+  },
+  "passes": {
+    "ddgi-trace": {
+      "p50_ms": 0.065,
+      "max_ms": 0.122
+    },
+    "ddgi-blend-irradiance": {
+      "p50_ms": 0.014,
+      "max_ms": 0.023
+    },
+    "ddgi-blend-visibility": {
+      "p50_ms": 0.025,
+      "max_ms": 0.043
+    },
+    "ddgi-atlases-ready": {
+      "p50_ms": 0.000,
+      "max_ms": 0.001
+    },
+    "depth-prepass": {
+      "p50_ms": 0.062,
+      "max_ms": 0.108
+    },
+    "velocity": {
+      "p50_ms": 0.041,
+      "max_ms": 0.061
+    },
+    "csm-cascade-0": {
+      "p50_ms": 0.032,
+      "max_ms": 0.062
+    },
+    "csm-cascade-1": {
+      "p50_ms": 0.032,
+      "max_ms": 0.080
+    },
+    "csm-cascade-2": {
+      "p50_ms": 0.031,
+      "max_ms": 0.060
+    },
+    "cluster-cull": {
+      "p50_ms": 0.008,
+      "max_ms": 0.019
+    },
+    "forward-pbr shadowed": {
+      "p50_ms": 0.793,
+      "max_ms": 1.830
+    },
+    "sky": {
+      "p50_ms": 0.075,
+      "max_ms": 0.158
+    },
+    "ssr-resolve": {
+      "p50_ms": 1.051,
+      "max_ms": 2.461
+    },
+    "taa-resolve": {
+      "p50_ms": 0.121,
+      "max_ms": 0.931
+    },
+    "tonemap": {
+      "p50_ms": 0.036,
+      "max_ms": 0.553
+    },
+    "hud": {
+      "p50_ms": 0.005,
+      "max_ms": 0.634
+    }
+  },
+  "worst_frame": {
+    "index": 538,
+    "ms": 16.259,
+    "passes": {
+      "ddgi-trace": 0.094,
+      "ddgi-blend-irradiance": 0.020,
+      "ddgi-blend-visibility": 0.038,
+      "ddgi-atlases-ready": 0.000,
+      "depth-prepass": 0.090,
+      "velocity": 0.057,
+      "csm-cascade-0": 0.047,
+      "csm-cascade-1": 0.049,
+      "csm-cascade-2": 0.046,
+      "cluster-cull": 0.011,
+      "forward-pbr shadowed": 1.316,
+      "sky": 0.131,
+      "ssr-resolve": 2.257,
+      "taa-resolve": 0.173,
+      "tonemap": 0.051,
+      "hud": 0.007
+    },
+    "zones": {
+      "physics.client.integrate_velocity": 0.002,
+      "physics.client.ccd_sweep": 0.000,
+      "physics.client.contacts": 4.595,
+      "physics.client.constraints": 0.241,
+      "physics.client.islands": 0.054,
+      "physics.client.wake": 0.001,
+      "physics.client.solve": 1.635,
+      "physics.client.sleep": 0.012,
+      "physics.client.events": 0.030,
+      "physics.client.commit": 0.188,
+      "physics.client.stats": 0.004,
+      "physics.client.step": 6.790,
+      "physics.server.integrate_velocity": 0.002,
+      "physics.server.ccd_sweep": 0.000,
+      "physics.server.contacts": 4.714,
+      "physics.server.constraints": 0.172,
+      "physics.server.islands": 0.080,
+      "physics.server.wake": 0.001,
+      "physics.server.solve": 2.149,
+      "physics.server.sleep": 0.013,
+      "physics.server.events": 0.031,
+      "physics.server.commit": 0.172,
+      "physics.server.stats": 0.004,
+      "physics.server.step": 7.356,
+      "frame.pump": 0.000,
+      "sim.pre": 0.000,
+      "sim.schedule": 0.000,
+      "sim.transforms": 0.000,
+      "sim.post": 0.000,
+      "sim.publish": 0.000,
+      "sim.tick": 0.001,
+      "frame.declare": 1.420,
+      "frame.execute": 1.078,
+      "rhi.submit.queue": 0.456,
+      "rhi.submit.wait": 4.534,
+      "rhi.submit.reclaim": 0.717,
+      "frame.submit": 5.708
+    }
+  },
+  "ledger": {
+    "frames.measured": 600,
+    "draws.submitted": 1771,
+    "draws.culled": 197,
+    "parts.alive_end": 774,
+    "debris.peak_live": 1045,
+    "leaves.live": 1933,
+    "sdf.stamps": 13,
+    "ddgi.probes_updated": 264960,
+    "shadow.spot_maps": 5520,
+    "ground.materials_bound": 1,
+    "ground.textures_refused_unsupported": 0,
+    "net.max_batches_per_tick": 2,
+    "net.client_physics_steps": 600,
+    "net.client_batches_applied": 725,
+    "physics.job_participants": 32,
+    "physics.server.parallel_steps": 473,
+    "physics.client.parallel_steps": 470,
+    "physics.max_active_islands": 120,
+    "physics.server.max_bodies": 1100,
+    "physics.client.max_bodies": 1119,
+    "physics.server.max_broadphase_pairs": 7253,
+    "physics.client.max_broadphase_pairs": 7249,
+    "physics.worst_tick_index": 433,
+    "physics.worst_tick_us": 17965,
+    "physics.worst_tick_steps": 2,
+    "physics.worst_tick_min_islands": 64,
+    "physics.worst_tick_max_islands": 72,
+    "physics.worst_tick_largest": 621,
+    "physics.worst_tick_awake_bodies": 834,
+    "physics.worst_tick_parallel_steps": 2,
+    "physics.worst_tick_island_ns_total": 0,
+    "physics.worst_tick_island_ns_largest": 0,
+    "physics.worst_step_island_ns_total": 0,
+    "physics.worst_step_island_ns_largest": 0,
+    "physics.worst_step_active_islands": 0,
+    "physics.worst_step_largest_bodies": 0,
+    "physics.worst_step_awake_bodies": 0
+  },
+  "integrity": {
+    "accounting_gaps": 0,
+    "foreign_zones": 0
+  },
+  "cpu": {
+    "model": "AMD Ryzen 9 9950X3D 16-Core Processor",
+    "cores": 16,
+    "threads": 32,
+    "governor": "performance",
+    "boost": "1",
+    "l3_domains": 2,
+    "l3_shared_cpu_lists": ["0-7,16-23", "8-15,24-31"],
+    "busiest_core_min": 5457,
+    "busiest_core_median": 5627.0,
+    "busiest_core_max": 5699,
+    "busiest_core_spread_pct": 4.3,
+    "all_core_mean_median": 5033.5,
+    "samples_total": 123
+  },
+  "gpu_clocks": {
+    "graphics_min": 210,
+    "graphics_median": 1837.0,
+    "graphics_max": 1927,
+    "graphics_spread_pct": 93.5,
+    "memory_min": 405,
+    "memory_median": 7501.0,
+    "memory_max": 7501,
+    "memory_spread_pct": 94.6,
+    "samples_total": 124,
+    "samples_under_load": 124,
+    "stable": false
+  }
+}

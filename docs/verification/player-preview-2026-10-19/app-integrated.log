@@ -1,0 +1,47 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+probe: 'browser' mode is not implemented yet: it needs the rime-gateway session spawn (ADR-0045/0046) — this build can run 'play' or 'dedicated'
+probe: 'stream' mode is not implemented yet: the capture/encode pipeline exists (samples/04-remote-view) but is not wired to a game — this build can run 'play' or 'dedicated'
+probe: 'host' mode is not implemented yet: listening for, admitting and replicating to remote players is later M20 work — this build can run 'play' or 'dedicated'
+probe: unknown mode 'warp'
+usage: probe [play | dedicated | browser | stream | host] [options]
+  play        play locally (the default): a window, or off-screen with --headless
+  dedicated   a headless server: no window, no GPU device, no Vulkan loaded
+  browser     host for a browser          (not yet implemented)
+  stream      a CLI streaming server      (not yet implemented)
+  host        host a multiplayer session  (not yet implemented)
+options:
+  --ticks N     run exactly N fixed ticks, deterministically, then stop
+  --frames N    play: run N real-clock frames, then stop
+  --autopilot   drive the game from its built-in autopilot
+  --headless    play: render off-screen instead of opening a window
+  --workers N   job-system worker threads (0 = one per core, less one)
+  --port N      the port a listening mode binds
+  --content DIR the game's content root (default: content/ beside this executable)
+[WARN] app: config.gpu set but no Vulkan device could be created — running GPU-free (/home/next/projects/rime/engine/app/src/application.cpp:46)
+[ERROR] InputEvent::decode: truncated (12 bytes) (/home/next/projects/rime/engine/stream/src/protocol.cpp:367)
+[ERROR] InputEvent::decode: unknown kind 9 (/home/next/projects/rime/engine/stream/src/protocol.cpp:371)
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[ERROR] rhi: no Vulkan surface support compiled in for this window system (/home/next/projects/rime/engine/rhi/src/vulkan/surface_vulkan.cpp:104)
+[WARN] app: this device cannot present to a window — running headless (/home/next/projects/rime/engine/app/src/application.cpp:87)
+probe: dedicated — 3 ticks, 3 frames, device never requested, digest 00000000abcd0003
+[WARN] app: windowed requires a GPU device — running headless (/home/next/projects/rime/engine/app/src/application.cpp:61)
+===============================================================================
+[doctest] test cases:  58 |  58 passed | 0 failed | 0 skipped
+[doctest] assertions: 509 | 509 passed | 0 failed |
+[doctest] Status: SUCCESS!

@@ -1,0 +1,5 @@
+Final bundle integrity and strict scene/pattern binding passed with repository/home hidden
+Final copied binary defaults to Play: actual Vulkan window, 3 weapon assets, 4 frames/24 ticks, repository/home hidden
+Existing destination refused; executable unchanged
+Explicit wrong content and hidden bundle content both refused without checkout fallback
+Changed payload and escaping cooked target refused; restored final bundle verifies

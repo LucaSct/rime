@@ -1,0 +1,13 @@
+{
+  "binary": "/home/next/projects/rime/build/release/the-block-host-changed-tu-asan",
+  "sha256": "1c743492830c823b5b8eaf3dcd898278c0f67a1b1f46169bd71a80cbbac3a16b",
+  "instrumented": [
+    "engine/app/editor_host_app.cpp",
+    "engine/app/stream_input.cpp",
+    "engine/editorhost/src/play_control.cpp",
+    "samples/99-the-block/editor_preview_player.cpp"
+  ],
+  "dependency_archives_instrumented": false,
+  "ASAN_OPTIONS": "detect_leaks=0",
+  "note": "GPU driver leak detection disabled; pure CPU changed-TU tests separately used detect_leaks=1."
+}

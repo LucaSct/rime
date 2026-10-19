@@ -1,0 +1,17 @@
+[
+  {
+    "path": "/home/next/reports/rime-player-performance-2026-10-19/controller-proof/controller-proof",
+    "sha256": "18ebc86ec906170ac1544106b765cbd57ddc5fe49b68a63682fd3375e1189c39",
+    "bytes": 22593008
+  },
+  {
+    "path": "/home/next/reports/rime-player-performance-2026-10-19/material-binding-tests",
+    "sha256": "b036f362002a9a94b46143e74dad1db9b97430b9a9e13fe24883a19cfea52d18",
+    "bytes": 2500200
+  },
+  {
+    "path": "/home/next/reports/rime-player-performance-2026-10-19/material-binding-tests-asan",
+    "sha256": "23ba0c2347ef21920f6b88d8c254d98b5434ef85b0596c891e48cc69f043c3a2",
+    "bytes": 3339824
+  }
+]

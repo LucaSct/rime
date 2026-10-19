@@ -1,0 +1,1736 @@
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354), validation on (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/render/clustered_test.cpp:229:
+TEST CASE:  clustered: the cull dispatch lists exactly the lights that reach each froxel (m10.3)
+
+/home/next/projects/rime/tests/render/clustered_test.cpp:309: MESSAGE: froxels with lights: 2478/3456, total list entries: 3252
+
+===============================================================================
+/home/next/projects/rime/tests/render/clustered_test.cpp:331:
+TEST CASE:  clustered: an adversarial light pile clamps instead of overflowing (m10.3)
+
+/home/next/projects/rime/tests/render/clustered_test.cpp:366: MESSAGE: saturated froxels: 3290/3456
+
+===============================================================================
+/home/next/projects/rime/tests/render/clustered_test.cpp:369:
+TEST CASE:  clustered: the froxel path matches the uniform-block loop, and scales past it (m10.3)
+  equivalence: clustered == the ADR-0022 uniform-block loop for a small light set
+
+/home/next/projects/rime/tests/render/clustered_test.cpp:461: MESSAGE: worst relative luminance difference clustered vs uniform-block: 0.00486618
+
+===============================================================================
+/home/next/projects/rime/tests/render/clustered_test.cpp:369:
+TEST CASE:  clustered: the froxel path matches the uniform-block loop, and scales past it (m10.3)
+  scale: 1000 point lights render through a 16-light uniform block
+
+/home/next/projects/rime/tests/render/clustered_test.cpp:494: MESSAGE: 1000 lights: mean luminance 6.41056, lit pixels 24921
+
+===============================================================================
+/home/next/projects/rime/tests/render/clustered_test.cpp:506:
+TEST CASE:  clustered: culling cost against light count (m10.3, shape only)
+
+/home/next/projects/rime/tests/render/clustered_test.cpp:536: MESSAGE: cull 10 lights: 0.407904 ms, 363 list entries (0.105035 per froxel)
+
+/home/next/projects/rime/tests/render/clustered_test.cpp:536: MESSAGE: cull 100 lights: 0.194081 ms, 3967 list entries (1.14786 per froxel)
+
+/home/next/projects/rime/tests/render/clustered_test.cpp:536: MESSAGE: cull 1000 lights: 0.645824 ms, 23531 list entries (6.80874 per froxel)
+
+===============================================================================
+/home/next/projects/rime/tests/render/culling_test.cpp:184:
+TEST CASE:  m13.2a: culling is invisible — on and off render byte-identical pixels
+
+/home/next/projects/rime/tests/render/culling_test.cpp:251: MESSAGE: m13.2a: 25 submitted, 40 culled of 65
+
+===============================================================================
+/home/next/projects/rime/tests/render/culling_test.cpp:264:
+TEST CASE:  m13.2a: a shadow caster outside the view still casts into it
+
+/home/next/projects/rime/tests/render/culling_test.cpp:359: MESSAGE: m13.2a shadow caster out of view: floor lit 0.955566, shadowed 0.539551
+
+===============================================================================
+/home/next/projects/rime/tests/render/ddgi_test.cpp:166:
+TEST CASE:  ddgi: an open sunlit probe accumulates irradiance; a sealed probe stays dark (m10.5a)
+
+/home/next/projects/rime/tests/render/ddgi_test.cpp:209: MESSAGE: open floor: brightest texel luminance = 1.66406
+
+/home/next/projects/rime/tests/render/ddgi_test.cpp:234: MESSAGE: sealed box: brightest texel luminance = 0
+
+===============================================================================
+/home/next/projects/rime/tests/render/ddgi_test.cpp:239:
+TEST CASE:  ddgi: the down-facing texel is materially brighter than the up-facing one, and the border agrees with its interior neighbour (m10.5a)
+
+/home/next/projects/rime/tests/render/ddgi_test.cpp:284: MESSAGE: down texel (4,1) luminance=1.64844; up texel (4,6) luminance=0.019989
+
+/home/next/projects/rime/tests/render/ddgi_test.cpp:301: MESSAGE: down-adjacent border texel (4,0) luminance=1.66406
+
+===============================================================================
+/h[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[ERROR] render: MeshRegistry::add('partly-bad') dropping submesh [18, 90) outside its 36 indices (/home/next/projects/rime/engine/render/src/mesh.cpp:265)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] render: motion vectors need the depth pre-pass (the velocity pass depth-tests Equal against it) -- no velocity target this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:962)
+[WARN] render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled and a depth pre-pass) -- no resolve this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1514)
+[WARN] render: motion vectors need the depth pre-pass (the velocity pass depth-tests Equal against it) -- no velocity target this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:962)
+[WARN] render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled and a depth pre-pass) -- no resolve this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1514)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] render: refused first-person deformation for mesh 0 (current 2, previous 3, unknown mesh or mismatched/duplicate topology) (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1257)
+[WARN] render: first-person kept 0 of 1 draws (unknown mesh 0, empty 0, index range outside mesh 0) (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1375)
+[WARN] render: refused first-person deformation for mesh 0 (current 3, previous 2, unknown mesh or mismatched/duplicate topology) (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1257)
+[WARN] render: first-person kept 0 of 1 draws (unknown mesh 0, empty 0, index range outside mesh 0) (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1375)
+[WARN] render: refused first-person deformation for mesh 0 (current 3, previous 3, unknown mesh or mismatched/duplicate topology) (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1257)
+[WARN] render: first-person kept 0 of 1 draws (unknown mesh 0, empty 0, index range outside mesh 0) (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1375)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+ome/next/projects/rime/tests/render/ddgi_test.cpp:310:
+TEST CASE:  ddgi: irradiance decays geometrically at the configured hysteresis rate once the light is gone, and settles near zero (m10.5a)
+
+/home/next/projects/rime/tests/render/ddgi_test.cpp:371: MESSAGE: initial (lit) peak = 1.66016
+
+/home/next/projects/rime/tests/render/ddgi_test.cpp:401: MESSAGE: after 10 dark updates: 0.179321 (expected ~0.178258)
+
+/home/next/projects/rime/tests/render/ddgi_test.cpp:405: MESSAGE: after 20 dark updates: 0.0209045 (initial was 1.66016)
+
+===============================================================================
+/home/next/projects/rime/tests/render/ddgi_test.cpp:493:
+TEST CASE:  ddgi: invalidate() fast-tracks a probe's hysteresis after a destruction event, converging in a handful of updates instead of riding out the default (m10.5b)
+
+/home/next/projects/rime/tests/render/ddgi_test.cpp:548: MESSAGE: initial (lit) peaks: fast-rig=1.65332 plain-rig=1.65332
+
+/home/next/projects/rime/tests/render/ddgi_test.cpp:575: MESSAGE: after 5 dark updates: fast-rig=0.0534973 (initial 1.65332), plain-rig=1.41797 (initial 1.65332)
+
+===============================================================================
+/home/next/projects/rime/tests/render/ddgi_test.cpp:595:
+TEST CASE:  ddgi: stable world quadrature retraces at zero hysteresis and survives atlas recenter
+
+/home/next/projects/rime/tests/render/ddgi_test.cpp:687: MESSAGE: stable quadrature: stable tile delta=0; rotating sensitivity=0.0712891; sun removal=1.62793
+
+===============================================================================
+/home/next/projects/rime/tests/render/draw_path_test.cpp:263:
+TEST CASE:  m16.3: a scene-placed mesh gets its COOKED material, not neutral grey
+
+/home/next/projects/rime/tests/render/draw_path_test.cpp:349: MESSAGE: settle converged in 4 rounds
+
+===============================================================================
+/home/next/projects/rime/tests/render/draw_path_test.cpp:509:
+TEST CASE:  m16.5: double-sided draws its back face, and a clamped sampler stops at the edge
+
+/home/next/projects/rime/tests/render/draw_path_test.cpp:582: MESSAGE: from behind: 0 lit culled vs 4096 double-sided
+
+===============================================================================
+/home/next/projects/rime/tests/render/first_person_test.cpp:252:
+TEST CASE:  first-person metal reads filtered sky with DDGI while covered world metal stays dark
+
+/home/next/projects/rime/tests/render/first_person_test.cpp:316: MESSAGE: DDGI metal: legacy model=1.55226 filtered model=0.98948 world=0
+
+===============================================================================
+/home/next/projects/rime/tests/render/fx_particle_test.cpp:211:
+TEST CASE:  fx1a: on-screen radiance tracks the simulation's coverage, up and down
+
+/home/next/projects/rime/tests/render/fx_particle_test.cpp:238: MESSAGE: m13.1a burst: coverage 0.0783355 -> screen radiance 20.2683
+
+/home/next/projects/rime/tests/render/fx_particle_test.cpp:264: MESSAGE: m13.1a decay: coverage 0.0783355 -> 0.010723, radiance 20.2683 -> 3.63896
+
+===============================================================================
+/home/next/projects/rime/tests/render/gbuffer_test.cpp:73:
+TEST CASE:  gbuffer: the shadowed pass writes correct world normals + per-surface roughness (m10.7a)
+
+/home/next/projects/rime/tests/render/gbuffer_test.cpp:171: MESSAGE: rough quad: normal·(0,1,0)=0.999985 roughness=0.849609
+
+/home/next/projects/rime/tests/render/gbuffer_test.cpp:174: MESSAGE: tilt quad: normal·expected=0.999983 roughness=0.299805
+
+===============================================================================
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:151:
+TEST CASE:  gi thesis: breaking a wall relights its shadow AND the indirect field updates (m10.5b, ADR-0032's headline sentence)
+
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:316: MESSAGE: BEFORE (wall present): shadowed patch ddgi-on=0.015976 ddgi-off=0.0159912; sunlit control=0.72168
+
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:357: MESSA[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] render: motion vectors need the depth pre-pass (the velocity pass depth-tests Equal against it) -- no velocity target this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:962)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] render: motion vectors need the depth pre-pass (the velocity pass depth-tests Equal against it) -- no velocity target this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:962)
+[WARN] render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled and a depth pre-pass) -- no resolve this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1514)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] render: motion vectors need the depth pre-pass (the velocity pass depth-tests Equal against it) -- no velocity target this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:962)
+[WARN] render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled and a depth pre-pass) -- no resolve this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1514)
+[WARN] render: motion vectors need the depth pre-pass (the velocity pass depth-tests Equal against it) -- no velocity target this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:962)
+[WARN] render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled and a depth pre-pass) -- no resolve this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1514)
+[WARN] render: motion vectors need the depth pre-pass (the velocity pass depth-tests Equal against it) -- no velocity target this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:962)
+[WARN] render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled and a depth pre-pass) -- no resolve this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1514)
+[WARN] render: motion vectors need the depth pre-pass (the velocity pass depth-tests Equal against it) -- no velocity target this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:962)
+[WARN] render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled and a depth pre-pass) -- no resolve this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1514)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] render: motion vectors need the depth pre-pass (the velocity pass depth-tests Equal against it) -- no velocity target this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:962)
+[WARN] render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled and a depth pre-pass) -- no resolve this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1514)
+[WARN] render: motion vectors need the depth pre-pass (the velocity pass depth-tests Equal against it) -- no velocity target this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:962)
+[WARN] render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled and a depth pre-pass) -- no resolve this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1514)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+GE: AFTER (6 updates post-break): shadowed patch ddgi-on=0.724121 ddgi-off=0.721191
+
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:381: MESSAGE: isolated GI term (on-off): before=-1.52588e-05 after=0.00292969
+
+===============================================================================
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:392:
+TEST CASE:  gi thesis: Chebyshev visibility stops a lit probe leaking through a wall onto a dark fragment right next to it (m10.5b)
+
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:506: MESSAGE: dark fragment (x=1.05): ddgi-on=0.00201988 ddgi-off=0.0159912
+
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:531: MESSAGE: probe 2 (inside, x=1.0) peak=0.00949097; probe 3 (outside, x=1.5) peak=0.769043
+
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:548: MESSAGE: indirect delta at dark fragment=-0.0139713; naive (unweighted) leak estimate=~0.0769043
+
+===============================================================================
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:562:
+TEST CASE:  gi thesis II: a wall falls between a sunlit room and a covered dark one — the dark room's floor lights up from BOUNCE ALONE, no direct light reaching it (m10.6, ADR-0032)
+
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:691: MESSAGE: BEFORE (wall up): dark-room floor ddgi-on=0.000725269 ddgi-off=0.0159912
+
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:712: MESSAGE: AFTER (6 updates, wall gone): dark-room floor ddgi-on=0.00577164 ddgi-off=0.0159912
+
+/home/next/projects/rime/tests/render/gi_thesis_test.cpp:720: MESSAGE: GI rise on the dark floor: 0.00504637 (from 0.000725269)
+
+[material-binding-proof] repeated draws=2206 reference=11030 cached=5 hash=9974d31e8602dcca
+[material-binding-proof] alternating draws=2206 reference=11030 cached=11030 hash=8ce95959e75a8fe2
+[material-binding-proof] normal-only draws=2206 reference=11030 cached=2210 hash=79c542fcc46c8fe2
+[material-binding-proof] generation-sampler-filter draws=1470 reference=7350 cached=414 hash=904cfc303dd3a92f
+[material-binding-proof] empty draws=0 reference=0 cached=0 hash=cbf29ce484222325
+===============================================================================
+/home/next/projects/rime/tests/render/pbr_pipeline_test.cpp:640:
+TEST CASE:  pbr: a normal map perturbs shading under grazing light (M6.4)
+
+/home/next/projects/rime/tests/render/pbr_pipeline_test.cpp:733: MESSAGE: normal-map variance: bumpy=0.0190413 flat=2.908e-10
+
+===============================================================================
+/home/next/projects/rime/tests/render/pbr_pipeline_test.cpp:739:
+TEST CASE:  pbr: a metallic-roughness texture drives the specular lobe (M6.4)
+
+/home/next/projects/rime/tests/render/pbr_pipeline_test.cpp:813: MESSAGE: MR-texture specular peak: smooth=369.75 rough=0.386719
+
+===============================================================================
+/home/next/projects/rime/tests/render/render_graph_test.cpp:156:
+TEST CASE:  render graph v0: multi-pass frames, culling, transients, order, timings (M5.4)
+  compile overhead at 100 passes (measured, not asserted)
+
+/home/next/projects/rime/tests/render/render_graph_test.cpp:398: MESSAGE: declare+compile+record, 100-pass chain: 0.130931 ms
+
+===============================================================================
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:294:
+TEST CASE:  sdf clipmap: a composed sphere and box sphere-trace to the analytic distance (m10.4b)
+
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:334: MESSAGE: sphere hit 4.00521 (analytic 4), box hit 4.76875 (analytic 4.6), tol 0.275
+
+===============================================================================
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:342:
+TEST CASE:  sdf clipmap: remove + invalidate recomposes, and the ray that hit now passes through (m10.4b, the headline)
+
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:364: MESSAGE: before removal: hit at 2.5
+
+/home/next/projects/rime/tests/ren[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+der/sdf_clipmap_test.cpp:380: MESSAGE: after removal: hit at -1
+
+===============================================================================
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:384:
+TEST CASE:  sdf clipmap: a static scene settles to zero stamps, and a small removal recomposes a small fraction (m10.4b, ADR-0032 §11)
+
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:413: MESSAGE: full recompose: 48 stamps, 3 clears
+
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:430: MESSAGE: small removal: 0 stamps, 3 clears (of 48 stamps / 3 clears during the full recompose)
+
+===============================================================================
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:576:
+TEST CASE:  gi spike: sphere-trace cost at DDGI probe-grid scale (ADR-0032 §2, shape only)
+
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:617: MESSAGE: 64 probes x 64 rays = 4096 rays: 0.131801 ms gpu / 0.226042 ms wall (32.178 ns/ray), 818 escaped (19.9707%)
+
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:617: MESSAGE: 216 probes x 64 rays = 13824 rays: 0.200862 ms gpu / 0.337662 ms wall (14.5299 ns/ray), 2750 escaped (19.8929%)
+
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:617: MESSAGE: 512 probes x 64 rays = 32768 rays: 0.328293 ms gpu / 0.514813 ms wall (10.0187 ns/ray), 6532 escaped (19.9341%)
+
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:635: MESSAGE: empty field, 32768 rays: 0.314723 ms (9.60458 ns/ray, every ray marches to max_dist)
+
+/home/next/projects/rime/tests/render/sdf_clipmap_test.cpp:664: MESSAGE: grazing rays, 32768 rays: 1.12833 ms (34.4338 ns/ray), 6749 ran out of steps
+
+===============================================================================
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:234:
+TEST CASE:  SDF specular occlusion: an enclosed SPHERE loses sky and the identical outdoor sphere keeps it
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:284: MESSAGE: SDF sphere: mask px=1094 SSR=false chain=false camera x=0 off mean=1.01646 [0.580789, 2.69355] on mean=0 ratio=0 worst px ratio=0 worst px change=1
+  logged: ssr := false
+          chain := false
+          x := 0
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:284: MESSAGE: SDF sphere: mask px=1094 SSR=false chain=false camera x=20 off mean=1.01646 [0.580789, 2.69355] on mean=1.01646 ratio=1 worst px ratio=1 worst px change=0
+  logged: ssr := false
+          chain := false
+          x := 20
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:284: MESSAGE: SDF sphere: mask px=1094 SSR=false chain=true camera x=0 off mean=1.26639 [0.986313, 1.71442] on mean=0 ratio=0 worst px ratio=0 worst px change=1
+  logged: ssr := false
+          chain := true
+          x := 0
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:284: MESSAGE: SDF sphere: mask px=1094 SSR=false chain=true camera x=20 off mean=1.26639 [0.986313, 1.71442] on mean=1.26639 ratio=1 worst px ratio=1 worst px change=0
+  logged: ssr := false
+          chain := true
+          x := 20
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:284: MESSAGE: SDF sphere: mask px=1094 SSR=true chain=false camera x=0 off mean=1.76064 [0.7231, 5.77251] on mean=0 ratio=0 worst px ratio=0 worst px change=1
+  logged: ssr := true
+          chain := false
+          x := 0
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:284: MESSAGE: SDF sphere: mask px=1094 SSR=true chain=false camera x=20 off mean=1.76064 [0.7231, 5.77251] on mean=1.76064 ratio=1 worst px ratio=1 worst px change=0
+  logged: ssr := true
+          chain := false
+          x := 20
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:284: MESSAGE: SDF sphere: mask px=1094 SSR=true chain=true camera x=0 off mean=1.25918 [0.98055, 1.70586] on mean=0 ratio=0 worst px ratio=0 worst px change=1
+  logged: ssr := true
+          chain := true
+          x := 0
+
+/home/next/projects/rim[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+e/tests/render/sdf_specular_occlusion_test.cpp:284: MESSAGE: SDF sphere: mask px=1094 SSR=true chain=true camera x=20 off mean=1.25917 [0.98055, 1.70586] on mean=1.25917 ratio=1 worst px ratio=1 worst px change=0
+  logged: ssr := true
+          chain := true
+          x := 20
+
+===============================================================================
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:421:
+TEST CASE:  SDF specular occlusion: only the sky fallback is occluded, never a real SSR hit
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:491: MESSAGE: SDF mixed: chain=false direct rect x[37,59] y[24,49] mirror rect x[38,58] y[40,64]
+  logged: direct.x0 := 37
+          direct.x1 := 59
+          mirror.y0 := 40
+          mirror.y1 := 64
+          chain := false
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:495: MESSAGE: SDF mixed: chain=false SSR-hit floor px=202 (outside mirror rect +3px: 0) worst on/off change=0 | box own px=550 (darker 118) | missed+blocked px=1901 on/off in [0, 0.949929] | unclassified px=6563 worst change=0.0494191 | px that got brighter=0
+  logged: direct.x0 := 37
+          direct.x1 := 59
+          mirror.y0 := 40
+          mirror.y1 := 64
+          chain := false
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:548: MESSAGE: SDF mixed: blocked floor point off=2.49154 on=0 | open floor point off=1.54491 on=1.54491
+  logged: direct.x0 := 37
+          direct.x1 := 59
+          mirror.y0 := 40
+          mirror.y1 := 64
+          chain := false
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:491: MESSAGE: SDF mixed: chain=true direct rect x[37,59] y[24,49] mirror rect x[38,58] y[40,64]
+  logged: direct.x0 := 37
+          direct.x1 := 59
+          mirror.y0 := 40
+          mirror.y1 := 64
+          chain := true
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:495: MESSAGE: SDF mixed: chain=true SSR-hit floor px=202 (outside mirror rect +3px: 0) worst on/off change=0 | box own px=550 (darker 146) | missed+blocked px=1969 on/off in [0, 0.949877] | unclassified px=6495 worst change=0.0469693 | px that got brighter=0
+  logged: direct.x0 := 37
+          direct.x1 := 59
+          mirror.y0 := 40
+          mirror.y1 := 64
+          chain := true
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:548: MESSAGE: SDF mixed: blocked floor point off=2.18203 on=0 | open floor point off=1.57244 on=1.57244
+  logged: direct.x0 := 37
+          direct.x1 := 59
+          mirror.y0 := 40
+          mirror.y1 := 64
+          chain := true
+
+===============================================================================
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:653:
+TEST CASE:  SDF specular occlusion: a curved sphere and a mixed SSR hit/miss floor in one frame
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:734: MESSAGE: SDF ball: chain=false sphere px=380 (rim excluded 190) unoccluded lum mean=1.98815 [1, 6.50629] occluded mean=1.68056 px changed>5%=104 | SSR-hit floor px=333 mean lum=0.897003 (outside mirror disc +3px: 0) worst on/off change=0 | missed+blocked px=1846 on/off in [0, 0.948547] | other px=6467 | px that got brighter=0
+  logged: mc.x := 48
+          mc.y := 53
+          mirror_radius := 10.8753
+          chain := false
+
+/home/next/projects/rime/tests/render/sdf_specular_occlusion_test.cpp:734: MESSAGE: SDF ball: chain=true sphere px=380 (rim excluded 190) unoccluded lum mean=1.97057 [1.03135, 2.57793] occluded mean=1.47629 px changed>5%=243 | SSR-hit floor px=333 mean lum=0.896772 (outside mirror disc +3px: 0) worst on/off change=0 | missed+blocked px=1898 on/off in [0, 0.949877] | other px=6415 | px that got brighter=0
+  logged: mc.x := 48
+          mc.y := 53
+          mirror_radius := 10.8753
+          chain := true
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_atmosphere_test.cpp:62:
+TEST CASE:  sky atmosphere: physical LU[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+Ts are finite, cached independently, and darken with extinction (m17.7c)
+
+/home/next/projects/rime/tests/render/sky_atmosphere_test.cpp:173: MESSAGE: transmittance red at (224,8): clear=0.950684 dense=0.674316
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:128:
+TEST CASE:  sky lighting: physical single scattering is live and tracks solar scale (m17.7d)
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:155: MESSAGE: sky off: floor=0.065979 expected=0.066
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:175: MESSAGE: physical sky: dark=0 day rgb=(0.554349, 1.08746, 2.23078) bright=1.10938 cloudy intensity-0=0
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:184:
+TEST CASE:  sky lighting: physical light follows the sun, not authored gradient colours (m17.7d)
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:239: MESSAGE: white=0.646811,1.25155,2.52198 gradient=0.646811,1.25155,2.52198 red r/b=0.64939/0.206725 blue r/b=0.0513064/2.50328 denser blue=5.38643 below-horizon=0
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:252:
+TEST CASE:  sky lighting: the bake is reused until the sky changes, and the counters say so (m17.7b)
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:285: MESSAGE: after 4 frames of one sky: filled=1 reused=3
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:306: MESSAGE: after changing the sky: filled=2 reused=4
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:312:
+TEST CASE:  sky lighting: on the shadowed path, the GATE is what keeps the old ambient (m17.7b)
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:354: MESSAGE: shadowed path, no sky: floor=0.065979 expected=0.066
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:362: MESSAGE: shadowed path, physical sky floor=0.643672, 1.24605, 2.51149
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:367:
+TEST CASE:  sky lighting: a reflection that leaves the screen finds the SKY, not a flat colour (m17.7b)
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:415: MESSAGE: mirror floor — red sun: r=0.27223 b=0.057628 | blue sun: r=0.0140145 b=0.965974
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:552:
+TEST CASE:  m19.6b: under the flat ambient a metal is exactly black, and a dielectric is unchanged
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:589: MESSAGE: m19.6b flat ambient, metallic 0: worst |pixel - albedo*ambient| = 2.09957e-05 (one f16 ULP = 6.10352e-05), fingerprint 1317157977558210435
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:597: MESSAGE: m19.6b flat ambient, metallic 0.5: worst error = 1.04979e-05
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:604: MESSAGE: m19.6b flat ambient, metallic 1: max |channel| = 0, lit pixels 0/3456
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:610:
+TEST CASE:  m19.6b: SSR reflects each surface at its own F0 — a metal tinted, a dielectric not
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:677: MESSAGE: m19.6b fix 1, grey ambient, SSR on, red metal: worst |red - E| = 1.46478e-05 (two f16 ULP = 0.00012207), red > green at 2304/2304, mean g=0.029972
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:711: MESSAGE: m19.6b fix 1, grey ambient, SSR on, dielectrics: worst reflection difference 0.000109375, worst excess over the four-ULP bound -9.66191e-05, smallest reflection 0.00700855
+
+/home/next/projects/rime/tests/render/sky_l[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+ighting_test.cpp:729: MESSAGE: m19.6b SSR on, sky: dielectric warm r/b=1.07722/1.49643 cool r/b=0.391374/4.27826 fingerprints 6602379689004050857 12097057722976624784
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:765: MESSAGE: m19.6b fix 1, sky, red metal: SSR on r/g/b=1.33358/0.728479/1.46216 SSR off r/g/b=1.29581/0.703144/1.41176; red on/off = 1.02915 in [1.01059, 1.03085]; red > green at 2304/2304
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:797:
+TEST CASE:  ADR-0078 s2: with the prefiltered chain on, SSR on and SSR off mirror the sky alike
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:894: MESSAGE: 0x557c71339a2b: chain ON  on/off r/g/b = 0.999932/1.00775/1.00779 worst pixel 0.0110906 | chain OFF on/off r/g/b = 1.02915/1.03603/1.0357
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:894: MESSAGE: 0x557c71339a3d: chain ON  on/off r/g/b = 0.995287/0.993487/1.00348 worst pixel 0.00792393 | chain OFF on/off r/g/b = 1.2343/1.2463/1.32869
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:894: MESSAGE: 0x557c71339a50: chain ON  on/off r/g/b = 0.994654/0.992574/1.00561 worst pixel 0.00852273 | chain OFF on/off r/g/b = 1.71677/1.77107/2.10966
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:894: MESSAGE: 0x557c71339a63: chain ON  on/off r/g/b = 0.996495/0.996428/0.996491 worst pixel 0.00431779 | chain OFF on/off r/g/b = 3.57054/3.58933/3.50399
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:894: MESSAGE: 0x557c71339a76: chain ON  on/off r/g/b = 0.999529/0.999989/0.999713 worst pixel 0.000711238 | chain OFF on/off r/g/b = 1.22655/1.2297/1.22194
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:903:
+TEST CASE:  m19.6b: with SSR off, the forward pass mirrors the sky — a smooth metal follows it
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:935: MESSAGE: m19.6b SSR off, sky: warm metal r/b=1.12221/1.28383 cool metal r/b=0.304137/4.55624 lit 3456/3456
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:954: MESSAGE: m19.6b relative change under the sky swap: smooth metal 0.499281, rough dielectric 0.239086; fingerprint diel high 15421769498765271934
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:961:
+TEST CASE:  m19.6b: DDGI's indirect diffuse does not light a metal either
+
+/home/next/projects/rime/tests/render/sky_lighting_test.cpp:996: MESSAGE: m19.6b DDGI: dielectric lit 3456/3456 mean r=0.449951; metal max |channel| = 0
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:472:
+TEST CASE:  sky specular: the DFG table is a physical quantity and matches an independent quadrature
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:502: MESSAGE: DFG: A in [0.0384521, 1], B in [0, 0.961426], max A+B=1.00002, min accepted fraction=0.5
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:518: MESSAGE: DFG corner (n.v=0.992188, r=0.0078125): A=1 B=0
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:549: MESSAGE:   DFG texel (4,32) nv=0.0703125 r=0.507812: gpu A,B=0.770996,0.149292 quad A,B=0.765006,0.149104
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:556: MESSAGE: DFG vs quadrature over 12 texels: worst |dA|,|dB| = 0.00599014
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:566:
+TEST CASE:  sky specular: white furnace -- a constant sky filters to itself and a white metal returns it
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:594: MESSAGE: furnace: worst relative deviation over all layers = 0.000651042, min accepted fraction = 0.5, fallback texels = 0
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:621: MESSAGE[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+: furnace through the GLSL lookup: worst prefiltered deviation = 0.000651042, worst white-metal deviation = 0.000651042
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:642: MESSAGE: compensated reflectance over 252 (f0, n.v, roughness) cases: max = 1
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:654: MESSAGE: uncompensated single-bounce albedo at roughness ~1, n.v ~0.5: E = 0.453886 (energy lost: 54.6114%)
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:661:
+TEST CASE:  sky specular: a bright spot widens monotonically, conserves flux, and matches a CPU convolution
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:687: MESSAGE: CPU reference at the spot, roughness 0: 40.2261
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:687: MESSAGE: CPU reference at the spot, roughness 0.166667: 34.4884
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:687: MESSAGE: CPU reference at the spot, roughness 0.333333: 17.7002
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:687: MESSAGE: CPU reference at the spot, roughness 0.5: 7.8374
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:687: MESSAGE: CPU reference at the spot, roughness 0.666667: 4.127
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:687: MESSAGE: CPU reference at the spot, roughness 0.833333: 2.72084
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:687: MESSAGE: CPU reference at the spot, roughness 1: 2.12451
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:691: MESSAGE: level 0 (roughness 0) peak = 39.9354
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:691: MESSAGE: level 1 (roughness 0.166667) peak = 34.1562
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:691: MESSAGE: level 2 (roughness 0.333333) peak = 17.6094
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:691: MESSAGE: level 3 (roughness 0.5) peak = 7.83594
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:691: MESSAGE: level 4 (roughness 0.666667) peak = 4.15234
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:691: MESSAGE: level 5 (roughness 0.833333) peak = 2.76562
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:691: MESSAGE: level 6 (roughness 1) peak = 2.20703
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:720: MESSAGE: layer 0: flux 8.63418 vs source 8.64368
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:720: MESSAGE: layer 1: flux 8.64104 vs source 8.64368
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:720: MESSAGE: layer 2: flux 8.64104 vs source 8.64368
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:720: MESSAGE: layer 3: flux 8.64184 vs source 8.64368
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:720: MESSAGE: layer 4: flux 8.64222 vs source 8.64368
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:720: MESSAGE: layer 5: flux 8.64312 vs source 8.64368
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:722: MESSAGE: worst flux deviation over the chain = 0.109915%
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q0 r=0.166667 gpu=33.8489 cpu=34.4884 err=0.0185429
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q1 r=0.25 gpu=25.6808 cpu=25.9717 err=0.0111988
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q2 r=0.333333 gpu=17.5128 cpu=17.7002 err=0.0105879
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q3 r=0.5 gpu=7.81538 cpu=7.8374 err=0.00280923
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q4 r=0.666667 gpu=4.14644 cpu=4.127 err=0.00470976
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q5 r=0.833333 gpu=2.76161 cpu=2.72084 err=0.0149833
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q6 r=1 gpu=2.[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+19366 cpu=2.12451 err=0.0325463
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q7 r=0.166667 gpu=31.1222 cpu=31.5447 err=0.0133915
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q8 r=0.25 gpu=23.8865 cpu=24.1671 err=0.0116091
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q9 r=0.333333 gpu=16.6508 cpu=16.7884 err=0.00819344
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q10 r=0.5 gpu=7.63818 cpu=7.65181 err=0.00178247
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q11 r=0.666667 gpu=4.09914 cpu=4.08435 err=0.00362072
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q12 r=0.833333 gpu=2.73667 cpu=2.70716 err=0.0108979
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q13 r=1 gpu=2.16597 cpu=2.11825 err=0.0225295
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q14 r=0.166667 gpu=20.2999 cpu=20.4386 err=0.00678897
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q15 r=0.25 gpu=16.627 cpu=17.0818 err=0.0266278
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q16 r=0.333333 gpu=12.9541 cpu=13.0367 err=0.00633621
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q17 r=0.5 gpu=6.80579 cpu=6.82562 err=0.00290483
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q18 r=0.666667 gpu=3.88978 cpu=3.8883 err=0.000380989
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q19 r=0.833333 gpu=2.65453 cpu=2.64562 err=0.00336725
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q20 r=1 gpu=2.11079 cpu=2.09221 err=0.00888044
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q21 r=0.166667 gpu=0.20603 cpu=0.206043 err=6.14898e-05
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q22 r=0.25 gpu=0.20588 cpu=0.20594 err=0.000293344
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q23 r=0.333333 gpu=0.205729 cpu=0.205767 err=0.000184391
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q24 r=0.5 gpu=0.205233 cpu=0.205279 err=0.000223674
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q25 r=0.666667 gpu=0.204744 cpu=0.20476 err=7.64509e-05
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q26 r=0.833333 gpu=0.204313 cpu=0.204342 err=0.000143215
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:746: MESSAGE:   conv q27 r=1 gpu=0.204004 cpu=0.204057 err=0.000261589
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:749: MESSAGE: GPU vs CPU convolution: worst error (relative to max(ref, background)) on a level = 0.0325463, between levels = 0.0266278
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:760:
+TEST CASE:  sky specular: no seam at a level boundary, and roughness k/6 reads layer k-1
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:795: MESSAGE: roughness 1/6: lookup 1.18544 vs layer 0 texel 1.18555
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:795: MESSAGE: roughness 2/6: lookup 2.77328 vs layer 1 texel 2.77344
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:795: MESSAGE: roughness 3/6: lookup 3.29091 vs layer 2 texel 3.29102
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:795: MESSAGE: roughness 4/6: lookup 2.77925 vs layer 3 texel 2.7793
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:795: MESSAGE: roughness 5/6: lookup 2.24607 vs layer 4 texel 2.24609
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:795: MESSAGE: roughness 6/6: lookup 1.91601 vs layer 5 texel 1.91602
+
+/home/next/projects/rime/tests/rende[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+r/sky_specular_test.cpp:830: MESSAGE: boundary continuity: worst jump / bound = 0.455469, seams = 0
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:835:
+TEST CASE:  sky specular: every rebuild, reuse and disabled frame is counted
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:861: MESSAGE: GPU time: first frame (DFG + chain) = 26.9072 ms, chain-only rebuild = 22.2492 ms (6 layers x 128x72 x 1024 samples)
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:951:
+TEST CASE:  sky specular: through the renderer, a smooth metal reads a sharp sky, a rough one a blurred one
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:984: MESSAGE: integration contrast (row spread / mean): smooth off=0.403547 on=0.381782; rough off=0 on=0.0174844
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:987: MESSAGE: integration mean luminance: smooth off=2.35742 on=2.39047; rough off=0.624003 on=1.26044
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:990: MESSAGE: stats: dfg 1/1 prefilter 1/1 disabled 2
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1002: MESSAGE: horizon/bottom row ratio: smooth on=1.44228 off=1.47201; rough on=1.01761 off=1
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1161:
+TEST CASE:  sky specular: per-pass GPU cost of the lookup, chain on against off (probe)
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1163: MESSAGE: RIME_PERF_PROBE not set -- skipping the per-pass cost probe
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1380:
+TEST CASE:  SDF specular occlusion: enclosed metal loses sky and identical outdoor metal stays bright
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1417: MESSAGE: SDF sky: SSR=false chain=false camera x=0 off=1.27519 on=0 ratio=0
+  logged: ssr := false
+          chain := false
+          x := 0
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1417: MESSAGE: SDF sky: SSR=false chain=false camera x=12 off=1.27519 on=1.27519 ratio=1
+  logged: ssr := false
+          chain := false
+          x := 12
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1417: MESSAGE: SDF sky: SSR=false chain=true camera x=0 off=1.82643 on=0 ratio=0
+  logged: ssr := false
+          chain := true
+          x := 0
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1417: MESSAGE: SDF sky: SSR=false chain=true camera x=12 off=1.82643 on=1.82643 ratio=1
+  logged: ssr := false
+          chain := true
+          x := 12
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1417: MESSAGE: SDF sky: SSR=true chain=false camera x=0 off=2.18528 on=0 ratio=0
+  logged: ssr := true
+          chain := false
+          x := 0
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1417: MESSAGE: SDF sky: SSR=true chain=false camera x=12 off=2.18528 on=2.18528 ratio=1
+  logged: ssr := true
+          chain := false
+          x := 12
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1417: MESSAGE: SDF sky: SSR=true chain=true camera x=0 off=1.8166 on=0 ratio=0
+  logged: ssr := true
+          chain := true
+          x := 0
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1417: MESSAGE: SDF sky: SSR=true chain=true camera x=12 off=1.8166 on=1.8166 ratio=1
+  logged: ssr := true
+          chain := true
+          x := 12
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1511:
+TEST CASE:  SDF specular occlusion: per-pass GPU cost (probe)
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1513: MESSAGE: RIME_PERF_PROBE not set -- skipping the SDF per-pass cost probe
+
+======================================================================[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+=========
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1653:
+TEST CASE:  SAA roughness divergence: analytic bound on the widened roughness over a sphere (no GPU)
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1680: MESSAGE: [saa analytic] silhouette radius 70.8752 px, chain layers 6
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1669: MESSAGE: [saa analytic] whole sphere: 15784 px; widened roughness min 0.115187 median 0.122978 p95 0.187822 max 0.312064 | unwidened 0.1 | chain levels (x6): unwidened 0.6, widened min 0.691123 median 0.73787 p95 1.12693 max 1.87238 | gap at max 1.27238 levels
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1669: MESSAGE: [saa analytic] centre disc (r < 0.30 R): 1412 px; widened roughness min 0.115187 median 0.115592 p95 0.115983 max 0.116085 | unwidened 0.1 | chain levels (x6): unwidened 0.6, widened min 0.691123 median 0.693553 p95 0.6959 max 0.696511 | gap at max 0.0965111 levels
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1669: MESSAGE: [saa analytic] rim band (0.90 R .. 0.97 R): 2072 px; widened roughness min 0.140235 median 0.153496 p95 0.179587 max 0.19128 | unwidened 0.1 | chain levels (x6): unwidened 0.6, widened min 0.84141 median 0.920978 p95 1.07752 max 1.14768 | gap at max 0.547677 levels
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1669: MESSAGE: [saa analytic] outer edge (r >= 0.97 R): 916 px; widened roughness min 0.172692 median 0.21142 p95 0.269209 max 0.312064 | unwidened 0.1 | chain levels (x6): unwidened 0.6, widened min 1.03615 median 1.26852 p95 1.61525 max 1.87238 | gap at max 1.27238 levels
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1694: MESSAGE: [saa analytic] hard ceiling on lobe_roughness: 0.651446 = 3.90868 levels
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1698:
+TEST CASE:  SAA roughness divergence: SSR-on against SSR-off on a smooth metal sphere (rendered)
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1846: MESSAGE: [saa render] centre disc: 1412 px (1412 differ from the sphere-less frame); mean luminance SSR-off 1.53494 SSR-on 1.53525 ratio on/off 1.00021
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1851: MESSAGE: [saa render] centre disc: sensitivity -- SSR-off at roughness 0.192 gives 1.52016, ratio 0.990373 against roughness 0.1
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1854: MESSAGE: [saa render] centre disc: CLOUDY sky -- SSR-off 4.32475 SSR-on 4.32571 ratio on/off 1.00022
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1857: MESSAGE: [saa render] centre disc: G-buffer B (1412 covered px) mean 0.115583 max 0.116089; mean cone 0; px with B > 0.25 (cone leaves 0): 0 = 0%
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1846: MESSAGE: [saa render] rim band: 2072 px (2072 differ from the sphere-less frame); mean luminance SSR-off 1.19976 SSR-on 1.19893 ratio on/off 0.999307
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1851: MESSAGE: [saa render] rim band: sensitivity -- SSR-off at roughness 0.192 gives 1.18885, ratio 0.990905 against roughness 0.1
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1854: MESSAGE: [saa render] rim band: CLOUDY sky -- SSR-off 2.48881 SSR-on 2.47985 ratio on/off 0.996402
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1857: MESSAGE: [saa render] rim band: G-buffer B (2072 covered px) mean 0.156051 max 0.187256; mean cone 0; px with B > 0.25 (cone leaves 0): 0 = 0%
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1846: MESSAGE: [saa render] outer ring (0.97-0.99 R): 612 px (612 differ from the sphere-less frame); mean luminance SSR-off 1.43219 SSR-on 1.43114 ratio on/off 0.99927
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1851: MESSAGE: [saa render] outer ring (0.97-0.99 R): sensitivity -- SSR-off at roughness 0.192 gives 1.42755, ratio 0.996765 against roughness 0.1
+
+/home/next/projects/[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+rime/tests/render/sky_specular_test.cpp:1854: MESSAGE: [saa render] outer ring (0.97-0.99 R): CLOUDY sky -- SSR-off 9.74336 SSR-on 9.69975 ratio on/off 0.995524
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1857: MESSAGE: [saa render] outer ring (0.97-0.99 R): G-buffer B (612 covered px) mean 0.202457 max 0.248901; mean cone 0; px with B > 0.25 (cone leaves 0): 0 = 0%
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1846: MESSAGE: [saa render] edge (0.99-1.00 R): 304 px (288 differ from the sphere-less frame); mean luminance SSR-off 1.64784 SSR-on 1.64253 ratio on/off 0.99678
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1851: MESSAGE: [saa render] edge (0.99-1.00 R): sensitivity -- SSR-off at roughness 0.192 gives 1.64109, ratio 0.995908 against roughness 0.1
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1854: MESSAGE: [saa render] edge (0.99-1.00 R): CLOUDY sky -- SSR-off 12.0178 SSR-on 11.9874 ratio on/off 0.997469
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1857: MESSAGE: [saa render] edge (0.99-1.00 R): G-buffer B (288 covered px) mean 0.311437 max 0.651367; mean cone 0.159604; px with B > 0.25 (cone leaves 0): 248 = 86.1111%
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1846: MESSAGE: [saa render] whole sphere: 15784 px (15768 differ from the sphere-less frame); mean luminance SSR-off 0.980348 SSR-on 0.980062 ratio on/off 0.999708
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1851: MESSAGE: [saa render] whole sphere: sensitivity -- SSR-off at roughness 0.192 gives 0.980839, ratio 1.0005 against roughness 0.1
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1854: MESSAGE: [saa render] whole sphere: CLOUDY sky -- SSR-off 2.21311 SSR-on 2.20986 ratio on/off 0.998533
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1857: MESSAGE: [saa render] whole sphere: G-buffer B (15768 covered px) mean 0.13369 max 0.651367; mean cone 0.00291515; px with B > 0.25 (cone leaves 0): 248 = 1.57281%
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1893:
+TEST CASE:  SAA roughness in the G-buffer: a FLAT surface stores exactly its material roughness
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1958: MESSAGE: [saa flat] roughness 0.5: raw HDR FNV-1a {?}17121784612434755292{?}; G-buffer B exact on 3936 of 3936 covered px
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1958: MESSAGE: [saa flat] roughness 0.25: raw HDR FNV-1a {?}8852151685772283775{?}; G-buffer B exact on 3936 of 3936 covered px
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:1975:
+TEST CASE:  SAA roughness in the G-buffer: a FLAT plane carrying a normal map, swept in frequency
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2156: MESSAGE: [saa normal plane] no-map: covered 9216 | B min/med/p95/max 0.0999756 / 0.0999756 / 0.0999756 / 0.0999756 | chain levels 0.599854 / 0.599854 / 0.599854 / 0.599854 | crossing 0.25: 0% | at ceiling: 0%
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2156: MESSAGE: [saa normal plane] 1 tile: covered 9216 | B min/med/p95/max 0.100037 / 0.134399 / 0.151123 / 0.153931 | chain levels 0.60022 / 0.806396 / 0.906738 / 0.923584 | crossing 0.25: 0% | at ceiling: 0%
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2156: MESSAGE: [saa normal plane] 8 tiles: covered 9216 | B min/med/p95/max 0.102783 / 0.348877 / 0.415039 / 0.42627 | chain levels 0.616699 / 2.09326 / 2.49023 / 2.55762 | crossing 0.25: 89.5833% | at ceiling: 0%
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2156: MESSAGE: [saa normal plane] 64 tiles: covered 9216 | B min/med/p95/max 0.109863 / 0.419678 / 0.557617 / 0.591309 | chain levels 0.65918 / 2.51807 / 3.3457 / 3.54785 | crossing 0.25: 93.3051% | at ceiling: 0%
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2218: MESSAGE: [saa normal [INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+[WARN] rhi: texture_barrier 'from' disagrees with the tracked layout (caller bookkeeping vs backend tracking) — using the tracked layout (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:122)
+plane] SSR on/off 0.993747 (|r-1| = 0.00625272) | no-map baseline 0.995025 (|r-1| = 0.00497503) | control at roughness 0.419678 1.16836 (|r-1| = 0.168355)
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2255:
+TEST CASE:  sky specular: how often a scrolling cloud field rebuilds the chain, and how much of the chain a rebuild changes
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2305: MESSAGE: rebuilds per 60 frames: static sky chain 1 (reused 59, sky LUT bakes 1); wind-scrolled sky chain 60 (reused 0, sky LUT bakes 60)
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2323: MESSAGE: one triggering frame adds 1 to prefilter_filled and rebuilds 6 layers in one dispatch
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2381: MESSAGE: layer 0: mean |relative luminance change| 1 frame = 0.00157298, 10 frames = 0.0158662
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2381: MESSAGE: layer 1: mean |relative luminance change| 1 frame = 0.00114395, 10 frames = 0.0114654
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2381: MESSAGE: layer 2: mean |relative luminance change| 1 frame = 0.00107172, 10 frames = 0.0106778
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2381: MESSAGE: layer 3: mean |relative luminance change| 1 frame = 0.00115627, 10 frames = 0.0115112
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2381: MESSAGE: layer 4: mean |relative luminance change| 1 frame = 0.00120799, 10 frames = 0.0119324
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2381: MESSAGE: layer 5: mean |relative luminance change| 1 frame = 0.00122536, 10 frames = 0.0120852
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2386: MESSAGE: 1-frame change monotonically non-increasing in layer index: false
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2470: MESSAGE: REAL chain layer 0: 1 frame = 0.00357738, 10 frames = 0.0343661   | proxy (Part 3): 0.00157298, 0.0158662
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2470: MESSAGE: REAL chain layer 1: 1 frame = 0.00336808, 10 frames = 0.0335656   | proxy (Part 3): 0.00114395, 0.0114654
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2470: MESSAGE: REAL chain layer 2: 1 frame = 0.00283274, 10 frames = 0.0269723   | proxy (Part 3): 0.00107172, 0.0106778
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2470: MESSAGE: REAL chain layer 3: 1 frame = 0.00269112, 10 frames = 0.0253635   | proxy (Part 3): 0.00115627, 0.0115112
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2470: MESSAGE: REAL chain layer 4: 1 frame = 0.00289333, 10 frames = 0.0271315   | proxy (Part 3): 0.00120799, 0.0119324
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2470: MESSAGE: REAL chain layer 5: 1 frame = 0.00312688, 10 frames = 0.0294354   | proxy (Part 3): 0.00122536, 0.0120852
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2649:
+TEST CASE:  sky specular budget: a partial rebuild converges to the chain a full rebuild makes
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2682: MESSAGE: layer 0: converged-vs-full max|diff| = 0 | control (different sky) vs full max|diff| = 33.6562
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2682: MESSAGE: layer 1: converged-vs-full max|diff| = 0 | control (different sky) vs full max|diff| = 17.1094
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2682: MESSAGE: layer 2: converged-vs-full max|diff| = 0 | control (different sky) vs full max|diff| = 7.33594
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2682: MESSAGE: layer 3: converged-vs-full max|diff| = 0 | control (different sky) vs full max|diff| = 3.65234
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2682: MESSAGE: layer 4: converged-vs-full max|diff| = 0 | control (different sky) vs full max|diff| = 2.26562
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2682: MESSAGE: layer 5: converged-vs-full max|diff| = 0 | control (different sky) vs full max|diff| = 1.70703
+
+/home/next/projects/rime/tests/render/sky_specular_test.cpp:2688: MESSAGE: worst convergence diff 0, smallest control diff 1.70703
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_test.cpp:132:
+TEST CASE:  sky: fills the background, and leaves every shaded pixel bit-identical (m17.0)
+
+/home/next/projects/rime/tests/render/sky_test.cpp:174: MESSAGE: background: off lum=0 on rgb=(0.20316, 0.447919, 0.984693)
+
+/home/next/projects/rime/tests/render/sky_test.cpp:186: MESSAGE: physical sky: elevated b/r=4.84687  horizon b/r=2.83596
+
+/home/next/projects/rime/tests/render/sky_test.cpp:229: MESSAGE: shaded block: 741 px, min lum=0.582031, sky-on/sky-off ratio [1.46057, 1.46689]
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_test.cpp:240:
+TEST CASE:  sky: the analytic disc is sharp, background-only, and outside the physical bake (m17.7d)
+
+/home/next/projects/rime/tests/render/sky_test.cpp:287: MESSAGE: disc centre: narrow=632.57 wide=1153.54; corner narrow/wide=0.332234/0.332231; fills=1/1
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_test.cpp:301:
+TEST CASE:  sky: the component turns on physical background, not the retired gradient (m17.7d)
+
+/home/next/projects/rime/tests/render/sky_test.cpp:345: MESSAGE: no Sky entity: centre lum=0
+
+/home/next/projects/rime/tests/render/sky_test.cpp:359: MESSAGE: physical up rgb=(0.404294, 0.870103, 1.86319) level rgb=(0.00256141, 0.0047695, 0.01017) neutral-up rgb=(0.40878, 0.878103, 1.87668)
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_test.cpp:375:
+TEST CASE:  sky: background samples the same physical solar source as reflected sky (m17.7d)
+
+/home/next/projects/rime/tests/render/sky_test.cpp:410: MESSAGE: physical background corner: red r/b=0.161775/0.0345549 blue r/b=0.00648046/0.863354
+
+===============================================================================
+/home/next/projects/rime/tests/render/sky_test.cpp:417:
+TEST CASE:  sky: clouds draw, and coverage is the knob that turns them off (m17.0)
+
+/home/next/projects/rime/tests/render/sky_test.cpp:476: MESSAGE: cloud cover changed vs a clear sky — coverage 0.90: 99.9878%, 0.55: 85.5713%, 0.00: 0%
+
+[specular_aa P1] analytic peak 9224.97 at (127,127), rendered 9192.00 (ratio 0.9964); 8 px compared, worst relative error 0.0076
+[specular_aa P2] pairs 9808, diff_energy 90524.4, annulus energy 1249.3, hottest 158.1
+[specular_aa P2b] rim max luminance 3.1250 (alpha = 1 ceiling 0.159)
+===============================================================================
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:370:
+TEST CASE:  ssr ddgi coverage: no accepted probe keeps the sky fallback; a covered dark probe stays dark
+
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:391: MESSAGE: ssr coverage: px(3,3) sky=0.48295 uncovered=0.48295 covered-dark=0 covered-bright=1.1765
+
+===============================================================================
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:406:
+TEST CASE:  ssr ddgi coverage: with the prefiltered chain live, an uncovered pixel reads the chain
+
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:418: MESSAGE: ssr coverage chain: px(3,3) uncovered=0.882375 covered=1.1765
+
+===============================================================================
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:429:
+TEST CASE:  ssr ddgi coverage: SDF occlusion darkens an uncovered sky and never a covered probe
+
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:443: MESSAGE: ssr coverage sdf: px(3,3) open=0.48295 occluded=0.0219456 (ratio 0.045[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] render: the TAA resolve needs the velocity buffer (set_motion_vectors_enabled and a depth pre-pass) -- no resolve this frame (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:1514)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+4407) uncovered+sdf=0.0219456
+
+===============================================================================
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:457:
+TEST CASE:  ssr ddgi coverage: normal-biased query stays on the covered side of a probe plane
+
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:482: MESSAGE: ssr probe plane: below=1.1765 above=1.1765 outside=0.882375
+
+===============================================================================
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:498:
+TEST CASE:  ssr ddgi finite support: covered core darkness, missing coverage and remote fallback
+
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:535: MESSAGE: finite SSR remote: sky=0.48295; legacy covered-probe sensitivity=1.1765
+
+===============================================================================
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:540:
+TEST CASE:  ssr ddgi finite support: a fixed world query blends continuously across camera snap
+
+/home/next/projects/rime/tests/render/ssr_ddgi_coverage_test.cpp:580: MESSAGE: finite SSR snap: fixed world (2.5,0,-.5), camera .49->.51, grid -4->-3; max radiance step=0.0517578
+
+===============================================================================
+/home/next/projects/rime/tests/render/ssr_test.cpp:115:
+TEST CASE:  ssr: a smooth floor reflects a bright object floating above it (m10.7b, ADR-0032 §5)
+
+/home/next/projects/rime/tests/render/ssr_test.cpp:239: MESSAGE: smooth floor — reflection pixel: off=0.0135727 on=0.374512; sky-facing pixel: off=0.0135727 on=0.0139771
+
+/home/next/projects/rime/tests/render/ssr_test.cpp:258: MESSAGE: matte floor — reflection pixel: off=0.0151062 on=0.0155487
+
+===============================================================================
+/home/next/projects/rime/tests/render/ssr_test.cpp:291:
+TEST CASE:  ssr m10.7c: the probe fallback reflects a sunlit wall the screen cannot see, on smooth AND rough floors (ADR-0032 §5)
+
+/home/next/projects/rime/tests/render/ssr_test.cpp:416: MESSAGE: smooth floor — reflection pixel: ddgi-on=0.074585 ddgi-off=0.0318909
+
+/home/next/projects/rime/tests/render/ssr_test.cpp:426: MESSAGE: rough floor — reflection pixel: ddgi-on=0.0864868 ddgi-off=0.0452576
+
+  frame 0: offset (+0.055, -0.167) px, disc moved (+0.056, -0.171) px
+  frame 1: offset (-0.195, +0.167) px, disc moved (-0.199, +0.170) px
+  frame 2: offset (+0.305, -0.389) px, disc moved (+0.309, -0.391) px
+  frame 3: offset (-0.320, -0.056) px, disc moved (-0.323, -0.057) px
+  frame 4: offset (+0.180, +0.278) px, disc moved (+0.183, +0.281) px
+  frame 5: offset (-0.070, -0.278) px, disc moved (-0.072, -0.281) px
+  frame 6: offset (+0.430, +0.056) px, disc moved (+0.431, +0.057) px
+  frame 7: offset (-0.383, +0.389) px, disc moved (-0.385, +0.391) px
+  sky-follows-jitter miss ratio = 0.0111 (0 = follows the geometry, 1 = ignores)
+[taa] static/no-jitter worst |resolved - raw| over 12 frames: 1.16e-05
+[taa] contrast 0.5000, edge pixels 284
+[taa] period error max|R(t+8)-R(t)|: 0.000244
+[taa] period-mean(R) vs mean(F): max 0.00165, rms on edges 0.00088
+[taa] single raw frame vs mean, rms on edges: 0.218
+[taa] single resolved frame vs mean, rms on edges: 0.0157
+[taa] mean temporal variance on 284 edge pixels: raw 0.04877, resolved 0.0002545 (ratio 0.005217)
+[taa] disocclusion: 397 revealed pixels, worst |resolved - current| 0, worst occluder share 0
+[taa] off-screen: left edge column 119 (shift 10.0 px)
+[taa] off-screen: worst |resolved - current| 0 (contrast 0.5)
+[taa] motion x       : 6912 object pixels scored, worst |resolved - current| = 0.00879 of contrast
+[taa] motion y       : 6912 object pixels scored, worst |resolved - current| = 0.0117 of contrast
+[taa] motion diagonal: 6912 object pixels scored, worst |resolved - current| = 0.00977 of contrast
+[taa] camera yaw: mean background-band error 0.03391 (of contrast) over 2760 px
+[taa] camera pitch: mean background-band error 0.03391 (of contrast) over 2760 px
+===================================[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+============================================
+/home/next/projects/rime/tests/render/viewer_frame_graph_test.cpp:311:
+TEST CASE:  M5.9 dogfood: the viewer's cross-section frame as a render graph (shared depth+stencil, load/keep)
+
+/home/next/projects/rime/tests/render/viewer_frame_graph_test.cpp:349: MESSAGE: compiled pass order: mesh -> cut-mark -> cap -> ui
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_dag_cut_test.cpp:169:
+TEST CASE:  virtual geometry DAG: the cooked fixture reads, validates, and is multi-level (M18.6)
+
+/home/next/projects/rime/tests/render/virtual_geometry_dag_cut_test.cpp:184: MESSAGE: DAG fixture: 41 groups, 7 pages, depth 5, root error 1.25019 m
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_dag_cut_test.cpp:195:
+TEST CASE:  virtual geometry DAG: select_virtual_geometry() cuts are valid and watertight (M18.6)
+
+/home/next/projects/rime/tests/render/virtual_geometry_dag_cut_test.cpp:236: MESSAGE: 6 distinct cuts, 92 -> 2208 triangles; residency blocked refinement in 41 cuts
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_dag_cut_test.cpp:246:
+TEST CASE:  virtual geometry DAG: the GPU twin selects the same cut as the oracle (M18.6)
+
+/home/next/projects/rime/tests/render/virtual_geometry_dag_cut_test.cpp:278: MESSAGE: GPU twin matched the oracle on 48 DAG cuts
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_gpu_selection_test.cpp:118:
+TEST CASE:  virtual geometry GPU selection matches the CPU oracle (M18.3 slice A)
+
+/home/next/projects/rime/tests/render/virtual_geometry_gpu_selection_test.cpp:188: MESSAGE: GPU selection matched oracle across 124 input combinations
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:368:
+TEST CASE:  micro raster: the GPU software rasterizer equals the CPU oracle bit for bit (M18.4a)
+
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:374: MESSAGE: adapter 'llvmpipe (LLVM 23.1.1, 256 bits)' 64-bit buffer atomics: true
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:368:
+TEST CASE:  micro raster: the GPU software rasterizer equals the CPU oracle bit for bit (M18.4a)
+
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:374: MESSAGE: adapter 'llvmpipe (LLVM 23.1.1, 256 bits)' 64-bit buffer atomics: true
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:368:
+TEST CASE:  micro raster: the GPU software rasterizer equals the CPU oracle bit for bit (M18.4a)
+
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:374: MESSAGE: adapter 'llvmpipe (LLVM 23.1.1, 256 bits)' 64-bit buffer atomics: true
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:368:
+TEST CASE:  micro raster: the GPU software rasterizer equals the CPU oracle bit for bit (M18.4a)
+
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:374: MESSAGE: adapter 'llvmpipe (LLVM 23.1.1, 256 bits)' 64-bit buffer atomics: true
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:523:
+TEST CASE:  micro raster: hardware and software agree at their boundary (M18.4b)
+  a single-layer mesh split across both paths: no cracks, no double writes
+
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:537: MESSAGE: mesh: 260 hardware + 318 softw[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] rhi: initial_data ignored for device-local buffer 'vg-draw-records' (needs staging) (/home/next/projects/rime/engine/rhi/src/vulkan/resources_vulkan.cpp:60)
+[WARN] rhi: initial_data ignored for device-local buffer 'vg-indirect-commands' (needs staging) (/home/next/projects/rime/engine/rhi/src/vulkan/resources_vulkan.cpp:60)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] rhi: initial_data ignored for device-local buffer 'vg-draw-records' (needs staging) (/home/next/projects/rime/engine/rhi/src/vulkan/resources_vulkan.cpp:60)
+[WARN] rhi: initial_data ignored for device-local buffer 'vg-indirect-commands' (needs staging) (/home/next/projects/rime/engine/rhi/src/vulkan/resources_vulkan.cpp:60)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] rhi: initial_data ignored for device-local buffer 'vg-draw-records' (needs staging) (/home/next/projects/rime/engine/rhi/src/vulkan/resources_vulkan.cpp:60)
+[WARN] rhi: initial_data ignored for device-local buffer 'vg-indirect-commands' (needs staging) (/home/next/projects/rime/engine/rhi/src/vulkan/resources_vulkan.cpp:60)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] rhi: initial_data ignored for device-local buffer 'vg-draw-records' (needs staging) (/home/next/projects/rime/engine/rhi/src/vulkan/resources_vulkan.cpp:60)
+[WARN] rhi: initial_data ignored for device-local buffer 'vg-indirect-commands' (needs staging) (/home/next/projects/rime/engine/rhi/src/vulkan/resources_vulkan.cpp:60)
+are triangles
+
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:569: MESSAGE: oracle covers 2304 px; double writes 0, cracks 0, extra 0, wrong owner 0
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:523:
+TEST CASE:  micro raster: hardware and software agree at their boundary (M18.4b)
+  two overlapping layers, each split: the depth winner is the oracle's
+
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:607: MESSAGE: two layers: 91 px won by software, 0 wrong owners
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:613:
+TEST CASE:  micro raster: a sub-pixel silhouette survives only with the hybrid path (M18.4c)
+
+/home/next/projects/rime/tests/render/virtual_geometry_micro_raster_test.cpp:657: MESSAGE: wire pixels: oracle 50, hardware alone 0, hybrid 50
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_page_cache_test.cpp:314:
+TEST CASE:  vg page cache: a teleport falls back to the coarse cut, then converges
+
+/home/next/projects/rime/tests/render/virtual_geometry_page_cache_test.cpp:353: MESSAGE: teleport converged in 5 frames
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_page_cache_test.cpp:356:
+TEST CASE:  vg page cache: a long randomized run against a fake GPU breaks no rule
+
+/home/next/projects/rime/tests/render/virtual_geometry_page_cache_test.cpp:433: MESSAGE: requests 4626, uploads 234, evictions 230, deferred budget/slot/staging 256/2447/172, fallbacks 916
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_resolve_pass_test.cpp:292:
+TEST CASE:  vg resolve: visibility buffer + resolve matches a forward draw (M18.2)
+  per-pixel parity with the conventional forward draw
+
+/home/next/projects/rime/tests/render/virtual_geometry_resolve_pass_test.cpp:466: MESSAGE: covered=2164 max|Δuv|=1.2517e-06 max grad rel=1.57363e-05 max|Δalbedo|=0 |dv/dy| range=[0.00400123, 0.136854]
+
+===============================================================================
+/home/next/projects/rime/tests/render/virtual_geometry_streaming_test.cpp:132:
+TEST CASE:  vg streaming: a teleport renders hole-free on the coarse cut, then converges (M18.5)
+
+/home/next/projects/rime/tests/render/virtual_geometry_streaming_test.cpp:297: MESSAGE: teleport at frame 6, converged at frame 9 (4 frames); fallbacks 4, deferred no-slot 0, budget 6
+
+===============================================================================
+[doctest] test cases:     230 |     230 passed | 0 failed | 0 skipped
+[doctest] assertions: 1707944 | 1707944 passed | 0 failed |
+[doctest] Status: SUCCESS!
