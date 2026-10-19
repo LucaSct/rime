@@ -40,12 +40,19 @@ CascadeFit compute_cascades(const CascadeInputs& in, const LightingSettings& set
 
     // Practical-split distances: blend a logarithmic split (even in perspective, good near) with a
     // uniform one (even in world, good far). splits[0] = near .. splits[n] = far.
+    //
+    // The far end is the SHADOW range, not necessarily the camera's: a terrain view may draw 3 km
+    // but the cascades would then spend 2048 texels on a ~1 km first slice. A valid cap only ever
+    // shortens the range; anything unusable (unset, <= near, NaN, inf) leaves the camera's z_far.
+    const float cap = settings.shadow_max_distance;
+    const float far_d =
+        (std::isfinite(cap) && cap > in.z_near) ? std::min(in.z_far, cap) : in.z_far;
     std::array<float, kMaxCascades + 1> splits{};
     splits[0] = in.z_near;
     for (std::uint32_t i = 1; i <= n; ++i) {
         const float p = static_cast<float>(i) / static_cast<float>(n);
-        const float log_d = in.z_near * std::pow(in.z_far / in.z_near, p);
-        const float uni_d = in.z_near + (in.z_far - in.z_near) * p;
+        const float log_d = in.z_near * std::pow(far_d / in.z_near, p);
+        const float uni_d = in.z_near + (far_d - in.z_near) * p;
         splits[i] = lambda * log_d + (1.0f - lambda) * uni_d;
     }
 

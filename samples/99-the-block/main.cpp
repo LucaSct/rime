@@ -1743,11 +1743,12 @@ struct Visuals {
         // it is a different scene (the m13.2d note).
         lighting.clustered_enabled = true;
 
-        // The sun, through cascades. Three at 2048 over a 44 m street: the near cascade covers the
-        // block the player is standing in, the far one the end of the road.
+        // The sun needs local detail even while the terrain camera sees several kilometres.
+        // Spend the three maps on the nearby city instead of stretching the first over 500 m.
         lighting.shadows_enabled = true;
         lighting.cascade_count = 3;
         lighting.shadow_map_resolution = 2048;
+        lighting.shadow_max_distance = 160.0f;
 
         // The 36 street spots and interior points. NOTE THE CAP, because it bites here and is not
         // this brick's to fix: `kMaxLocalShadows = 8` (settings.hpp:25), so 8 of 36 cast shadows

@@ -127,3 +127,5 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0100](0100-editor-player-preview-and-input-lease.md) — optional city Walk Preview, acknowledged input capture and exact Stop restoration
 
 - [ADR-0101](0101-walking-shadow-stability.md) — stable sun cascades, continuous shared receivers and moving-caster cache invalidation
+
+- [ADR-0102](0102-runtime-floor-lighting.md) — receiving-side diffuse GI queries and city shadow coverage independent of terrain range

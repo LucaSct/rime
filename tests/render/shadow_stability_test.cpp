@@ -22,6 +22,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <vector>
@@ -304,4 +305,102 @@ TEST_CASE("shadow stability: the oracle fails on a wobbling light basis (control
     };
     const Stability st = measure(3, 1024, {}, kLights[0], 300, rot);
     CHECK(st.scale_rel > 100 * kScaleTol);
+}
+
+// ---- shadow_max_distance (coverage decoupled from the camera's raster far) -------------------
+
+namespace {
+
+CascadeFit fit_with(float camera_far, float cap, std::uint32_t n, int pose = 0) {
+    CascadeInputs in = make_inputs(pose_view(pose, {}), kLights[0]);
+    in.z_far = camera_far;
+    LightingSettings s = make_settings(n, 2048);
+    s.shadow_max_distance = cap;
+    return compute_cascades(in, s);
+}
+
+bool same_fit(const CascadeFit& a, const CascadeFit& b) {
+    if (a.count != b.count) {
+        return false;
+    }
+    for (std::uint32_t c = 0; c < a.count; ++c) {
+        if (std::memcmp(a.view_proj[c].m, b.view_proj[c].m, sizeof(a.view_proj[c].m)) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+TEST_CASE("shadow distance: unset or unusable caps leave the camera range untouched") {
+    const float inf = std::numeric_limits<float>::infinity();
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    for (const std::uint32_t n : {1u, 3u, 4u}) {
+        const CascadeFit base = fit_with(3072.0f, 0.0f, n);
+        // Bad caps: negative, NaN, infinite, at and below near.
+        for (const float bad : {-5.0f, nan, inf, kNear, 0.05f}) {
+            CAPTURE(n);
+            CAPTURE(bad);
+            CHECK(same_fit(base, fit_with(3072.0f, bad, n)));
+        }
+        // A cap at or beyond the camera's far shortens nothing.
+        CHECK(same_fit(base, fit_with(3072.0f, 3072.0f, n)));
+        CHECK(same_fit(base, fit_with(3072.0f, 9000.0f, n)));
+    }
+}
+
+TEST_CASE("shadow distance: a finite cap fits exactly like a camera whose far is that cap") {
+    for (const std::uint32_t n : {1u, 3u, 4u}) {
+        const CascadeFit direct = fit_with(128.0f, 0.0f, n);
+        for (const float camera_far : {3072.0f, 4096.0f}) {
+            CAPTURE(n);
+            CAPTURE(camera_far);
+            // Same matrices => same splits, so camera far no longer moves the fit.
+            CHECK(same_fit(direct, fit_with(camera_far, 128.0f, n)));
+        }
+        // Not vacuous: the uncapped camera far really does give a different fit.
+        CHECK_FALSE(same_fit(direct, fit_with(3072.0f, 0.0f, n)));
+        CHECK_FALSE(same_fit(fit_with(3072.0f, 0.0f, n), fit_with(4096.0f, 0.0f, n)));
+    }
+}
+
+TEST_CASE("shadow distance: capped splits start at near, end at the cap, and cover that frustum") {
+    const float tan_half = std::tan(kFovY * 0.5f);
+    constexpr float kCap = 128.0f;
+    for (const std::uint32_t n : {1u, 3u, 4u}) {
+        // Independent restatement of the practical split with far = cap.
+        std::array<double, 5> sp{};
+        sp[0] = kNear;
+        for (std::uint32_t c = 1; c <= n; ++c) {
+            const double t = static_cast<double>(c) / n;
+            sp[c] = 0.5 * (kNear * std::pow(kCap / kNear, t)) + 0.5 * (kNear + (kCap - kNear) * t);
+        }
+        CHECK(sp[n] == doctest::Approx(kCap));
+        double worst = 0.0;
+        for (int i = 0; i < 200; i += 13) {
+            const core::Mat4 inv = core::inverse(pose_view(i, {}));
+            const CascadeFit fit = fit_with(3072.0f, kCap, n, i);
+            for (std::uint32_t c = 0; c < n; ++c) {
+                for (int zi = 0; zi < 2; ++zi) {
+                    const double d = sp[c + zi];
+                    for (int sx = -1; sx <= 1; sx += 2) {
+                        for (int sy = -1; sy <= 1; sy += 2) {
+                            const core::Vec3 cam{static_cast<float>(sx * d * tan_half * kAspect),
+                                                 static_cast<float>(sy * d * tan_half),
+                                                 static_cast<float>(-d)};
+                            const core::Vec3 w = core::transform_point(inv, cam);
+                            const auto q = project_d(fit.view_proj[c],
+                                                     {double(w.x), double(w.y), double(w.z)});
+                            worst = std::max({worst, std::fabs(q[0]), std::fabs(q[1])});
+                            CHECK(q[2] > -1e-3);
+                            CHECK(q[2] < 1.0 + 1e-3);
+                        }
+                    }
+                }
+            }
+        }
+        CAPTURE(n);
+        CHECK(worst <= 1.0 + 2e-3);
+    }
 }
