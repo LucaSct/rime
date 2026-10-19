@@ -536,6 +536,10 @@ int serve_viewport(std::string_view socket_path,
     // applied where a user opens arbitrary content rather than only where we author it.
     render::LightingSettings lighting;
     lighting.clustered_enabled = true;
+    // Preview must show authored cast shadows too. Clustering alone lights the scene but
+    // leaves both shadow gates at their baseline-off defaults, unlike the playable city.
+    lighting.shadows_enabled = true;
+    lighting.local_shadows_enabled = true;
     renderer.set_lighting(lighting);
     renderer.set_ambient(0.03f, 0.03f, 0.04f);
 

@@ -124,6 +124,20 @@ geometry/camera, negative scales and ambiguous spawns refuse entry with a reason
 It does not invent a floor. Other hosts retain Inspect Preview until they provide
 player hooks; the Walk checkbox appears only with that capability.
 
+## Shadows while walking
+
+Preview now enables authored sun and spotlight shadows. Buildings and ordinary
+world meshes share a stable sun-shadow grid; terrain uses the same cascade-edge
+transition. Moving or removing a world caster refreshes nearby spotlight maps,
+while moving only the camera preserves cached static maps. Cutout foliage keeps
+its transparent holes in shadow depth and filters normal detail before discard.
+The fixed 960×540 stream and authored shadow-map resolutions are unchanged.
+
+Sun specular and reflection roughness use the existing shared shading paths.
+Screen-space reflections still have screen-coverage/hit limits; point lights and
+cosmetic particles do not acquire new shadow-casting features. A first-person
+weapon/arms overlay is separate from a world-space full-body actor.
+
 ## Find smoke, fire, water and ice
 
 Use **View → Outliner**, **View → Inspector**, or **View → Assets** if a panel

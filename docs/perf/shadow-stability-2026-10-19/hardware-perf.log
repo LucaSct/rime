@@ -1,0 +1,64 @@
+── 99-the-block on NVIDIA GeForce RTX 3060 ──
+  baseline: docs/perf/2026-10-11-99-the-block-nvidia-geforce-rtx-3060-bdd3be0.json
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+99-the-block --perf: NVIDIA GeForce RTX 3060 (NVIDIA 615.78.08), 1920x1080, warmup 90, measuring 600 frames…
+  frame     p50 9.58  p95 17.04  p99 21.59  max 24.19 ms  (600 frames)
+  collapse  p50 11.50  p95 11.95  p99 12.19  max 12.19 ms  (90 frames)
+  sim(both) p50 3.712  p99 8.179  max 8.575 ms
+  sim.client p50 3.214  p99 7.703  max 7.913 ms  <- what a player pays
+  render    p50 6.18  p99 13.78  max 16.48 ms
+  submit    p99 9.92  max 12.78 ms  = queue p99 1.05 + fence wait p99 7.77 (max 8.95); gpu passes p99 7.45  max 8.64 ms
+  frame.player p50 9.02  p99 21.24  max 23.90 ms  <- client + render, i.e. one machine
+  sim.server p50 3.343  p99 7.594  max 7.782 ms
+  where the CPU frame went (per-frame totals, p99, top 6 of 37):
+    frame.submit.per_frame                9.925 ms
+    rhi.submit.wait.per_frame             7.774 ms
+    physics.client.step.per_frame         7.636 ms
+    physics.server.step.per_frame         7.546 ms
+    physics.client.contacts.per_frame     5.154 ms
+    physics.server.contacts.per_frame     5.076 ms
+  what the frame could NOT name (residual = parent - its named parts):
+    frame.unaccounted          p50   0.002  p99   0.004  max   0.008  min   0.000 ms
+    frame.render.unaccounted   p50   0.013  p99   0.031  max   0.205  min   0.006 ms
+    sim.block.unaccounted      p50   0.201  p99   0.401  max   0.520  min   0.067 ms
+    sim.client.unaccounted     p50   0.027  p99   0.167  max   0.249  min   0.008 ms
+    sim.server.unaccounted     p50   0.034  p99   0.182  max   0.273  min   0.002 ms
+  worst frame #581 at 24.19 ms
+    frame.submit                 12.781 ms
+    rhi.submit.wait               8.584 ms
+    physics.client.step           7.378 ms
+    physics.server.step           7.187 ms
+  passes: 46 declared at peak, timestamp pool brackets 1024
+  work ledger: {"frames.measured":600,"draws.submitted":1771,"draws.culled":197,"parts.alive_end":774,"debris.peak_live":1045,"leaves.live":1933,"sdf.stamps":13,"ddgi.probes_updated":264960,"shadow.spot_maps":5520,"ground.materials_bound":1,"ground.textures_refused_unsupported":0,"net.max_batches_per_tick":2,"net.client_physics_steps":600,"net.client_batches_applied":725,"physics.job_participants":32,"physics.server.parallel_steps":473,"physics.client.parallel_steps":470,"physics.max_active_islands":120,"physics.server.max_bodies":1100,"physics.client.max_bodies":1119,"physics.server.max_broadphase_pairs":7253,"physics.client.max_broadphase_pairs":7249,"physics.worst_tick_index":597,"physics.worst_tick_us":15425,"physics.worst_tick_steps":2,"physics.worst_tick_min_islands":72,"physics.worst_tick_max_islands":78,"physics.worst_tick_largest":709,"physics.worst_tick_awake_bodies":1052,"physics.worst_tick_parallel_steps":2,"physics.worst_tick_island_ns_total":0,"physics.worst_tick_island_ns_largest":0,"physics.worst_step_island_ns_total":0,"physics.worst_step_island_ns_largest":0,"physics.worst_step_active_islands":0,"physics.worst_step_largest_bodies":0,"physics.worst_step_awake_bodies":0}
+  wrote /tmp/tmp.6dvHWCiLRk/2026-10-19-99-the-block-nvidia-geforce-rtx-3060-9507cb2-dirty.json
+  PERF GATE:
+  frame p99: 21.594 ms, budget 16.600 ms  (600 samples)
+  sim.block p99: 8.179 ms, budget 6.000 ms  (600 samples)
+  baseline: fingerprint-mismatch — baseline is for a different configuration, so no comparison was made
+      this run: NVIDIA GeForce RTX 3060 / NVIDIA 615.78.08 / linux / RelWithDebInfo / san=off / 1920x1080 / block-all-lighting-gates
+      baseline: NVIDIA GeForce RTX 3060 / NVIDIA 615.71.09 / linux / RelWithDebInfo / san=off / 1920x1080 / block-all-lighting-gates
+  A baseline exists for this sample and this run could not be judged against it, so the
+  regression check did not run. That is a FAILURE, not a note (ADR-0041 Ruling 4):
+  re-baseline deliberately, or say why this run may skip the comparison.
+99-the-block: authored environment (cosmetic) enabled_sources=0 sources=0 smoke=0 flames=0 lights=0 phase_surfaces=0 phase_cells=0 thermal_status=0 atlas=0 fx_ticks=690 thermal_ticks=0 invalid_source_visits=0 invalid_thermal_builds=0 thermal_refusals=0
+99-the-block --perf: FAILED the perf gate
+  cpu: AMD Ryzen 9 9950X3D 16-Core Processor, governor performance, 2 L3 domain(s), busiest core 5613.0 MHz median, 4.8% spread over 141 samples
+  gpu clock: 1837.0 MHz median, 50.2% spread over 131 of 141 samples (stable=false)
+
+perf.sh: the GPU graphics clock was NOT stable during this run.
+
+  graphics clock: 1012–1935 MHz — 50.2% spread of a 1837.0 MHz median (limit 2.0%)
+  memory clock:   810–7501 MHz — 89.2% spread (reported, not gating)
+  measured from 131 samples taken at ≥10% utilisation, of 141 taken in all
+
+  A graphics clock that moves more than 2.0% over the run means this report measures the
+  clock ramp as much as the engine, so the numbers are not comparable against a stable baseline.
+  Re-run once the card settles — and check cooling and power limits, because the thermal and power
+  governors move the graphics clock even on a card that cannot be pinned.
+
+perf.sh: NOT filing into docs/perf — the box was not idle or a GPU clock moved.
+  The reports are in /tmp/tmp.6dvHWCiLRk if you want to look at them.
+perf.sh: at least one run failed its perf gate.

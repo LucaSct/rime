@@ -228,39 +228,8 @@ vec3 perturb_normal(vec3 world_normal) {
     return normalize(mat3(T, B, N) * n_tangent);
 }
 
-// The sun's shadow factor at this fragment: 1 = fully lit, 0 = fully shadowed. Walk the cascades
-// coarse-to-fine and use the FIRST one the fragment projects inside — that is the tightest map that
-// still covers it (docs/math/shadow-mapping.md §2). Offset the sample point along the surface normal
-// first (normal bias) to fight self-shadowing acne at grazing sun angles, then compare with a small
-// constant depth bias. A 3×3 grid of hardware-compare taps softens the edge (PCF, §5).
-float sun_shadow(vec3 world_pos, vec3 N) {
-    uint count = uint(shadow.params.x);
-    if (count == 0u)
-        return 1.0; // shadows disabled — no modulation (kept for safety; the off path uses pbr_forward)
-
-    vec3 biased = world_pos + N * shadow.params.w;
-    for (uint c = 0u; c < count && c < 4u; ++c) {
-        vec4 lc = shadow.cascade_view_proj[c] * vec4(biased, 1.0);
-        vec3 p = lc.xyz / lc.w;         // ortho ⇒ w = 1, but the divide is harmless and general
-        vec2 uv = p.xy * 0.5 + 0.5;     // clip [-1,1] → texture [0,1] (both y-down, Vulkan)
-        // Inside this cascade's map? (a hair inside the border avoids sampling the clamped edge)
-        if (all(greaterThanEqual(uv, vec2(0.001))) && all(lessThanEqual(uv, vec2(0.999))) &&
-            p.z >= 0.0 && p.z <= 1.0) {
-            float ref = p.z - shadow.params.z;   // the receiver's light-space depth, biased toward lit
-            float step = shadow.params.y * shadow.texel.x;
-            float sum = 0.0;
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    vec2 o = vec2(float(dx), float(dy)) * step;
-                    // sampler2DArrayShadow: (u, v, layer, reference) → filtered compare result.
-                    sum += texture(shadow_map, vec4(uv + o, float(c), ref));
-                }
-            }
-            return sum / 9.0;
-        }
-    }
-    return 1.0; // past the last cascade — treat as lit rather than pop to hard shadow
-}
+// One receiver implementation keeps terrain and mesh cascade transitions consistent.
+#include "sun_shadow.glsl"
 
 // A spot light's shadow factor at this fragment: 1 = lit, 0 = shadowed. The spot is a perspective
 // shadow map (its own array layer `idx`), so unlike the ortho cascades the projection is a real
@@ -446,13 +415,11 @@ void main() {
     vec3 v = normalize(frame.camera_pos.xyz - v_world_pos);
     // ALPHA MASK (m15.6). Sample once, mask, then use the rgb. `draw.emissive.w` is the cutoff and
     // zero means "no masking" — so an opaque or blended material takes the false branch on a
-    // comparison that can never be true, and needs no shader variant. The discard is FIRST because
-    // a discarded fragment must not have written depth or run the BRDF.
+    // comparison that can never be true, and needs no shader variant. Derivative-dependent
+    // texture reads and normal filtering precede discard: a cutout must not remove helper
+    // lanes before its neighbours measure their pixel footprint. No lighting/depth writes yet.
     vec4 base_sample = texture(base_color_tex, v_uv);
     float base_alpha = draw.base_color.a * base_sample.a;
-    if (draw.emissive.w > 0.0 && base_alpha < draw.emissive.w) {
-        discard;
-    }
     vec3 albedo = draw.base_color.rgb * base_sample.rgb;
 
     vec2 mr = texture(metallic_roughness_tex, v_uv).gb;
@@ -460,13 +427,18 @@ void main() {
     float roughness = clamp(draw.params.y * mr.x, 0.045, 1.0);
     float alpha = roughness * roughness;
     alpha = filter_specular_alpha(n, alpha); // geometric specular AA, ADR-0078 step 1a
+    float ao_sample = texture(occlusion_tex, v_uv).r;
+    vec3 emissive_sample = texture(emissive_tex, v_uv).rgb;
+    if (draw.emissive.w > 0.0 && base_alpha < draw.emissive.w) {
+        discard;
+    }
     // The perceptual roughness of the lobe AFTER that widening. One value, computed once, read by
     // the sky-specular lookup below AND written to the G-buffer, so the SSR-on and SSR-off paths
     // read the prefiltered chain at the same level (ADR-0078 step 1e). On a flat surface
     // dFdx(n) = 0, the widening adds nothing, and this equals `roughness` exactly.
     const float lobe_roughness = sqrt(alpha);
 
-    float ao = mix(1.0, texture(occlusion_tex, v_uv).r, draw.params.w);
+    float ao = mix(1.0, ao_sample, draw.params.w);
 
     // Ambient / indirect diffuse — two mutually exclusive sources of the low-frequency "everything
     // else" light, and picking exactly one is the m10.6 integration step:
@@ -666,7 +638,7 @@ void main() {
         out_radiance += contrib * spot_shadow(i, v_world_pos, normalize(v_world_normal));
     }
 
-    out_radiance += draw.emissive.rgb * texture(emissive_tex, v_uv).rgb;
+    out_radiance += draw.emissive.rgb * emissive_sample;
     out_hdr = vec4(out_radiance, 1.0);
 
 #ifdef WRITE_GBUFFER

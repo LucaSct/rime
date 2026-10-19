@@ -49,40 +49,42 @@ CascadeFit compute_cascades(const CascadeInputs& in, const LightingSettings& set
         splits[i] = lambda * log_d + (1.0f - lambda) * uni_d;
     }
 
-    // The rotation-only light view (eye at the origin): its xy plane is the shadow map's plane,
-    // used to snap the cascade centre to whole texels.
+    // The rotation-only light view (eye at the origin). Its rotation is the ONE fixed light basis
+    // every cascade and every frame reuses: only the translation column changes per cascade, and it
+    // is written explicitly below. We never rebuild a look_at(eye, snapped) from translated floats,
+    // because look_at re-normalises (eye->target) and so re-derives the basis from the very
+    // coordinates we just snapped, injecting world-magnitude round-off into the texel phase.
     const core::Mat4 light_rot = core::look_at(core::Vec3{0.0f, 0.0f, 0.0f}, light_dir, up);
-    const core::Mat4 light_rot_inv = core::inverse(light_rot);
+    const core::Mat4 inv_camera_view = core::inverse(in.camera_view);
+    const float tan_half_y = std::tan(in.fov_y * 0.5f);
+    const float res = static_cast<float>(settings.shadow_map_resolution);
 
     for (std::uint32_t c = 0; c < n; ++c) {
-        // World-space corners of this depth slice: unproject the 8 clip-cube corners of a frustum
-        // built for [splits[c], splits[c+1]].
-        const core::Mat4 proj = core::perspective(in.fov_y, in.aspect, splits[c], splits[c + 1]);
-        const core::Mat4 inv_view_proj = core::inverse(proj * in.camera_view);
-        std::array<core::Vec3, 8> corners{};
-        int k = 0;
-        for (int z = 0; z <= 1; ++z) { // Vulkan clip z ∈ [0,1]
-            for (int y = -1; y <= 1; y += 2) {
-                for (int x = -1; x <= 1; x += 2) {
-                    const core::Vec4 v = inv_view_proj * core::Vec4{static_cast<float>(x),
-                                                                    static_cast<float>(y),
-                                                                    static_cast<float>(z),
-                                                                    1.0f};
-                    corners[k++] = core::Vec3{v.x / v.w, v.y / v.w, v.z / v.w};
-                }
-            }
-        }
+        // Local fit (camera space, analytic). The slice [d0, d1] is a frustum along -Z whose
+        // geometry depends only on fov/aspect/splits — NOT on where the camera is or where it
+        // looks. So we build its bounding sphere in camera space from those numbers alone: centre
+        // on the axis at the mean depth, radius to a far corner. (The old fit unprojected 8 corners
+        // through inverse(proj * view); at world coordinates ~100 the inverse's round-off made the
+        // sphere radius, hence the texel size, wobble from frame to frame — a shimmer source that
+        // snapping cannot remove, since the snap quantum itself kept moving.) Only the centre
+        // is then carried into the world, through the camera's rigid inverse.
+        const float d0 = splits[c];
+        const float d1 = splits[c + 1];
+        const float half_h = d1 * tan_half_y;
+        const float half_w = half_h * in.aspect;
+        const float half_d = 0.5f * (d1 - d0);
+        float radius = std::sqrt(half_w * half_w + half_h * half_h + half_d * half_d);
+        const core::Vec3 center =
+            core::transform_point(inv_camera_view, core::Vec3{0.0f, 0.0f, -0.5f * (d0 + d1)});
 
-        // Bounding sphere: rotation-invariant, so the radius (and thus the texel size) is stable
-        // frame to frame no matter how the camera turns — the fix for rotation shimmer.
-        core::Vec3 center{0.0f, 0.0f, 0.0f};
-        for (const core::Vec3& p : corners) {
-            center += p;
-        }
-        center = center * (1.0f / 8.0f);
-        float radius = 0.0f;
-        for (const core::Vec3& p : corners) {
-            radius = std::max(radius, core::length(p - center));
+        // Texel size is quantised by the radius, and a nearest-texel snap moves the centre by up to
+        // half a texel, so grow the radius by N/(N-1): texel = 2r/N = 2 r0/(N-1), half a texel =
+        // r0/(N-1), and r0 + r0/(N-1) = r0*N/(N-1) — the guarded sphere still holds the whole
+        // slice after the snap. N <= 1 has no room for a guard (and no texel grid worth keeping),
+        // so it simply skips snapping instead of dividing by zero.
+        const bool snap = settings.shadow_map_resolution > 1;
+        if (snap) {
+            radius *= res / (res - 1.0f);
         }
         radius = std::max(radius, 1e-3f);
 
@@ -90,17 +92,21 @@ CascadeFit compute_cascades(const CascadeInputs& in, const LightingSettings& set
         // in whole-texel steps, so the shadow's texel grid stays world-aligned — the fix for
         // translation shimmer (docs/math/shadow-mapping.md §3).
         core::Vec3 center_ls = core::transform_point(light_rot, center);
-        const float units_per_texel =
-            (2.0f * radius) / static_cast<float>(settings.shadow_map_resolution);
-        center_ls.x = std::floor(center_ls.x / units_per_texel) * units_per_texel;
-        center_ls.y = std::floor(center_ls.y / units_per_texel) * units_per_texel;
-        const core::Vec3 snapped = core::transform_point(light_rot_inv, center_ls);
+        if (snap) {
+            const float units_per_texel = (2.0f * radius) / res;
+            center_ls.x = std::round(center_ls.x / units_per_texel) * units_per_texel;
+            center_ls.y = std::round(center_ls.y / units_per_texel) * units_per_texel;
+        }
 
         // The light "camera": pulled back so its near plane (0) sits behind the slice, capturing
-        // occluders between the sun and the slice. far reaches the slice's far side.
+        // occluders between the sun and the slice. far reaches the slice's far side. The eye is
+        // centre - dir*(2r) and the basis maps dir to light-space -Z, so in light space the eye is
+        // centre_ls + (0,0,2r): the view is the fixed rotation with this exact translation.
         const float z_extra = radius; // room for off-slice casters
-        const core::Vec3 eye = snapped - light_dir * (radius + z_extra);
-        const core::Mat4 light_view = core::look_at(eye, snapped, up);
+        core::Mat4 light_view = light_rot;
+        light_view.at(0, 3) = -center_ls.x;
+        light_view.at(1, 3) = -center_ls.y;
+        light_view.at(2, 3) = -(center_ls.z + radius + z_extra);
         const core::Mat4 light_proj =
             core::ortho(-radius, radius, -radius, radius, 0.0f, 2.0f * radius + z_extra);
         fit.view_proj[c] = light_proj * light_view;

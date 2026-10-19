@@ -19,8 +19,17 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/render/components.hpp"
 #include "rime/render/culling.hpp"
+#include "shadow_caster_tracker.hpp"
 
 namespace rime::render {
+
+namespace detail {
+struct SceneShadowCasters {
+    ShadowCasterTracker tracker;
+    std::vector<ShadowCasterRecord> frame;
+    bool active = false;
+};
+} // namespace detail
 
 namespace {
 
@@ -209,8 +218,8 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
       velocity_(device), forward_(device), tonemap_(device), csm_(device), local_shadows_(device),
-      clustered_(device), sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device),
-      taa_resolve_(device) {
+      shadow_casters_(std::make_unique<detail::SceneShadowCasters>()), clustered_(device),
+      sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device), taa_resolve_(device) {
     // Default ring depth: kFramesInFlight (2, private to the Vulkan swapchain) + 1. See
     // set_frames_in_flight for why the default is the safe maximum rather than the headless
     // minimum.
@@ -495,8 +504,12 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         }
     }
     if (!scene.camera.found) {
-        if (previous_first_person_active_)
-            taa_history_valid_ = false;
+        // A camera gap breaks rendered-frame continuity even without a first-person overlay.
+        // The next camera has no predecessor to reproject into, so discard both kinds of history.
+        taa_history_valid_ = false;
+        last_frame_resolved_ = false;
+        has_view_proj_history_ = false;
+        prev_models_.clear();
         previous_first_person_active_ = false;
         previous_first_person_models_.clear();
         first_person_draws_ = {};
@@ -670,6 +683,19 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     frame_normal_.resize(draw_count);
     frame_occlusion_.resize(draw_count);
     frame_emissive_.resize(draw_count);
+    const bool track_shadow_casters =
+        lighting_.shadows_enabled && lighting_.local_shadows_enabled && !scene.spot_lights.empty();
+    shadow_casters_->frame.clear();
+    if (track_shadow_casters) {
+        shadow_casters_->frame.reserve(draw_count);
+        if (!shadow_casters_->active)
+            local_shadows_.invalidate_all();
+    } else if (shadow_casters_->active) {
+        // Maps can survive a disabled frame while geometry changes. Resuming invalidates every
+        // slot, including an empty new world whose removed casters have no current bounds.
+        shadow_casters_->tracker.clear();
+    }
+    shadow_casters_->active = track_shadow_casters;
     // Previous-frame model matrices (ADR-0078 step 1c, decision 7): look each drawn entity up in
     // the cache the LAST render() left, and build the cache for the NEXT one from this frame's
     // draws. Building a fresh map rather than editing in place is what drops an entity that was not
@@ -762,6 +788,35 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         frame_normal_[i] = pick(material.normal_texture, flat_normal_);
         frame_occlusion_[i] = pick(material.occlusion_texture, white_);
         frame_emissive_[i] = pick(material.emissive_texture, white_);
+        if (track_shadow_casters) {
+            detail::ShadowCasterRecord caster;
+            caster.entity = std::bit_cast<std::uint64_t>(scene.draw_entities[i]);
+            caster.mesh = item.mesh;
+            caster.first_index = item.first_index;
+            caster.index_count = item.index_count;
+            caster.model = item.model;
+            caster.flags = frame_draws_[i].flags;
+            caster.alpha_factor = material.base_color[3];
+            caster.alpha_cutoff = material.alpha_cutoff;
+            caster.base_color_texture = frame_base_color_[i];
+            caster.vertex_override = item.vertex_override;
+            caster.vertex_override_offset = item.vertex_override_offset;
+            // A deformed stream need not fit the registry's rest bounds. Until its producer
+            // supplies conservative bounds, invalidate all local maps instead of guessing.
+            caster.bounds_known = !item.vertex_override.is_valid();
+            const auto& mesh = meshes_.get(item.mesh);
+            transform_aabb(
+                item.model, mesh.local_min, mesh.local_max, caster.bounds.min, caster.bounds.max);
+            shadow_casters_->frame.push_back(caster);
+        }
+    }
+    if (track_shadow_casters) {
+        // Camera culling partitions this full list; it never deletes offscreen casters. Keys
+        // include entity generations/subranges, so camera-driven reorder cannot dirty a lamp.
+        shadow_casters_->tracker.update(
+            shadow_casters_->frame,
+            [&](const WorldAabb& region) { local_shadows_.invalidate(region); },
+            [&] { local_shadows_.invalidate_all(); });
     }
     if (draw_count > 0)
         device_.write_buffer(draw_ubos_[ubo_slot_], draw_staging_.data(), draw_staging_.size());

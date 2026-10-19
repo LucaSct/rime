@@ -1,0 +1,42 @@
+Clang syntax PASS engine/render/src/lighting/shadows.cpp
+Clang syntax PASS engine/render/src/lighting/local_shadows.cpp
+Clang syntax PASS engine/render/src/scene_renderer.cpp
+Clang syntax PASS engine/app/editor_host_app.cpp
+Clang syntax PASS tests/render/shadow_stability_test.cpp
+Clang syntax PASS tests/render/shadow_caster_tracker_test.cpp
+Clang syntax PASS tests/render/shadow_motion_test.cpp
+Clang syntax PASS tests/render/shadow_transition_test.cpp
+Clang syntax PASS tests/render/local_shadow_test.cpp
+Clang syntax PASS tests/render/taa_resolve_test.cpp
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:    7 |    7 passed | 0 failed | 243 skipped
+[doctest] assertions: 8207 | 8207 passed | 0 failed |
+[doctest] Status: SUCCESS!
+Changed-TU CPU ASan/UBSan/LSan PASS
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] render: no active camera in the world — declaring no passes (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:522)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/render/shadow_transition_test.cpp:18:
+TEST CASE:  shadows: shared mesh and terrain sampler blends cascade boundaries
+
+/home/next/projects/rime/tests/render/shadow_transition_test.cpp:153: MESSAGE: cascade transition steps x=0.0874023, z=0.0112305, overlapping=0.115723
+
+===============================================================================
+[doctest] test cases:    6 |    6 passed | 0 failed | 244 skipped
+[doctest] assertions: 2208 | 2208 passed | 0 failed |
+[doctest] Status: SUCCESS!
+Changed-TU Vulkan ASan/UBSan PASS; GPU driver leak checks disabled
+Dependency archives are not fully instrumented. No threading primitives changed.

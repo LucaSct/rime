@@ -125,3 +125,5 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0099](0099-authored-city-spawns-and-runtime-environment.md) — sample-owned player spawn markers and bounded authored environment presentation shared by the city runtime and editor.
 
 - [ADR-0100](0100-editor-player-preview-and-input-lease.md) — optional city Walk Preview, acknowledged input capture and exact Stop restoration
+
+- [ADR-0101](0101-walking-shadow-stability.md) — stable sun cascades, continuous shared receivers and moving-caster cache invalidation
