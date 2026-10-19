@@ -336,3 +336,11 @@ Explicit C2 invalidation remains available, including in-place GPU texture chang
 new handle. Static cache reuse and moving/removed caster pixels have independent checks.
 
 See [ADR-0101](../adr/0101-walking-shadow-stability.md) for scope and verified limitations.
+
+`LightingSettings::shadow_max_distance` can cap the far depth used to compute the
+practical splits independently of the raster camera's far plane. Zero or invalid
+caps preserve the existing fit. The city uses 160 world units for shadows while
+terrain remains visible to 3072; the cascade bounding volumes and their existing
+edge fades still determine actual receiver coverage. This improves local texel
+density without increasing shadow-map resolution. It does not change the
+diffuse-GI surface query described in [ADR-0102](../adr/0102-runtime-floor-lighting.md).

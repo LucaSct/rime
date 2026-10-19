@@ -138,6 +138,11 @@ Screen-space reflections still have screen-coverage/hit limits; point lights and
 cosmetic particles do not acquire new shadow-casting features. A first-person
 weapon/arms overlay is separate from a world-space full-body actor.
 
+Run game additionally uses local indirect lighting and screen-space reflections;
+its lighting is not identical to Preview. Diffuse GI now queries the receiving
+side of a surface to avoid sharp floor bands at probe planes. The game's sun
+maps cover the nearby 160 units independently of its 3072-unit terrain view.
+
 ## Find smoke, fire, water and ice
 
 Use **View → Outliner**, **View → Inspector**, or **View → Assets** if a panel
