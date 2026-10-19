@@ -32,8 +32,8 @@ existing map. The launcher supplies the game's component/preview host and cooks.
 For the V2 showcase, run `./scripts/city-v2.sh`. It creates an editable
 `build/release/city-v2.rscene` copy on first launch, with a player spawn, fire,
 smoke, a rippling water sheet and a blue frost sheet in low timber basins. Later
-launches keep your edits. Press Preview to inspect effects in the editor, or Run game for weapons
-and the authored player position. Frost Yard remains the freezing/melting demo.
+launches keep your edits. Use **Walk → ▶** for walking, looking and jumping inside
+the editor, or **Run game** for weapons and the authored player position. Frost Yard remains the freezing/melting demo.
 
 Press **Run game** in the top toolbar. The editor saves the current document,
 waits for success, then opens the full city game in a separate window. A save
@@ -50,9 +50,9 @@ check `enabled`. Position is the **capsule centre**, not the feet or eye; rotati
 sets initial yaw/pitch and scale does not size the player. Outliner → Filter →
 Gameplay finds these markers. Exactly one may be enabled; invalid or duplicate
 spawns refuse startup with a reason. With none, the original default remains.
-Initial position, look and out-of-bounds recovery use the saved marker. Spawn
-overlap checks, teams and dynamic selection are future work. Preview's triangle runs
-scene systems in the editor; it does not possess the complete weapon player.
+Initial position, look and out-of-bounds recovery use the saved marker. Teams
+and dynamic selection are future work. The full weapon player remains in
+Run game. Walk Preview performs its own bounded static-collision admission check.
 
 Enabled smoke/fire/thermal descriptions now also run in the full city, without
 the separate scripted `--effects-preview` flag. Main and scope views share the
@@ -97,8 +97,32 @@ cannot create more pixels. Dolly reveals closer geometry, but textures and mesh 
 still have finite resolution. Mipmaps reduce distant texture shimmer; temporal
 antialiasing can soften moving details. Native standalone rendering uses the
 actual window framebuffer, independently of this fixed editor stream. Adaptive
-viewport resolution remains future work. Camera navigation works during Preview
-and Pause; Stop restores the authored camera, and the next movement starts there.
+viewport resolution remains future work. Inspect camera navigation works during
+Preview and Pause; Stop restores the authored camera, and the next movement starts there.
+
+## Walk inside the editor
+
+With the city host, check **Walk** in the toolbar, then press **▶**. Click inside
+the viewport to capture the mouse. **WASD** walks, mouse motion looks and **Space**
+jumps. **Esc** releases the mouse and stops held movement. Pause, focus loss and
+Ctrl/Alt/Command shortcuts also release it. Resume keeps the current player pose;
+click the viewport again to regain control. **Stop** restores the complete pre-Play
+scene, including its original camera. Stop before editing or saving.
+
+Walk uses exactly one enabled `PlayerSpawn` and one active root camera. It checks
+the real GroundSurface floor, supported city shapes and explicit physics bodies;
+a missing floor lets the player fall. Timber surrounds are solid. The showcase's
+water and ice use the explicit **Phase sheet** role, which is cosmetic unless an
+explicit collider is authored; adding thermal appearance to a wall does not make
+that wall passable. Older edited showcase copies may still have those sheets
+marked **Kerb**: change just those two water/ice SlabRole `kind` fields to `13`
+if they obstruct walking. The launcher preserves existing documents.
+
+This first preview controller is query-only: no weapons, pushing dynamic bodies,
+swimming, skating or gameplay freezing. Unsupported mesh collision, parented
+geometry/camera, negative scales and ambiguous spawns refuse entry with a reason.
+It does not invent a floor. Other hosts retain Inspect Preview until they provide
+player hooks; the Walk checkbox appears only with that capability.
 
 ## Find smoke, fire, water and ice
 
@@ -252,13 +276,12 @@ There is no GUI Export button; clean-machine release compatibility remains open.
 | --- | --- | --- |
 | Map | Saved scenes, placement/transforms, imported mesh assets, lights, terrain/destruction foundations | Persistent custom names, prefabs/presets, better search and map editing tools |
 | Effects | Reflected smoke/fire, thermal cell/source preview, live phase appearance | Preset library, viewport emitter icons, entity reference picker |
-| Player | GameDefinition/InputMap and hello-game gameplay; city Run game launches the existing full player/weapon runtime | In-viewport possession and general action/spawn authoring; editor fly camera is not a player controller |
+| Player | City Walk Preview with mouse capture, walking/jump/static collision and Stop restoration; Run game launches the full weapon runtime | General action/spawn authoring, dynamic-body interaction and terrain walking |
 | Events | Sensor TriggerEvents and example gameplay rules work in C++ | Inspector wiring from sensors to actions/objectives and event debugging |
 | Animation | Sample-specific procedural motion; asset formats/cooking contain animation-related data | General clip playback, skeletal runtime, Animator-style editor and timeline workflow |
 | Export | Verified Linux hello_game profile and city development folder with cooked weapons, notices and integrity checks | GUI Export and clean-machine release validation |
 
-The next useful **playable** brick is a small possessed-player/input slice in a
-saved test map, with explicit editor focus and restart behavior. Follow that with
-one authored heater interaction and an exit objective, then reusable heater/pool
-presets, then a small property-animation clip. The thermal demo is today's
+The next useful **playable** brick is one authored heater interaction and an exit
+objective, using the new Walk Preview focus/restart path. Follow that with reusable
+heater/pool presets, then a small property-animation clip. The thermal demo is today's
 working example; these rows are planned work, not hidden menus you need to find.

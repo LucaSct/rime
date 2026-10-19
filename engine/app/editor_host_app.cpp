@@ -61,6 +61,7 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/editorhost/editor_host.hpp"
+#include "rime/editorhost/play_control.hpp"
 #include "rime/editorhost/thermal_preview.hpp"
 #include "rime/fluids_render/phase_surface.hpp"
 #include "rime/fluids_scene/preview.hpp"
@@ -424,7 +425,8 @@ int serve_viewport(std::string_view socket_path,
                    std::string_view assets_path,
                    const app::ComponentRegistrar& registrar,
                    const app::ScenePreparer& prepare,
-                   const app::PlayTick& play_tick) {
+                   const app::PlayTick& play_tick,
+                   const app::EditorPlayHooks& player_hooks) {
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kViewportWidth, kViewportHeight};
@@ -586,6 +588,89 @@ int serve_viewport(std::string_view socket_path,
     std::uint64_t input_malformed = 0;         // an Input payload that did not decode
     bool input_released = false;               // release_all has run for this (single) connection
 
+    editorhost::PlayControlStateMsg play_control;
+    play_control.supported_modes = player_hooks.supported() ? 3 : 1;
+    bool player_admitted = false;
+    std::uint64_t uncaptured_inputs = 0;
+    const auto player_context = [&] {
+        return app::EditorPlayContext{
+            app.world(), *physics_world, play_control.session_id, play_session.tick_count()};
+    };
+    const auto notify_player = [&](app::EditorPlayTransition transition) {
+        if (player_admitted && physics_world && player_hooks.transition) {
+            auto context = player_context();
+            player_hooks.transition(context, transition);
+        }
+    };
+    const auto release_player_input = [&] {
+        // Inspect has its own persistent fly-camera input owner. Do not consume that
+        // owner's synthetic key-ups through this Player-only lifecycle.
+        if (play_control.mode != 1 && !player_admitted)
+            return;
+        play_control.captured = false;
+        notify_player(app::EditorPlayTransition::ReleaseInput);
+        // The next capture starts a new pointer baseline. Delivering accumulated absolute
+        // positions from the previous capture would turn a focus change into a sudden look.
+        input_translator.release_all(input_events);
+        input_events.clear();
+    };
+    const auto begin_session = [&](bool paused) {
+        const auto before = play_session.phase();
+        if (paused)
+            play_session.pause(app.world());
+        else
+            play_session.play(app.world());
+        if (before == editorhost::PlayPhase::Edit) {
+            effects.reset();
+            thermal.reset();
+            ++thermal_session;
+            effects_tick = 0;
+            physics_world = std::make_unique<physics::PhysicsWorld>();
+            physics_sync = physics::PhysicsSync{};
+            ++play_control.session_id;
+            play_control.status = 1;
+            play_control.reason.clear();
+            play_control.captured = false;
+            if (play_control.mode == 1) {
+                release_player_input();
+                // A final transform edit can share this drain batch with Play. Bind collision
+                // from that edited pose, not from the previous render's derived transforms.
+                scene::derive_world_transforms(app.world(), app.jobs());
+                (void)ground::bind_ground(app.world(), *physics_world);
+                physics_sync.reconcile(app.world(), *physics_world);
+                auto context = player_context();
+                const auto admission = player_hooks.begin(context);
+                if (!admission.ok) {
+                    // Begin may have admitted a prefix of transient collision. Give the owner
+                    // its cleanup opportunity while the collision world is still alive.
+                    if (player_hooks.transition)
+                        player_hooks.transition(context, app::EditorPlayTransition::Stop);
+                    (void)play_session.stop(app.world());
+                    scene::derive_world_transforms(app.world(), app.jobs());
+                    physics_world.reset();
+                    physics_sync = physics::PhysicsSync{};
+                    play_control.status = 2;
+                    play_control.reason = admission.reason.substr(0, 1024);
+                    RIME_WARN("editor-host: Walk Preview refused: {}", play_control.reason);
+                    app.timestep().reset();
+                    return false;
+                }
+                player_admitted = true;
+                RIME_INFO("editor-host: Walk Preview admitted, session {}",
+                          play_control.session_id);
+            }
+        } else if (!paused && before == editorhost::PlayPhase::Paused) {
+            notify_player(app::EditorPlayTransition::Resume);
+        }
+        if (paused) {
+            notify_player(app::EditorPlayTransition::Pause);
+            if (play_control.mode == 1)
+                release_player_input();
+        }
+        app.timestep().reset();
+        return true;
+    };
+
     // The one place a fixed tick advances physics: Application's per-tick hook (ADR-0023), which
     // runs on the main thread between the Schedule and the render — exactly where PhysicsSync's
     // reconcile is allowed to add/remove RigidBodyHandle components (a structural change). This
@@ -604,7 +689,15 @@ int serve_viewport(std::string_view socket_path,
         // already swapped in by `Application::step` before it runs any tick, so the span is the
         // events this frame's drain posted — and the render that follows the tick sees whatever
         // the game did with them.
-        if (play_tick) {
+        if (player_admitted) {
+            const bool single_step = play_session.phase() == editorhost::PlayPhase::Paused;
+            if (single_step)
+                notify_player(app::EditorPlayTransition::Resume);
+            auto context = player_context();
+            player_hooks.tick(context, app.frame_input(), dt);
+            if (single_step)
+                notify_player(app::EditorPlayTransition::Pause);
+        } else if (play_tick) {
             play_tick(w, app.frame_input(), dt);
         }
         (void)effects.tick(w, ++effects_tick, static_cast<float>(dt));
@@ -869,6 +962,12 @@ int serve_viewport(std::string_view socket_path,
                 // Deliberately NOT frame-affecting: input moves the world through the tick, and a
                 // Playing session already renders every iteration, so forcing a render here would
                 // only defeat m10.0-perf's idle skip for a mouse moving over a paused editor.
+                if (e.type == stream::MessageType::Input && play_control.mode == 1 &&
+                    (!play_control.captured ||
+                     play_session.phase() != editorhost::PlayPhase::Playing)) {
+                    ++uncaptured_inputs;
+                    continue;
+                }
                 const app::InputDispatch input_disp =
                     app::dispatch_input_message(e.type, e.payload, input_translator, input_events);
                 if (input_disp != app::InputDispatch::NotInput) {
@@ -905,8 +1004,14 @@ int serve_viewport(std::string_view socket_path,
                     // runs on the thread that owns the world.
                     std::string save_path;
                     if (editorhost::parse_save_scene(e.payload, save_path)) {
-                        const editorhost::SceneSaveOutcome outcome =
-                            editorhost::save_hosted_scene(app.world(), hosted, save_path);
+                        editorhost::SceneSaveOutcome outcome;
+                        if (play_control.mode == 1 &&
+                            play_session.phase() != editorhost::PlayPhase::Edit) {
+                            outcome.path = save_path;
+                            outcome.error = "Stop Walk Preview before saving the editing state";
+                        } else {
+                            outcome = editorhost::save_hosted_scene(app.world(), hosted, save_path);
+                        }
                         if (outcome.ok) {
                             RIME_INFO("editor-host: saved {} entities to {} ({} bytes)",
                                       outcome.entities,
@@ -942,38 +1047,45 @@ int serve_viewport(std::string_view socket_path,
                                 : static_cast<render::GizmoMode>(gs.mode <= 3 ? gs.mode : 0);
                         gizmo_sel.axis = static_cast<render::GizmoAxis>(gs.axis <= 3 ? gs.axis : 0);
                     }
+                } else if (msg == editorhost::EditorMessage::PlayControl) {
+                    editorhost::PlayControlMsg control;
+                    if (!editorhost::parse_play_control(e.payload, control) ||
+                        control.session_id != play_control.session_id)
+                        continue;
+                    using Action = editorhost::PlayControlAction;
+                    if (control.action == Action::Release) {
+                        release_player_input();
+                    } else if (control.action == Action::Capture) {
+                        if (player_admitted &&
+                            play_session.phase() == editorhost::PlayPhase::Playing) {
+                            release_player_input();
+                            play_control.captured = true;
+                        }
+                    } else if (play_session.phase() == editorhost::PlayPhase::Edit) {
+                        const bool player = control.action == Action::SelectPlayer;
+                        if (player && !player_hooks.supported()) {
+                            play_control.status = 2;
+                            play_control.reason = "This host does not provide Walk Preview";
+                        } else {
+                            play_control.mode = player ? 1 : 0;
+                            play_control.status = 0;
+                            play_control.reason.clear();
+                        }
+                    }
                 } else if (msg == editorhost::EditorMessage::Play) {
                     // Begin (Edit) or resume (Paused) — play() snapshots only on the FIRST call out
                     // of Edit, so a resume after Pause keeps restoring the true pre-play state, not
                     // whatever the world looked like when Pause was pressed.
-                    const bool was_edit = play_session.phase() == editorhost::PlayPhase::Edit;
-                    play_session.play(app.world());
-                    if (was_edit) {
-                        effects.reset();
-                        thermal.reset();
-                        ++thermal_session;
-                        effects_tick = 0;
-                        physics_world = std::make_unique<physics::PhysicsWorld>();
-                        physics_sync = physics::PhysicsSync{};
-                    }
-                    app.timestep().reset(); // m9.7: no leftover accumulator across a state change
+                    (void)begin_session(false);
                 } else if (msg == editorhost::EditorMessage::Pause) {
-                    play_session.pause(app.world());
-                    app.timestep().reset();
+                    (void)begin_session(true);
                 } else if (msg == editorhost::EditorMessage::Step) {
-                    const bool was_edit = play_session.phase() == editorhost::PlayPhase::Edit;
-                    play_session.pause(app.world()); // ensure a snapshot + a Paused steady state
-                    if (was_edit) {
-                        effects.reset();
-                        thermal.reset();
-                        ++thermal_session;
-                        effects_tick = 0;
-                        physics_world = std::make_unique<physics::PhysicsWorld>();
-                        physics_sync = physics::PhysicsSync{};
-                    }
-                    app.timestep().reset();
-                    pending_step = true;
+                    pending_step = begin_session(true);
                 } else if (msg == editorhost::EditorMessage::Stop) {
+                    release_player_input();
+                    notify_player(app::EditorPlayTransition::Stop);
+                    player_admitted = false;
+                    pending_step = false;
                     if (play_session.stop(app.world())) {
                         // The restore only reconstructed reflected components (LocalTransform among
                         // them); WorldTransform is derived and must be recomputed, exactly like a
@@ -989,13 +1101,31 @@ int serve_viewport(std::string_view socket_path,
                         thermal.reset();
                         effects_tick = 0;
                     }
+                    play_control.status = 0;
+                    play_control.reason.clear();
                     app.timestep().reset();
                 } else {
                     // A world edit, through the same dispatcher the GPU-free host uses — and the
                     // structural ones answered in order, which is what the editor's undo history
                     // waits on before it commits a step.
-                    const editorhost::EditOutcome outcome =
-                        editorhost::apply_editor_edit(app.world(), editor_ids, msg, e.payload);
+                    editorhost::EditOutcome outcome;
+                    if (player_admitted) {
+                        // Collision in a walking preview is a snapshot of the authored static
+                        // geometry. Refuse edits on the server too: moving only the picture would
+                        // create invisible walls. Inspect Preview retains its live-edit route.
+                        const bool structural = msg == editorhost::EditorMessage::Spawn ||
+                                                msg == editorhost::EditorMessage::SpawnEntity ||
+                                                msg == editorhost::EditorMessage::Despawn ||
+                                                msg == editorhost::EditorMessage::AddComponent ||
+                                                msg == editorhost::EditorMessage::RemoveComponent;
+                        outcome.reply = structural;
+                        core::ByteReader reader(e.payload);
+                        (void)reader.u64(outcome.editor_id);
+                        play_control.reason = "Stop Walk Preview before editing the scene";
+                    } else {
+                        outcome =
+                            editorhost::apply_editor_edit(app.world(), editor_ids, msg, e.payload);
+                    }
                     derive_after_edits = derive_after_edits || outcome.ok;
                     if (outcome.reply &&
                         !conn.send_message(
@@ -1024,6 +1154,8 @@ int serve_viewport(std::string_view socket_path,
         if (!input_released && stop.load(std::memory_order_relaxed)) {
             input_released = true;
             input_translator.release_all(input_events);
+            if (player_admitted)
+                release_player_input();
         }
         // One place feeds the engine, so a queued event cannot be applied twice or skipped: the
         // drain above only APPENDS to input_events, and this drains it into the frame snapshot.
@@ -1084,6 +1216,15 @@ int serve_viewport(std::string_view socket_path,
                     break; // client disconnected
                 }
             }
+
+            // Optional capability + session acknowledgement. An older client ignores this
+            // message; a new client never guesses that an arbitrary host can possess a player.
+            play_control.phase = static_cast<std::uint8_t>(play_session.phase());
+            play_control.tick_count = play_session.tick_count();
+            if (!conn.send_message(
+                    static_cast<stream::MessageType>(editorhost::EditorMessage::PlayControlState),
+                    editorhost::serialize_play_control_state(play_control)))
+                break;
 
             // Optional readonly diagnostics follow the same frame's PlayState. Simulation
             // samples never become ECS components, so Save during Play cannot bake them in.
@@ -1273,11 +1414,12 @@ int serve_viewport(std::string_view socket_path,
     // exited between the drain and the release check, which is harmless here (the process is
     // ending) and would not be in a host that served a second client.
     RIME_INFO("editor-host: input closed — {} malformed, {} unknown key usage(s), {} unknown "
-              "button(s), {} still held",
+              "button(s), {} still held, {} uncaptured player inputs ignored",
               input_malformed,
               input_translator.unknown_usages(),
               input_translator.unknown_buttons(),
-              input_translator.held_count());
+              input_translator.held_count(),
+              uncaptured_inputs);
     RIME_INFO("editor-host: effects closed — {} ticks, {} lit ticks, {} spawned, {} cleared, "
               "{} source-cap visits dropped, {} invalid source visits, {} emission-budget "
               "particles dropped, {} pool particles dropped",
@@ -1300,9 +1442,15 @@ int serve_viewport(std::string_view socket_path,
 
     stop.store(true, std::memory_order_relaxed);
     receiver.join();
+    // The controller owns transient bodies in this PhysicsWorld. Disconnect and early frame
+    // failures still tear those down while the world is alive, just like an explicit Stop.
+    if (player_admitted) {
+        release_player_input();
+        notify_player(app::EditorPlayTransition::Stop);
+        player_admitted = false;
+    }
     // Synchronous capture() completes each frame before returning, so nothing is in flight to
-    // drain; the streamer (and its readback buffers) release cleanly ahead of the device at scope
-    // exit.
+    // drain; the streamer/readback buffers release before the device at scope exit.
     fmt::print("editor-host: viewport session closed after {} frames ({} entities)\n",
                sequence,
                app.world().entity_count());
@@ -1317,14 +1465,17 @@ int serve(std::string_view socket_path,
           bool viewport,
           const app::ComponentRegistrar& registrar,
           const app::ScenePreparer& prepare,
-          const app::PlayTick& play_tick) {
+          const app::PlayTick& play_tick,
+          const app::EditorPlayHooks& player_hooks) {
     if (viewport) {
-        return serve_viewport(socket_path, scene_path, assets_path, registrar, prepare, play_tick);
+        return serve_viewport(
+            socket_path, scene_path, assets_path, registrar, prepare, play_tick, player_hooks);
     }
     // The GPU-free channel host below has no play session and no frame loop, so it has no tick to
     // hand a game and no client input to hand it with — `play_tick` is deliberately unused there
     // rather than silently half-wired.
     (void)play_tick;
+    (void)player_hooks;
     ecs::World world;
     editorhost::HostedScene hosted;
     register_and_populate(world, scene_path, hosted, registrar);
@@ -1359,7 +1510,8 @@ int run_editor_host(int argc,
                     const ComponentRegistrar& registrar,
                     const char* usage_name,
                     const ScenePreparer& prepare,
-                    const PlayTick& play_tick) {
+                    const PlayTick& play_tick,
+                    const EditorPlayHooks& player_hooks) {
     std::string_view socket_path;
     std::string_view scene_path;
     std::string_view assets_path;
@@ -1384,7 +1536,14 @@ int run_editor_host(int argc,
                    usage_name);
         return 2;
     }
-    return serve(socket_path, scene_path, assets_path, viewport, registrar, prepare, play_tick);
+    return serve(socket_path,
+                 scene_path,
+                 assets_path,
+                 viewport,
+                 registrar,
+                 prepare,
+                 play_tick,
+                 player_hooks);
 }
 
 } // namespace rime::app

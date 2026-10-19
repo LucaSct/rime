@@ -12,6 +12,7 @@
 namespace rime::ecs {
 class World;
 }
+
 namespace rime::physics {
 class PhysicsWorld;
 }

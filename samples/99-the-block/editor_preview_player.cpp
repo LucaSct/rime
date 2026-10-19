@@ -171,6 +171,11 @@ bool PreviewPlayer::bind_collision(rime::app::EditorPlayContext& context) {
             return;
         if (already_bound(world, context.physics, entity))
             return;
+        // Solidity is authored role/collider intent, not a temperature or appearance side effect.
+        // A thermal material on a wall must leave its collision intact; a cosmetic water/ice
+        // sheet must not silently become gameplay ice. Explicit colliders above still win.
+        if (role.kind == blockkit::slab_kind::kPhaseSheet)
+            return;
         const auto* local = world.get<ecs::LocalTransform>(entity);
         const auto* derived = world.get<ecs::WorldTransform>(entity);
         if (!local || !derived || parented(world, entity) || !valid_pose(local->value) ||
@@ -350,6 +355,7 @@ bool PreviewPlayer::write_camera(rime::ecs::World& world) {
     const auto eye = rime::gameplay::eye_transform(view_, state_.position);
     local->value.translation = derived->value.translation = eye.translation;
     local->value.rotation = derived->value.rotation = eye.rotation;
+    local->value.scale = derived->value.scale = {1.0f, 1.0f, 1.0f};
     return true;
 }
 

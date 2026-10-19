@@ -286,8 +286,10 @@ mod tests {
         let mut extra = REFUSED.to_vec();
         extra.push(0);
         assert!(PlayControlState::decode(&extra).is_err());
-        let mut s = PlayControlState::default();
-        s.reason = "x".repeat(1024);
+        let mut s = PlayControlState {
+            reason: "x".repeat(1024),
+            ..Default::default()
+        };
         let b = s.encode().unwrap();
         assert_eq!(b.len(), 25 + 1024);
         assert!(PlayControlState::decode(&b).is_ok());

@@ -117,6 +117,7 @@ PaletteStats apply_palette(ecs::World& world, const BlockPalette& palette) {
                 material = palette.street;
                 break;
             case slab_kind::kKerb:
+            case slab_kind::kPhaseSheet:
                 material = palette.kerb;
                 mesh = palette.unit_cube;
                 break;

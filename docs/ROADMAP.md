@@ -149,6 +149,19 @@ and [ADR-0099](adr/0099-authored-city-spawns-and-runtime-environment.md). Posses
 sensor/action wiring, prefabs, adaptive resolution, animation, moving water and
 gameplay ice remain later bricks. Existing release/performance gates stay open.
 
+**Walk Preview and bounded renderer work (2026-10-19):** the city host now offers
+an optional Walk mode with acknowledged mouse capture, WASD/look/jump, actual
+static city collision and an exact pre-Play Stop restore. Esc/focus loss/Pause
+release held input; Resume requires a new viewport click. Server and GUI refuse
+editing/saving during Walk. Inspect and older hosts retain their original path.
+This is a query-only preview controller, not the full weapon/network player.
+The next creator brick is a heater interaction and exit objective, then presets.
+See [ADR-0100](adr/0100-editor-player-preview-and-input-lease.md).
+Pass-local material binding reuse removes redundant CPU attachment calls while
+preserving draw state; [evidence](perf/material-bindings-2026-10-19/README.md)
+separates deterministic controls from rejected clock qualification. No frame-rate,
+collapse, terrain walking, gameplay ice or shipment gate closes.
+
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
 > been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the

@@ -123,3 +123,5 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0097](0097-city-editor-run-and-development-bundle.md) — confirmed save before launching the full city runtime, derived preview exclusion and a separate Linux city development bundle.
 - [ADR-0098](0098-editor-navigation-and-environment-presentation-v2.md) — reconciled Preview camera ownership, aspect-preserving viewport interaction, thermal entity pickers and bounded flame/smoke/water/ice presentation V2.
 - [ADR-0099](0099-authored-city-spawns-and-runtime-environment.md) — sample-owned player spawn markers and bounded authored environment presentation shared by the city runtime and editor.
+
+- [ADR-0100](0100-editor-player-preview-and-input-lease.md) — optional city Walk Preview, acknowledged input capture and exact Stop restoration

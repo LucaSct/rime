@@ -50,14 +50,14 @@ enum class EditorMessage : std::uint16_t {
     EditResult = 0x0208,     // engine -> editor: ok + EditorId, per structural edit (ADR-0075)
     SceneLoadReport =
         0x0209, // engine -> editor: the --scene load's outcome, once after the schema (E3)
-    ThermalPreview = 0x020A,  // engine -> editor: optional bounded readonly thermal diagnostics
+    ThermalPreview = 0x020A,   // engine -> editor: optional bounded readonly thermal diagnostics
     PlayControlState = 0x020B, // engine -> editor: optional play-control capability + state
-    SetComponent = 0x0210,    // editor -> engine: set a component's bytes on an entity
-    Spawn = 0x0211,           // editor -> engine: spawn an empty entity
-    Despawn = 0x0212,         // editor -> engine: despawn an entity
-    AddComponent = 0x0213,    // editor -> engine: add a DEFAULT-constructed component to an entity
-    RemoveComponent = 0x0214, // editor -> engine: remove a component from an entity
-    RequestSnapshot = 0x0215, // editor -> engine: resend the world (engine replies with Snapshot)
+    SetComponent = 0x0210,     // editor -> engine: set a component's bytes on an entity
+    Spawn = 0x0211,            // editor -> engine: spawn an empty entity
+    Despawn = 0x0212,          // editor -> engine: despawn an entity
+    AddComponent = 0x0213,     // editor -> engine: add a DEFAULT-constructed component to an entity
+    RemoveComponent = 0x0214,  // editor -> engine: remove a component from an entity
+    RequestSnapshot = 0x0215,  // editor -> engine: resend the world (engine replies with Snapshot)
     SpawnEntity = 0x0216, // editor -> engine: spawn an entity WITH an initial component set (m9.5)
     PickRequest = 0x0217, // editor -> engine: pick the entity at a viewport pixel (m9.6)
     GizmoState = 0x0218,  // editor -> engine: selection + gizmo mode/axis to render (m9.6 gizmos)
@@ -65,7 +65,7 @@ enum class EditorMessage : std::uint16_t {
     Pause = 0x021A, // editor -> engine: stop ticking; the viewport keeps rendering (m9.7)
     Step = 0x021B,  // editor -> engine: run exactly one fixed tick, then stay Paused (m9.7)
     Stop = 0x021C,  // editor -> engine: restore the pre-play snapshot; back to Edit (m9.7)
-    SaveScene = 0x021D, // editor -> engine: write the world back to a .rscene path (m14.3)
+    SaveScene = 0x021D,   // editor -> engine: write the world back to a .rscene path (m14.3)
     PlayControl = 0x021E, // editor -> engine: optional select Inspect/Player, capture, release
 };
 

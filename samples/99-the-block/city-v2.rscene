@@ -12070,7 +12070,7 @@ entity 628 {
   rime::blockkit::SlabRole 0x3f51d745b75a387c {
     building 4294967295
     storey 0
-    kind 7
+    kind 13
     tint 0
   }
   rime::fluids_scene::ThermalCell 0x7cb777a70bc2a09e {
@@ -12095,7 +12095,7 @@ entity 629 {
   rime::blockkit::SlabRole 0x3f51d745b75a387c {
     building 4294967295
     storey 0
-    kind 7
+    kind 13
     tint 0
   }
   rime::fluids_scene::ThermalCell 0x7cb777a70bc2a09e {

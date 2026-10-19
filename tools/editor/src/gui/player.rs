@@ -18,6 +18,7 @@
 
 use std::sync::mpsc::Sender;
 
+use eframe::egui;
 use rime_protocol::{EditorMessage, PlayControl, PlayControlAction, PlayControlState};
 
 use super::protocol_input::Input;
@@ -140,7 +141,7 @@ impl PlayerControl {
         // Escape is consumed only while we hold (or are about to hold) the mouse, so the gizmo
         // shortcut elsewhere keeps working in plain Edit mode.
         let escape = (self.captured || self.pending.is_some())
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+            && ctx.input_mut(|i| i.consume_key(i.modifiers, egui::Key::Escape));
         let mut desired = Vec::new();
         if self.captured && !held_modifier {
             ctx.input(|i| {
@@ -162,7 +163,7 @@ impl PlayerControl {
         }
         let frame = FrameInput {
             focused,
-            escape,
+            escape: escape || held_modifier,
             desired,
             motion,
         };
@@ -207,13 +208,23 @@ impl PlayerControl {
         } else {
             "Player mode is unavailable"
         };
-        ui.painter().text(
-            rect.left_top() + egui::vec2(10.0, 10.0),
-            egui::Align2::LEFT_TOP,
-            text,
+        // The city sky can be nearly white. Keep the capture instruction readable over
+        // either sky or ground, and wrap it inside a narrow docked viewport.
+        let color = egui::Color32::WHITE;
+        let galley = ui.painter().layout(
+            text.to_owned(),
             egui::FontId::proportional(13.0),
-            egui::Color32::from_white_alpha(200),
+            color,
+            (rect.width() - 28.0).max(1.0),
         );
+        let backing = egui::Rect::from_min_size(
+            rect.left_top() + egui::vec2(8.0, 8.0),
+            galley.size() + egui::vec2(12.0, 8.0),
+        );
+        ui.painter()
+            .rect_filled(backing, 3.0, egui::Color32::from_black_alpha(190));
+        ui.painter()
+            .galley(backing.min + egui::vec2(6.0, 4.0), galley, color);
         true
     }
 
@@ -386,7 +397,17 @@ impl PlayerControl {
         }
         self.cursor_locked = self.captured;
         ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(if self.captured {
-            egui::CursorGrab::Locked
+            // X11 and Windows support confinement where winit's locked mode may be unavailable.
+            // Raw motion still drives look; confinement is not desktop-coordinate navigation.
+            if cfg!(target_os = "windows")
+                || (cfg!(target_os = "linux")
+                    && (std::env::var_os("WAYLAND_DISPLAY").is_none()
+                        || std::env::var("WINIT_UNIX_BACKEND").as_deref() == Ok("x11")))
+            {
+                egui::CursorGrab::Confined
+            } else {
+                egui::CursorGrab::Locked
+            }
         } else {
             egui::CursorGrab::None
         }));
@@ -486,6 +507,50 @@ mod tests {
         assert!(p.captured());
         drain(&rx);
         (p, tx, rx)
+    }
+
+    #[test]
+    fn prepare_releases_capture_for_shortcut_modifiers_and_shift_escape() {
+        for modifiers in [
+            egui::Modifiers::CTRL,
+            egui::Modifiers::ALT,
+            egui::Modifiers::COMMAND,
+            egui::Modifiers::SHIFT,
+        ] {
+            let (mut p, tx, rx) = captured_player();
+            p.step(
+                &FrameInput {
+                    desired: vec![HID_W],
+                    ..frame()
+                },
+                Some(&playing(true)),
+                true,
+                false,
+                &tx,
+            );
+            assert_eq!(drain(&rx), vec![Ev::Down(HID_W)]);
+            let mut input = egui::RawInput {
+                modifiers,
+                ..Default::default()
+            };
+            // Shift is a movement modifier, so it releases only when Escape is pressed.
+            // The actual egui consume_key path must accept that modified Escape.
+            if modifiers == egui::Modifiers::SHIFT {
+                input.events.push(egui::Event::Key {
+                    key: egui::Key::Escape,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                });
+            }
+            let ctx = egui::Context::default();
+            let _ = ctx.run(input, |ctx| {
+                p.prepare(ctx, Some(&playing(true)), true, false, &tx);
+            });
+            assert!(!p.captured());
+            assert_eq!(drain(&rx), vec![Ev::Up(HID_W), Ev::Release(SESSION)]);
+        }
     }
 
     #[test]

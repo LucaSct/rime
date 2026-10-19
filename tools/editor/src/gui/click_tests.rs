@@ -44,8 +44,9 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use rime_protocol::{
     decode_entity_ref, encode_entity_ref, entity_refs, ComponentRef, EditResult, FieldDesc,
-    FieldKind, PickResult, PlayState, SaveResult, SaveScene, SceneLoadReport, SchemaEntry,
-    SetComponent, Snapshot, SnapshotComponent, SpawnEntity,
+    FieldKind, PickResult, PlayControl, PlayControlAction, PlayControlState, PlayState, SaveResult,
+    SaveScene, SceneLoadReport, SchemaEntry, SetComponent, Snapshot, SnapshotComponent,
+    SpawnEntity,
 };
 
 use super::protocol_input::Input;
@@ -485,6 +486,8 @@ impl FakeHost {
                     Input::PointerMove { x, y } => format!("move {x},{y}"),
                     Input::PointerDown { x, y, button } => format!("down {x},{y} b{button}"),
                     Input::PointerUp { x, y, button } => format!("up {x},{y} b{button}"),
+                    Input::KeyDown { code } => format!("key down {code}"),
+                    Input::KeyUp { code } => format!("key up {code}"),
                 }),
                 Outbound::Editor { msg, payload } => {
                     self.apply(msg, &payload);
@@ -605,6 +608,11 @@ impl FakeHost {
                 };
                 self.shared.lock().unwrap().last_save = Some(result);
             }
+            // Capability and capture acknowledgements are injected explicitly by widget tests.
+            // Decode the intent, but never turn a request into an invented controller response.
+            EditorMessage::PlayControl => {
+                PlayControl::decode(payload).expect("PlayControl");
+            }
             // GizmoState is engine render state; logged, nothing to simulate.
             _ => {}
         }
@@ -624,6 +632,14 @@ impl FakeHost {
 
     fn messages(&self) -> Vec<EditorMessage> {
         self.log.iter().map(|(m, _)| *m).collect()
+    }
+
+    fn play_controls(&self) -> Vec<PlayControl> {
+        self.log
+            .iter()
+            .filter(|(msg, _)| *msg == EditorMessage::PlayControl)
+            .map(|(_, payload)| PlayControl::decode(payload).expect("PlayControl"))
+            .collect()
     }
 
     /// The world edits and commands only — without the `GizmoState` render hints and the
@@ -2779,10 +2795,9 @@ fn w_e_and_q_fly_while_the_right_button_is_held() {
 }
 
 #[test]
-fn keys_are_never_forwarded_to_the_engine() {
-    // DOCUMENTS A STUB: the editor→engine input vocabulary is pointer-only (`protocol_input::Input`
-    // has no Key variant), so a game that reads the keyboard cannot be driven during Play from
-    // this window. Only the editor's own camera sees keys.
+fn inspect_preview_does_not_forward_player_keys() {
+    // Inspect Preview keeps keyboard navigation local to the editor. Player Preview forwards
+    // movement only after an explicit viewport capture and a matching engine acknowledgement.
     let mut rig = Rig::new();
     rig.present_frame();
     rig.click("▶");
@@ -2793,6 +2808,196 @@ fn keys_are_never_forwarded_to_the_engine() {
     }
     assert!(rig.host.inputs.is_empty());
     assert!(rig.host.commands().is_empty());
+}
+
+const WIDGET_PLAYER_SESSION: u64 = 57;
+
+fn widget_play_control(mode: u8, phase: u8, captured: bool) -> PlayControlState {
+    PlayControlState {
+        supported_modes: 3,
+        mode,
+        phase,
+        status: u8::from(phase != 0),
+        captured,
+        session_id: WIDGET_PLAYER_SESSION,
+        tick_count: 0,
+        reason: String::new(),
+    }
+}
+
+fn widget_player_rig() -> Rig {
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.present_frame();
+    rig.click(ROW_CRATE);
+    rig.click("Move (W)");
+    rig.click("▶");
+    rig.host.shared.lock().unwrap().play_control = Some(widget_play_control(1, 1, false));
+    rig.settle();
+    rig.host.inputs.clear();
+    rig.host.log.clear();
+    rig
+}
+
+#[test]
+fn walk_widget_requires_capability_and_sends_mode_intent_without_inventing_ack() {
+    let mut rig = Rig::new();
+    assert!(!rig.has("Walk"), "older hosts expose only Inspect Preview");
+    rig.host.shared.lock().unwrap().play_control = Some(PlayControlState::default());
+    rig.settle();
+    assert!(
+        !rig.has("Walk"),
+        "Inspect-only capability does not offer Walk"
+    );
+
+    rig.host.shared.lock().unwrap().play_control = Some(widget_play_control(0, 0, false));
+    rig.settle();
+    assert!(rig.has("Walk"));
+    assert!(!rig.toggled("Walk"));
+    rig.host.log.clear();
+    rig.click_checkbox("Walk");
+    assert_eq!(
+        rig.host.play_controls(),
+        [PlayControl {
+            action: PlayControlAction::SelectPlayer,
+            session_id: WIDGET_PLAYER_SESSION,
+        }]
+    );
+    assert!(
+        !rig.toggled("Walk"),
+        "intent alone is not a mode acknowledgement"
+    );
+
+    rig.host.shared.lock().unwrap().play_control = Some(widget_play_control(1, 0, false));
+    rig.settle();
+    assert!(rig.toggled("Walk"));
+    rig.host.log.clear();
+    rig.click_checkbox("Walk");
+    assert_eq!(
+        rig.host.play_controls(),
+        [PlayControl {
+            action: PlayControlAction::SelectInspect,
+            session_id: WIDGET_PLAYER_SESSION,
+        }]
+    );
+    assert!(
+        rig.toggled("Walk"),
+        "returning to Inspect also awaits acknowledgement"
+    );
+}
+
+#[test]
+fn player_viewport_click_requests_capture_but_blocks_keys_look_pick_and_gizmo_until_ack() {
+    let mut rig = widget_player_rig();
+    let camera = rig.host.translation(CAMERA);
+    let crate_pose = rig.host.translation(CRATE);
+    // Aim at the selected crate's actual translate handle: Inspect would start a gizmo here.
+    let handle = rig.x_handle_px(gizmo::Vec3::new(0.0, 0.0, 0.0), 0.7);
+    rig.viewport_click(handle);
+    rig.hold_key(egui::Key::W);
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::MouseMoved(egui::vec2(24.0, -9.0)));
+    rig.pointer_move((600.0, 320.0));
+    assert_eq!(
+        rig.host.play_controls(),
+        [PlayControl {
+            action: PlayControlAction::Capture,
+            session_id: WIDGET_PLAYER_SESSION,
+        }]
+    );
+    assert!(!rig.app().player.captured());
+    assert!(
+        rig.host.inputs.is_empty(),
+        "pending capture forwards neither keys nor look"
+    );
+    assert_eq!(rig.host.count(EditorMessage::PickRequest), 0);
+    assert_eq!(rig.host.count(EditorMessage::SetComponent), 0);
+    assert!(rig.app().gizmo_drag.is_none());
+    assert_eq!(rig.app().selected, Some(CRATE));
+    assert_eq!(rig.host.translation(CAMERA), camera);
+    assert_eq!(rig.host.translation(CRATE), crate_pose);
+}
+
+#[test]
+fn player_widget_matching_capture_ack_forwards_hid_w_and_escape_releases_it() {
+    let mut rig = widget_player_rig();
+    rig.viewport_click((480.0, 270.0));
+    assert!(!rig.app().player.captured());
+    assert!(rig.host.inputs.is_empty());
+    rig.host.shared.lock().unwrap().play_control = Some(widget_play_control(1, 1, true));
+    rig.settle();
+    assert!(rig.app().player.captured());
+    assert_eq!(
+        rig.host.inputs,
+        ["move 0,0"],
+        "ack resets the virtual look origin"
+    );
+    rig.host.inputs.clear();
+    rig.host.log.clear();
+    rig.hold_key(egui::Key::W);
+    assert_eq!(
+        rig.host.inputs,
+        ["key down 26"],
+        "USB HID W, once across held frames"
+    );
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::MouseMoved(egui::vec2(9.0, -4.0)));
+    rig.settle();
+    assert_eq!(
+        rig.host.inputs.last().map(String::as_str),
+        Some("move 9,-4")
+    );
+    assert_eq!(rig.host.count(EditorMessage::PickRequest), 0);
+    assert_eq!(rig.host.count(EditorMessage::SetComponent), 0);
+
+    rig.host.inputs.clear();
+    rig.host.log.clear();
+    rig.key(egui::Key::Escape);
+    assert!(!rig.app().player.captured());
+    assert_eq!(rig.host.inputs, ["key up 26"]);
+    assert_eq!(
+        rig.host.play_controls(),
+        [PlayControl {
+            action: PlayControlAction::Release,
+            session_id: WIDGET_PLAYER_SESSION,
+        }]
+    );
+    assert_eq!(
+        rig.host.play.phase,
+        PlayPhase::Playing,
+        "Esc releases without stopping Preview"
+    );
+}
+
+#[test]
+fn player_active_and_paused_widgets_block_save_and_ctrl_s() {
+    for (phase, wire_phase) in [(PlayPhase::Playing, 1), (PlayPhase::Paused, 2)] {
+        let mut rig = widget_player_rig();
+        if phase == PlayPhase::Paused {
+            rig.click("⏸");
+            rig.host.shared.lock().unwrap().play_control =
+                Some(widget_play_control(1, wire_phase, false));
+            rig.settle();
+        }
+        assert_eq!(rig.host.play.phase, phase);
+        rig.host.log.clear();
+        rig.click("File");
+        assert!(
+            !rig.enabled(SAVE),
+            "Player {phase:?} cannot save the simulated world"
+        );
+        rig.key(egui::Key::Escape);
+        rig.chord(CTRL, egui::Key::S);
+        assert_eq!(
+            rig.host.count(EditorMessage::SaveScene),
+            0,
+            "Ctrl+S in Player {phase:?}"
+        );
+        assert!(rig.host.files.is_empty());
+    }
 }
 
 #[test]
