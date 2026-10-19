@@ -29,7 +29,9 @@ pub mod connection;
 pub mod editor;
 pub mod frame;
 pub mod input;
+pub mod play_control;
 pub mod thermal;
+pub use play_control::{PlayControl, PlayControlAction, PlayControlState};
 pub use thermal::{ThermalPreview, ThermalPreviewCell};
 
 pub use connection::Connection;
@@ -121,6 +123,8 @@ pub enum Error {
     Truncated,
     /// Invalid bounded thermal diagnostic payload.
     BadThermalPreview,
+    /// Invalid optional play-control payload.
+    BadPlayControl,
     /// The handshake magic did not match [`PROTOCOL_MAGIC`] — a wrong-protocol peer.
     BadMagic(u32),
     /// The handshake version did not match [`PROTOCOL_VERSION`] — an incompatible peer.
@@ -147,6 +151,7 @@ impl std::fmt::Display for Error {
             Error::BadMagic(m) => write!(f, "bad protocol magic {m:#010x}"),
             Error::BadVersion(v) => write!(f, "unsupported protocol version {v}"),
             Error::BadThermalPreview => write!(f, "invalid thermal preview"),
+            Error::BadPlayControl => write!(f, "invalid play control"),
             Error::BadCodec(c) => write!(f, "unknown codec byte {c}"),
             Error::BadFormat(c) => write!(f, "unknown pixel-format byte {c}"),
             Error::BadFrameFlags(b) => write!(f, "unknown frame flags {b:#04x}"),

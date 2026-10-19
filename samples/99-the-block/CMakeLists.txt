@@ -53,7 +53,7 @@ rime_game_content(the_block ${CMAKE_CURRENT_BINARY_DIR}/city-content
 # builds its own host from the engine's library and adds its module on top. Nine lines of C++, one
 # CMake target, and nothing in engine/ knows this game exists. Point the editor at it with
 # `editor --engine build/dev/bin/the-block-host`.
-add_executable(the_block_host block_host_main.cpp play_city.cpp)
+add_executable(the_block_host block_host_main.cpp editor_preview_player.cpp play_city.cpp)
 set_target_properties(the_block_host PROPERTIES OUTPUT_NAME the-block-host)
 # rime::gameplay + rime::platform arrive with m18 Track H: the host's play-mode `PlayTick` hook
 # flies a `gameplay::FlyCamera` from the browser's input, which is this game deciding what a key

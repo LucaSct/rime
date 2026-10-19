@@ -1,0 +1,60 @@
+Clang syntax PASS engine/app/editor_host_app.cpp
+Clang syntax PASS engine/app/stream_input.cpp
+Clang syntax PASS engine/editorhost/src/play_control.cpp
+Clang syntax PASS samples/99-the-block/editor_preview_player.cpp
+Clang syntax PASS samples/99-the-block/block_host_main.cpp
+Clang syntax PASS tests/gameplay/editor_preview_player_test.cpp
+Clang syntax PASS tests/editorhost/play_control_test.cpp
+Clang syntax PASS tests/app/stream_input_test.cpp
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 1 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 2 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 8 static bodies, 5 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 1 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 2 at (0, 1, 0), 1 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (-10, 1, 2), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (-10, 1, 2), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  17 |  17 passed | 0 failed | 96 skipped
+[doctest] assertions: 177 | 177 passed | 0 failed |
+[doctest] Status: SUCCESS!
+Changed-TU ASan/UBSan + LSan PASS rime_gameplay_tests
+[ERROR] editorhost: set-component unknown type_hash 0xdeadbeef (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:481)
+[ERROR] editorhost: set-component on a dead entity (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:475)
+[ERROR] editor-host: scene load failed (/tmp/rime-276768-1304132520/rime_e3_malformed.rscene): unterminated entity 0 (/home/next/projects/rime/engine/app/editor_host_app.cpp:136)
+[WARN] editor-host: 1 component(s) skipped — this build does not register: some::Bogus (/home/next/projects/rime/engine/app/editor_host_app.cpp:150)
+[INFO] editor-host: loaded 1 entities, 0 components, 1 skipped (/tmp/rime-276768-1304132520/rime_e3_unknown.rscene) (/home/next/projects/rime/engine/app/editor_host_app.cpp:154)
+[ERROR] editorhost: refusing SetComponent — no live entity has EditorId 77 (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:949)
+[ERROR] editorhost: refusing Despawn — no live entity has EditorId 77 (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:949)
+[ERROR] editorhost: refusing AddComponent — no live entity has EditorId 77 (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:949)
+[ERROR] editorhost: refusing a rime::ecs::Parent that references EditorId 999, which no live entity holds (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:190)
+[ERROR] editorhost: refusing a rime::ecs::Parent that references EditorId 999, which no live entity holds (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:190)
+[ERROR] editorhost: refusing to respawn under id 50 — this session never issued it (/home/next/projects/rime/engine/editorhost/src/editor_identity.cpp:106)
+[ERROR] editorhost: refusing to respawn under id 1 — a live entity already holds it (/home/next/projects/rime/engine/editorhost/src/editor_identity.cpp:112)
+[ERROR] editorhost: stop restored a rime::ecs::Parent whose reference 1:0 named no entity before play either (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:879)
+[ERROR] editorhost: a component references 1:0, which is not a live entity with an EditorId — sent as dangling (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:128)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  40 |  40 passed | 0 failed | 0 skipped
+[doctest] assertions: 730 | 730 passed | 0 failed |
+[doctest] Status: SUCCESS!
+Changed-TU ASan/UBSan + LSan PASS rime_editorhost_tests
+[ERROR] InputEvent::decode: truncated (12 bytes) (/home/next/projects/rime/engine/stream/src/protocol.cpp:367)
+[ERROR] InputEvent::decode: unknown kind 9 (/home/next/projects/rime/engine/stream/src/protocol.cpp:371)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:   8 |   8 passed | 0 failed | 50 skipped
+[doctest] assertions: 105 | 105 passed | 0 failed |
+[doctest] Status: SUCCESS!
+Changed-TU ASan/UBSan + LSan PASS rime_app_tests
+Dependency archives are not fully instrumented. No threading primitives changed.

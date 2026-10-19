@@ -223,6 +223,8 @@ bool message_affects_frame(EditorMessage msg) noexcept {
         case EditorMessage::Pause:
         case EditorMessage::Step:
         case EditorMessage::Stop:
+        // Mode selection and capture change what the next frame shows (player camera, HUD).
+        case EditorMessage::PlayControl:
             return true;
         // Not frame-affecting. RequestSnapshot is answered with a Snapshot (world bytes, not a
         // frame); PickRequest is served by the independent 1×1 pick pass. The engine->editor kinds
@@ -242,6 +244,7 @@ bool message_affects_frame(EditorMessage msg) noexcept {
         case EditorMessage::PickResult:
         case EditorMessage::ViewportCamera:
         case EditorMessage::ThermalPreview:
+        case EditorMessage::PlayControlState:
         case EditorMessage::PlayState:
             return false;
     }

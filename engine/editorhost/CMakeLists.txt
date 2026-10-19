@@ -9,6 +9,7 @@
 add_library(rime_editorhost STATIC
     src/editor_host.cpp
     src/thermal_preview.cpp
+    src/play_control.cpp
     src/editor_identity.cpp)
 
 # Namespaced alias so dependents link `rime::editorhost`, matching our C++ namespace.

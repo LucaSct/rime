@@ -1,0 +1,10 @@
+{
+  "rows": 166374,
+  "builds": 44,
+  "all_body_bounds": 25900,
+  "body_padding_read": 23979,
+  "padding_not_read": 1921,
+  "padding_unread_fraction": 0.07416988416988417,
+  "nextafter_calls_avoidable": 11526,
+  "decompressed_bytes": 73325857
+}

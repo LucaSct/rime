@@ -1,0 +1,22 @@
+{
+  "base": "7be38d253a61cad46bff54cb9c553ee67bba0498",
+  "implementation": "19c70fd6b049a5eba4495091777b88cd49a24307",
+  "source_sha256": {
+    "engine/render/src/passes.cpp": "2f9d3e2fa7049abba7e5a5c680fd5c2b52c0c3ea28a41fdc4fabdfbee65ce723",
+    "engine/render/src/material_binding_cache.hpp": "a7c0073bf5417e158de5627c9bc22f7c7210b8102e66aebb5ec292048b7b2e34",
+    "tests/render/material_binding_cache_test.cpp": "167c0eb06d390606ab12a5cbb9cbde24278b54ab79e44ef899633547c136142d",
+    "tests/render/CMakeLists.txt": "30316fca647cedd72df93f00720e5921b533831a9ff1908a821d9d0f1981842e"
+  },
+  "binary_sha256": {
+    "material-binding-tests": "b036f362002a9a94b46143e74dad1db9b97430b9a9e13fe24883a19cfea52d18",
+    "material-binding-tests-asan": "23ba0c2347ef21920f6b88d8c254d98b5434ef85b0596c891e48cc69f043c3a2"
+  },
+  "fresh_verification": {
+    "gcc_cpu_tests": "3 cases,29 assertions",
+    "clang_asan_ubsan_lsan_cpu_tests": "3 cases,29 assertions",
+    "clang_syntax": "passes.cpp, material_binding_cache_test.cpp",
+    "format": "clang-format20.1.8 dry-run owned C++ files",
+    "diff_check": "pass"
+  },
+  "no_timing_or_gpu_run": true
+}

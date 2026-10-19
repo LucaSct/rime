@@ -1,0 +1,42 @@
+{
+  "result": "PASS",
+  "initial_eye": [
+    -5.0,
+    5.0,
+    9.0
+  ],
+  "settled_spawn": [
+    -10.0,
+    1.5018999576568604,
+    2.0
+  ],
+  "walk": [
+    -10.0,
+    1.5018999576568604,
+    -1.3888894319534302
+  ],
+  "jump": [
+    -10.0,
+    1.911025047302246,
+    -1.9888895750045776
+  ],
+  "released": [
+    -10.0,
+    1.5053987503051758,
+    -4.188889503479004
+  ],
+  "checks": [
+    "real city admission",
+    "actual ground support",
+    "uncaptured/stale capture ignored",
+    "WASD walking",
+    "jump",
+    "release clears movement",
+    "Pause and single Step",
+    "Resume requires recapture",
+    "Save and spawn refused",
+    "Stop exact snapshot restore",
+    "source file unchanged"
+  ],
+  "frames": 176
+}

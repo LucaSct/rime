@@ -15,6 +15,7 @@
 #include "depth_only.vert.spv.h"
 #include "depth_only_masked.vert.spv.h"
 #include "fullscreen.vert.spv.h"
+#include "material_binding_cache.hpp"
 #include "pbr_forward.frag.spv.h"
 #include "pbr_forward.vert.spv.h"
 #include "pbr_forward_first_person.frag.spv.h"
@@ -92,6 +93,13 @@ void record_draws(rhi::CommandBuffer& cmd,
     // 256-byte view_proj slice for a CSM depth pass (m10.1). depth_only.vert / the forward shaders
     // read only the leading members of whatever block sits there, so one loop serves every view.
     cmd.bind_uniform_buffer(0, data.frame_ubo, data.frame_ubo_offset, data.frame_ubo_size);
+    // No pipeline switch or external callback occurs inside this loop. A new invocation starts
+    // unknown even when its preceding partition used exactly the same material handles.
+    detail::MaterialBindingCache material_bindings;
+    const auto bind_texture =
+        [&cmd](std::uint32_t binding, rhi::TextureHandle texture, rhi::SamplerHandle sampler) {
+            cmd.bind_texture(binding, texture, sampler);
+        };
     for (std::size_t i = 0; i < data.draws.size(); ++i) {
         const DrawItem& item = data.draws[i];
         if ((item.flags & flag_filter) != flag_match) {
@@ -131,11 +139,11 @@ void record_draws(rhi::CommandBuffer& cmd,
             const rhi::SamplerHandle sampler = ((item.flags & DrawItem::ClampUv) != 0)
                                                    ? data.clamp_sampler
                                                    : data.material_sampler;
-            cmd.bind_texture(2, data.base_color_textures[i], sampler);
-            cmd.bind_texture(3, data.metallic_roughness_textures[i], sampler);
-            cmd.bind_texture(4, data.normal_textures[i], sampler);
-            cmd.bind_texture(5, data.occlusion_textures[i], sampler);
-            cmd.bind_texture(6, data.emissive_textures[i], sampler);
+            material_bindings.bind(0, data.base_color_textures[i], sampler, bind_texture);
+            material_bindings.bind(1, data.metallic_roughness_textures[i], sampler, bind_texture);
+            material_bindings.bind(2, data.normal_textures[i], sampler, bind_texture);
+            material_bindings.bind(3, data.occlusion_textures[i], sampler, bind_texture);
+            material_bindings.bind(4, data.emissive_textures[i], sampler, bind_texture);
         }
         // The submesh range, not the whole mesh (m16.2). Every DrawItem carries one, because
         // MeshRegistry::add guarantees at least one range per mesh and extraction emits one draw

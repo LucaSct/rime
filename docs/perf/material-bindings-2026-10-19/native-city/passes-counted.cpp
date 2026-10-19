@@ -1,0 +1,1027 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 The Rime Engine Authors.
+//
+// The pass library's engine side (M5.6): bake each pass's pipeline(s) once, declare them into a
+// RenderGraph each frame. The SPIR-V is embedded at build time from engine/render/shaders/ — the
+// engine library carries its own shaders the same way the tests and samples do (ADR-0008's
+// offline-compile model; an asset-driven shader system is an M6+ concern).
+
+#include "rime/render/passes.hpp"
+
+#include <iterator>
+#include <atomic>
+#include <cstdio>
+#include <vector>
+
+#include "depth_masked.frag.spv.h"
+#include "depth_only.vert.spv.h"
+#include "depth_only_masked.vert.spv.h"
+#include "fullscreen.vert.spv.h"
+#include "material_binding_cache.hpp"
+#include "pbr_forward.frag.spv.h"
+#include "pbr_forward.vert.spv.h"
+#include "pbr_forward_first_person.frag.spv.h"
+#include "pbr_forward_first_person_sdf.frag.spv.h"
+#include "pbr_forward_shadowed.frag.spv.h"
+#include "pbr_forward_shadowed_gbuffer.frag.spv.h" // -DWRITE_GBUFFER variant (m10.7a)
+#include "pbr_forward_shadowed_sdf.frag.spv.h"
+#include "present.frag.spv.h"
+#include "rime/core/diagnostics/log.hpp"
+#include "rime/render/lighting/sdf_clipmap.hpp"
+#include "taa_resolve.frag.spv.h"
+#include "tonemap.frag.spv.h"
+#include "velocity.frag.spv.h"
+#include "velocity.vert.spv.h"
+
+namespace rime::render {
+
+namespace {
+
+constexpr rhi::BindingDesc kShadowedBindings[] = {
+    {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+    {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+    {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    {7, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // cascade map
+    {8, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // ShadowUniforms
+    {9, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // local (spot) map
+    {10, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},       // LocalShadowUniforms
+    {11, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment}, // clustered lights (m10.3)
+    {12, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment}, // per-froxel light lists
+    {13, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment}, // ClusterUniforms
+    {14, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI irradiance
+    {15, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DDGI visibility
+    {16, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // DdgiSampleParams
+    {17, rhi::BindingType::StorageBuffer, rhi::StageMask::Fragment},        // sky SH (m17.7b)
+    {18, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // sky-view LUT
+    {19, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // prefiltered sky
+    {20, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // DFG table
+};
+
+[[nodiscard]] rhi::ShaderHandle make_shader(rhi::Device& device,
+                                            rhi::ShaderStage stage,
+                                            const std::uint32_t* words,
+                                            std::size_t bytes,
+                                            std::string_view name) {
+    rhi::ShaderDesc sd{};
+    sd.stage = stage;
+    sd.spirv = words;
+    sd.spirv_size_bytes = bytes;
+    sd.debug_name = name;
+    return device.create_shader(sd);
+}
+
+// The geometry passes' shared draw loop. The pipeline is already bound; the frame uniforms are
+// attached once (pending bindings persist across draws — ADR-0020), then each draw re-binds only
+// what changes: its mesh buffers, its 256-byte slice of the draw-uniform buffer, and (for the
+// shading pass) its base-color texture. Draws run in extraction order, unsorted — sorting by
+// pipeline/material/depth is a measured optimization for when scenes are big enough to show it.
+// `flag_filter`/`flag_match`: record only the draws whose flags AND to `flag_match` under
+// `flag_filter`. A pass with two pipelines calls this twice — once per partition — which switches
+// pipeline once instead of per draw, and keeps the single-pipeline callers exactly as they were
+// (filter 0 matches everything).
+void record_draws(rhi::CommandBuffer& cmd,
+                  const SceneDrawData& data,
+                  bool bind_material_textures,
+                  std::uint32_t flag_filter = 0,
+                  std::uint32_t flag_match = 0,
+                  bool velocity = false,
+                  const std::optional<Frustum>& caster_frustum = std::nullopt,
+                  CullStats* caster_stats = nullptr) {
+    // Binding 0 is FrameUniforms at data.frame_ubo_offset — 0 for the camera pass, cascade c's
+    // 256-byte view_proj slice for a CSM depth pass (m10.1). depth_only.vert / the forward shaders
+    // read only the leading members of whatever block sits there, so one loop serves every view.
+    cmd.bind_uniform_buffer(0, data.frame_ubo, data.frame_ubo_offset, data.frame_ubo_size);
+    // No pipeline switch or external callback occurs inside this loop. A new invocation starts
+    // unknown even when its preceding partition used exactly the same material handles.
+    struct BindingProof {
+        std::atomic<unsigned long long> invocations{0}, attempts{0}, issues{0}, draws{0};
+        ~BindingProof() {
+            std::fprintf(stderr, "RIME_BINDING_TOTAL invocations=%llu draws=%llu attempts=%llu issues=%llu\n",
+                invocations.load(), draws.load(), attempts.load(), issues.load());
+        }
+    };
+    static BindingProof proof;
+    unsigned long long binding_attempts = 0, binding_issues = 0;
+    detail::MaterialBindingCache material_bindings;
+    const auto bind_texture =
+        [&cmd, &binding_issues](std::uint32_t binding, rhi::TextureHandle texture, rhi::SamplerHandle sampler) {
+            ++binding_issues;
+            cmd.bind_texture(binding, texture, sampler);
+        };
+    for (std::size_t i = 0; i < data.draws.size(); ++i) {
+        const DrawItem& item = data.draws[i];
+        if ((item.flags & flag_filter) != flag_match) {
+            continue; // belongs to the other partition
+        }
+        if (caster_frustum && !item.vertex_override.is_valid() &&
+            !item.velocity_vertex_override.is_valid()) {
+            // Keep original i for UBO/material arrays. Whole-mesh bounds are conservative for
+            // submeshes; deformed streams fail open because registry bounds may be stale.
+            const GpuMesh& bounds = data.meshes->get(item.mesh);
+            if (!shadow_caster_aabb_in_frustum(
+                    *caster_frustum, item.model, bounds.local_min, bounds.local_max)) {
+                if (caster_stats)
+                    ++caster_stats->culled;
+                continue;
+            }
+        }
+        if (caster_stats)
+            ++caster_stats->submitted;
+        const GpuMesh& mesh = data.meshes->get(item.mesh);
+        if (velocity && item.velocity_vertex_override.is_valid())
+            cmd.bind_vertex_buffer(item.velocity_vertex_override,
+                                   item.velocity_vertex_override_offset);
+        else if (item.vertex_override.is_valid())
+            cmd.bind_vertex_buffer(item.vertex_override, item.vertex_override_offset);
+        else
+            cmd.bind_vertex_buffer(mesh.vertices);
+        cmd.bind_index_buffer(mesh.indices, rhi::IndexType::Uint32);
+        cmd.bind_uniform_buffer(1, data.draw_ubo, i * kDrawUniformStride, sizeof(GpuDrawUniforms));
+        if (bind_material_textures) {
+            binding_attempts += 5;
+            // The five material maps (fallbacks already resolved by the SceneRenderer), bindings
+            // 2–6 matching pbr_forward.frag. The depth pre-pass skips them — it has no fragment
+            // shader.
+            // The clamp sampler for a material that asked for it (m16.5). One sampler served all
+            // five slots with AddressMode::Repeat, so every atlas and trim sheet bled its far edge
+            // into its near one — worst at coarse mips, where the bleed is widest.
+            const rhi::SamplerHandle sampler = ((item.flags & DrawItem::ClampUv) != 0)
+                                                   ? data.clamp_sampler
+                                                   : data.material_sampler;
+            material_bindings.bind(0, data.base_color_textures[i], sampler, bind_texture);
+            material_bindings.bind(1, data.metallic_roughness_textures[i], sampler, bind_texture);
+            material_bindings.bind(2, data.normal_textures[i], sampler, bind_texture);
+            material_bindings.bind(3, data.occlusion_textures[i], sampler, bind_texture);
+            material_bindings.bind(4, data.emissive_textures[i], sampler, bind_texture);
+        }
+        // The submesh range, not the whole mesh (m16.2). Every DrawItem carries one, because
+        // MeshRegistry::add guarantees at least one range per mesh and extraction emits one draw
+        // per range — so a single-material mesh takes the identical path with first_index 0 and
+        // index_count == the whole buffer, and renders byte-identically to before.
+        cmd.draw_indexed(item.index_count, 1, item.first_index);
+    }
+    if (binding_attempts > 0) {
+        const auto invocation = proof.invocations.fetch_add(1);
+        proof.attempts.fetch_add(binding_attempts);
+        proof.issues.fetch_add(binding_issues);
+        proof.draws.fetch_add(binding_attempts / 5);
+        if (invocation < 64)
+            std::fprintf(stderr, "RIME_BINDING_ROW invocation=%llu draws=%llu attempts=%llu issues=%llu filter=%u match=%u caster=%u\n",
+                invocation, binding_attempts / 5, binding_attempts, binding_issues,
+                flag_filter, flag_match, unsigned(caster_frustum.has_value()));
+    }
+}
+
+} // namespace
+
+// ── DepthPrepass ──────────────────────────────────────────────────────────────────────────────
+
+DepthPrepass::DepthPrepass(rhi::Device& device) : device_(device) {
+    vertex_shader_ = make_shader(device,
+                                 rhi::ShaderStage::Vertex,
+                                 depth_only_vert_spv,
+                                 sizeof(depth_only_vert_spv),
+                                 "depth_only.vert");
+
+    // The depth-only pipeline shape (the M5.6 RHI addition): no fragment shader, no color
+    // attachment. The vertex layout is the full registry vertex — the shader consumes only
+    // position; unconsumed attributes are legal and keep one layout shared across every pass.
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex},
+        {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex},
+    };
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.color_format = rhi::Format::Undefined;
+    pd.vertex_layout.stride = MeshRegistry::vertex_stride();
+    pd.vertex_layout.attributes = MeshRegistry::vertex_attributes();
+    pd.cull = rhi::CullMode::Back;
+    pd.depth_test = true;
+    pd.depth_write = true;
+    pd.depth_compare = rhi::CompareOp::Less;
+    pd.depth_format = kDepthFormat;
+    pd.bindings = bindings;
+    pd.debug_name = "depth-prepass";
+    pipeline_ = device.create_graphics_pipeline(pd);
+
+    // The MASKED variant (m16.4): same vertex expression (compiled from the same source with
+    // -DMASKED, so `invariant gl_Position` still holds across the pair), plus a fragment stage that
+    // discards below the material's alpha cutoff. Kept as a SECOND pipeline rather than replacing
+    // the first, so opaque geometry — nearly all of it — keeps paying nothing for a texture fetch
+    // and a branch it does not need.
+    masked_vertex_shader_ = make_shader(device,
+                                        rhi::ShaderStage::Vertex,
+                                        depth_only_masked_vert_spv,
+                                        sizeof(depth_only_masked_vert_spv),
+                                        "depth_only_masked.vert");
+    masked_fragment_shader_ = make_shader(device,
+                                          rhi::ShaderStage::Fragment,
+                                          depth_masked_frag_spv,
+                                          sizeof(depth_masked_frag_spv),
+                                          "depth_masked.frag");
+    // Bindings 2-6 so `record_draws(bind_material_textures=true)` serves this pipeline unchanged;
+    // the shader samples only binding 2, and an unused-but-bound sampler costs nothing.
+    const rhi::BindingDesc masked_bindings[] = {
+        {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex},
+        {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+        {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    };
+    pd.vertex_shader = masked_vertex_shader_;
+    pd.fragment_shader = masked_fragment_shader_;
+    pd.bindings = masked_bindings;
+    pd.debug_name = "depth-prepass-masked";
+    masked_pipeline_ = device.create_graphics_pipeline(pd);
+}
+
+DepthPrepass::~DepthPrepass() {
+    device_.destroy(masked_pipeline_);
+    device_.destroy(masked_fragment_shader_);
+    device_.destroy(masked_vertex_shader_);
+    device_.destroy(pipeline_);
+    device_.destroy(vertex_shader_);
+}
+
+void DepthPrepass::add(RenderGraph& graph,
+                       RGTexture depth,
+                       const SceneDrawData& data,
+                       std::uint32_t layer,
+                       std::string_view label,
+                       std::optional<Frustum> caster_frustum,
+                       std::shared_ptr<CullStats> caster_stats) const {
+    // Clear to the far plane, STORE the result — the whole point is that the forward pass (or, for
+    // a CSM cascade, the shadow sample) loads this depth back. `layer` aims the pass at one cascade
+    // of a layered depth target (m10.1); 0 is the ordinary single-layer case.
+    RGDepthAttachment depth_att{};
+    depth_att.texture = depth;
+    depth_att.load = rhi::LoadOp::Clear;
+    depth_att.store = rhi::StoreOp::Store;
+    depth_att.clear_depth = 1.0f;
+    depth_att.layer = layer;
+    RenderGraph::RasterPassDesc desc{};
+    desc.depth = &depth_att;
+    graph.add_raster_pass(
+        label,
+        desc,
+        [pipe = pipeline_, masked = masked_pipeline_, data, caster_frustum, caster_stats](
+            rhi::CommandBuffer& cmd) {
+            // Two partitions, one pipeline switch. Opaque first (the overwhelming majority, and
+            // the byte-identical old path), then the masked draws through the alpha-testing
+            // variant. Without the second half, depth is written for texels the forward pass
+            // discards and everything behind a masked hole fails CompareOp::Equal — the hole
+            // renders as clear colour, in the PRIMARY view.
+            // Four partitions: {opaque, masked} x {single-sided, double-sided}. The cull half is
+            // NOT optional here even though the pre-pass writes no colour: the forward pass tests
+            // CompareOp::Equal, so a face the pre-pass culled has no depth for the forward pass to
+            // match and is never shaded. A double-sided material culled here is invisible there.
+            cmd.bind_pipeline(pipe);
+            cmd.set_cull_mode(rhi::CullMode::Back);
+            record_draws(cmd,
+                         data,
+                         /*bind_material_textures=*/false,
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided,
+                         0,
+                         false,
+                         caster_frustum,
+                         caster_stats.get());
+            cmd.set_cull_mode(rhi::CullMode::None);
+            record_draws(cmd,
+                         data,
+                         /*bind_material_textures=*/false,
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided,
+                         DrawItem::DoubleSided,
+                         false,
+                         caster_frustum,
+                         caster_stats.get());
+            cmd.bind_pipeline(masked);
+            // Masked geometry is overwhelmingly foliage, which is also where double-sided lives —
+            // so the depth pass honours the same cull flag. A card whose back face is culled here
+            // would write no depth from behind and shade inconsistently with the forward pass.
+            cmd.set_cull_mode(rhi::CullMode::Back);
+            record_draws(cmd,
+                         data,
+                         /*bind_material_textures=*/true,
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided,
+                         DrawItem::AlphaMasked,
+                         false,
+                         caster_frustum,
+                         caster_stats.get());
+            cmd.set_cull_mode(rhi::CullMode::None);
+            record_draws(cmd,
+                         data,
+                         /*bind_material_textures=*/true,
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided,
+                         DrawItem::AlphaMasked | DrawItem::DoubleSided,
+                         false,
+                         caster_frustum,
+                         caster_stats.get());
+        });
+}
+
+// ── VelocityPass ──────────────────────────────────────────────────────────────────────────────
+
+VelocityPass::VelocityPass(rhi::Device& device) : device_(device) {
+    vertex_shader_ = make_shader(device,
+                                 rhi::ShaderStage::Vertex,
+                                 velocity_vert_spv,
+                                 sizeof(velocity_vert_spv),
+                                 "velocity.vert");
+    fragment_shader_ = make_shader(device,
+                                   rhi::ShaderStage::Fragment,
+                                   velocity_frag_spv,
+                                   sizeof(velocity_frag_spv),
+                                   "velocity.frag");
+    // Bindings 0/1 only: no material is sampled, so record_draws runs with
+    // bind_material_textures=false, exactly like the depth pre-pass.
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex},
+        {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex},
+    };
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = fragment_shader_;
+    pd.vertex_layout.stride = MeshRegistry::vertex_stride();
+    pd.vertex_layout.attributes = MeshRegistry::vertex_attributes();
+    pd.color_format = kVelocityFormat;
+    pd.cull = rhi::CullMode::Back;
+    pd.depth_test = true;
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal; // the pre-pass depth decides what is visible
+    pd.depth_format = kDepthFormat;
+    pd.bindings = bindings;
+    pd.debug_name = "velocity";
+    pipeline_ = device.create_graphics_pipeline(pd);
+}
+
+VelocityPass::~VelocityPass() {
+    device_.destroy(pipeline_);
+    device_.destroy(fragment_shader_);
+    device_.destroy(vertex_shader_);
+}
+
+void VelocityPass::add(RenderGraph& graph,
+                       RGTexture velocity,
+                       RGTexture depth,
+                       const SceneDrawData& data,
+                       rhi::LoadOp color_load,
+                       std::string_view label) const {
+    // Clear to zero: a pixel nothing covers (sky, the clear colour) has no surface to have moved,
+    // and zero is also what a static scene must produce everywhere.
+    const RGColorAttachment colors[] = {
+        {velocity, color_load, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+    RGDepthAttachment depth_att{};
+    depth_att.texture = depth;
+    depth_att.load = rhi::LoadOp::Load;
+    depth_att.store = rhi::StoreOp::DontCare;
+    depth_att.read_only = true;
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.depth = &depth_att;
+    graph.add_raster_pass(label, desc, [pipe = pipeline_, data](rhi::CommandBuffer& cmd) {
+        cmd.bind_pipeline(pipe);
+        // The same two cull partitions as the pre-pass and the forward pass: a face the pre-pass
+        // drew with culling off must be drawn with culling off here too, or its depth has no
+        // matching fragment and it keeps zero velocity.
+        cmd.set_cull_mode(rhi::CullMode::Back);
+        record_draws(cmd,
+                     data,
+                     /*bind_material_textures=*/false,
+                     DrawItem::DoubleSided,
+                     0,
+                     /*velocity=*/true);
+        cmd.set_cull_mode(rhi::CullMode::None);
+        record_draws(cmd,
+                     data,
+                     /*bind_material_textures=*/false,
+                     DrawItem::DoubleSided,
+                     DrawItem::DoubleSided,
+                     /*velocity=*/true);
+    });
+}
+
+// ── TaaResolvePass ────────────────────────────────────────────────────────────────────────────
+
+TaaResolvePass::TaaResolvePass(rhi::Device& device) : device_(device) {
+    vertex_shader_ = make_shader(device,
+                                 rhi::ShaderStage::Vertex,
+                                 fullscreen_vert_spv,
+                                 sizeof(fullscreen_vert_spv),
+                                 "fullscreen.vert");
+    fragment_shader_ = make_shader(device,
+                                   rhi::ShaderStage::Fragment,
+                                   taa_resolve_frag_spv,
+                                   sizeof(taa_resolve_frag_spv),
+                                   "taa_resolve.frag");
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // scene colour
+        {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // velocity
+        {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // depth
+        {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}, // history
+        {4, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment},        // TaaParams
+    };
+    // Two colour attachments of one format: the resolved frame and the new history.
+    const rhi::Format formats[] = {kHdrFormat, kHdrFormat};
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = fragment_shader_;
+    pd.color_formats = formats;
+    pd.cull = rhi::CullMode::None; // one oversized triangle; nothing to cull
+    pd.bindings = bindings;
+    pd.debug_name = "taa-resolve";
+    pipeline_ = device.create_graphics_pipeline(pd);
+
+    rhi::SamplerDesc ps{};
+    ps.mag_filter = rhi::Filter::Nearest;
+    ps.min_filter = rhi::Filter::Nearest;
+    ps.address_mode = rhi::AddressMode::ClampToEdge;
+    ps.debug_name = "taa-point";
+    point_sampler_ = device.create_sampler(ps);
+
+    rhi::SamplerDesc ls{};
+    ls.mag_filter = rhi::Filter::Linear;
+    ls.min_filter = rhi::Filter::Linear;
+    ls.address_mode = rhi::AddressMode::ClampToEdge;
+    ls.debug_name = "taa-linear";
+    linear_sampler_ = device.create_sampler(ls);
+}
+
+TaaResolvePass::~TaaResolvePass() {
+    device_.destroy(linear_sampler_);
+    device_.destroy(point_sampler_);
+    device_.destroy(pipeline_);
+    device_.destroy(fragment_shader_);
+    device_.destroy(vertex_shader_);
+}
+
+void TaaResolvePass::add(RenderGraph& graph,
+                         RGTexture scene_color,
+                         RGTexture velocity,
+                         RGTexture depth,
+                         RGTexture history_read,
+                         RGTexture resolved,
+                         RGTexture history_write,
+                         const core::Mat4& view_proj_unjittered,
+                         const core::Mat4& prev_view_proj_unjittered,
+                         bool history_valid,
+                         float history_weight) const {
+    // The shader unprojects background pixels, so it needs the INVERSE of the current matrix;
+    // inverting once here on the CPU beats every fragment doing it.
+    GpuTaaUniforms u{};
+    u.inv_view_proj = core::inverse(view_proj_unjittered);
+    u.prev_view_proj = prev_view_proj_unjittered;
+    u.params[0] = history_weight;
+    u.params[1] = history_valid ? 1.0f : 0.0f;
+    const RenderGraph::FrameSlice ubo = graph.push_frame_data(&u, sizeof(u));
+
+    // DontCare loads: the triangle covers every pixel and writes both targets whole.
+    const RGColorAttachment colors[] = {
+        {resolved, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}},
+        {history_write, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}},
+    };
+    const RGTexture sampled[] = {scene_color, velocity, depth, history_read};
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.sampled = sampled;
+    graph.add_raster_pass("taa-resolve",
+                          desc,
+                          [pipe = pipeline_,
+                           point = point_sampler_,
+                           linear = linear_sampler_,
+                           ubo,
+                           scene_color,
+                           velocity,
+                           depth,
+                           history_read,
+                           &graph](rhi::CommandBuffer& cmd) {
+                              cmd.bind_pipeline(pipe);
+                              cmd.bind_texture(0, graph.physical(scene_color), point);
+                              cmd.bind_texture(1, graph.physical(velocity), point);
+                              cmd.bind_texture(2, graph.physical(depth), point);
+                              cmd.bind_texture(3, graph.physical(history_read), linear);
+                              cmd.bind_uniform_buffer(
+                                  4, ubo.buffer, ubo.offset, sizeof(GpuTaaUniforms));
+                              cmd.draw(3);
+                          });
+}
+
+// ── ForwardPbrPass ────────────────────────────────────────────────────────────────────────────
+
+ForwardPbrPass::ForwardPbrPass(rhi::Device& device) : device_(device) {
+    vertex_shader_ = make_shader(device,
+                                 rhi::ShaderStage::Vertex,
+                                 pbr_forward_vert_spv,
+                                 sizeof(pbr_forward_vert_spv),
+                                 "pbr_forward.vert");
+    fragment_shader_ = make_shader(device,
+                                   rhi::ShaderStage::Fragment,
+                                   pbr_forward_frag_spv,
+                                   sizeof(pbr_forward_frag_spv),
+                                   "pbr_forward.frag");
+    shadowed_fragment_shader_ = make_shader(device,
+                                            rhi::ShaderStage::Fragment,
+                                            pbr_forward_shadowed_frag_spv,
+                                            sizeof(pbr_forward_shadowed_frag_spv),
+                                            "pbr_forward_shadowed.frag");
+    shadowed_gbuffer_fragment_shader_ = make_shader(device,
+                                                    rhi::ShaderStage::Fragment,
+                                                    pbr_forward_shadowed_gbuffer_frag_spv,
+                                                    sizeof(pbr_forward_shadowed_gbuffer_frag_spv),
+                                                    "pbr_forward_shadowed_gbuffer.frag");
+
+    // Bindings 0/1 = frame/draw uniforms; 2–6 = the five material maps (base-color,
+    // metallic-roughness, normal, occlusion, emissive). One layout, every permutation — untextured
+    // slots bind a 1x1 fallback rather than spawning a shader variant (M6.4).
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+        {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+        {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {3, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {4, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {5, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {6, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    };
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = fragment_shader_;
+    pd.vertex_layout.stride = MeshRegistry::vertex_stride();
+    pd.vertex_layout.attributes = MeshRegistry::vertex_attributes();
+    pd.color_format = kHdrFormat;
+    pd.cull = rhi::CullMode::Back;
+    pd.depth_test = true;
+    pd.depth_format = kDepthFormat;
+    pd.bindings = bindings;
+
+    // Two depth disciplines, two pipelines (depth state is baked, not dynamic — ADR-0007's
+    // explicit-pipeline model). After a pre-pass: test EQUAL against the depth it stored, write
+    // nothing — every surviving fragment is THE visible surface. The invariance contract in
+    // depth_only.vert is what makes Equal safe; LessEqual is the documented fallback if a driver
+    // ever breaks it. Standalone: classic Less with writes.
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal;
+    pd.debug_name = "forward-pbr (after prepass)";
+    pipeline_after_prepass_ = device.create_graphics_pipeline(pd);
+
+    pd.depth_write = true;
+    pd.depth_compare = rhi::CompareOp::Less;
+    pd.debug_name = "forward-pbr (standalone)";
+    pipeline_standalone_ = device.create_graphics_pipeline(pd);
+
+    // The shadowed variants (m10.1 + m10.2): the same two depth disciplines, but the shadowed
+    // fragment shader and four extra bindings — 7 = the cascade depth array (sampler2DArrayShadow),
+    // 8 = the ShadowUniforms block, 9 = the local (spot) depth array, 10 = the LocalShadowUniforms
+    // block. A separate pipeline so the shadow-off path is the byte-identical baseline above
+    // (ADR-0032 §11); it is only ever bound when a caller opts shadows in.
+    // 18 of the RHI's 24 descriptor slots (rhi::kMaxBindings, vulkan_backend.hpp:355) are now
+    // spoken for. The previous note here named 18 as the trigger for a second descriptor set or a
+    // bindless table, and expected SSR to be what spent it; SSR did not, because it resolves in a
+    // pass with its own pipeline and never joined this layout. m17.7b is what spent it, on the
+    // sky's nine SH coefficients — and it was spent deliberately rather than doing the refactor
+    // here: 18 is still comfortably under 24, splitting the set is milestone-scale work, and
+    // doing it inside a lighting brick would bury that brick's actual claim. The sky's on/off flag
+    // rides INSIDE this buffer rather than taking a 19th slot.
+    //
+    // The trigger stands, just moved: the next technique that wants its own bindings on the
+    // forward pipeline should split the set rather than take a 19th.
+    //
+    // m19.6b took the 19th anyway (binding 18, the sky-view LUT the specular sky term mirrors),
+    // and that is a recorded exception rather than the note being ignored: it is the OTHER HALF of
+    // the sky binding already here, not a new technique — SkyLightBinding has carried the LUT
+    // since m17.7b and terrain/SSR bind the same pair. 19 of 24. The trigger is unchanged for
+    // anything that is genuinely new.
+    //
+    // ADR-0078 section 2 took bindings 19 and 20 (the prefiltered sky chain and the DFG table) --
+    // a second recorded exception, for the same reason: they are the rest of the SAME sky
+    // binding (SkyLightBinding::specular), not a new technique. 21 of 24. The next one splits the
+    // set.
+    pd.fragment_shader = shadowed_fragment_shader_;
+    pd.bindings = kShadowedBindings;
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal;
+    pd.debug_name = "forward-pbr shadowed (after prepass)";
+    pipeline_shadowed_after_prepass_ = device.create_graphics_pipeline(pd);
+
+    pd.depth_write = true;
+    pd.depth_compare = rhi::CompareOp::Less;
+    pd.debug_name = "forward-pbr shadowed (standalone)";
+    pipeline_shadowed_standalone_ = device.create_graphics_pipeline(pd);
+
+    // The SSR G-buffer variants (m10.7a): the SAME shadowed shader and bindings, plus a second
+    // colour attachment. The shader always writes location=1; only these pipelines give that write
+    // somewhere to land (the baseline pair above declares one attachment, so the hardware discards
+    // it there). color_formats wins over the single color_format when non-empty
+    // (rhi::GraphicsPipelineDesc), which is what makes these two MRT.
+    const rhi::Format gbuffer_formats[] = {kHdrFormat, kGbufferFormat, kGbufferMaterialFormat};
+    pd.color_formats = gbuffer_formats;
+    pd.fragment_shader = shadowed_gbuffer_fragment_shader_; // the -DWRITE_GBUFFER twin
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal;
+    pd.debug_name = "forward-pbr shadowed+gbuffer (after prepass)";
+    pipeline_shadowed_gbuffer_after_prepass_ = device.create_graphics_pipeline(pd);
+
+    pd.depth_write = true;
+    pd.depth_compare = rhi::CompareOp::Less;
+    pd.debug_name = "forward-pbr shadowed+gbuffer (standalone)";
+    pipeline_shadowed_gbuffer_standalone_ = device.create_graphics_pipeline(pd);
+}
+
+// Created only on the first live SDF sky frame: OFF pays neither shader/pipeline creation nor
+// descriptor layout allocation, in addition to declaring and binding no SDF resources.
+void ForwardPbrPass::ensure_sdf_pipelines() const {
+    if (pipeline_sdf_after_prepass_.is_valid())
+        return;
+    // The SDF sky variant is mutually exclusive with DDGI: reuse its two atlas slots for
+    // levels 0/1, then spend 21/22 on level 2/metadata. Four appended slots would exceed the
+    // RHI's 24-slot limit. This deliberate reuse leaves every OFF layout and binding unchanged.
+    sdf_fragment_shader_ = make_shader(device_,
+                                       rhi::ShaderStage::Fragment,
+                                       pbr_forward_shadowed_sdf_frag_spv,
+                                       sizeof(pbr_forward_shadowed_sdf_frag_spv),
+                                       "pbr_forward_shadowed_sdf.frag");
+    std::vector<rhi::BindingDesc> sdf_bindings(std::begin(kShadowedBindings),
+                                               std::end(kShadowedBindings));
+    sdf_bindings.push_back({21, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
+    sdf_bindings.push_back({22, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment});
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.vertex_layout.stride = MeshRegistry::vertex_stride();
+    pd.vertex_layout.attributes = MeshRegistry::vertex_attributes();
+    pd.color_format = kHdrFormat;
+    pd.cull = rhi::CullMode::Back;
+    pd.depth_test = true;
+    pd.depth_format = kDepthFormat;
+    pd.bindings = sdf_bindings;
+    pd.fragment_shader = sdf_fragment_shader_;
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal;
+    pd.debug_name = "forward-pbr SDF sky (after prepass)";
+    pipeline_sdf_after_prepass_ = device_.create_graphics_pipeline(pd);
+    pd.depth_write = true;
+    pd.depth_compare = rhi::CompareOp::Less;
+    pd.debug_name = "forward-pbr SDF sky (standalone)";
+    pipeline_sdf_standalone_ = device_.create_graphics_pipeline(pd);
+}
+
+void ForwardPbrPass::ensure_first_person_pipelines() const {
+    if (pipeline_first_person_.is_valid())
+        return;
+    first_person_fragment_shader_ = make_shader(device_,
+                                                rhi::ShaderStage::Fragment,
+                                                pbr_forward_first_person_frag_spv,
+                                                sizeof(pbr_forward_first_person_frag_spv),
+                                                "pbr_forward_first_person.frag");
+    first_person_sdf_fragment_shader_ = make_shader(device_,
+                                                    rhi::ShaderStage::Fragment,
+                                                    pbr_forward_first_person_sdf_frag_spv,
+                                                    sizeof(pbr_forward_first_person_sdf_frag_spv),
+                                                    "pbr_forward_first_person_sdf.frag");
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = first_person_fragment_shader_;
+    pd.vertex_layout.stride = MeshRegistry::vertex_stride();
+    pd.vertex_layout.attributes = MeshRegistry::vertex_attributes();
+    pd.color_format = kHdrFormat;
+    pd.cull = rhi::CullMode::Back;
+    pd.depth_test = true;
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal;
+    pd.depth_format = kDepthFormat;
+    pd.bindings = kShadowedBindings;
+    pd.debug_name = "forward-pbr first-person";
+    pipeline_first_person_ = device_.create_graphics_pipeline(pd);
+    std::vector<rhi::BindingDesc> sdf_bindings(std::begin(kShadowedBindings),
+                                               std::end(kShadowedBindings));
+    sdf_bindings.push_back({21, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
+    sdf_bindings.push_back({22, rhi::BindingType::UniformBuffer, rhi::StageMask::Fragment});
+    pd.fragment_shader = first_person_sdf_fragment_shader_;
+    pd.bindings = sdf_bindings;
+    pd.debug_name = "forward-pbr first-person SDF sky";
+    pipeline_first_person_sdf_ = device_.create_graphics_pipeline(pd);
+}
+
+ForwardPbrPass::~ForwardPbrPass() {
+    device_.destroy(pipeline_first_person_sdf_);
+    device_.destroy(pipeline_first_person_);
+    device_.destroy(first_person_sdf_fragment_shader_);
+    device_.destroy(first_person_fragment_shader_);
+    device_.destroy(pipeline_sdf_after_prepass_);
+    device_.destroy(pipeline_sdf_standalone_);
+    device_.destroy(sdf_fragment_shader_);
+    device_.destroy(pipeline_shadowed_gbuffer_standalone_);
+    device_.destroy(pipeline_shadowed_gbuffer_after_prepass_);
+    device_.destroy(pipeline_shadowed_standalone_);
+    device_.destroy(pipeline_shadowed_after_prepass_);
+    device_.destroy(pipeline_standalone_);
+    device_.destroy(pipeline_after_prepass_);
+    device_.destroy(shadowed_gbuffer_fragment_shader_);
+    device_.destroy(shadowed_fragment_shader_);
+    device_.destroy(fragment_shader_);
+    device_.destroy(vertex_shader_);
+}
+
+void ForwardPbrPass::add(RenderGraph& graph,
+                         RGTexture hdr,
+                         RGTexture depth,
+                         bool depth_prepassed,
+                         const SceneDrawData& data) const {
+    // Radiance target starts at zero (black = no light); the tonemap maps it back to black, so
+    // the background costs nothing and biases no test.
+    const RGColorAttachment colors[] = {
+        {hdr, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}}};
+    RGDepthAttachment depth_att{};
+    depth_att.texture = depth;
+    if (depth_prepassed) {
+        // Load what the pre-pass stored; read-only (the declaration the graph rewards with a
+        // read-after-write edge instead of write-after-write).
+        depth_att.load = rhi::LoadOp::Load;
+        depth_att.store = rhi::StoreOp::DontCare;
+        depth_att.read_only = true;
+    } else {
+        depth_att.load = rhi::LoadOp::Clear;
+        depth_att.store = rhi::StoreOp::DontCare;
+        depth_att.read_only = false;
+    }
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.depth = &depth_att;
+    const rhi::PipelineHandle pipe =
+        depth_prepassed ? pipeline_after_prepass_ : pipeline_standalone_;
+    graph.add_raster_pass("forward-pbr", desc, [pipe, data](rhi::CommandBuffer& cmd) {
+        cmd.bind_pipeline(pipe);
+        // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
+        // overwhelming majority and the byte-identical old path — then the double-sided draws with
+        // culling off. Dynamic state rather than a second pipeline: the forward pass already bakes
+        // six variants, and a cull axis would make twelve (ADR-0039).
+        cmd.set_cull_mode(rhi::CullMode::Back);
+        record_draws(cmd, data, /*bind_material_textures=*/true, DrawItem::DoubleSided, 0);
+        cmd.set_cull_mode(rhi::CullMode::None);
+        record_draws(cmd,
+                     data,
+                     /*bind_material_textures=*/true,
+                     DrawItem::DoubleSided,
+                     DrawItem::DoubleSided);
+    });
+}
+
+void ForwardPbrPass::add_shadowed(RenderGraph& graph,
+                                  RGTexture hdr,
+                                  RGTexture depth,
+                                  bool depth_prepassed,
+                                  const SceneDrawData& data,
+                                  const ShadowBinding& shadow,
+                                  const LocalShadowBinding& local,
+                                  const ClusterBinding& clusters,
+                                  const DdgiBinding& ddgi,
+                                  const SkyLightBinding& sky,
+                                  RGTexture gbuffer,
+                                  RGTexture gbuffer_material,
+                                  const SdfSpecularOcclusionBinding* sdf_occlusion_ptr,
+                                  rhi::LoadOp hdr_load,
+                                  bool first_person,
+                                  std::string_view label) const {
+    const SdfSpecularOcclusionBinding sdf_occlusion =
+        sdf_occlusion_ptr ? *sdf_occlusion_ptr : SdfSpecularOcclusionBinding{};
+    // SSR G-buffer (m10.7a): a valid target becomes a SECOND colour output, cleared to zero (A = 0
+    // is the "no geometry" the shader overwrites with 1 where it shades), rendered by the matching
+    // MRT pipeline variant. Invalid = the one-attachment baseline, byte-for-byte the pre-SSR path.
+    // The material half (m19.6b fix 1) is a THIRD output of the same variant and travels with the
+    // first: the G-buffer pipelines declare three attachments, so half a G-buffer cannot be drawn.
+    // A caller that passes only one gets the single-attachment path and an error, not a pipeline
+    // whose attachment count disagrees with its render pass.
+    if (gbuffer.is_valid() != gbuffer_material.is_valid()) {
+        RIME_ERROR("render: add_shadowed was given half a G-buffer (gbuffer {}, material {}) — "
+                   "drawing without one",
+                   gbuffer.is_valid(),
+                   gbuffer_material.is_valid());
+    }
+    const bool write_gbuffer = gbuffer.is_valid() && gbuffer_material.is_valid();
+    const RGColorAttachment colors[] = {
+        {hdr, hdr_load, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}},
+        {gbuffer, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}},
+        {gbuffer_material, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+    RGDepthAttachment depth_att{};
+    depth_att.texture = depth;
+    if (depth_prepassed) {
+        depth_att.load = rhi::LoadOp::Load;
+        depth_att.store = rhi::StoreOp::DontCare;
+        depth_att.read_only = true;
+    } else {
+        depth_att.load = rhi::LoadOp::Clear;
+        depth_att.store = rhi::StoreOp::DontCare;
+        depth_att.read_only = false;
+    }
+    // Both shadow arrays AND both DDGI atlases are SAMPLED here — declaring them makes the graph
+    // order this pass after whatever last wrote each (m10.1 cascades, m10.2 spots, m10.5b's own
+    // blend-irradiance/blend-visibility compute passes) and transition all four to ShaderRead.
+    // The sky-view LUT joins them (m19.6b): the forward shader mirrors it when no SSR pass will,
+    // and declaring the read is what orders this pass after the bake that writes it. It leaves the
+    // LUT in ShaderRead — the state SceneRenderer already reports to SkyPass on every sky-on frame.
+    //
+    // The prefiltered chain and the DFG table join them (ADR-0078 section 2), always: with the
+    // feature off they are the placeholders, already in ShaderRead, and declaring them costs a
+    // no-op transition. Conditional declaration would make the graph's edges depend on a flag.
+    const bool use_sdf = sdf_occlusion.is_valid() && !write_gbuffer;
+    if (use_sdf)
+        ensure_sdf_pipelines();
+    if (first_person)
+        ensure_first_person_pipelines();
+    std::vector<RGTexture> sampled = {
+        shadow.map, local.map, sky.skyview, sky.specular.prefiltered, sky.specular.dfg};
+    if (use_sdf) {
+        sampled.insert(sampled.end(), sdf_occlusion.levels.begin(), sdf_occlusion.levels.end());
+    } else {
+        sampled.insert(sampled.end(), {ddgi.irradiance, ddgi.visibility});
+    }
+    // Declaring the two cluster buffers is what orders this pass after the cull dispatch that
+    // filled them and gets the storage-write → shader-read barrier emitted (m10.3).
+    // The sky's SH buffer joins the cluster buffers here for the same reason they are declared:
+    // it is written by a compute pass earlier in this frame, and declaring the read is what makes
+    // the graph order this pass after that dispatch and emit the storage-write -> shader-read
+    // barrier. An undeclared read would work right up until the frame that actually re-baked.
+    const RGBuffer buffers[] = {clusters.lights, clusters.lists, sky.sh};
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = write_gbuffer ? std::span<const RGColorAttachment>{colors, 3}
+                                : std::span<const RGColorAttachment>{colors, 1};
+    desc.depth = &depth_att;
+    desc.sampled = sampled;
+    desc.buffer_reads = buffers;
+    const rhi::PipelineHandle pipe =
+        first_person ? (use_sdf ? pipeline_first_person_sdf_ : pipeline_first_person_)
+        : write_gbuffer
+            ? (depth_prepassed ? pipeline_shadowed_gbuffer_after_prepass_
+                               : pipeline_shadowed_gbuffer_standalone_)
+            : (use_sdf ? (depth_prepassed ? pipeline_sdf_after_prepass_ : pipeline_sdf_standalone_)
+                       : (depth_prepassed ? pipeline_shadowed_after_prepass_
+                                          : pipeline_shadowed_standalone_));
+    graph.add_raster_pass(
+        label,
+        desc,
+        [pipe, data, shadow, local, clusters, ddgi, sky, use_sdf, sdf_occlusion, &graph](
+            rhi::CommandBuffer& cmd) {
+            cmd.bind_pipeline(pipe);
+            // Bindings 7–20 are attached once (they persist across draws — ADR-0020);
+            // record_draws re-binds only per-draw state on top. The resources' physical handles
+            // resolve now (assign_physicals has run), the same late-resolve the tonemap pass uses.
+            cmd.bind_texture(7, graph.physical(shadow.map), shadow.sampler);
+            cmd.bind_uniform_buffer(8, shadow.ubo.buffer, shadow.ubo.offset, shadow.ubo.size);
+            cmd.bind_texture(9, graph.physical(local.map), local.sampler);
+            cmd.bind_uniform_buffer(10, local.ubo.buffer, local.ubo.offset, local.ubo.size);
+            cmd.bind_storage_buffer(11, graph.physical_buffer(clusters.lights));
+            cmd.bind_storage_buffer(12, graph.physical_buffer(clusters.lists));
+            cmd.bind_uniform_buffer(
+                13, clusters.ubo.buffer, clusters.ubo.offset, clusters.ubo.size);
+            if (use_sdf) {
+                cmd.bind_texture(
+                    14, graph.physical(sdf_occlusion.levels[0]), sdf_occlusion.sampler);
+                cmd.bind_texture(
+                    15, graph.physical(sdf_occlusion.levels[1]), sdf_occlusion.sampler);
+                cmd.bind_texture(
+                    21, graph.physical(sdf_occlusion.levels[2]), sdf_occlusion.sampler);
+                cmd.bind_uniform_buffer(22,
+                                        sdf_occlusion.params.buffer,
+                                        sdf_occlusion.params.offset,
+                                        sdf_occlusion.params.size);
+            } else {
+                cmd.bind_texture(14, graph.physical(ddgi.irradiance), ddgi.sampler);
+                cmd.bind_texture(15, graph.physical(ddgi.visibility), ddgi.sampler);
+            }
+            cmd.bind_uniform_buffer(16, ddgi.ubo.buffer, ddgi.ubo.offset, ddgi.ubo.size);
+            cmd.bind_storage_buffer(17, graph.physical_buffer(sky.sh));
+            cmd.bind_texture(18, graph.physical(sky.skyview), sky.sampler);
+            // The chain is read with the sky-view's own sampler (linear, azimuth wraps); the DFG
+            // table has no seam and clamps.
+            cmd.bind_texture(19, graph.physical(sky.specular.prefiltered), sky.sampler);
+            cmd.bind_texture(20, graph.physical(sky.specular.dfg), sky.specular.dfg_sampler);
+            // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
+            // overwhelming majority and the byte-identical old path — then the double-sided draws
+            // with culling off. Dynamic state rather than a second pipeline: the forward pass
+            // already bakes six variants, and a cull axis would make twelve (ADR-0039).
+            cmd.set_cull_mode(rhi::CullMode::Back);
+            record_draws(cmd, data, /*bind_material_textures=*/true, DrawItem::DoubleSided, 0);
+            cmd.set_cull_mode(rhi::CullMode::None);
+            record_draws(cmd,
+                         data,
+                         /*bind_material_textures=*/true,
+                         DrawItem::DoubleSided,
+                         DrawItem::DoubleSided);
+        });
+}
+
+// ── TonemapPass ───────────────────────────────────────────────────────────────────────────────
+
+PresentPass::PresentPass(rhi::Device& device, rhi::Format target_format) : device_(device) {
+    vertex_shader_ = make_shader(device,
+                                 rhi::ShaderStage::Vertex,
+                                 fullscreen_vert_spv,
+                                 sizeof(fullscreen_vert_spv),
+                                 "fullscreen.vert");
+    fragment_shader_ = make_shader(device,
+                                   rhi::ShaderStage::Fragment,
+                                   present_frag_spv,
+                                   sizeof(present_frag_spv),
+                                   "present.frag");
+
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    };
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = fragment_shader_;
+    pd.color_format = target_format; // the swapchain's, not ours — see the header
+    pd.cull = rhi::CullMode::None;
+    pd.bindings = bindings;
+    pd.debug_name = "present";
+    pipeline_ = device.create_graphics_pipeline(pd);
+
+    rhi::SamplerDesc sd{};
+    sd.mag_filter = rhi::Filter::Nearest;
+    sd.min_filter = rhi::Filter::Nearest;
+    sd.address_mode = rhi::AddressMode::ClampToEdge;
+    sd.debug_name = "present-nearest";
+    sampler_ = device.create_sampler(sd);
+}
+
+PresentPass::~PresentPass() {
+    device_.destroy(sampler_);
+    device_.destroy(pipeline_);
+    device_.destroy(fragment_shader_);
+    device_.destroy(vertex_shader_);
+}
+
+void PresentPass::add(RenderGraph& graph, RGTexture source, RGTexture target) const {
+    // DontCare: the triangle covers every pixel of the backbuffer, so its previous contents (last
+    // frame's image, still sitting in the recycled swapchain slot) are dead.
+    const RGColorAttachment colors[] = {{target, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
+    const RGTexture sampled[] = {source};
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.sampled = sampled;
+    graph.add_raster_pass("present", desc, [this, &graph, source](rhi::CommandBuffer& cmd) {
+        cmd.bind_pipeline(pipeline_);
+        cmd.bind_texture(0, graph.physical(source), sampler_);
+        cmd.draw(3);
+    });
+}
+
+TonemapPass::TonemapPass(rhi::Device& device) : device_(device) {
+    vertex_shader_ = make_shader(device,
+                                 rhi::ShaderStage::Vertex,
+                                 fullscreen_vert_spv,
+                                 sizeof(fullscreen_vert_spv),
+                                 "fullscreen.vert");
+    fragment_shader_ = make_shader(device,
+                                   rhi::ShaderStage::Fragment,
+                                   tonemap_frag_spv,
+                                   sizeof(tonemap_frag_spv),
+                                   "tonemap.frag");
+
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    };
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = fragment_shader_;
+    pd.color_format = kLdrFormat;
+    pd.cull = rhi::CullMode::None; // one oversized triangle; nothing to cull
+    pd.bindings = bindings;
+    pd.debug_name = "tonemap";
+    pipeline_ = device.create_graphics_pipeline(pd);
+
+    rhi::SamplerDesc sd{};
+    sd.mag_filter = rhi::Filter::Nearest;
+    sd.min_filter = rhi::Filter::Nearest;
+    sd.address_mode = rhi::AddressMode::ClampToEdge;
+    sd.debug_name = "tonemap-nearest";
+    sampler_ = device.create_sampler(sd);
+}
+
+TonemapPass::~TonemapPass() {
+    device_.destroy(sampler_);
+    device_.destroy(pipeline_);
+    device_.destroy(fragment_shader_);
+    device_.destroy(vertex_shader_);
+}
+
+void TonemapPass::add(RenderGraph& graph, RGTexture hdr, RGTexture ldr) const {
+    // DontCare load: the triangle covers every pixel, so whatever the LDR target held is dead.
+    const RGColorAttachment colors[] = {{ldr, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
+    const RGTexture sampled[] = {hdr};
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.sampled = sampled;
+    // The λ resolves hdr's physical handle at record time (assign_physicals has run by then) —
+    // the same pattern the render-graph tests established.
+    graph.add_raster_pass("tonemap", desc, [this, &graph, hdr](rhi::CommandBuffer& cmd) {
+        cmd.bind_pipeline(pipeline_);
+        cmd.bind_texture(0, graph.physical(hdr), sampler_);
+        cmd.draw(3);
+    });
+}
+
+} // namespace rime::render

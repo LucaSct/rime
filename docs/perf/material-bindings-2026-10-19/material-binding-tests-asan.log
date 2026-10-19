@@ -1,0 +1,11 @@
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+[material-binding-proof] repeated draws=2206 reference=11030 cached=5 hash=9974d31e8602dcca
+[material-binding-proof] alternating draws=2206 reference=11030 cached=11030 hash=8ce95959e75a8fe2
+[material-binding-proof] normal-only draws=2206 reference=11030 cached=2210 hash=79c542fcc46c8fe2
+[material-binding-proof] generation-sampler-filter draws=1470 reference=7350 cached=414 hash=904cfc303dd3a92f
+[material-binding-proof] empty draws=0 reference=0 cached=0 hash=cbf29ce484222325
+===============================================================================
+[doctest] test cases:  3 |  3 passed | 0 failed | 0 skipped
+[doctest] assertions: 29 | 29 passed | 0 failed |
+[doctest] Status: SUCCESS!

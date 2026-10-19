@@ -1,0 +1,3 @@
+no content root found; tried, in order:
+  1. beside the executable /home/next/reports/rime-player-performance-2026-10-19/native-binding-proof/content: missing
+  2. in-tree fallback: none (this build names no source-tree content)

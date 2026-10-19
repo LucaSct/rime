@@ -74,6 +74,7 @@ pub struct SharedState {
     /// consumed. Defaults to `PlayState::default()` (Edit, tick 0) before the engine's first frame.
     pub play_state: PlayState,
     pub thermal: Option<rime_protocol::ThermalPreview>,
+    pub play_control: Option<rime_protocol::PlayControlState>,
     pub thermal_session: u64,
     pub thermal_revision: u64,
     /// The newest un-consumed answer to a `SaveScene` (m15.3). The UI `take()`s it each repaint and
@@ -366,6 +367,19 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
                 s.thermal = None; // diagnostics must follow THIS frame, never an older equal tick
             }
         }
+        MessageType::Other(code) if code == EditorMessage::PlayControlState.to_code() => {
+            if let Ok(control) = rime_protocol::PlayControlState::decode(payload) {
+                let mut s = shared.lock().unwrap();
+                if s.play_control.as_ref().is_none_or(|old| {
+                    control.session_id > old.session_id
+                        || (control.session_id == old.session_id
+                            && control.tick_count >= old.tick_count)
+                        || (control.session_id == old.session_id && control.phase == 0)
+                }) {
+                    s.play_control = Some(control);
+                }
+            }
+        }
         MessageType::Other(code) if code == EditorMessage::ThermalPreview.to_code() => {
             if let Ok(m) = rime_protocol::ThermalPreview::decode(payload) {
                 let mut s = shared.lock().unwrap();
@@ -401,6 +415,8 @@ fn to_input_event(input: Input) -> InputEvent {
         Input::PointerMove { x, y } => (InputKind::PointerMove, x, y, 0),
         Input::PointerDown { x, y, button } => (InputKind::PointerDown, x, y, button),
         Input::PointerUp { x, y, button } => (InputKind::PointerUp, x, y, button),
+        Input::KeyDown { code } => (InputKind::KeyDown, 0, 0, code),
+        Input::KeyUp { code } => (InputKind::KeyUp, 0, 0, code),
     };
     InputEvent {
         kind,

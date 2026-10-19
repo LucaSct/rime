@@ -40,6 +40,7 @@ mod commands;
 mod entity_picker;
 mod game_run;
 mod outliner;
+mod player;
 #[cfg(test)]
 use outliner::label as outliner_label;
 mod session;
@@ -394,6 +395,7 @@ struct EditorApp {
     last_gizmo_state: Option<GizmoState>,
     // Viewport fly camera (m17.1). See FlyCam for why yaw/pitch live here.
     fly: FlyCam,
+    player: player::PlayerControl,
     // ── Saving (m15.3) ──────────────────────────────────────────────────────────────────────
     // The scene this session opened, if any: what `Save` writes back to, and what makes it
     // meaningfully different from `Save As`. `save_as_path` is the inline text field, because there
@@ -467,6 +469,7 @@ impl EditorApp {
             gizmo_snap: false,
             last_gizmo_state: None,
             fly: FlyCam::default(),
+            player: player::PlayerControl::default(),
             scene_path: scene.clone(),
             save_as_path: scene.unwrap_or_default(),
             save_status: None,
@@ -785,6 +788,7 @@ impl eframe::App for EditorApp {
             camera,
             play_state,
             thermal,
+            play_control,
             snapshot_revision,
         ) = {
             let mut s = self.shared.lock().unwrap();
@@ -815,6 +819,7 @@ impl eframe::App for EditorApp {
                 s.camera, // Copy: the newest render lens (gizmo math reads it, never consumes)
                 s.play_state, // Copy: the newest play phase + tick count (m9.7), never consumed
                 s.thermal.clone(),
+                s.play_control.clone(),
                 s.snapshots_received,
             )
         };
@@ -851,6 +856,20 @@ impl eframe::App for EditorApp {
             self.save_status = Some(("save interrupted; game was not launched".into(), false));
         }
         let saving = self.save_pending.is_some() || self.pending_open.is_some();
+        let player_active = play_control
+            .as_ref()
+            .is_some_and(|s| s.mode == 1 && s.phase != 0);
+        let viewport_open = self
+            .dock
+            .iter_all_tabs()
+            .any(|(_, tab)| *tab == Tab::Viewport);
+        self.player.prepare(
+            ctx,
+            play_control.as_ref(),
+            connected,
+            saving || !viewport_open,
+            &self.out_tx,
+        );
 
         // Click-to-select (m9.6): the engine answered a viewport click with the entity under that
         // pixel, as a handle — the one message that still speaks handles — so map it to the
@@ -928,7 +947,12 @@ impl eframe::App for EditorApp {
             }
             // Ctrl/Cmd+S — the reflex every user already has. Only meaningful with a scene open;
             // Save As lives in the menu, because it needs a path and this shell has no file dialog.
-            if !saving && i.modifiers.command && i.key_pressed(egui::Key::S) && scene_is_open {
+            if !saving
+                && !player_active
+                && i.modifiers.command
+                && i.key_pressed(egui::Key::S)
+                && scene_is_open
+            {
                 do_save = Some(String::new());
             }
         });
@@ -941,7 +965,7 @@ impl eframe::App for EditorApp {
         // while the right button is up. With it held they fly instead (E2, the Unreal convention),
         // and the same key does one job at a time. R and Esc are not fly keys and always act.
         let looking = ctx.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
-        if !typing {
+        if !typing && !player_active && !self.player.captured() {
             ctx.input(|i| {
                 if !looking && i.key_pressed(egui::Key::W) {
                     self.gizmo_mode = Some(gizmo::Mode::Translate);
@@ -995,7 +1019,7 @@ impl eframe::App for EditorApp {
                 ui.menu_button("File", |ui| {
                     let has_scene = self.scene_path.is_some();
                     if ui
-                        .add_enabled(has_scene && !saving, egui::Button::new("Save\tCtrl+S"))
+                        .add_enabled(has_scene && !saving && !player_active, egui::Button::new("Save\tCtrl+S"))
                         .on_disabled_hover_text(
                             "no scene was opened — use Save As, or launch with --scene",
                         )
@@ -1017,7 +1041,7 @@ impl eframe::App for EditorApp {
                         );
                         if ui
                             .add_enabled(
-                                !saving && !self.save_as_path.trim().is_empty(),
+                                !saving && !player_active && !self.save_as_path.trim().is_empty(),
                                 egui::Button::new("Write"),
                             )
                             .clicked()
@@ -1101,6 +1125,18 @@ impl eframe::App for EditorApp {
                 }
                 ui.checkbox(&mut gizmo_snap, "Snap");
                 ui.separator();
+                if let Some(control) = play_control.as_ref().filter(|s| s.supported_modes & 2 != 0) {
+                    let mut walking = control.mode == 1;
+                    if ui.add_enabled(!saving && play_state.phase == PlayPhase::Edit,
+                        egui::Checkbox::new(&mut walking, "Walk"))
+                        .on_hover_text("Preview a local walking player. Click the viewport after Play; Esc releases the mouse. Use Run game for weapons.")
+                        .changed() {
+                        self.player.release(ctx, play_control.as_ref(), &self.out_tx);
+                        player::send_control(&self.out_tx, control,
+                            if walking { rime_protocol::PlayControlAction::SelectPlayer }
+                            else { rime_protocol::PlayControlAction::SelectInspect });
+                    }
+                }
                 // Play/Pause/Step/Stop (m9.7, ADR-0031 §4) — the same wire the headless
                 // play/restore proof drives (tests/app/editor_play_test.cpp); each button just
                 // pushes the matching zero-payload Command onto the same `actions` dispatch every
@@ -1121,6 +1157,7 @@ impl eframe::App for EditorApp {
                     .on_hover_text("Pause")
                     .clicked()
                 {
+                    self.player.release(ctx, play_control.as_ref(), &self.out_tx);
                     actions.push(Command::Pause);
                 }
                 if ui.add_enabled(!saving, egui::Button::new("⏭")).on_hover_text("Step one tick").clicked() {
@@ -1131,6 +1168,7 @@ impl eframe::App for EditorApp {
                     .on_hover_text("Stop (restore the pre-play world)")
                     .clicked()
                 {
+                    self.player.release(ctx, play_control.as_ref(), &self.out_tx);
                     actions.push(Command::Stop);
                 }
                 if ui.add_enabled(can_run_game,
@@ -1231,6 +1269,10 @@ impl eframe::App for EditorApp {
                 ui.label(format!("{} entities", entities.len()));
                 ui.separator();
                 ui.label(format!("{frames} frames · {fps:.0} fps"));
+                if let Some(control) = play_control.as_ref().filter(|s| !s.reason.is_empty()) {
+                    ui.separator();
+                    ui.colored_label(egui::Color32::from_rgb(220, 150, 80), &control.reason);
+                }
                 // The save outcome, kept visible until the next one. A refusal is red and carries
                 // the engine's reason verbatim — "cannot save" with no cause is indistinguishable
                 // from a bug, and a user who cannot tell those apart reaches for a workaround.
@@ -1340,10 +1382,12 @@ impl eframe::App for EditorApp {
 
         let saving_now = self.save_pending.is_some() || self.pending_open.is_some();
         let mut viewer = EditorTabs {
-            editing_enabled: !saving_now,
+            editing_enabled: !saving_now && !player_active,
             frame_tex: self.frame_tex.as_ref(),
             frame_dims,
             play_phase: play_state.phase,
+            play_control: play_control.as_ref(),
+            player: &mut self.player,
             thermal: thermal.as_ref(),
             entities: &entities,
             schema: &schema,
@@ -1377,7 +1421,10 @@ impl eframe::App for EditorApp {
         // Tell the engine which gizmo to render (selection + mode + the now-updated hovered axis).
         // Sent only when it changes: the message is tiny, but this runs every repaint, and the
         // engine only needs the transitions (a new selection, a mode switch, a hover move).
-        let desired = match (self.gizmo_mode, gizmo_target.as_ref()) {
+        let desired = match (
+            self.gizmo_mode.filter(|_| !player_active),
+            gizmo_target.as_ref(),
+        ) {
             (Some(mode), Some(target)) => GizmoState {
                 editor_id: target.key,
                 mode: to_proto_mode(Some(mode)),
@@ -1424,6 +1471,8 @@ struct EditorTabs<'a> {
     frame_dims: Option<(u32, u32)>,
     // The engine's play/edit phase (m9.7) — the viewport border's state colour.
     play_phase: PlayPhase,
+    play_control: Option<&'a rime_protocol::PlayControlState>,
+    player: &'a mut player::PlayerControl,
     thermal: Option<&'a rime_protocol::ThermalPreview>,
     entities: &'a [SnapshotEntity],
     schema: &'a Schema,
@@ -1472,7 +1521,12 @@ impl TabViewer for EditorTabs<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
-        if !self.editing_enabled {
+        if !self.editing_enabled
+            && (*tab != Tab::Viewport
+                || !self
+                    .play_control
+                    .is_some_and(|s| s.mode == 1 && s.phase != 0))
+        {
             ui.disable();
         }
         match tab {
@@ -1491,7 +1545,11 @@ impl TabViewer for EditorTabs<'_> {
                     ui,
                     self.frame_tex,
                     self.frame_dims,
-                    self.play_phase,
+                    &mut ViewportPlay {
+                        phase: self.play_phase,
+                        state: self.play_control,
+                        player: &mut *self.player,
+                    },
                     self.out_tx,
                     &mut gz,
                     &mut FlyView {
@@ -1787,11 +1845,17 @@ fn viewport_image_rect(panel: egui::Rect, dims: (u32, u32)) -> egui::Rect {
     egui::Rect::from_center_size(panel.center(), egui::vec2(width, height))
 }
 
+struct ViewportPlay<'a> {
+    phase: PlayPhase,
+    state: Option<&'a rime_protocol::PlayControlState>,
+    player: &'a mut player::PlayerControl,
+}
+
 fn viewport_ui(
     ui: &mut egui::Ui,
     frame_tex: Option<&egui::TextureHandle>,
     frame_dims: Option<(u32, u32)>,
-    play_phase: PlayPhase,
+    play: &mut ViewportPlay,
     out_tx: &Sender<Outbound>,
     gz: &mut GizmoView,
     fly: &mut FlyView,
@@ -1820,20 +1884,27 @@ fn viewport_ui(
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
         );
-        viewport_input(out_tx, &response, rect, frame_dims, gz);
-        viewport_fly(ui, &response, fly, &mut *gz.actions);
+        let player_owns = play
+            .player
+            .viewport(ui, &response, rect, play.state, out_tx);
+        if !player_owns {
+            viewport_input(out_tx, &response, rect, frame_dims, gz);
+            viewport_fly(ui, &response, fly, &mut *gz.actions);
+        }
         let navigating = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
-        ui.painter().text(
-            rect.left_bottom() + egui::vec2(10.0, -10.0),
-            egui::Align2::LEFT_BOTTOM,
-            if navigating {
-                "NAVIGATING: keep right mouse held + WASD / Q down / E up / Shift faster"
-            } else {
-                "Hold right mouse + WASD to move | Right-drag to look | Wheel closer / farther"
-            },
-            egui::FontId::proportional(12.0),
-            egui::Color32::WHITE,
-        );
+        if !player_owns {
+            ui.painter().text(
+                rect.left_bottom() + egui::vec2(10.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                if navigating {
+                    "NAVIGATING: keep right mouse held + WASD / Q down / E up / Shift faster"
+                } else {
+                    "Hold right mouse + WASD to move | Right-drag to look | Wheel closer / farther"
+                },
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+        }
     } else {
         ui.painter()
             .rect_filled(rect, 0.0, egui::Color32::from_gray(20));
@@ -1849,7 +1920,7 @@ fn viewport_ui(
     // the-time state should not add visual noise), Playing green, Paused amber — the same
     // at-a-glance vocabulary a video editor's transport uses, so "is this live right now" never
     // depends on reading the toolbar label.
-    if let Some(color) = phase_border_color(play_phase) {
+    if let Some(color) = phase_border_color(play.phase) {
         // Inside: the stroke stays within the panel's own rect rather than bleeding a pixel or two
         // into whatever dock tab sits next to it.
         ui.painter().rect_stroke(
@@ -2354,6 +2425,8 @@ pub mod protocol_input {
         PointerMove { x: i32, y: i32 },
         PointerDown { x: i32, y: i32, button: u32 },
         PointerUp { x: i32, y: i32, button: u32 },
+        KeyDown { code: u32 },
+        KeyUp { code: u32 },
     }
 }
 

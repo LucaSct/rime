@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "editor_fly_camera.hpp"
+#include "editor_preview_player.hpp"
 #include "play_city.hpp"
 #include "player_spawn.hpp"
 #include "rime/app/editor_host_app.hpp"
@@ -200,6 +201,7 @@ int main(int argc, char** argv) {
     // One per process, outliving the callback the host holds: a fly camera that forgot its angle
     // every tick would not be a camera.
     BlockFlyCamera fly;
+    block_editor::PreviewPlayer player;
     return rime::app::run_editor_host(
         argc,
         argv,
@@ -212,5 +214,6 @@ int main(int argc, char** argv) {
         prepare_block_for_viewport,
         [&fly](rime::ecs::World& world, std::span<const rime::platform::Event> events, double dt) {
             fly.tick(world, events, dt);
-        });
+        },
+        player.hooks());
 }

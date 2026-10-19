@@ -7,6 +7,7 @@
 #include <span>
 #include <string_view>
 
+#include "rime/app/editor_play.hpp"
 #include "rime/platform/event.hpp"
 #include "rime/stream/frame_codec.hpp"
 
@@ -123,6 +124,7 @@ bool load_scene_for_editor(ecs::World& world,
                                   const ComponentRegistrar& registrar,
                                   const char* usage_name = "rime-engine",
                                   const ScenePreparer& prepare = {},
-                                  const PlayTick& play_tick = {});
+                                  const PlayTick& play_tick = {},
+                                  const EditorPlayHooks& player_hooks = {});
 
 } // namespace rime::app

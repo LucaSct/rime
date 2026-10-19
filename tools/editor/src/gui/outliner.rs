@@ -176,6 +176,7 @@ fn slab_kind(schema: &Schema, entity: &SnapshotEntity) -> &'static str {
         Some(10) => "Lamp fixture",
         Some(11) => "Scene marker",
         Some(12) => "Timber board",
+        Some(13) => "Phase sheet",
         _ => "City part",
     }
 }

@@ -56,6 +56,7 @@ rime_add_test(rime_render_tests
     frame_scratch_test.cpp
     render_transform_test.cpp
     draw_path_test.cpp
+    material_binding_cache_test.cpp
     viewer_frame_graph_test.cpp)
 
 # rime::vfx joins the link for the fx1a coverage-delta proof: the CPU sim is the input the
