@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <numbers>
 #include <tuple>
 
@@ -227,26 +228,62 @@ void Effects::collect_lights() {
                 // Three offset tongues share a source, instead of emitting one flame for every
                 // smoke particle. The hard 16-source admission bounds this at 48 sprites. Phase
                 // uses accepted simulation duration and stable source identity, never frame time.
-                const float seed =
-                    static_cast<float>((d.entity.index * 37u + d.entity.generation * 17u) % 101u) /
-                    101.0f;
-                const float time = static_cast<float>(std::fmod(presentation_seconds_, 8.0)) *
-                                   (2.0f * std::numbers::pi_v<float> / 8.0f);
+                //
+                // Why the motion looks like fire rather than a breathing sprite: real flames are
+                // a few independent buoyant lobes that surge and retire at unrelated rates, not
+                // one body pulsing in lockstep. Each tongue therefore sums two sinusoids whose
+                // frequencies are different INTEGERS of the 8 s loop. Integer harmonics return to
+                // their start value and slope exactly when the loop wraps, so there is no seam,
+                // and unrelated harmonics rarely align, which reads as irregular without any
+                // random stream. Tongue 0 is the anchored, luminous root (small amplitude, slow);
+                // the two side tongues are faster and swing further, so they rise and retire
+                // around a steadier core. Everything is a smooth function of the loop angle:
+                // no sawtooth, no per-frame noise, no teleporting.
+                const std::uint32_t id = d.entity.index * 37u + d.entity.generation * 17u;
+                const float tau = 2.0f * std::numbers::pi_v<float>;
+                const float seed = static_cast<float>(id % 101u) / 101.0f;
+                const float seed_b = static_cast<float>((id * 29u + 13u) % 97u) / 97.0f;
+                const float time =
+                    static_cast<float>(std::fmod(presentation_seconds_, 8.0)) * (tau / 8.0f);
+                // {surge harmonics A/B, sway harmonics A/B} per tongue. A tongue's surge and
+                // sway use different harmonics so its height and lean do not move in step.
+                static constexpr float kSurgeA[3] = {4.0f, 7.0f, 6.0f};
+                static constexpr float kSurgeB[3] = {9.0f, 13.0f, 11.0f};
+                static constexpr float kSwayA[3] = {3.0f, 5.0f, 4.0f};
+                static constexpr float kSwayB[3] = {8.0f, 10.0f, 9.0f};
                 for (unsigned tongue = 0; tongue < 3; ++tongue) {
-                    const float phase = time * (7.0f + float(tongue)) +
-                                        seed * 2.0f * std::numbers::pi_v<float> +
-                                        float(tongue) * 2.1f;
-                    const float pulse = 0.88f + 0.12f * std::sin(phase);
-                    const float width = size * (tongue == 0 ? 1.0f : 0.7f) * pulse;
-                    const float sway = time * (3.0f + float(tongue)) + seed * 4.0f;
-                    const core::Vec3 position{light->position.x + size * 0.24f * std::sin(sway),
-                                              d.lo.y + width * 1.35f,
-                                              light->position.z + size * 0.20f * std::cos(sway)};
-                    flames_[flame_count_++] = {position,
-                                               width,
-                                               {2.8f, 2.2f, 1.4f},
-                                               std::min(d.intensity, 1.0f) *
-                                                   (tongue == 0 ? 0.65f : 0.4f)};
+                    const bool root = tongue == 0;
+                    const float offset = float(tongue) * 2.1f;
+                    // Surge in [-1, 1]; `lobe` is the same signal remapped to [0, 1].
+                    const float surge =
+                        0.65f * std::sin(time * kSurgeA[tongue] + seed * tau + offset) +
+                        0.35f * std::sin(time * kSurgeB[tongue] + seed_b * tau + offset * 1.7f);
+                    const float lobe = 0.5f + 0.5f * surge;
+                    const float width =
+                        size * (root ? 1.0f : 0.7f) * (1.0f + (root ? 0.10f : 0.26f) * surge);
+                    // Lift is quadratic in the lobe: a tongue spends most of its time low and
+                    // only occasionally darts up, which is how a flame tip behaves.
+                    const float lift = size * (root ? 0.05f : 0.30f) * lobe * lobe;
+                    const float sway_a = time * kSwayA[tongue] + seed_b * tau + offset;
+                    const float sway_b = time * kSwayB[tongue] + seed * tau;
+                    const float lean = size * (root ? 0.10f : 0.26f);
+                    const core::Vec3 position{light->position.x + lean * (0.8f * std::sin(sway_a) +
+                                                                          0.4f * std::sin(sway_b)),
+                                              d.lo.y + width * 1.35f + lift,
+                                              light->position.z + lean * (0.7f * std::cos(sway_a) +
+                                                                          0.3f * std::cos(sway_b))};
+                    // The root stays bright (anchored radiance); a side tongue dims as it
+                    // retires and flares as it rises. Heat shifts the hue between warm orange and
+                    // pale yellow-white without leaving the established palette.
+                    const float heat = root ? 0.9f + 0.1f * lobe : 0.7f + 0.3f * lobe;
+                    const float body = root ? 0.85f + 0.15f * lobe : 0.45f + 0.55f * lobe;
+                    flames_[flame_count_++] = {
+                        position,
+                        width,
+                        {2.8f, 2.2f * (0.88f + 0.12f * heat), 1.4f * (0.75f + 0.25f * heat)},
+                        std::clamp(std::min(d.intensity, 1.0f) * (root ? 0.65f : 0.45f) * body,
+                                   0.0f,
+                                   1.0f)};
                 }
             }
     }
