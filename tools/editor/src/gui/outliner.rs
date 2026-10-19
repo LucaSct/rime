@@ -19,6 +19,7 @@ enum Filter {
     All,
     Effects,
     Thermal,
+    Gameplay,
 }
 #[derive(Default, PartialEq)]
 enum View {
@@ -41,6 +42,7 @@ enum Icon {
     Heat,
     Contact,
     Camera,
+    Spawn,
     Light,
     Entity,
 }
@@ -62,6 +64,7 @@ fn role<'a>(schema: &'a Schema, entity: &SnapshotEntity) -> (&'a str, Icon) {
             "rime::fluids_scene::ThermalSource" => (2, "Heat source", Icon::Heat),
             "rime::fluids_scene::ThermalContact" => (3, "Thermal contact", Icon::Contact),
             "rime::render::Camera" => (4, "Camera", Icon::Camera),
+            "rime::block_play::PlayerSpawn" => (4, "Player spawn", Icon::Spawn),
             "rime::render::PointLight" => (5, "Point light", Icon::Light),
             "rime::render::DirectionalLight" => (5, "Sun light", Icon::Light),
             "rime::render::Sky" => (6, "Sky", Icon::Light),
@@ -291,6 +294,15 @@ fn icon(ui: &mut egui::Ui, kind: Icon, size: f32, selected: bool, label: &str) -
                 egui::Stroke::new(1.3_f32, pale),
             ));
         }
+        Icon::Spawn => {
+            line(at(0.3, 0.85), at(0.3, 0.14), cyan);
+            p.add(egui::Shape::convex_polygon(
+                vec![at(0.3, 0.14), at(0.83, 0.32), at(0.3, 0.51)],
+                cyan,
+                egui::Stroke::NONE,
+            ));
+            line(at(0.15, 0.85), at(0.6, 0.85), pale);
+        }
         Icon::Light => {
             p.circle_filled(at(0.5, 0.5), size * 0.18, amber);
             for i in 0..8 {
@@ -353,6 +365,11 @@ pub(super) fn ui(
                 Filter::Thermal,
                 "Thermal (water / ice)",
             );
+            ui.selectable_value(
+                &mut options.filter,
+                Filter::Gameplay,
+                "Gameplay (player spawn)",
+            );
         });
         ui.menu_button("Display", |ui| {
             ui.selectable_value(&mut options.view, View::List, "List");
@@ -360,10 +377,11 @@ pub(super) fn ui(
         });
     });
     if options.filter != Filter::All {
-        ui.weak(if options.filter == Filter::Effects {
-            "Effects filter active"
-        } else {
-            "Thermal filter active"
+        ui.weak(match options.filter {
+            Filter::Effects => "Effects filter active",
+            Filter::Thermal => "Thermal filter active",
+            Filter::Gameplay => "Gameplay filter active",
+            Filter::All => unreachable!(),
         });
     }
     ui.separator();
@@ -380,9 +398,11 @@ pub(super) fn ui(
                             t.name.as_str(),
                             "rime::vfx_scene::SmokeEmitter" | "rime::vfx_scene::FireEmitter"
                         )
-                    } else {
+                    } else if options.filter == Filter::Thermal {
                         t.name.starts_with("rime::fluids_scene::")
                             || t.name == "rime::fluids_render::ThermalSurface"
+                    } else {
+                        t.name == "rime::block_play::PlayerSpawn"
                     }
                 })
             })
@@ -443,4 +463,66 @@ pub(super) fn ui(
             ui.weak("(no entities match the filter)");
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::{kittest::Queryable, Harness};
+    use rime_protocol::{SchemaEntry, SnapshotComponent};
+
+    #[test]
+    fn gameplay_filter_finds_and_selects_a_spawn_even_when_it_also_has_geometry() {
+        let schema = Schema {
+            types: ["rime::block_play::PlayerSpawn", "rime::render::MeshRef"]
+                .into_iter()
+                .enumerate()
+                .map(|(i, name)| SchemaEntry {
+                    type_hash: i as u64 + 1,
+                    name: name.into(),
+                    is_component: true,
+                    fields: vec![],
+                })
+                .collect(),
+        };
+        let entities: Vec<_> = [vec![1, 2], vec![2]]
+            .into_iter()
+            .enumerate()
+            .map(|(i, types)| SnapshotEntity {
+                index: i as u32,
+                generation: 0,
+                editor_id: i as u64 + 71,
+                components: types
+                    .into_iter()
+                    .map(|type_hash| SnapshotComponent {
+                        type_hash,
+                        data: vec![],
+                    })
+                    .collect(),
+            })
+            .collect();
+        let mut harness = Harness::new_ui_state(
+            move |ui, state: &mut (Options, Option<EntityId>)| {
+                super::ui(
+                    ui,
+                    &schema,
+                    &entities,
+                    &mut state.1,
+                    &mut vec![],
+                    &mut state.0,
+                );
+            },
+            (Options::default(), None),
+        );
+        harness.get_by_label("Filter").click();
+        harness.run();
+        harness.get_by_label("Gameplay (player spawn)").click();
+        harness.run();
+        harness.press_key(egui::Key::Escape);
+        harness.run();
+        assert!(harness.query_by_label("1  Mesh").is_none());
+        harness.get_by_label("0  Player spawn").click();
+        harness.run();
+        assert_eq!(harness.state().1, Some(71));
+    }
 }

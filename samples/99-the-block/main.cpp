@@ -5727,6 +5727,25 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path, u
         if (!demo.warm_scope_view())
             return 1;
     }
+    if (demo.session.server.spawn.status == block_play::SpawnStatus::Valid &&
+        !demo.session.server.avatars.empty() && demo.session.client.predictor.seeded()) {
+        // A resolved marker alone does not prove the server placed its avatar there or that
+        // the client received it. Observe both live poses after the existing startup handshake.
+        const auto* authoritative = demo.session.server.world.get<gameplay::CharacterState>(
+            demo.session.server.avatars.front());
+        const auto predicted = demo.session.client.eye_anchor();
+        if (authoritative)
+            std::printf("99-the-block: authored player ready: authority (%.3f, %.3f, %.3f), "
+                        "predicted (%.3f, %.3f, %.3f), look (%.4f, %.4f)\n",
+                        double(authoritative->position.x),
+                        double(authoritative->position.y),
+                        double(authoritative->position.z),
+                        double(predicted.x),
+                        double(predicted.y),
+                        double(predicted.z),
+                        double(demo.session.client.view.yaw),
+                        double(demo.session.client.view.pitch));
+    }
     gameplay::InputBindings bindings{};
 
     if (demo.app.windowed()) {

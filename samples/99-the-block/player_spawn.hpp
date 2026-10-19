@@ -33,6 +33,7 @@
 #include <cmath>
 #include <cstddef>
 #include <string>
+#include <utility>
 
 #include "rime/blockkit/role.hpp"
 #include "rime/core/math/quat.hpp"
@@ -74,17 +75,19 @@ namespace detail {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
 }
 
-// A quaternion shorter than this carries no direction at all (all-zero is the usual authoring
-// accident). Merely un-normalised ones are accepted and normalised once, at the end.
-inline constexpr float kMinQuatLength = 1e-3f;
-
 [[nodiscard]] inline bool usable(const core::Transform& t) noexcept {
     const core::Quat& q = t.rotation;
+    // TRS composition assumes unit rotations. Normalising only after composing would still
+    // rotate child translations with the malformed parent, and huge finite quaternions can
+    // overflow float length() into a zero/identity fallback. Refuse those descriptions before
+    // any arithmetic, with a small tolerance for serialized unit-quaternion roundoff.
+    const double norm_squared =
+        double(q.x) * q.x + double(q.y) * q.y + double(q.z) * q.z + double(q.w) * q.w;
     return finite3(t.translation) && finite3(t.scale) && std::isfinite(q.x) && std::isfinite(q.y) &&
-           std::isfinite(q.z) && std::isfinite(q.w) && core::length(q) >= kMinQuatLength;
+           std::isfinite(q.z) && std::isfinite(q.w) && std::abs(norm_squared - 1.0) <= 0.002;
 }
 
-// A parent chain longer than this is a cycle; real maps are a few levels deep.
+// Bound malformed/cyclic traversal; valid hierarchies deeper than this are explicitly refused.
 inline constexpr int kMaxParentDepth = 64;
 
 [[nodiscard]] inline SpawnResolution refuse(std::size_t enabled, std::string why) {
@@ -126,7 +129,8 @@ inline constexpr int kMaxParentDepth = 64;
     }
     if (!detail::usable(local->value)) {
         return detail::refuse(
-            enabled, "the enabled PlayerSpawn pose is non-finite or has a degenerate rotation");
+            enabled,
+            "the enabled PlayerSpawn pose is non-finite or its rotation is not unit length");
     }
 
     core::Transform composed = local->value;
@@ -147,14 +151,16 @@ inline constexpr int kMaxParentDepth = 64;
         }
         if (!detail::usable(up->value)) {
             return detail::refuse(
-                enabled, "a PlayerSpawn ancestor pose is non-finite or has a degenerate rotation");
+                enabled,
+                "a PlayerSpawn ancestor pose is non-finite or its rotation is not unit length");
         }
         composed = up->value * composed;
         cursor = parent->value;
     }
 
     const core::Quat q = core::normalize(composed.rotation);
-    if (!detail::finite3(composed.translation) || !std::isfinite(q.x) || !std::isfinite(q.w)) {
+    if (!detail::usable(composed) || !std::isfinite(q.x) || !std::isfinite(q.y) ||
+        !std::isfinite(q.z) || !std::isfinite(q.w)) {
         return detail::refuse(enabled, "the composed PlayerSpawn pose is not finite");
     }
 

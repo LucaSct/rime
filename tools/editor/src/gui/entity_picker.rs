@@ -59,6 +59,7 @@ fn reference_id<'a>(
     let nested = schema.type_by_hash(desc.nested_hash)?;
     if nested.name != ENTITY_TYPE_NAME
         || nested.fields.len() != 1
+        || nested.fields[0].name != "editor_id"
         || nested.fields[0].kind != FieldKind::U64
     {
         return None;
@@ -329,8 +330,7 @@ mod tests {
         h.press_key(egui::Key::End);
         h.press_key(egui::Key::Backspace);
         h.run();
-        h.get_by_role(Role::TextInput)
-            .type_text(&SECOND.to_string());
+        h.get_by_role(Role::TextInput).type_text(SECOND.to_string());
         h.run();
         h.press_key(egui::Key::Enter);
         h.run();
@@ -349,6 +349,9 @@ mod tests {
             assert!(reference_id(&schema, component, field, &mut reference(SECOND)).is_none());
         }
         assert!(reference_id(&schema, SOURCE, "cell", &mut Value::U64(SECOND)).is_none());
+        let mut malformed = schema.clone();
+        malformed.types[0].fields[0].name = "raw_handle".into();
+        assert!(reference_id(&malformed, SOURCE, "cell", &mut reference(SECOND)).is_none());
         let mut malformed = schema;
         malformed.types[0]
             .fields

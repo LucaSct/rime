@@ -179,13 +179,23 @@ TEST_CASE("an enabled marker with an unusable pose is refused, never defaulted")
             w.spawn_with(ecs::LocalTransform{}, ecs::Parent{a}, PlayerSpawn{true});
         w.get<ecs::Parent>(a)->value = m;
     }));
-    // An un-normalised but real rotation is accepted and normalised, not refused.
-    ecs::World w;
-    init(w);
-    (void)add_marker(w, pose({0, 0, 0}, yaw_pitch(0.3f, 0) * 3.0f));
-    const auto ok = resolve_player_spawn(w);
-    REQUIRE(ok.status == SpawnStatus::Valid);
-    CHECK(ok.placement.yaw == doctest::Approx(0.3f).epsilon(1e-4));
+    CHECK(refused(
+        [](ecs::World& w) { (void)add_marker(w, pose({0, 0, 0}, yaw_pitch(0.3f, 0) * 3.0f)); }));
+    CHECK(
+        refused([](ecs::World& w) { (void)add_marker(w, pose({0, 0, 0}, {1e30f, 0, 0, 1e30f})); }));
+    CHECK(refused([](ecs::World& w) {
+        const auto parent = w.spawn_with(ecs::LocalTransform{pose({1, 0, 0}, {0, 1, 0, 1})});
+        (void)w.spawn_with(
+            ecs::LocalTransform{pose({0, 0, 2})}, ecs::Parent{parent}, PlayerSpawn{true});
+    }));
+    CHECK(refused([](ecs::World& w) {
+        auto parent_pose = pose({0, 0, 0});
+        parent_pose.scale = {1e30f, 1e30f, 1e30f};
+        const auto parent = w.spawn_with(ecs::LocalTransform{parent_pose});
+        (void)w.spawn_with(ecs::LocalTransform{pose({1e30f, 1e30f, 1e30f})},
+                           ecs::Parent{parent},
+                           PlayerSpawn{true});
+    }));
 }
 
 TEST_CASE("the marker survives a real scene save/load; derived handles are not written") {
