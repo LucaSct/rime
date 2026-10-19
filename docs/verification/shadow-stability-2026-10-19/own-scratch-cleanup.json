@@ -1,0 +1,127 @@
+[
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/probe-cascade",
+    "bytes": 4250976,
+    "sha256": "84df40bb96613fa27e094395cbfa9ce6ff19b6ba134cb22c7825dbe56988634b"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/engine_render_src_lighting_shadows.cpp.asan.o",
+    "bytes": 524848,
+    "sha256": "e83b37ec1800ea453632a94ac1ac91ac27d439887f9b4aff154bfd28cc982564"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/engine_render_src_lighting_local_shadows.cpp.asan.o",
+    "bytes": 570032,
+    "sha256": "8794399e8c49087489c9b6a6b34d29524a851cab5f5823d29cbb1cd1595290ec"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/engine_render_src_scene_renderer.cpp.asan.o",
+    "bytes": 5147776,
+    "sha256": "be5396e3d137a9e72448d2472fe45b8557c82e2651fa7a737dde9171a5e874b8"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/tests_render_shadow_stability_test.cpp.asan.o",
+    "bytes": 771768,
+    "sha256": "dfb10664b3252f429c62b19054c4f769b80df42eac48dadf977d2dd014888445"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/tests_render_shadow_caster_tracker_test.cpp.asan.o",
+    "bytes": 1218696,
+    "sha256": "58a5494161bba664831a8379b973f3061478e14ab4c6a8dc849cc9a38641aa2c"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/tests_render_shadow_motion_test.cpp.asan.o",
+    "bytes": 2640376,
+    "sha256": "b70610074b77c4c0a53837fb4ba1b502aaa35585eb85360bc32fddd0a5ec8413"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/tests_render_shadow_transition_test.cpp.asan.o",
+    "bytes": 844192,
+    "sha256": "d42db3cc0127e5402c386dc9950b5c9544c1c10bf964ea5dcf223b9d019a7e42"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/tests_render_local_shadow_test.cpp.asan.o",
+    "bytes": 2577472,
+    "sha256": "6421d1f1c7baef63fa9f52745e44af42c59942f6f8076fc334dcdc260c8101ff"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/tests_render_taa_resolve_test.cpp.asan.o",
+    "bytes": 3480448,
+    "sha256": "58c2c7d482f4687cfadaccae5ae1c5b5d8bacdaa1471f4699f360e84f620f7a3"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/rime_render_tests-changed-tu-asan",
+    "bytes": 82706768,
+    "sha256": "a5023a5b0446de7e0c7ff046a5849a937c610af4fa674fa0024088339f4d1ba0"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/old-sampler-test.o",
+    "bytes": 541552,
+    "sha256": "1e359760483c68d7ee301c0ac01a1cfa948112e51dcde479857934c7a25a0d7f"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/old-sampler-test",
+    "bytes": 11579096,
+    "sha256": "e180c90a11751426fe2f6679b8c2a5d11cdb27fbdec9085dab326a2e43dd41f1"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/baseline-shadows.o",
+    "bytes": 401832,
+    "sha256": "07566d3e1d358743f772a80daee043b5ea0386242e37219ff2f9fcc17f517a88"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/probe-cascade.o",
+    "bytes": 33416,
+    "sha256": "dffb7d9bed5e3d79851a6019ae0eecbfd83ea7f6c32abd97233943c8d29061a0"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/probe-cascade-baseline",
+    "bytes": 4252800,
+    "sha256": "d51d6223574f484bee8d4f52032f5ef9e64ba00a970f4f8eef82970e37482d4d"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/csm-scratch/t.o",
+    "bytes": 87352,
+    "sha256": "92f481c48d9902ff094c3df25d41be56b36f851ae3290f4485885c085df71539"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/csm-scratch/new.o",
+    "bytes": 22816,
+    "sha256": "265768ca560be5880e37de7fe96f1ee5c66020666b8942147ba04e69e4943017"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/csm-scratch/main.o",
+    "bytes": 320016,
+    "sha256": "18aafdbc020b77abe1e732ddbcbd082dc5c119a676375d98422ebffd81755ad5"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/csm-scratch/new.exe",
+    "bytes": 4224432,
+    "sha256": "9316b0910ba757f1ef38c6be5615450e359476e31a4c1b80a988cd845c10e38c"
+  },
+  {
+    "path": "/home/next/reports/rime-shadow-stability-2026-10-19/csm-scratch/old.exe",
+    "bytes": 4449712,
+    "sha256": "98cc13646eaeb8e8503f35aa72a2e6ffda92b71c1ce0a3ebb5819d476bd9b67f"
+  },
+  {
+    "path": "docs/verification/shadow-stability-2026-10-19/probe-cascade",
+    "bytes": 4246920,
+    "sha256": "7db17bf2c6f960e2a62816e1b490d859793481a37b001a09737208083684bbba"
+  },
+  {
+    "path": "docs/verification/shadow-stability-2026-10-19/baseline-shadows.o",
+    "bytes": 401840,
+    "sha256": "0173bd93e1eb776b2c285487d1d8137df3caa98932e2587deb5b4778505766ee"
+  },
+  {
+    "path": "docs/verification/shadow-stability-2026-10-19/probe-cascade.o",
+    "bytes": 33424,
+    "sha256": "ed54e76a69fdd85907814006c2bf235bfc494660cd2e5ebb969215792a581292"
+  },
+  {
+    "path": "docs/verification/shadow-stability-2026-10-19/probe-cascade-baseline",
+    "bytes": 4252856,
+    "sha256": "c07122a8c20d696552f35cbecc8c315042f936c1050b34a284952a4f8d86c37c"
+  }
+]

@@ -1,0 +1,17 @@
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[WARN] render: no active camera in the world — declaring no passes (/home/next/projects/rime/engine/render/src/scene_renderer.cpp:522)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/render/shadow_transition_test.cpp:18:
+TEST CASE:  shadows: shared mesh and terrain sampler blends cascade boundaries
+
+/home/next/projects/rime/tests/render/shadow_transition_test.cpp:153: MESSAGE: cascade transition steps x=0.0874023, z=0.0112305, overlapping=0.115723
+
+===============================================================================
+[doctest] test cases:    2 |    2 passed | 0 failed | 248 skipped
+[doctest] assertions: 2069 | 2069 passed | 0 failed |
+[doctest] Status: SUCCESS!

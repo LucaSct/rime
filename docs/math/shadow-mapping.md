@@ -137,23 +137,38 @@ orientation, so $r$ — and therefore the world-units-per-texel $2r / \text{reso
 moves, which §3b handles. (The price is a little wasted resolution — a sphere circumscribes the box —
 paid gladly to stop the crawl.)
 
+Compute this sphere in **camera-local space**, rather than reconstructing large world-space
+corners through an inverse view-projection. For near/far slice depths $d_0,d_1$, let
+$h=d_1\tan(\mathrm{fov}_y/2)$ and $w=h\,\mathrm{aspect}$. Its local centre is
+$(0,0,-(d_0+d_1)/2)$ and $r_0=\sqrt{w^2+h^2+((d_1-d_0)/2)^2}$; only the centre is
+transformed through the inverse camera view. The radius then depends on the lens/splits alone.
+Mathematically equivalent world-corner arithmetic changed this radius in float precision during
+walking, making the snap quantum itself wobble. Keep the light's rotation basis fixed too;
+rebuilding it from a translated eye/target introduces another avoidable subtraction error.
+
 ### 3b. Translation shimmer → **texel snapping**
 
 Even with a fixed texel size, if the cascade centre moves by a fraction of a texel each frame, every
 world point shifts to a slightly different spot *within* its texel and the rasterised edge dances. The
 fix is to let the centre move only in **whole-texel steps**, so the shadow's sampling grid stays
 locked to world space. Work in the light's *rotation-only* frame (the shadow map's own plane), where
-one texel is $t = 2r / \text{resolution}$ world units on a side, and floor the centre to that grid:
+one texel is $t = 2r / \text{resolution}$ world units on a side, and round the centre to that grid:
 
 $$\mathbf c_{\text{ls}} = R_{\text{light}}\,\mathbf c, \qquad
-c_{\text{ls},x} \leftarrow t \left\lfloor \tfrac{c_{\text{ls},x}}{t} \right\rfloor, \quad
-c_{\text{ls},y} \leftarrow t \left\lfloor \tfrac{c_{\text{ls},y}}{t} \right\rfloor,$$
+c_{\text{ls},x} \leftarrow t \operatorname{round}(c_{\text{ls},x}/t), \quad
+c_{\text{ls},y} \leftarrow t \operatorname{round}(c_{\text{ls},y}/t),$$
 
-then rotate back ($\mathbf c_{\text{snap}} = R_{\text{light}}^{-1}\,\mathbf c_{\text{ls}}$). Now as the
-camera glides, the centre jumps in texel-sized increments: every world point keeps landing on the
-*same* texel until the whole grid steps over by one, so the shadow is rock-steady instead of swimming.
-This is the property the unit test pins — nudge the camera far less than a texel and cascade 0's
-matrix must not change (`approx_eq`).
+The rounded centre moves by at most half a texel per axis. For $N>1$ texels, use
+$r=r_0 N/(N-1)$ so the fitted slice remains inside after that shift. Tiny resolutions
+$N\le1$ skip snapping, avoiding division by zero. Build the light view by retaining the
+rotation-only basis and writing its translation column directly, rather than recomputing a
+look-at basis from rounded world coordinates.
+
+The stability oracle projects fixed **world** points and compares shadow-UV differences modulo
+whole texels over camera walks and turns, including translated copies of the scene. Raw matrix
+comparison with a loose epsilon can pass while a world point drifts by a visible fraction of a
+shadow texel. Slice-corner coverage and deliberately perturbed radius/basis/translation are
+separate positive and sensitivity controls.
 
 ### The light "camera" placement
 
@@ -304,3 +319,20 @@ already built for them, and §1's perspective divide already handles a per-face 
 Contact-hardening / variable penumbra (PCSS) and filtering schemes beyond fixed PCF (VSM/ESM) are out
 entirely — this milestone buys *correct, stable, soft-enough, and cheap-when-static* shadows, and the
 later bricks sharpen from there.
+
+## Numerical and cache follow-up (2026-10-19)
+
+Mesh and terrain receivers now include one shared `sun_shadow.glsl` implementation. Its PCF guard
+tracks the actual tap footprint. A narrow edge band blends each cascade against the already
+composed coarser result, including overlapping transition bands; the final boundary fades to the
+existing lit fallback. Interior pixels keep the nine-tap path. This controls cascade selection
+pops without increasing map resolution or applying a screen blur.
+
+`SceneRenderer` also tracks depth-affecting world caster records by full entity generation and
+mesh subrange. Model, silhouette flags and masked alpha/texture changes invalidate old and new
+bounds; removals invalidate the old footprint. Camera movement/reordering and opaque cosmetic
+changes do not invalidate maps. Unknown deformation bounds conservatively invalidate all spots.
+Explicit C2 invalidation remains available, including in-place GPU texture changes that have no
+new handle. Static cache reuse and moving/removed caster pixels have independent checks.
+
+See [ADR-0101](../adr/0101-walking-shadow-stability.md) for scope and verified limitations.

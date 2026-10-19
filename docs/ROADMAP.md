@@ -162,6 +162,15 @@ preserving draw state; [evidence](perf/material-bindings-2026-10-19/README.md)
 separates deterministic controls from rejected clock qualification. No frame-rate,
 collapse, terrain walking, gameplay ice or shipment gate closes.
 
+**Walking shadow stability (2026-10-19):** sun cascade scale and light basis now
+stay fixed while the camera walks/turns; mesh and terrain share continuous cascade
+transitions. Local spotlight caches track depth-affecting caster edits, motion and
+removal while preserving static/camera-only reuse. Alpha-masked materials filter
+normals before discard; missing cameras reset temporal history. Editor Preview
+now enables sun/local shadows. See [ADR-0101](adr/0101-walking-shadow-stability.md).
+Sun/reflection routing was audited; this does not close SSR/disocclusion, general
+actor/terrain shadow coverage or inherited performance/shipment gates.
+
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
 > been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the

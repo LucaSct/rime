@@ -1,0 +1,62 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/render/culling_test.cpp:264:
+TEST CASE:  m13.2a: a shadow caster outside the view still casts into it
+
+/home/next/projects/rime/tests/render/culling_test.cpp:359: MESSAGE: m13.2a shadow caster out of view: floor lit 0.955566, shadowed 0.539551
+
+===============================================================================
+[doctest] test cases:   18 |   18 passed | 0 failed | 232 skipped
+[doctest] assertions: 8408 | 8408 passed | 0 failed |
+[doctest] Status: SUCCESS!
+
+=================================================================
+==463686==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 256 byte(s) in 1 object(s) allocated from:
+    #0 0x7f3763189451  (/usr/lib/libasan.so.8+0x189451) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7b375097dafe  (<unknown module>)
+
+Direct leak of 256 byte(s) in 1 object(s) allocated from:
+    #0 0x7f3763189451  (/usr/lib/libasan.so.8+0x189451) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7b375db5a75e  (<unknown module>)
+
+Direct leak of 184 byte(s) in 1 object(s) allocated from:
+    #0 0x7f376318aa21 in calloc (/usr/lib/libasan.so.8+0x18aa21) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7f37611cdc08  (/usr/lib/../lib/libdbus-1.so.3+0x28c08) (BuildId: abbac845e2b15b094f7744a15ed2c67ce27cf54b)
+    #2 0x7f37611cfb7d in _dbus_message_loader_queue_messages (/usr/lib/../lib/libdbus-1.so.3+0x2ab7d) (BuildId: abbac845e2b15b094f7744a15ed2c67ce27cf54b)
+
+Direct leak of 112 byte(s) in 2 object(s) allocated from:
+    #0 0x7f376318aa21 in calloc (/usr/lib/libasan.so.8+0x18aa21) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7b374e7e7b8d  (<unknown module>)
+
+Direct leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7f376318aa21 in calloc (/usr/lib/libasan.so.8+0x18aa21) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7f37615ce35c  (<unknown module>)
+
+Indirect leak of 1190 byte(s) in 2 object(s) allocated from:
+    #0 0x7f3763189451  (/usr/lib/libasan.so.8+0x189451) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7f37611e0909 in _dbus_string_copy_len (/usr/lib/../lib/libdbus-1.so.3+0x3b909) (BuildId: abbac845e2b15b094f7744a15ed2c67ce27cf54b)
+
+Indirect leak of 192 byte(s) in 2 object(s) allocated from:
+    #0 0x7f376318aa21 in calloc (/usr/lib/libasan.so.8+0x18aa21) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7b374e7e7b8d  (<unknown module>)
+
+Indirect leak of 96 byte(s) in 1 object(s) allocated from:
+    #0 0x7f376318aa21 in calloc (/usr/lib/libasan.so.8+0x18aa21) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7f37615d02e9  (<unknown module>)
+
+Indirect leak of 62 byte(s) in 4 object(s) allocated from:
+    #0 0x7f376318a5b1 in malloc (/usr/lib/libasan.so.8+0x18a5b1) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7b374e7e78d1  (<unknown module>)
+
+Indirect leak of 31 byte(s) in 2 object(s) allocated from:
+    #0 0x7f376318a5b1 in malloc (/usr/lib/libasan.so.8+0x18a5b1) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7f37615cdf68  (<unknown module>)
+
+SUMMARY: AddressSanitizer: 2435 byte(s) leaked in 17 allocation(s).
