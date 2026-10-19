@@ -1,0 +1,4 @@
+[1/4] Building CXX object samples/99-the-block/CMakeFiles/the_block_host.dir/block_host_main.cpp.o
+[2/4] Linking CXX executable bin/the-block-host
+[3/4] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/main.cpp.o
+[4/4] Linking CXX executable bin/the_block

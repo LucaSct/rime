@@ -137,6 +137,18 @@ heater interaction/exit objective; prefab library, emitter icons, animation and
 adaptive viewport resolution remain explicit follow-ups. See
 [ADR-0096](adr/0096-committed-phase-detail-and-editor-discovery.md). No open gate closes.
 
+**Editor/environment V2 (2026-10-19):** live Preview camera ownership and post-Stop
+navigation now reconcile, and streamed viewports preserve aspect and picking
+coordinates. Thermal references have readable entity pickers. Water/ice detail
+adds multiscale ripples and branching frost with a stable frozen endpoint; fire
+has bounded animated flames and smoke has procedural density, lifetime fades and
+local fire illumination. Saved city maps now consume these authored descriptions
+in the full runtime, including scopes, and can author one PlayerSpawn for position,
+look and recovery. See [ADR-0098](adr/0098-editor-navigation-and-environment-presentation-v2.md)
+and [ADR-0099](adr/0099-authored-city-spawns-and-runtime-environment.md). Possession,
+sensor/action wiring, prefabs, adaptive resolution, animation, moving water and
+gameplay ice remain later bricks. Existing release/performance gates stay open.
+
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not
 > been made. **M17**'s visual work has landed (the pass-owned ring, the physical sky lighting the

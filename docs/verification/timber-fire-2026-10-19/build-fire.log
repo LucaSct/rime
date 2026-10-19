@@ -1,0 +1,8 @@
+[1/8] Building CXX object engine/vfx_scene/CMakeFiles/rime_vfx_scene.dir/src/effects.cpp.o
+[2/8] Linking CXX static library lib/librime_vfx_scene.a
+[3/8] Linking CXX executable bin/the_block
+[4/8] Building CXX object tests/gameplay/CMakeFiles/rime_gameplay_tests.dir/player_spawn_test.cpp.o
+[5/8] Linking CXX executable bin/the-block-host
+[6/8] Linking CXX executable bin/rime_gameplay_tests
+[7/8] Building CXX object tests/vfx_scene/CMakeFiles/rime_vfx_scene_tests.dir/effects_test.cpp.o
+[8/8] Linking CXX executable bin/rime_vfx_scene_tests

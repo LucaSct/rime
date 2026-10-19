@@ -1,0 +1,17 @@
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: swapchain ready — 1280x720, 4 images, mailbox (/home/next/projects/rime/engine/rhi/src/vulkan/swapchain_vulkan.cpp:84)
+[INFO] app: presenting in a 1280x720 window (/home/next/projects/rime/engine/app/src/application.cpp:103)
+99-the-block: building support: loaded=1 all_supported=1 buildings=32 quarantined=0 nodes=6540 roots=728 bond_edges=12971 contact_edges=13851 unreachable=0 missing_geometry=0
+99-the-block: held-scar-h.glb topology original=23255 body=22103 magazine=1152 fnv64=4c74aa9179600eba
+99-the-block: held-m4a1.glb topology original=21555 body=20891 magazine=664 fnv64=57fbe42330511e32
+99-the-block: held-msr.glb topology original=12194 body=11276 magazine=918 fnv64=c50f3118a2bb7efa
+99-the-block: authored environment (cosmetic) enabled_sources=2 sources=2 smoke=58 flames=3 lights=1 phase_surfaces=2 phase_cells=2 thermal_status=1 atlas=1 fx_ticks=118 thermal_ticks=118 invalid_source_visits=0 invalid_thermal_builds=0 thermal_refusals=0
+99-the-block: authored player spawn: capsule centre (-10.000, 1.000, 2.000) m, yaw -0.0000 rad, pitch 0.0000 rad
+99-the-block: authored player ready: authority (-10.000, 0.902, 2.000), predicted (-10.000, 0.902, 2.000), look (-0.0000, 0.0000)
+99-the-block: presenting in a window.
+  WASD move · hold RIGHT-DRAG (free look engages if the cursor locks) to look · LEFT MOUSE fires (rifles hold, sniper click)
+  1 SCAR-H · 2 M4A1 · 3 MSR / Schmidt & Bender PM II
+  Q / RIGHT MOUSE aims · R reload animation · F detonates · ESC exits
+99-the-block: 12 frames, 88 ticks
+  wrote /home/next/reports/rime-timber-fire-2026-10-19/framed-game.ppm

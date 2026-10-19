@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <utility>
 #include <vector>
 
 #include "render_test_support.hpp"
@@ -81,7 +82,8 @@ struct FrameResult {
                                        std::span<const GpuParticle> particles,
                                        const FxSettings& settings,
                                        float clear_depth = 1.0f,
-                                       float clear_luminance = 0.0f) {
+                                       float clear_luminance = 0.0f,
+                                       FxParticlePass* following_pass = nullptr) {
     RenderGraph graph(device);
     const RGTexture hdr = graph.create_texture({{kSize, kSize}, kHdrFormat, "fx-hdr"});
     const RGTexture depth = graph.create_texture({{kSize, kSize}, kDepthFormat, "fx-depth"});
@@ -107,6 +109,8 @@ struct FrameResult {
 
     const View view = make_view();
     pass.add(graph, hdr, depth, particles, view.fx, settings);
+    if (following_pass)
+        following_pass->add(graph, hdr, depth, particles, view.fx, settings);
 
     graph.export_texture(hdr);
     auto cmd = device.begin_commands();
@@ -643,4 +647,258 @@ TEST_CASE("transient scene lights illuminate without authored components and cle
     renderer.set_transient_point_lights({&bad, 1});
     CHECK(renderer.transient_point_lights_dropped() == 4);
     CHECK(frame() == off);
+}
+
+TEST_CASE("SceneRenderer flame V2 copies input, composes before smoke and clears exactly") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    MaterialRegistry materials;
+    ecs::World world;
+    register_render_components(world);
+    (void)world.spawn_with(ecs::WorldTransform{}, Camera{});
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_temporal_jitter_enabled(false);
+    renderer.set_taa_resolve_enabled(false);
+    const auto frame = [&] {
+        RenderGraph graph(*device);
+        const auto out = renderer.render(graph, world, {kSize, kSize}, true);
+        graph.export_texture(out.hdr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        return read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8);
+    };
+    const auto baseline = frame();
+    FxSettings on{};
+    on.enabled = true;
+    on.max_particles = 1;
+    std::vector<GpuParticle> flames(3, smoke(-3.0f, 4.0f, 3.0f, 2.0f));
+    renderer.set_flame_particles(flames, on);
+    for (auto& flame : flames)
+        flame.color_alpha[3] = 0.0f; // copy ownership, not a borrowed caller span
+    const auto fire = frame();
+    CHECK(fire != baseline);
+    CHECK(renderer.flame_particles_dropped() == 2);
+    const auto dark_smoke = smoke(-2.5f, 0.0f, 0.0f, 0.0f, 0.9f);
+    renderer.set_smoke_particles({&dark_smoke, 1}, on);
+    const auto obscured = frame();
+    const auto fire_image = decode_hdr(fire, kSize, kSize);
+    const auto obscured_image = decode_hdr(obscured, kSize, kSize);
+    float fire_energy = 0.0f, obscured_energy = 0.0f;
+    for (std::uint32_t y = 0; y < kSize; ++y)
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            fire_energy += fire_image.luminance(x, y);
+            obscured_energy += obscured_image.luminance(x, y);
+        }
+    CHECK(fire_energy > 0.0f);
+    CHECK(obscured_energy < fire_energy * 0.9f);
+    renderer.set_flame_particles({}, on);
+    renderer.set_smoke_particles({}, on);
+    CHECK(frame() == baseline);
+}
+
+TEST_CASE("flame V2 gate, empty input, alpha zero, depth and intensity controls") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass pass(*device, 4, FxBlendMode::Flame);
+    FxSettings on{};
+    on.enabled = true;
+    const GpuParticle flame = smoke(0.0f, 4.0f, 4.0f, 4.0f);
+    const auto baseline = render_frame(*device, pass, {}, on, 1.0f, 0.4f);
+    CHECK(render_frame(*device, pass, {&flame, 1}, FxSettings{}, 1.0f, 0.4f).bytes ==
+          baseline.bytes);
+    CHECK(pass.particles_drawn() == 0);
+    CHECK(pass.set_frames_in_flight(3)); // off and empty calls must not consume ring slots
+    const auto visible = render_frame(*device, pass, {&flame, 1}, on, 1.0f, 0.4f);
+    CHECK(visible.total_radiance > baseline.total_radiance + 10.0f);
+    CHECK(visible.bytes != baseline.bytes); // sensitivity witness for every null control below
+    GpuParticle zero_alpha = flame;
+    zero_alpha.color_alpha[3] = 0.0f;
+    CHECK(render_frame(*device, pass, {&zero_alpha, 1}, on, 1.0f, 0.4f).bytes == baseline.bytes);
+    CHECK(render_frame(*device, pass, {&flame, 1}, on, 0.0f, 0.4f).bytes == baseline.bytes);
+    on.intensity = 0.0f;
+    const auto drawn_before = pass.particles_drawn();
+    CHECK(render_frame(*device, pass, {&flame, 1}, on, 1.0f, 0.4f).bytes == baseline.bytes);
+    CHECK(pass.particles_drawn() == drawn_before + 1); // dark still submits
+    CHECK_FALSE(pass.set_frames_in_flight(3));
+}
+
+TEST_CASE("flame V2 silhouette is tall and tapers toward its tip") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass flame_pass(*device, 4, FxBlendMode::Flame);
+    FxParticlePass disc_pass(*device, 4);
+    FxSettings on{};
+    on.enabled = true;
+    const GpuParticle flame = smoke(0.0f, 4.0f, 4.0f, 4.0f);
+    const auto frame = render_frame(*device, flame_pass, {&flame, 1}, on);
+    const auto disc = render_frame(*device, disc_pass, {&flame, 1}, on);
+    REQUIRE(frame.total_radiance > 0.0f);
+    const auto image = decode_hdr(frame.bytes, kSize, kSize);
+    const auto bounds = [](const HdrImage& img) {
+        std::uint32_t min_x = kSize, min_y = kSize, max_x = 0, max_y = 0;
+        for (std::uint32_t y = 0; y < kSize; ++y)
+            for (std::uint32_t x = 0; x < kSize; ++x)
+                if (img.luminance(x, y) > 0.01f) {
+                    min_x = std::min(min_x, x);
+                    min_y = std::min(min_y, y);
+                    max_x = std::max(max_x, x);
+                    max_y = std::max(max_y, y);
+                }
+        return std::pair{max_x - min_x + 1, max_y - min_y + 1};
+    };
+    const auto [width, height] = bounds(image);
+    const auto [disc_width, disc_height] = bounds(decode_hdr(disc.bytes, kSize, kSize));
+    CHECK(height > width * 2);
+    CHECK(height > disc_height);
+    CHECK(width < disc_width); // switching back to a radial disc must falsify the shape proof
+    const auto row_width = [&](float world_y) {
+        const auto row = static_cast<std::uint32_t>(
+            project(make_view().view_proj, {0.0f, world_y, 0.0f}, kSize).y);
+        std::uint32_t pixels = 0;
+        for (std::uint32_t x = 0; x < kSize; ++x)
+            pixels += image.luminance(x, row) > 0.01f ? 1u : 0u;
+        return pixels;
+    };
+    const auto root_width = row_width(-0.6f);
+    const auto tip_width = row_width(0.8f);
+    CHECK(tip_width > 0);
+    CHECK(root_width > tip_width * 2);
+
+    // Two layers still add when the front layer was submitted first: depth must stay read-only.
+    GpuParticle near = flame;
+    near.position_size[2] = 1.0f;
+    GpuParticle far = flame;
+    far.position_size[2] = -1.0f;
+    const float near_radiance = render_frame(*device, flame_pass, {&near, 1}, on).total_radiance;
+    const float far_radiance = render_frame(*device, flame_pass, {&far, 1}, on).total_radiance;
+    const std::vector<GpuParticle> layers{near, far};
+    const float both = render_frame(*device, flame_pass, layers, on).total_radiance;
+    CHECK(std::abs(both - near_radiance - far_radiance) <
+          (near_radiance + far_radiance) * 0.005f); // margin for HDR half-float accumulation
+}
+
+TEST_CASE("flame V2 admission counts invalid and over-budget rows and names its pass") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass pass(*device, 2, FxBlendMode::Flame);
+    FxSettings on{};
+    on.enabled = true;
+    const GpuParticle valid = smoke(0.0f, 4.0f, 4.0f, 4.0f);
+    GpuParticle bad_position = valid;
+    bad_position.position_size[0] = std::numeric_limits<float>::infinity();
+    GpuParticle bad_size = valid;
+    bad_size.position_size[3] = -1.0f;
+    GpuParticle bad_color = valid;
+    bad_color.color_alpha[3] = std::numeric_limits<float>::quiet_NaN();
+    const auto reference = render_frame(*device, pass, {&valid, 1}, on);
+    const std::vector<GpuParticle> mixed{bad_position, valid, bad_size, bad_color, valid};
+    on.max_particles = 1;
+    const auto before = pass.particles_dropped();
+    CHECK(render_frame(*device, pass, mixed, on).bytes == reference.bytes);
+    CHECK(pass.particles_dropped() - before == 4);
+    CHECK(pass.capacity() == 2);
+
+    RenderGraph graph(*device);
+    const RGTexture hdr = graph.create_texture({{kSize, kSize}, kHdrFormat, "flame-admit-hdr"});
+    const RGTexture depth =
+        graph.create_texture({{kSize, kSize}, kDepthFormat, "flame-admit-depth"});
+    pass.add(graph, hdr, depth, {&valid, 1}, make_view().fx, FxSettings{});
+    CHECK(graph.pass_count() == 0);
+    pass.add(graph, hdr, depth, {}, make_view().fx, on);
+    CHECK(graph.pass_count() == 0);
+    on.max_particles = 0;
+    const auto before_zero = pass.particles_dropped();
+    pass.add(graph, hdr, depth, mixed, make_view().fx, on);
+    CHECK(graph.pass_count() == 0);
+    CHECK(pass.particles_dropped() - before_zero == mixed.size());
+    on.max_particles = 4;
+    FxView bad_view = make_view().fx;
+    bad_view.up = bad_view.right;
+    const auto before_view = pass.particles_dropped();
+    pass.add(graph, hdr, depth, {&valid, 1}, bad_view, on);
+    CHECK(graph.pass_count() == 0);
+    CHECK(pass.particles_dropped() - before_view == 1);
+    on.intensity = std::numeric_limits<float>::quiet_NaN();
+    const auto before_intensity = pass.particles_dropped();
+    pass.add(graph, hdr, depth, {&valid, 1}, make_view().fx, on);
+    CHECK(graph.pass_count() == 0);
+    CHECK(pass.particles_dropped() - before_intensity == 1);
+    on.intensity = 1.0f;
+    const auto before_cap = pass.particles_dropped();
+    const std::vector<GpuParticle> three{valid, valid, valid};
+    pass.add(graph, hdr, depth, three, make_view().fx, on);
+    REQUIRE(graph.pass_count() == 1);
+    CHECK(graph.pass_name(0) == "fx-flame");
+    CHECK(pass.particles_dropped() - before_cap == 1); // pass capacity independently bounds draw
+}
+
+TEST_CASE("smoke V2 density is deterministic and breaks radial symmetry with black occlusion") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass pass(*device, 4, FxBlendMode::SmokeAlpha);
+    FxSettings on{};
+    on.enabled = true;
+    const GpuParticle grey = smoke(0.0f, 0.5f, 0.5f, 0.5f);
+    const auto frame = render_frame(*device, pass, {&grey, 1}, on);
+    CHECK(render_frame(*device, pass, {&grey, 1}, on).bytes == frame.bytes);
+    const auto image = decode_hdr(frame.bytes, kSize, kSize);
+    float asymmetry = 0.0f;
+    for (std::uint32_t y = 0; y < kSize; ++y)
+        for (std::uint32_t x = 0; x < kSize; ++x)
+            asymmetry += std::abs(image.luminance(x, y) - image.luminance(kSize - 1 - x, y));
+    REQUIRE(frame.total_radiance > 0.0f);
+    // A radial puff has equal samples at equal radii. This control measures density breakup,
+    // without pinning a noise pattern or depending on any particular driver's sine precision.
+    CHECK(asymmetry > frame.total_radiance * 0.02f);
+
+    const auto bright = render_frame(*device, pass, {}, on, 1.0f, 1.0f);
+    on.intensity = 0.0f;
+    const auto dark_smoke = render_frame(*device, pass, {&grey, 1}, on, 1.0f, 1.0f);
+    CHECK(dark_smoke.total_radiance < bright.total_radiance);
+    CHECK(dark_smoke.bytes != bright.bytes); // zero light must retain smoke opacity
+}
+
+TEST_CASE("flame V2 preserves occluder depth for a following translucent pass") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass flame_pass(*device, 4, FxBlendMode::Flame);
+    FxParticlePass smoke_pass(*device, 4, FxBlendMode::SmokeAlpha);
+    FxSettings on{};
+    on.enabled = true;
+    const GpuParticle source = smoke(0.0f, 4.0f, 4.0f, 4.0f);
+    const auto baseline = render_frame(*device, flame_pass, {}, on, 0.0f, 0.4f);
+    const auto occluded =
+        render_frame(*device, flame_pass, {&source, 1}, on, 0.0f, 0.4f, &smoke_pass);
+    CHECK(occluded.bytes == baseline.bytes);
+    const auto visible =
+        render_frame(*device, flame_pass, {&source, 1}, on, 1.0f, 0.4f, &smoke_pass);
+    CHECK(visible.total_radiance > baseline.total_radiance);
+    CHECK(flame_pass.particles_drawn() == 2);
+    CHECK(smoke_pass.particles_drawn() == 2); // both draws submitted; depth rejected hidden pixels
 }

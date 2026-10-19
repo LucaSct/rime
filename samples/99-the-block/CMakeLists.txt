@@ -10,6 +10,7 @@
 # the one file whose merge mistakes are hardest to spot. A line each, and git merges them.
 add_executable(the_block
     main.cpp
+    authored_environment.cpp
     play_arm_ik.cpp
     play_building_support.cpp
     play_city.cpp
@@ -39,7 +40,7 @@ target_link_libraries(the_block
             rime::platform
             rime::ecs
             rime::core)
-target_link_libraries(the_block PRIVATE rime::vfx)
+target_link_libraries(the_block PRIVATE rime::vfx rime::vfx_scene rime::fluids_render)
 
 rime_apply_common_target_options(the_block)
 # Same binary/content/provenance seam as hello-game, with a distinct development profile.

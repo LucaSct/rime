@@ -29,6 +29,26 @@ struct EffectsStats {
     std::uint64_t deferred_particles = 0; // current gauge; pool admission has separate field stats
 };
 
+// Renderer-independent presentation: games and the editor use the same accepted source state.
+// These are cosmetic billboards, not burning matter, fuel, heat or gameplay collision.
+struct FlamePresentation {
+    core::Vec3 position{};
+    float half_size = 0.0f;
+    core::Vec3 color{1.0f, 0.35f, 0.06f};
+    float opacity = 0.0f;
+};
+
+struct SmokeAppearance {
+    core::Vec3 color{};
+    float opacity = 0.0f;
+};
+
+// Soft birth/retirement and bounded local fire illumination. No wall clock, random stream or
+// renderer state enters this function; a paused particle/light snapshot gives identical output.
+[[nodiscard]] SmokeAppearance
+smoke_appearance(const vfx::Particle& particle,
+                 std::span<const vfx::FireLightContribution> lights) noexcept;
+
 // A reusable, renderer-free consumer for editor previews or a game's cosmetic presentation.
 // Single owner thread, after transforms are derived. No ECS mutations or gameplay forces.
 // Admission is ordered by (entity index, generation, kind), independently of archetype layout.
@@ -37,6 +57,7 @@ class Effects {
 public:
     static constexpr std::size_t max_sources = 16;
     static constexpr std::size_t max_particles = 256;
+    static constexpr std::size_t max_flames = max_sources * 3;
 
     Effects();
     // Reconcile removals/disable/invalid edits even while paused, without aging or emitting.
@@ -52,6 +73,10 @@ public:
 
     [[nodiscard]] std::span<const vfx::FireLightContribution> lights() const noexcept {
         return {lights_.data(), light_count_};
+    }
+
+    [[nodiscard]] std::span<const FlamePresentation> flames() const noexcept {
+        return {flames_.data(), flame_count_};
     }
 
     [[nodiscard]] std::size_t source_count() const noexcept { return sources_.size(); }
@@ -82,6 +107,9 @@ private:
     std::vector<Source> sources_, next_sources_;
     std::array<vfx::FireLightContribution, max_sources> lights_{};
     std::size_t light_count_ = 0;
+    std::array<FlamePresentation, max_flames> flames_{};
+    std::size_t flame_count_ = 0;
+    double presentation_seconds_ = 0.0;
     bool has_tick_ = false;
     std::uint64_t last_tick_ = 0;
     EffectsStats stats_{};

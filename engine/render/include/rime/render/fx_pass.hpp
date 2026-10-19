@@ -58,9 +58,9 @@ struct FxSettings {
     bool enabled = false;
 
     // A global multiplier on every particle's RGB, for authoring and for the proof's negative
-    // control. 0 draws the pass with nothing visible, which is NOT the same as `enabled = false`:
-    // the pass still runs, still binds, still blends. Keeping the two distinguishable is what lets
-    // a test tell "the gate is off" from "the gate is on and the content is dark".
+    // control. 0 suppresses additive/flame emission; smoke still attenuates the background with
+    // black opacity. This differs from `enabled = false`: the pass still runs, binds and blends.
+    // Keeping the two distinguishable lets a test tell "off" from "on with dark content".
     float intensity = 1.0f;
 
     // The draw budget. Zero submits no draw. Particles past it are not drawn — the CPU sim has its
@@ -92,7 +92,9 @@ struct FxView {
     core::Vec3 up{0.0f, 1.0f, 0.0f};    // camera up, world space, unit
 };
 
-enum class FxBlendMode { Additive, SmokeAlpha };
+// Flame uses additive radiance with a procedural tapered silhouette. Its size is the base
+// half-size: the billboard spans 0.55 times that horizontally and 1.5 times it vertically.
+enum class FxBlendMode { Additive, SmokeAlpha, Flame };
 
 class FxParticlePass {
 public:

@@ -79,6 +79,7 @@
 #include <utility>
 #include <vector>
 
+#include "authored_environment.hpp"
 #include "play_building_support.hpp"
 #include "play_city.hpp"
 #include "play_effects.hpp"
@@ -89,6 +90,7 @@
 #include "play_weapon_fx.hpp"
 #include "play_weapon_policy.hpp"
 #include "play_world.hpp"
+#include "player_spawn.hpp"
 #include "rime/app/application.hpp"
 #include "rime/app/content_root.hpp"
 #include "rime/assets/asset_server.hpp"
@@ -227,8 +229,8 @@ bool g_island_profile = false;
 // tidiness: `ecs::component_schema_hash` goes into `NetDriver::Config`, and two peers that
 // registered different sets refuse to connect. Both peers calling one function cannot disagree.
 void register_all(ecs::World& world) {
-    (void)worldkit::register_engine_components(world);
-    blockkit::register_blockkit_components(world); // the game's own, layered on the engine's
+    block_play::register_block_components(
+        world); // engine + game + PlayerSpawn, shared with the host
 }
 
 // How many debris bodies are still LIVE (not frozen by the C6 budget). The roster is append-only,
@@ -418,6 +420,11 @@ struct Peer {
     bool city = false;
     bool city_patterns = false;
 
+    // The map's authored player spawn, resolved once in stand_up after the transforms exist
+    // (player_spawn.hpp). `None` for every map without an enabled marker, which keeps the old
+    // west-viewpoint default; copied data, so it outlives structural changes to `world`.
+    block_play::SpawnResolution spawn;
+
     // HAND THE PHYSICS A JOB SYSTEM (m17.5). Without this pointer `PhysicsWorld` takes the
     // sequential island solve — same answer, one thread — and it had been taking it here since the
     // demo was written: each peer owned a job system and spent it only on
@@ -540,6 +547,28 @@ struct Peer {
         }
         (void)blockkit::derive_world_transforms(world);
 
+        // THE AUTHORED SPAWN, resolved before anything gameplay-side starts. An enabled marker that
+        // cannot be honoured stops the run here with the reason: starting the player at the old
+        // default instead would hide an author's mistake. Both peers resolve (same file, same
+        // answer); only the server announces it, so the line appears once.
+        spawn = block_play::resolve_player_spawn(world);
+        if (spawn.status == block_play::SpawnStatus::Refused) {
+            std::fprintf(stderr,
+                         "99-the-block: refusing player spawn (%zu enabled): %s\n",
+                         spawn.enabled_count,
+                         spawn.reason.c_str());
+            return false;
+        }
+        if (spawn.status == block_play::SpawnStatus::Valid && own_destructibles) {
+            std::printf("99-the-block: authored player spawn: capsule centre (%.3f, %.3f, %.3f) m, "
+                        "yaw %.4f rad, pitch %.4f rad\n",
+                        static_cast<double>(spawn.placement.capsule_centre.x),
+                        static_cast<double>(spawn.placement.capsule_centre.y),
+                        static_cast<double>(spawn.placement.capsule_centre.z),
+                        static_cast<double>(spawn.placement.yaw),
+                        static_cast<double>(spawn.placement.pitch));
+        }
+
         // THE GROUND, from the scene rather than from a formula (m17.8). It used to be a static box
         // built here, before the load, from `BlockParams` — half-extent 44 against a drawn surface
         // of 38, so six metres of the world were standable and invisible. Now the surface is
@@ -638,8 +667,13 @@ struct ServerPeer : Peer {
     // `GameplayServer` deliberately refuses to make on a game's behalf.
     ecs::Entity spawn_avatar(net::SessionId) {
         core::Transform placement;
-        placement.translation = blockkit::west_viewpoint(blockkit::BlockParams{});
-        placement.translation.y = character.half_height + character.radius;
+        if (spawn.status == block_play::SpawnStatus::Valid) {
+            // Authored: the marker IS the capsule centre, so no height adjustment.
+            placement.translation = spawn.placement.capsule_centre;
+        } else {
+            placement.translation = blockkit::west_viewpoint(blockkit::BlockParams{});
+            placement.translation.y = character.half_height + character.radius;
+        }
 
         physics::RigidBody body;
         body.motion = static_cast<std::uint32_t>(physics::MotionType::Kinematic);
@@ -1100,7 +1134,11 @@ struct Session {
         }
 
         if (play_world) {
+            // Recovery returns to the SAME place the avatar started: the authored marker when the
+            // map has one, otherwise the old west spawn.
             const core::Vec3 spawn = [&] {
+                if (server.spawn.status == block_play::SpawnStatus::Valid)
+                    return server.spawn.placement.capsule_centre;
                 core::Vec3 p = blockkit::west_viewpoint(blockkit::BlockParams{});
                 p.y = server.character.half_height + server.character.radius;
                 return p;
@@ -1656,6 +1694,7 @@ struct Visuals {
     render::MeshRegistry meshes;
     render::MaterialRegistry materials;
     destruction_render::PartLeafRenderer leaves;
+    block_play::AuthoredEnvironment authored_environment;
     render::SceneRenderer renderer;
     std::unique_ptr<render::SceneRenderer> scope_renderer;
     render::text::HudRenderer hud;
@@ -1680,7 +1719,8 @@ struct Visuals {
     std::uint64_t spot_maps_total = 0; // rendered + reused
 
     explicit Visuals(rhi::Device& device)
-        : meshes(device), renderer(device, meshes, materials), hud(device, render::kLdrFormat) {
+        : meshes(device), authored_environment(&device), renderer(device, meshes, materials),
+          hud(device, render::kLdrFormat) {
         // ── THE WHOLE M10 STACK, ON (m13.L) ──────────────────────────────────────────────────────
         //
         // It was not, and that is worth writing down rather than quietly fixing. m13.5 set
@@ -1951,7 +1991,9 @@ struct Demo {
                 return false;
             }
             session.play_world = play_world.get();
-            const core::Vec3 spawn = blockkit::west_viewpoint(blockkit::BlockParams{});
+            const core::Vec3 spawn = session.server.spawn.status == block_play::SpawnStatus::Valid
+                                         ? session.server.spawn.placement.capsule_centre
+                                         : blockkit::west_viewpoint(blockkit::BlockParams{});
             if (!play_world->prepare(session.server.world,
                                      session.server.destruction,
                                      session.client.world,
@@ -2160,6 +2202,7 @@ struct Demo {
                 settings.max_particles = block_play::PlayEffects::kParticleCapacity;
                 visuals->scope_renderer->set_smoke_particles(smoke_particles, settings);
             }
+            visuals->authored_environment.apply_to(*visuals->scope_renderer);
         }
     }
 
@@ -2225,6 +2268,8 @@ struct Demo {
     // One simulation tick, plus everything downstream of it that is not drawing.
     void step_sim(const replication::InputCommand& intent) {
         session.tick(intent);
+        if (visuals)
+            (void)visuals->authored_environment.tick(session.client.world, session.tick_index, kDt);
         if (effects)
             (void)effects->tick(
                 session.tick_index, session.client.destruction.events(), static_cast<float>(kDt));
@@ -2395,6 +2440,8 @@ struct Demo {
             if (visuals->scope_renderer)
                 visuals->scope_renderer->set_smoke_particles(smoke_particles, settings);
         }
+        visuals->authored_environment.publish(
+            world, smoke_particles, visuals->renderer, visuals->scope_renderer.get());
         if (weapon_fx) {
             weapon_fx->advance(static_cast<float>(ctx.frame_dt));
         }
@@ -5645,8 +5692,15 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path, u
         play_sunset::apply(demo.session.server.world);
         play_sunset::apply(demo.session.client.world);
     } // Saved maps own their lighting: Run must not silently replace an editor's sun edits.
-    demo.session.client.view.yaw = play_sunset::kViewYaw;
-    demo.session.client.view.pitch = play_sunset::kViewPitch;
+    // The initial look: the authored spawn's heading when the map has one, else the sun-facing
+    // preset. Decided once, here, and read back below so the handshake input cannot disagree.
+    if (demo.session.client.spawn.status == block_play::SpawnStatus::Valid) {
+        demo.session.client.view.yaw = demo.session.client.spawn.placement.yaw;
+        demo.session.client.view.pitch = demo.session.client.spawn.placement.pitch;
+    } else {
+        demo.session.client.view.yaw = play_sunset::kViewYaw;
+        demo.session.client.view.pitch = play_sunset::kViewPitch;
+    }
     if (auto* camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera)) {
         // The outer 8x8 LOD5 square guarantees at least 4 km of ground around the eye,
         // including immediately before a recenter. Show several kilometres of that cover.
@@ -5666,12 +5720,31 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path, u
     if (demo.viewmodel) {
         // Complete the local startup handshake before warming its replicated render scene.
         gameplay::CharacterInput idle{};
-        idle.yaw = play_sunset::kViewYaw;
-        idle.pitch = play_sunset::kViewPitch;
+        idle.yaw = demo.session.client.view.yaw;
+        idle.pitch = demo.session.client.view.pitch;
         for (unsigned i = 0; i < 30; ++i)
             demo.step_sim(gameplay_net::to_input_command(idle));
         if (!demo.warm_scope_view())
             return 1;
+    }
+    if (demo.session.server.spawn.status == block_play::SpawnStatus::Valid &&
+        !demo.session.server.avatars.empty() && demo.session.client.predictor.seeded()) {
+        // A resolved marker alone does not prove the server placed its avatar there or that
+        // the client received it. Observe both live poses after the existing startup handshake.
+        const auto* authoritative = demo.session.server.world.get<gameplay::CharacterState>(
+            demo.session.server.avatars.front());
+        const auto predicted = demo.session.client.eye_anchor();
+        if (authoritative)
+            std::printf("99-the-block: authored player ready: authority (%.3f, %.3f, %.3f), "
+                        "predicted (%.3f, %.3f, %.3f), look (%.4f, %.4f)\n",
+                        double(authoritative->position.x),
+                        double(authoritative->position.y),
+                        double(authoritative->position.z),
+                        double(predicted.x),
+                        double(predicted.y),
+                        double(predicted.z),
+                        double(demo.session.client.view.yaw),
+                        double(demo.session.client.view.pitch));
     }
     gameplay::InputBindings bindings{};
 

@@ -25,7 +25,7 @@ latent plateau temperature stays at 273.15 K while the liquid mass fraction
 changes. The overlay reads numerical state, not a timer-driven colour animation.
 
 The heater brazier and chimney use existing authored fire/smoke sources. Fire
-provides cosmetic light/smoke; the +100 kW is a separate explicit thermal source.
+provides cosmetic flames, light and smoke; the +100 kW is a separate explicit thermal source.
 Turning a cosmetic fire off does not implicitly extinguish the thermal source.
 This small city diorama uses built-in meshes/materials and needs no downloads,
 asset cook or external texture. Source/palette roles reconstruct draw data when
@@ -41,7 +41,8 @@ See the [creator workflow and controls](../../docs/creator-workflow.md).
 **Hold right mouse while pressing WASD** to move; Q/E down/up, Shift faster,
 right-drag to look. Release right mouse for W/E/R object tools. Wheel over the
 viewport moves closer/farther. The editor stream remains 960×540, so a large
-panel can look soft; camera dolly is not image enlargement.
+panel can look soft; camera dolly is not image enlargement. The image now keeps its
+aspect with letterboxing, and the bars do not start selection/navigation gestures.
 
 Open View → Outliner to select meshless sources. Filter → Effects (smoke / fire)
 finds emitters, Filter → Thermal (water / ice) finds thermal descriptions, and
@@ -55,7 +56,9 @@ library and clickable emitter icons are future work.
 Press Play or Step. Click a tray to inspect its `ThermalCell`, opt-in
 `ThermalSurface` and read-only thermal preview values. Edit initial mass,
 temperature and liquid fraction; source entities hold signed `power_watts` and a
-reference to their tray. Relevant cell/contact/source edits restart the whole
+reference to their tray. Source/contact references now offer readable ThermalCell
+choices and an exact numeric fallback; ordinary undo and save preserve the choice.
+Relevant cell/contact/source edits restart the whole
 thermal graph from initial conditions, including on Pause. Appearance enable
 changes only the visual binding. Stop restores the authored scene. Use Save As
 for an experiment, then reopen it with the same courtyard host.
@@ -99,7 +102,11 @@ content (`scene.cpp`) and a small standalone/editor composition (`main.cpp`).
 This is an opaque **phase presentation on fixed meshes**, not flowing water,
 transparent/refraction optics, geometric ice thickness, expansion, collision or
 breakable sheets. The colour/roughness blend visualizes liquid **mass** fraction;
-immutable mipmapped normal/tint maps add cosmetic ripples and frost veins.
+immutable mipmapped normal/tint maps add V2 multiscale directional ripples and
+branching frost veins. Liquid detail is quantized in eighths; the nearly frozen
+endpoint shares the same static frost map as fully frozen ice. Thermal energy and
+fraction remain continuous. Fire adds at most three tapered sprites per source;
+smoke has soft lifetime fades, procedural density and approximate fire lighting.
 Pause/refusal hold their committed clock; rebuild restarts it.
 It does not infer solid volume. There is no fuel/spread/damage authority or
 multiplayer shipment proof. M18/performance and inherited city/block gates remain

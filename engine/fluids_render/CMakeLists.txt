@@ -1,5 +1,5 @@
 # Optional validated thermal state -> transient rendering factors. Neither lower module knows it.
-add_library(rime_fluids_render STATIC src/phase_surface.cpp src/phase_detail.cpp)
+add_library(rime_fluids_render STATIC src/phase_surface.cpp src/phase_detail.cpp src/phase_maps.cpp)
 add_library(rime::fluids_render ALIAS rime_fluids_render)
 target_include_directories(rime_fluids_render PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>

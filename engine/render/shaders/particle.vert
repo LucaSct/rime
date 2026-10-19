@@ -38,7 +38,8 @@ layout(push_constant) uniform Pc {
 
 layout(location = 0) out vec2 out_uv;
 layout(location = 1) out vec4 out_color;
-layout(location = 2) flat out int out_smoke;
+layout(location = 2) flat out int out_mode;
+layout(location = 3) flat out vec2 out_noise_origin;
 
 void main() {
     // Two triangles from six indices, in the corner order (-1,-1) (1,-1) (-1,1) / (-1,1) (1,-1)
@@ -55,11 +56,21 @@ void main() {
 
     const vec3 centre = p.position_size.xyz;
     const float half_size = p.position_size.w;
-    const vec3 world = centre + pc.camera_right.xyz * (corner.x * half_size) +
-                       pc.camera_up.xyz * (corner.y * half_size);
+    const int mode = pc.camera_right.w > 1.5 ? 2 : (pc.camera_right.w > 0.5 ? 1 : 0);
+    // Flame needs vertical room for a tongue, rather than the square puff used by dust/smoke.
+    // Keep the original additive geometry expression intact for its pixel regression bridge.
+    vec3 world = centre + pc.camera_right.xyz * (corner.x * half_size) +
+                 pc.camera_up.xyz * (corner.y * half_size);
+    if (mode == 2) {
+        world = centre + pc.camera_right.xyz * (corner.x * half_size * 0.55) +
+                pc.camera_up.xyz * (corner.y * half_size * 1.5);
+    }
 
     gl_Position = pc.view_proj * vec4(world, 1.0);
     out_uv = corner;            // [-1,1]² — the fragment stage's radial falloff domain
     out_color = p.color_alpha;
-    out_smoke = pc.camera_right.w > 0.5 ? 1 : 0;
+    out_mode = mode;
+    // Continuous world-space offsets give nearby puffs related but different detail, without a
+    // clock, random frame seed, or quantized position hash that pops when a puff moves.
+    out_noise_origin = centre.xz * 0.71 + vec2(centre.y * 0.37, half_size * 0.83);
 }

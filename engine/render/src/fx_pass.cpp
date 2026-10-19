@@ -76,7 +76,9 @@ FxParticlePass::FxParticlePass(rhi::Device& device, std::uint32_t max_particles,
     // statically but vkCmdPushConstants was not called", which points at the call site rather than
     // at the missing declaration.)
     pd.push_constant_size = sizeof(FxPush);
-    pd.debug_name = blend_ == FxBlendMode::SmokeAlpha ? "fx-smoke" : "fx-particles";
+    pd.debug_name = blend_ == FxBlendMode::SmokeAlpha ? "fx-smoke"
+                    : blend_ == FxBlendMode::Flame    ? "fx-flame"
+                                                      : "fx-particles";
     pipeline_ = device.create_graphics_pipeline(pd);
 
     (void)set_frames_in_flight(2);
@@ -96,7 +98,7 @@ bool FxParticlePass::set_frames_in_flight(std::uint32_t frames) {
     // host-visible memory exists for. A device-local buffer plus a staging copy would be faster to
     // read and slower to write, and the read side here is one fetch per particle per vertex.
     bd.memory = rhi::MemoryUsage::CpuToGpu;
-    bd.debug_name = "fx-particle-instances";
+    bd.debug_name = blend_ == FxBlendMode::Flame ? "fx-flame-instances" : "fx-particle-instances";
     for (std::uint32_t i = 0; i < frames + 1; ++i)
         instances_.push_back(device_.create_buffer(bd));
     return true;
@@ -132,7 +134,7 @@ void FxParticlePass::add(RenderGraph& graph,
     std::vector<GpuParticle> scaled;
     scaled.reserve(std::min<std::size_t>(particles.size(), budget));
     const float scale = std::max(settings.intensity, 0.0f);
-    if (blend_ == FxBlendMode::SmokeAlpha) {
+    if (blend_ != FxBlendMode::Additive) {
         const core::Vec3 back = core::cross(view.right, view.up);
         const auto finite3 = [](core::Vec3 v) {
             return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
@@ -168,15 +170,17 @@ void FxParticlePass::add(RenderGraph& graph,
             }
             scaled.push_back(candidate);
         }
-        std::stable_sort(
-            scaled.begin(), scaled.end(), [back](const GpuParticle& a, const GpuParticle& b) {
-                const auto projection = [back](const GpuParticle& p) {
-                    return static_cast<double>(p.position_size[0]) * back.x +
-                           static_cast<double>(p.position_size[1]) * back.y +
-                           static_cast<double>(p.position_size[2]) * back.z;
-                };
-                return projection(a) < projection(b);
-            });
+        // Only straight-alpha smoke needs sorting; flame is additive and retains caller order.
+        if (blend_ == FxBlendMode::SmokeAlpha)
+            std::stable_sort(
+                scaled.begin(), scaled.end(), [back](const GpuParticle& a, const GpuParticle& b) {
+                    const auto projection = [back](const GpuParticle& p) {
+                        return static_cast<double>(p.position_size[0]) * back.x +
+                               static_cast<double>(p.position_size[1]) * back.y +
+                               static_cast<double>(p.position_size[2]) * back.z;
+                    };
+                    return projection(a) < projection(b);
+                });
     } else {
         const std::uint32_t count = static_cast<std::uint32_t>(
             std::min<std::size_t>(particles.size(), static_cast<std::size_t>(budget)));
@@ -202,7 +206,9 @@ void FxParticlePass::add(RenderGraph& graph,
     push.right[0] = view.right.x;
     push.right[1] = view.right.y;
     push.right[2] = view.right.z;
-    push.right[3] = blend_ == FxBlendMode::SmokeAlpha ? 1.0f : 0.0f;
+    push.right[3] = blend_ == FxBlendMode::SmokeAlpha ? 1.0f
+                    : blend_ == FxBlendMode::Flame    ? 2.0f
+                                                      : 0.0f;
     push.up[0] = view.up.x;
     push.up[1] = view.up.y;
     push.up[2] = view.up.z;
@@ -214,7 +220,9 @@ void FxParticlePass::add(RenderGraph& graph,
     RGDepthAttachment depth_att{};
     depth_att.texture = depth;
     depth_att.load = rhi::LoadOp::Load;
-    depth_att.store = rhi::StoreOp::DontCare;
+    // Later translucent passes load the same depth. Read-only prevents shader writes, but
+    // DontCare would still allow the render-pass store operation to discard the attachment.
+    depth_att.store = rhi::StoreOp::Store;
     depth_att.read_only = true;
 
     RenderGraph::RasterPassDesc desc{};
@@ -223,7 +231,9 @@ void FxParticlePass::add(RenderGraph& graph,
 
     const rhi::PipelineHandle pipeline = pipeline_;
     const std::uint32_t instance_count = count;
-    graph.add_raster_pass(blend_ == FxBlendMode::SmokeAlpha ? "fx-smoke" : "fx-particles",
+    graph.add_raster_pass(blend_ == FxBlendMode::SmokeAlpha ? "fx-smoke"
+                          : blend_ == FxBlendMode::Flame    ? "fx-flame"
+                                                            : "fx-particles",
                           desc,
                           [pipeline, instances, instance_count, push](rhi::CommandBuffer& cmd) {
                               cmd.bind_pipeline(pipeline);

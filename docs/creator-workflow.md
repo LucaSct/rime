@@ -29,6 +29,12 @@ This opens the expanded city in the native editor. Its persistent map is
 Use `./scripts/city-editor.sh --scene /absolute/path/map.rscene` to open an
 existing map. The launcher supplies the game's component/preview host and cooks.
 
+For the V2 showcase, run `./scripts/city-v2.sh`. It creates an editable
+`build/release/city-v2.rscene` copy on first launch, with a player spawn, fire,
+smoke, a rippling water sheet and a blue frost sheet in low timber basins. Later
+launches keep your edits. Press Preview to inspect effects in the editor, or Run game for weapons
+and the authored player position. Frost Yard remains the freezing/melting demo.
+
 Press **Run game** in the top toolbar. The editor saves the current document,
 waits for success, then opens the full city game in a separate window. A save
 refusal never launches an older copy. Stop editor Preview first if Run is disabled.
@@ -38,8 +44,22 @@ Closing the editor leaves the launched game running; Escape closes that game.
 In the game: **WASD** moves, mouse looks, **left mouse** shoots, **Q/right mouse**
 aims, **R** reloads, **1/2/3** selects SCAR-H/M4A1/MSR, and **F** detonates the
 sample charge. The game's player spawn/camera policy is sample-owned. The editor
-camera position is not a player spawn authoring tool. Preview's triangle runs
+camera position is not a player spawn authoring tool. To author a spawn, use
+**+ spawn → Inspector → + add component → PlayerSpawn**, set LocalTransform and
+check `enabled`. Position is the **capsule centre**, not the feet or eye; rotation
+sets initial yaw/pitch and scale does not size the player. Outliner → Filter →
+Gameplay finds these markers. Exactly one may be enabled; invalid or duplicate
+spawns refuse startup with a reason. With none, the original default remains.
+Initial position, look and out-of-bounds recovery use the saved marker. Spawn
+overlap checks, teams and dynamic selection are future work. Preview's triangle runs
 scene systems in the editor; it does not possess the complete weapon player.
+
+Enabled smoke/fire/thermal descriptions now also run in the full city, without
+the separate scripted `--effects-preview` flag. Main and scope views share the
+same presentation. These effects are client-local cosmetics: thermal phase does
+not change collision or damage, and the city's current environment transforms
+remain flat. An invalid thermal graph reports refusal while valid fire can keep
+running. Maps without enabled descriptions allocate no phase-detail atlas or FX pass.
 
 Export the saved city to a new folder outside the checkout:
 
@@ -70,13 +90,15 @@ not an object undo operation. Today the editor navigates the scene's camera,
 so saving the scene also saves that camera position; independent editor/game
 cameras and focus-selection/orbit controls are future work.
 
-The editor stream is currently **960×540**, stretched to fit its dock panel.
-Making that panel huge cannot create more pixels; mismatched panel aspect also
-stretches the image. Dolly reveals closer geometry, but textures and mesh detail
+The editor stream is currently **960×540**, fitted inside its dock panel with
+letterboxing to preserve its aspect. Picking, gizmos and navigation use the
+displayed image; the bars do not start scene gestures. Making that panel huge
+cannot create more pixels. Dolly reveals closer geometry, but textures and mesh detail
 still have finite resolution. Mipmaps reduce distant texture shimmer; temporal
 antialiasing can soften moving details. Native standalone rendering uses the
 actual window framebuffer, independently of this fixed editor stream. Adaptive
-viewport resolution and aspect-preserving presentation remain needed.
+viewport resolution remains future work. Camera navigation works during Preview
+and Pause; Stop restores the authored camera, and the next movement starts there.
 
 ## Find smoke, fire, water and ice
 
@@ -117,15 +139,23 @@ heating/cooling is an explicit **ThermalSource** referencing that cell.
 Temperature, mass and latent heat determine its phase. The inspector shows the
 accepted runtime values separately from authored initial values. Relevant thermal
 edits rebuild the whole graph from its initial conditions, even when paused.
-The source/cell references currently require choosing scene identities through
-numeric reflected fields; a friendly entity picker remains missing.
+Source/contact references offer readable ThermalCell choices with stable editor
+ids, plus None to clear. Missing/external references stay visible until explicitly
+changed. The exact numeric field remains available; the engine validates the
+chosen live reference. These choices use the ordinary undo and save paths.
 
 Frost Yard demonstrates cooling/freezing, heating/melting and an unheated control.
-Its ice has static blue frost veins; liquid has moving normal detail whose strength
-falls with liquid mass fraction. Pause/refusal hold the last accepted appearance,
+Its V2 ice has branching blue frost veins and polished variation; liquid has
+directional swell, chop and finer ripples. Immutable maps blend these slopes in
+eight liquid steps, so nearly frozen water approaches the static frost endpoint
+without a final abrupt normal switch. Pause/refusal hold the last accepted appearance,
 and graph rebuild restarts its cosmetic clock. These details do not create flowing
 water, ice thickness, collision, or transparent/refraction optics. Fire VFX and its
-thermal power source remain separate, explicitly authored things.
+thermal power source remain separate, explicitly authored things. Fire now has
+animated tapered flames as well as light and smoke; smoke has procedural density,
+soft lifetime fades and approximate local fire illumination. Pause freezes their
+accepted presentation clock; extinguish removes flame/light while old smoke
+ages out. These additions do not implement combustion or flowing water.
 
 ## What professional teams build
 

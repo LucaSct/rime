@@ -568,6 +568,8 @@ int serve_viewport(std::string_view socket_path,
     std::uint64_t effects_tick = 0;
     std::vector<render::GpuParticle> effect_particles;
     effect_particles.reserve(vfx_scene::Effects::max_particles);
+    std::vector<render::GpuParticle> flame_particles;
+    flame_particles.reserve(vfx_scene::Effects::max_flames);
 
     // ── Client input (m18 Track H, ADR-0054) ─────────────────────────────────────────────────
     // The browser page sends `stream::InputEvent`s over the same connection the editor band uses,
@@ -636,14 +638,24 @@ int serve_viewport(std::string_view socket_path,
         (void)renderer.set_surface_appearances(phase_surfaces.span());
         effect_particles.clear();
         for (const auto& p : effects.field().particles()) {
-            const float opacity = 0.3f * std::max(0.0f, 1.0f - p.age / p.lifetime);
-            effect_particles.push_back({{p.position.x, p.position.y, p.position.z, p.size},
-                                        {0.35f, 0.35f, 0.35f, opacity}});
+            const auto appearance = vfx_scene::smoke_appearance(p, effects.lights());
+            effect_particles.push_back(
+                {{p.position.x, p.position.y, p.position.z, p.size},
+                 {appearance.color.x, appearance.color.y, appearance.color.z, appearance.opacity}});
         }
         render::FxSettings fx{};
         fx.enabled = !effect_particles.empty();
         fx.max_particles = vfx_scene::Effects::max_particles;
         renderer.set_smoke_particles(effect_particles, fx);
+        flame_particles.clear();
+        for (const auto& flame : effects.flames())
+            flame_particles.push_back(
+                {{flame.position.x, flame.position.y, flame.position.z, flame.half_size},
+                 {flame.color.x, flame.color.y, flame.color.z, flame.opacity}});
+        render::FxSettings flame_fx{};
+        flame_fx.enabled = !flame_particles.empty();
+        flame_fx.max_particles = vfx_scene::Effects::max_flames;
+        renderer.set_flame_particles(flame_particles, flame_fx);
         std::array<render::GpuPointLight, vfx_scene::Effects::max_sources> fire_lights{};
         std::size_t fire_light_count = 0;
         for (const auto& light : effects.lights()) {

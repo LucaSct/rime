@@ -121,3 +121,5 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0091](0091-fixed-mass-thermal-phase-reference.md) — provisional fixed-mass water/ice energy reference, explicit liquid mass fraction, transactional heat accounting and exact-arithmetic verification.
 - [ADR-0096](0096-committed-phase-detail-and-editor-discovery.md) — immutable cosmetic water ripples, static frost veins, committed presentation clock, wheel dolly and source discovery.
 - [ADR-0097](0097-city-editor-run-and-development-bundle.md) — confirmed save before launching the full city runtime, derived preview exclusion and a separate Linux city development bundle.
+- [ADR-0098](0098-editor-navigation-and-environment-presentation-v2.md) — reconciled Preview camera ownership, aspect-preserving viewport interaction, thermal entity pickers and bounded flame/smoke/water/ice presentation V2.
+- [ADR-0099](0099-authored-city-spawns-and-runtime-environment.md) — sample-owned player spawn markers and bounded authored environment presentation shared by the city runtime and editor.

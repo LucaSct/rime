@@ -19,7 +19,7 @@
 //! thin, crash-isolated client of it, and **every edit is a [`commands::Command`]** — the same typed
 //! mutations a scripted test drives, which is what makes undo and the headless proof honest.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -37,6 +37,7 @@ use crate::gizmo::{self, DragSession, Snapping};
 #[cfg(test)]
 mod click_tests;
 mod commands;
+mod entity_picker;
 mod game_run;
 mod outliner;
 #[cfg(test)]
@@ -219,14 +220,68 @@ fn quat_from_yaw_pitch(yaw: f32, pitch: f32) -> gizmo::Quat {
 ///
 /// Yaw/pitch are kept HERE rather than re-derived from the entity's quaternion each frame, because
 /// round-tripping through a quaternion loses which way you came: at the poles the extracted angles
-/// jump, and a camera that flips when you look straight up is the classic symptom. Seeded once from
-/// the entity, then owned by the editor for the rest of the session.
+/// jump, and a camera that flips when you look straight up is the classic symptom. Keep them while
+/// navigating, but rebase when an inspector edit, camera replacement or Stop changes the pose.
 #[derive(Default)]
 struct FlyCam {
     yaw: f32,
     pitch: f32,
     pos: [f32; 3],
     seeded: bool,
+    key: Option<EntityId>,
+    local_hash: u64,
+    phase: Option<PlayPhase>,
+    last_blob: Vec<u8>,
+    snapshot_revision: u64,
+    // Baseline followed by our unacknowledged poses, in socket order.
+    pending: VecDeque<Vec<u8>>,
+    navigating: bool,
+}
+
+impl FlyCam {
+    /// Snapshot reconciliation: the UI runs ahead of the engine, so an old snapshot must not undo
+    /// movement accumulated since that snapshot was requested. Recognise our in-flight poses and
+    /// retain the latest local pose; an unfamiliar pose is an external edit and takes ownership.
+    /// A snapshot containing our latest output acknowledges the queue. Release requests one such
+    /// snapshot, bounding this optimistic history to the gesture rather than the editor session.
+    fn sync(&mut self, key: EntityId, blob: &[u8], revision: u64, phase: PlayPhase) {
+        let replacement = self.key != Some(key) || self.phase != Some(phase);
+        let fresh_snapshot = revision != self.snapshot_revision;
+        self.snapshot_revision = revision;
+        self.phase = Some(phase);
+        if !replacement && blob == self.last_blob {
+            if fresh_snapshot {
+                self.pending.clear();
+            }
+            return;
+        }
+        if !replacement {
+            if let Some(ack) = self.pending.iter().position(|p| p == blob) {
+                if fresh_snapshot {
+                    // Keep the acknowledged pose as a baseline: several delayed snapshots may
+                    // contain it before any of the more recent camera writes are processed.
+                    self.pending.drain(..ack);
+                }
+                return;
+            }
+        }
+        if let Some(trs) = gizmo::decode_trs_blob(blob) {
+            self.pos = [trs.translation.x, trs.translation.y, trs.translation.z];
+            (self.yaw, self.pitch) = yaw_pitch_from_quat(trs.rotation);
+            self.seeded = true;
+            self.key = Some(key);
+            self.last_blob = blob.to_vec();
+            self.pending.clear();
+        }
+    }
+
+    fn sent(&mut self, blob: &[u8]) {
+        if self.pending.is_empty() {
+            self.pending.push_back(self.last_blob.clone());
+        }
+        self.pending.push_back(blob.to_vec());
+        self.last_blob = blob.to_vec();
+    }
 }
 
 /// The camera entity's edit target: which entity, and the LocalTransform bytes to rewrite.
@@ -593,6 +648,21 @@ impl EditorApp {
                 type_hash,
                 blob,
             } => {
+                if self.fly.key == Some(*id)
+                    && self.fly.local_hash == *type_hash
+                    && self.fly.last_blob != *blob
+                {
+                    // An inspector/undo command is a known new owner, even when it restores a
+                    // pose equal to an older pending navigation sample. Only delayed snapshots
+                    // need the conservative stale-pose filter in sync().
+                    self.fly.pending.clear();
+                    self.fly.sync(
+                        *id,
+                        blob,
+                        self.fly.snapshot_revision,
+                        self.fly.phase.unwrap_or(PlayPhase::Edit),
+                    );
+                }
                 self.shared
                     .lock()
                     .unwrap()
@@ -715,6 +785,7 @@ impl eframe::App for EditorApp {
             camera,
             play_state,
             thermal,
+            snapshot_revision,
         ) = {
             let mut s = self.shared.lock().unwrap();
             let new_image = match &s.frame {
@@ -744,6 +815,7 @@ impl eframe::App for EditorApp {
                 s.camera, // Copy: the newest render lens (gizmo math reads it, never consumes)
                 s.play_state, // Copy: the newest play phase + tick count (m9.7), never consumed
                 s.thermal.clone(),
+                s.snapshots_received,
             )
         };
 
@@ -1234,9 +1306,8 @@ impl eframe::App for EditorApp {
                 })
             });
 
-        // The camera entity (m17.1): the FIRST entity carrying a render::Camera, matching the
-        // engine's own "first active camera wins" rule in extract_scene -- if the editor flew a
-        // different one, the picture would not move and nothing would say why.
+        // Skip inactive cameras, matching the renderer's first-active rule. Flying an inactive
+        // camera would change the scene data without moving the picture.
         let camera_hash = schema
             .types
             .iter()
@@ -1246,19 +1317,21 @@ impl eframe::App for EditorApp {
             let lh = local_hash?;
             let e = entities
                 .iter()
-                .find(|e| e.components.iter().any(|c| c.type_hash == ch))?;
+                .find(|e| {
+                    e.components.iter().any(|c| {
+                        c.type_hash == ch
+                            && matches!(decode_value(&schema, ch, &c.data), Ok(Value::Struct(fields))
+                                if fields.iter().any(|(name, value)| name == "active" && *value == Value::Bool(true)))
+                    })
+                })?;
             let local = e.components.iter().find(|c| c.type_hash == lh)?;
-            // Seed once from the entity, then the editor owns the orientation. Re-seeding every
-            // frame would fight the user: the pose we send this frame arrives back next frame.
-            if !self.fly.seeded {
-                if let Some(trs) = gizmo::decode_trs_blob(&local.data) {
-                    self.fly.pos = [trs.translation.x, trs.translation.y, trs.translation.z];
-                    let (yaw, pitch) = yaw_pitch_from_quat(trs.rotation);
-                    self.fly.yaw = yaw;
-                    self.fly.pitch = pitch;
-                    self.fly.seeded = true;
-                }
-            }
+            self.fly.sync(
+                e.editor_id,
+                &local.data,
+                snapshot_revision,
+                play_state.phase,
+            );
+            self.fly.local_hash = lh;
             Some(NavTarget {
                 key: e.editor_id,
                 local_hash: lh,
@@ -1674,6 +1747,11 @@ fn viewport_fly(
             changed = true;
         }
     }
+    let navigating = flying || changed;
+    if fly.navigating && !navigating {
+        actions.push(Command::RequestSnapshot);
+    }
+    fly.navigating = navigating;
     if !changed {
         return;
     }
@@ -1684,14 +1762,29 @@ fn viewport_fly(
         // stray one would silently distort the lens.
         scale: gizmo::Vec3::new(1.0, 1.0, 1.0),
     };
+    let blob = gizmo::encode_trs_blob(&trs);
+    fly.sent(&blob);
     actions.push(Command::SetComponent {
         id: target.key,
         type_hash: target.local_hash,
-        blob: gizmo::encode_trs_blob(&trs),
+        blob,
     });
     // The engine only redraws when something asks it to; without this the view would advance one
     // frame per input event rather than continuously while a key is held.
     ui.ctx().request_repaint();
+}
+
+/// Fit the stream into the dock panel without stretching its lens. The fitted image rectangle
+/// also owns interaction: picking and gizmo rays must map from the same pixels that are painted,
+/// and letterbox bars must not become invisible scene controls.
+fn viewport_image_rect(panel: egui::Rect, dims: (u32, u32)) -> egui::Rect {
+    if dims.0 == 0 || dims.1 == 0 {
+        return egui::Rect::from_center_size(panel.center(), egui::Vec2::ZERO);
+    }
+    let aspect = dims.0 as f32 / dims.1 as f32;
+    let width = panel.width().min(panel.height() * aspect).max(0.0);
+    let height = (width / aspect).min(panel.height().max(0.0));
+    egui::Rect::from_center_size(panel.center(), egui::vec2(width, height))
 }
 
 fn viewport_ui(
@@ -1704,8 +1797,23 @@ fn viewport_ui(
     fly: &mut FlyView,
 ) {
     let avail = ui.available_size();
-    let (rect, response) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
+    let (panel, allocation) = ui.allocate_exact_size(avail, egui::Sense::hover());
+    ui.painter()
+        .rect_filled(panel, 0.0, egui::Color32::from_gray(12));
+    let rect = frame_tex
+        .map(|tex| {
+            viewport_image_rect(
+                panel,
+                frame_dims.unwrap_or((tex.size()[0] as u32, tex.size()[1] as u32)),
+            )
+        })
+        .unwrap_or(panel);
     if let Some(tex) = frame_tex {
+        let response = ui.interact(
+            rect,
+            allocation.id.with("scene"),
+            egui::Sense::click_and_drag(),
+        );
         ui.painter().image(
             tex.id(),
             rect,
@@ -1788,7 +1896,12 @@ fn viewport_input(
         let v = ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
         (u * ext.0, v * ext.1)
     };
-    let cursor = response.hover_pos().map(to_px);
+    // A gesture started on the image retains capture across a letterbox bar. New gestures in
+    // bars have neither hover nor interaction position, but an existing drag must still release.
+    let cursor = response
+        .hover_pos()
+        .or_else(|| response.interact_pointer_pos())
+        .map(to_px);
 
     // Hover: while idle, which handle is under the cursor? Drives the engine's axis highlight, and
     // decides whether a press grabs the gizmo or picks. Instant (this frame's lens), never a
@@ -1818,7 +1931,7 @@ fn viewport_input(
     };
 
     // Press → grab a handle (begin the drag) or fall through to camera input.
-    if response.drag_started() {
+    if response.drag_started_by(egui::PointerButton::Primary) {
         let grabbed = match (cursor, gz.mode, gz.camera, gz.target.as_ref(), *gz.hover) {
             (Some(px), Some(mode), Some(cam), Some(target), Some(axis)) => DragSession::begin(
                 mode,
@@ -1870,7 +1983,7 @@ fn viewport_input(
     }
 
     // Release → fold the whole drag into ONE undo Edit (grab bytes → final bytes), or camera up.
-    if response.drag_stopped() {
+    if response.drag_stopped_by(egui::PointerButton::Primary) {
         if let Some(session) = gz.drag.take() {
             if let (Some(px), Some(cam), Some(target)) = (cursor, gz.camera, gz.target.clone()) {
                 let after = session.update(&ray_at(px, &cam), snapping);
@@ -1986,7 +2099,16 @@ fn inspector_ui(
                             type_hash: comp.type_hash,
                         });
                     }
-                    component_fields_ui(ui, comp, key, schema, actions, active_edit, stack);
+                    component_fields_ui(
+                        ui,
+                        comp,
+                        key,
+                        schema,
+                        entities,
+                        actions,
+                        active_edit,
+                        stack,
+                    );
                 });
         }
     });
@@ -1995,11 +2117,13 @@ fn inspector_ui(
 // Decode one component into typed fields, render an editor per field, and turn edits into a live
 // `SetComponent` + a single undo step per gesture. A component the schema can't describe (or whose
 // bytes don't fit) is shown honestly as read-only.
+#[allow(clippy::too_many_arguments)] // edits also need the snapshot for semantic reference choices
 fn component_fields_ui(
     ui: &mut egui::Ui,
     comp: &rime_protocol::SnapshotComponent,
     key: EntityId,
     schema: &Schema,
+    entities: &[SnapshotEntity],
     actions: &mut Vec<Command>,
     active_edit: &mut Option<ActiveEdit>,
     stack: &mut CommandStack,
@@ -2022,7 +2146,18 @@ fn component_fields_ui(
             // Every field is keyed by its component and its path, so no two fields share an id
             // (see `exact_int_field`).
             let salt = format!("{:016x}/{fname}", comp.type_hash);
-            render_field(ui, &salt, fname, fval, &mut it);
+            if !entity_picker::field_ui(
+                ui,
+                &salt,
+                schema,
+                comp.type_hash,
+                fname,
+                fval,
+                entities,
+                &mut it,
+            ) {
+                render_field(ui, &salt, fname, fval, &mut it);
+            }
         }
     }
 

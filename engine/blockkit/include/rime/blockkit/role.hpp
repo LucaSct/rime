@@ -50,7 +50,8 @@ inline constexpr std::uint32_t kBarrier = 8;   // a static street barrier debris
 inline constexpr std::uint32_t kLampMast = 9;  // the post
 inline constexpr std::uint32_t kLampHead = 10; // the emissive fixture
 inline constexpr std::uint32_t kLight = 11;    // a light or the camera — carries no geometry
-inline constexpr std::uint32_t kCount = 12;
+inline constexpr std::uint32_t kTimber = 12;   // static wood edging/boards, not a cooked crate
+inline constexpr std::uint32_t kCount = 13;
 
 // Is this kind one of the cooked destructibles (as opposed to a static prop)? Used by the proof to
 // separate "slabs that must bind" from "props that must not".

@@ -46,9 +46,11 @@ public:
                                          const fluids_scene::ThermalPreview& preview) const;
 
 private:
-    static constexpr std::size_t frames = 64, tints = 9;
+    // normals_[0] is the static frost map; 1 + (k-1)*32 + frame holds liquid level k (see
+    // phase_maps.hpp for the quantization and exact memory).
+    static constexpr std::size_t normal_maps = 1 + 8 * 32, tints = 9;
     rhi::Device& device_;
-    std::array<rhi::TextureHandle, frames + 1> normals_{};
+    std::array<rhi::TextureHandle, normal_maps> normals_{};
     std::array<rhi::TextureHandle, tints> colors_{};
     bool ready_ = false;
 };

@@ -32,8 +32,10 @@ uses the same adapter and renderer seam as the editor host. See
 
 `PhaseDetail(device)` optionally adds immutable borrowed normal/base maps to these
 same rows. Declare it before the renderer (destroy after it); the device outlives
-both. Destruction waits idle. There are 64 water normal frames, one static frost
-normal, and nine fraction-quantized static tint maps, all 128²/mipmapped (~6.5 MB).
+both. Destruction waits idle. V2 has one static frost normal, eight liquid levels
+with 32 animation frames each, and nine tint maps, all 128² with eight mip levels.
+The 266 maps occupy exactly 23,243,080 texture bytes (22.17 MiB), excluding driver
+allocation overhead. This replaces the original 64-frame water-only normal bank.
 Initialization uses blocking uploads once per host; partial creation publishes no
 maps and falls back to factor-only rendering. It allocates even if the host scene
 has no enabled thermal surfaces. No per-frame map writes/allocations or new shader
@@ -41,9 +43,12 @@ ABI. Existing PBR normal/colour sampling handles every resolved submesh.
 
 `surfaces(world, preview)` uses the committed presentation-duration accumulator;
 Pause and refusal cannot advance it, and graph rebuild/Stop restarts its epoch.
-Liquid normal strength falls with liquid mass fraction. Fully frozen cells use a
-static frost normal/tint. The updated ice endpoint is blue and polished rather
-than the original pale/rough diagnostic. Static tint has nine levels, an explicit
-visual approximation; numerical fraction and energy remain continuous/unchanged.
+Frost and water slopes are baked together per liquid level. Water has directional
+swell, chop and finer ripples; periodic cellular frost has long veins, branches
+and fine detail over polished blue variation. Liquid fraction rounds to the
+nearest eighth for map selection. Fractions below 1/16 use the same static frost
+map as fully frozen cells, removing the former last-fraction normal switch.
+Both normal and tint quantization are explicit visual approximations; numerical
+fraction, factor blending and energy remain continuous and unchanged.
 The geometry stays fixed: waves alter shading, never collision/silhouette/flow.
 See [creator controls/workflow](../../docs/creator-workflow.md).

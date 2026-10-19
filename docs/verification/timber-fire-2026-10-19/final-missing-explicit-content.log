@@ -1,0 +1,3 @@
+no content root found; tried, in order:
+  1. --content /home/next/reports/rime-timber-fire-2026-10-19/missing-content: missing
+  2. (an explicit --content is the only place looked: nothing else was tried)
