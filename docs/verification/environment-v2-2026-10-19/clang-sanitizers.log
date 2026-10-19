@@ -1,0 +1,110 @@
+Clang syntax PASS engine/fluids_render/src/phase_maps.cpp
+Clang syntax PASS tests/fluids_render/phase_maps_test.cpp
+Clang syntax PASS samples/99-the-block/authored_environment.cpp
+Clang syntax PASS tests/gameplay/authored_environment_test.cpp
+Clang syntax PASS tests/gameplay/player_spawn_test.cpp
+Clang syntax PASS tests/gameplay/input_map_test.cpp
+Clang syntax PASS samples/99-the-block/main.cpp
+Clang syntax PASS samples/99-the-block/block_host_main.cpp
+Clang syntax PASS engine/vfx_scene/src/effects.cpp
+Clang syntax PASS tests/vfx_scene/effects_test.cpp
+Clang syntax PASS engine/render/src/fx_pass.cpp
+Clang syntax PASS engine/render/src/scene_renderer.cpp
+Clang syntax PASS tests/render/fx_particle_test.cpp
+Clang syntax PASS engine/app/editor_host_app.cpp
+Clang syntax PASS samples/thermal-courtyard/main.cpp
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:     9 |     9 passed | 0 failed | 0 skipped
+[doctest] assertions: 29479 | 29479 passed | 0 failed |
+[doctest] Status: SUCCESS!
+ASan/UBSan + LSan PASS rime_vfx_scene_tests-changed-tu-asan None
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:      6 |      6 passed | 0 failed | 5 skipped
+[doctest] assertions: 606293 | 606293 passed | 0 failed |
+[doctest] Status: SUCCESS!
+ASan/UBSan + LSan PASS rime_fluids_render_tests-changed-tu-asan phase maps:*
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:   9 |   9 passed | 0 failed | 87 skipped
+[doctest] assertions: 372 | 372 passed | 0 failed |
+[doctest] Status: SUCCESS!
+ASan/UBSan + LSan PASS rime_gameplay_tests-changed-tu-asan *marker*,*spawn*,city editor:*
+99-the-block: authored environment (cosmetic) enabled_sources=0 sources=0 smoke=0 flames=0 lights=0 phase_surfaces=0 phase_cells=0 thermal_status=0 atlas=0 fx_ticks=1 thermal_ticks=0 invalid_source_visits=0 invalid_thermal_builds=0 thermal_refusals=0
+99-the-block: authored environment (cosmetic) enabled_sources=2 sources=2 smoke=16 flames=3 lights=1 phase_surfaces=0 phase_cells=0 thermal_status=0 atlas=0 fx_ticks=2 thermal_ticks=0 invalid_source_visits=0 invalid_thermal_builds=0 thermal_refusals=5
+99-the-block: authored environment (cosmetic) enabled_sources=1 sources=1 smoke=4 flames=3 lights=1 phase_surfaces=0 phase_cells=0 thermal_status=0 atlas=0 fx_ticks=1 thermal_ticks=0 invalid_source_visits=0 invalid_thermal_builds=0 thermal_refusals=0
+99-the-block: authored environment (cosmetic) enabled_sources=1 sources=1 smoke=4 flames=3 lights=1 phase_surfaces=0 phase_cells=0 thermal_status=0 atlas=0 fx_ticks=192 thermal_ticks=0 invalid_source_visits=0 invalid_thermal_builds=0 thermal_refusals=0
+99-the-block: authored environment (cosmetic) enabled_sources=0 sources=0 smoke=0 flames=0 lights=0 phase_surfaces=0 phase_cells=0 thermal_status=2 atlas=0 fx_ticks=601 thermal_ticks=600 invalid_source_visits=0 invalid_thermal_builds=1 thermal_refusals=1
+99-the-block: authored environment (cosmetic) enabled_sources=0 sources=0 smoke=0 flames=0 lights=0 phase_surfaces=1 phase_cells=1 thermal_status=4 atlas=0 fx_ticks=2 thermal_ticks=1 invalid_source_visits=0 invalid_thermal_builds=0 thermal_refusals=1
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+99-the-block: authored environment (cosmetic) enabled_sources=1 sources=1 smoke=4 flames=3 lights=1 phase_surfaces=0 phase_cells=0 thermal_status=0 atlas=0 fx_ticks=1 thermal_ticks=0 invalid_source_visits=0 invalid_thermal_builds=0 thermal_refusals=0
+99-the-block: authored environment (cosmetic) enabled_sources=1 sources=0 smoke=0 flames=0 lights=0 phase_surfaces=0 phase_cells=0 thermal_status=0 atlas=0 fx_ticks=1 thermal_ticks=0 invalid_source_visits=2 invalid_thermal_builds=0 thermal_refusals=0
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+99-the-block: authored environment (cosmetic) enabled_sources=0 sources=0 smoke=0 flames=0 lights=0 phase_surfaces=0 phase_cells=0 thermal_status=0 atlas=1 fx_ticks=1 thermal_ticks=1 invalid_source_visits=0 invalid_thermal_builds=0 thermal_refusals=0
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:   9 |   9 passed | 0 failed | 87 skipped
+[doctest] assertions: 896 | 896 passed | 0 failed |
+[doctest] Status: SUCCESS!
+ASan/UBSan GPU PASS (driver LSan off) rime_gameplay_tests-changed-tu-asan city authored environment:*
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/render/fx_particle_test.cpp:211:
+TEST CASE:  fx1a: on-screen radiance tracks the simulation's coverage, up and down
+
+/home/next/projects/rime/tests/render/fx_particle_test.cpp:238: MESSAGE: m13.1a burst: coverage 0.0783355 -> screen radiance 20.2683
+
+/home/next/projects/rime/tests/render/fx_particle_test.cpp:264: MESSAGE: m13.1a decay: coverage 0.0783355 -> 0.010723, radiance 20.2683 -> 3.63896
+
+===============================================================================
+[doctest] test cases:  19 |  19 passed | 0 failed | 208 skipped
+[doctest] assertions: 122 | 122 passed | 0 failed |
+[doctest] Status: SUCCESS!
+ASan/UBSan GPU PASS (driver LSan off) rime_render_tests-changed-tu-asan *fx1a*,*smoke*,*flame V2*,*transient scene lights*,*SceneRenderer flame V2*
+Changed-TU instrumentation only; engine dependency archives were not rebuilt with sanitizers.
