@@ -103,3 +103,9 @@ shallow large-box GJK overlap limitations remain. The generic void tick hook can
 log an internal controller fault without a separate published fault state;
 Esc/Stop remain available. General action authoring, animation clips and adaptive
 stream resolution are later bricks.
+
+## Published
+
+Draft PR **#345**: https://github.com/LucaSct/rime/pull/345, stacked on #344.
+Feature integration is `622798c`; evidence delivery is `170504f`.
+GitHub CI and self-hosted CI were queued at publication, not reported green.
