@@ -30,10 +30,9 @@ bool finite(core::Vec3 v) {
 }
 
 bool valid_pose(const core::Transform& pose) {
-    return block_play::detail::usable(pose) && positive(pose.scale.x) &&
-           positive(pose.scale.y) && positive(pose.scale.z) &&
-           std::abs(pose.translation.x) <= 8192.0f && std::abs(pose.translation.y) <= 8192.0f &&
-           std::abs(pose.translation.z) <= 8192.0f;
+    return block_play::detail::usable(pose) && positive(pose.scale.x) && positive(pose.scale.y) &&
+           positive(pose.scale.z) && std::abs(pose.translation.x) <= 8192.0f &&
+           std::abs(pose.translation.y) <= 8192.0f && std::abs(pose.translation.z) <= 8192.0f;
 }
 
 bool parented(ecs::World& world, ecs::Entity entity) {
@@ -117,7 +116,8 @@ bool PreviewPlayer::bind_pattern(rime::physics::PhysicsWorld& physics,
             vertices.reserve(part.vertices.size());
             for (const auto& vertex : part.vertices)
                 vertices.push_back(scaled(vertex, pose.scale));
-            const auto hull = physics.register_hull({vertices, part.face_counts, part.face_indices});
+            const auto hull =
+                physics.register_hull({vertices, part.face_counts, part.face_indices});
             if (!hull.is_valid()) {
                 failure_ = "Physics refused a scaled city source hull";
                 return false;
@@ -139,8 +139,15 @@ bool PreviewPlayer::bind_pattern(rime::physics::PhysicsWorld& physics,
         description.shape.type = physics::ShapeType::ConvexHull;
         description.shape.hull = part.hull;
         description.orientation = core::normalize(pose.rotation);
-        description.position = pose.translation + core::rotate(description.orientation, part.offset);
-        if (!finite(description.position) || !add_body(physics, description))
+        description.position =
+            pose.translation + core::rotate(description.orientation, part.offset);
+        if (!finite(description.position) || std::abs(description.position.x) > 8192.0f ||
+            std::abs(description.position.y) > 8192.0f ||
+            std::abs(description.position.z) > 8192.0f) {
+            failure_ = "A scaled city source part is outside Preview's finite spatial bounds";
+            return false;
+        }
+        if (!add_body(physics, description))
             return false;
     }
     return true;
@@ -158,7 +165,8 @@ bool PreviewPlayer::bind_collision(rime::app::EditorPlayContext& context) {
     });
     if (!ok)
         return false;
-    world.query<blockkit::SlabRole>().for_each([&](ecs::Entity entity, const blockkit::SlabRole& role) {
+    world.query<blockkit::SlabRole>().for_each([&](ecs::Entity entity,
+                                                   const blockkit::SlabRole& role) {
         if (!ok || role.kind == blockkit::slab_kind::kLight)
             return;
         if (already_bound(world, context.physics, entity))
@@ -179,9 +187,14 @@ bool PreviewPlayer::bind_collision(rime::app::EditorPlayContext& context) {
         description.shape.type = physics::ShapeType::Box;
         if (const auto* destructible = world.get<destruction::Destructible>(entity)) {
             if (const auto* cook = blockkit::find_cook_by_asset(destructible->asset)) {
-                description.shape.half_extents =
-                    scaled({cook->size_x * 0.5f, cook->size_y * 0.5f, cook->size_z * 0.5f},
-                           pose.scale);
+                if (!blockkit::slab_kind::is_destructible(role.kind)) {
+                    ok = false;
+                    failure_ =
+                        "A cooked slab has a unit-prop role inconsistent with its preview mesh";
+                    return;
+                }
+                description.shape.half_extents = scaled(
+                    {cook->size_x * 0.5f, cook->size_y * 0.5f, cook->size_z * 0.5f}, pose.scale);
             } else if (destructible->asset == block_play::city::kLampAsset ||
                        destructible->asset == block_play::city::kBarrierAsset) {
                 ok = bind_pattern(context.physics, destructible->asset, pose);
@@ -208,6 +221,14 @@ bool PreviewPlayer::bind_collision(rime::app::EditorPlayContext& context) {
     });
     if (!ok)
         return false;
+    world.query<destruction::Destructible>().for_each(
+        [&](ecs::Entity entity, const destruction::Destructible&) {
+            if (!already_bound(world, context.physics, entity) &&
+                !world.get<blockkit::SlabRole>(entity)) {
+                ok = false;
+                failure_ = "A destructible object has no supported preview role";
+            }
+        });
     // Refuse an unrecognised rendered object rather than call a scene collision-ready while a
     // newly imported wall is walk-through. Explicit light/decorative roles carry no solid volume.
     auto inspect_mesh = [&](ecs::Entity entity) {
@@ -217,8 +238,10 @@ bool PreviewPlayer::bind_collision(rime::app::EditorPlayContext& context) {
             failure_ = "Rendered geometry has no supported preview collision source";
         }
     };
-    world.query<render::MeshRef>().for_each([&](ecs::Entity e, const render::MeshRef&) { inspect_mesh(e); });
-    world.query<render::MeshAsset>().for_each([&](ecs::Entity e, const render::MeshAsset&) { inspect_mesh(e); });
+    world.query<render::MeshRef>().for_each(
+        [&](ecs::Entity e, const render::MeshRef&) { inspect_mesh(e); });
+    world.query<render::MeshAsset>().for_each(
+        [&](ecs::Entity e, const render::MeshAsset&) { inspect_mesh(e); });
     return ok;
 }
 
@@ -249,16 +272,22 @@ rime::app::EditorPlayAdmission PreviewPlayer::begin(rime::app::EditorPlayContext
     release_input();
     const auto spawn = block_play::resolve_player_spawn(context.world);
     if (spawn.status != block_play::SpawnStatus::Valid)
-        return {false, spawn.reason.empty() ? "Player Preview needs one enabled PlayerSpawn" : spawn.reason};
+        return {false,
+                spawn.reason.empty() ? "Player Preview needs one enabled PlayerSpawn"
+                                     : spawn.reason};
     if (!finite(spawn.placement.capsule_centre) ||
         std::abs(spawn.placement.capsule_centre.x) > 8192.0f ||
         std::abs(spawn.placement.capsule_centre.y) > 8192.0f ||
         std::abs(spawn.placement.capsule_centre.z) > 8192.0f)
         return {false, "PlayerSpawn is outside Preview's 8192-metre bounds"};
     std::size_t cameras = 0;
-    context.world.query<render::Camera>().for_each([&](ecs::Entity e, const render::Camera& camera) {
-        if (camera.active) { ++cameras; camera_ = e; }
-    });
+    context.world.query<render::Camera>().for_each(
+        [&](ecs::Entity e, const render::Camera& camera) {
+            if (camera.active) {
+                ++cameras;
+                camera_ = e;
+            }
+        });
     if (cameras != 1)
         return {false, "Player Preview needs exactly one active camera"};
     const auto* local = context.world.get<ecs::LocalTransform>(camera_);
@@ -274,10 +303,16 @@ rime::app::EditorPlayAdmission PreviewPlayer::begin(rime::app::EditorPlayContext
     }
     state_.position = spawn.placement.capsule_centre;
     physics::PenetrationHit overlap;
-    if (context.physics.penetration(gameplay::character_shape(config_), state_.position,
-                                    core::quat_identity(), overlap) && overlap.depth > 0.001f) {
+    const bool intersects = context.physics.penetration(
+        gameplay::character_shape(config_), state_.position, core::quat_identity(), overlap);
+    if (context.physics.heightfield_query_skips() != 0) {
         cleanup(context.physics);
-        return {false, "PlayerSpawn overlaps solid preview collision; move the capsule centre clear"};
+        return {false, "Walking Preview does not support heightfield shape queries"};
+    }
+    if (intersects && overlap.depth > 0.001f) {
+        cleanup(context.physics);
+        return {false,
+                "PlayerSpawn overlaps solid preview collision; move the capsule centre clear"};
     }
     view_.yaw = spawn.placement.yaw;
     view_.pitch = spawn.placement.pitch;
@@ -285,8 +320,14 @@ rime::app::EditorPlayAdmission PreviewPlayer::begin(rime::app::EditorPlayContext
     active_ = true;
     paused_ = false;
     (void)write_camera(context.world);
-    RIME_INFO("player-preview: admitted session {} at ({}, {}, {}), {} static bodies, {} source hulls; query-only, no weapons",
-              session_, state_.position.x, state_.position.y, state_.position.z, bodies_.size(), hulls_.size());
+    RIME_INFO("player-preview: admitted session {} at ({}, {}, {}), {} static bodies, {} source "
+              "hulls; query-only, no weapons",
+              session_,
+              state_.position.x,
+              state_.position.y,
+              state_.position.z,
+              bodies_.size(),
+              hulls_.size());
     return {};
 }
 
@@ -313,8 +354,8 @@ bool PreviewPlayer::write_camera(rime::ecs::World& world) {
 }
 
 void PreviewPlayer::tick(rime::app::EditorPlayContext& context,
-                          std::span<const rime::platform::Event> events,
-                          double dt) {
+                         std::span<const rime::platform::Event> events,
+                         double dt) {
     using namespace rime;
     if (!active_ || paused_ || context.session_id != session_ || !failure_.empty() ||
         !std::isfinite(dt) || dt <= 0.0 || dt > 0.1)
@@ -329,19 +370,29 @@ void PreviewPlayer::tick(rime::app::EditorPlayContext& context,
         }
         if (event.type == platform::EventType::MouseMove) {
             gameplay::apply_look(view_, event.mouse_move.dx, event.mouse_move.dy);
-        } else if (event.type == platform::EventType::KeyDown || event.type == platform::EventType::KeyUp) {
+        } else if (event.type == platform::EventType::KeyDown ||
+                   event.type == platform::EventType::KeyUp) {
             const bool down = event.type == platform::EventType::KeyDown;
             switch (event.key.key) {
-                case platform::Key::W: forward_ = down; break;
-                case platform::Key::S: backward_ = down; break;
-                case platform::Key::A: left_ = down; break;
-                case platform::Key::D: right_ = down; break;
+                case platform::Key::W:
+                    forward_ = down;
+                    break;
+                case platform::Key::S:
+                    backward_ = down;
+                    break;
+                case platform::Key::A:
+                    left_ = down;
+                    break;
+                case platform::Key::D:
+                    right_ = down;
+                    break;
                 case platform::Key::Space:
                     if (down && !jump_ && !event.key.repeat)
                         pressed |= gameplay::kActionJump;
                     jump_ = down;
                     break;
-                default: break;
+                default:
+                    break;
             }
         }
     }
@@ -352,8 +403,10 @@ void PreviewPlayer::tick(rime::app::EditorPlayContext& context,
     intent.pitch = view_.pitch;
     intent.held = jump_ ? gameplay::kActionJump : 0;
     intent.pressed = pressed;
-    state_ = gameplay::step_character(state_, intent, config_, context.physics, {}, float(dt), &stats_);
-    if (!finite(state_.position) || !finite(state_.velocity) || context.physics.heightfield_query_skips() != 0) {
+    state_ =
+        gameplay::step_character(state_, intent, config_, context.physics, {}, float(dt), &stats_);
+    if (!finite(state_.position) || !finite(state_.velocity) ||
+        context.physics.heightfield_query_skips() != 0) {
         failure_ = "Player Preview stopped on non-finite motion or unsupported heightfield queries";
         release_input();
         RIME_WARN("player-preview: {}", failure_);
@@ -363,15 +416,28 @@ void PreviewPlayer::tick(rime::app::EditorPlayContext& context,
 }
 
 void PreviewPlayer::transition(rime::app::EditorPlayContext& context,
-                                rime::app::EditorPlayTransition transition) {
+                               rime::app::EditorPlayTransition transition) {
     using rime::app::EditorPlayTransition;
     if (!active_ || context.session_id != session_)
         return;
     switch (transition) {
-        case EditorPlayTransition::Pause: release_input(); paused_ = true; break;
-        case EditorPlayTransition::Resume: release_input(); paused_ = false; break;
-        case EditorPlayTransition::ReleaseInput: release_input(); break;
-        case EditorPlayTransition::Stop: cleanup(context.physics); state_ = {}; view_ = {}; stats_ = {}; break;
+        case EditorPlayTransition::Pause:
+            release_input();
+            paused_ = true;
+            break;
+        case EditorPlayTransition::Resume:
+            release_input();
+            paused_ = false;
+            break;
+        case EditorPlayTransition::ReleaseInput:
+            release_input();
+            break;
+        case EditorPlayTransition::Stop:
+            cleanup(context.physics);
+            state_ = {};
+            view_ = {};
+            stats_ = {};
+            break;
     }
 }
 

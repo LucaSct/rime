@@ -30,7 +30,8 @@ rime_add_test(rime_gameplay_tests
     ../../samples/99-the-block/play_arm_ik.cpp)
 
 target_link_libraries(rime_gameplay_tests
-    PRIVATE rime::app rime::ground rime::destruction_render rime::gameplay rime::physics rime::assets rime::render rime::vfx rime::destruction
+    PRIVATE rime::app rime::editorhost rime::ground rime::destruction_render
+            rime::gameplay rime::physics rime::assets rime::render rime::vfx rime::destruction
             rime::scene rime::worldkit rime::blockkit rime::ecs
             rime::vfx_scene rime::fluids_render)
 

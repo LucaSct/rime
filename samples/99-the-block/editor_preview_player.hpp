@@ -37,11 +37,17 @@ public:
                     rime::app::EditorPlayTransition transition);
 
     [[nodiscard]] bool active() const noexcept { return active_; }
+
     [[nodiscard]] const rime::gameplay::CharacterState& state() const noexcept { return state_; }
+
     [[nodiscard]] const rime::gameplay::FirstPersonView& view() const noexcept { return view_; }
+
     [[nodiscard]] const rime::gameplay::StepStats& step_stats() const noexcept { return stats_; }
+
     [[nodiscard]] std::size_t body_count() const noexcept { return bodies_.size(); }
+
     [[nodiscard]] std::size_t hull_count() const noexcept { return hulls_.size(); }
+
     [[nodiscard]] const std::string& failure() const noexcept { return failure_; }
 
 private:
@@ -49,6 +55,7 @@ private:
         rime::physics::HullId hull;
         rime::core::Vec3 offset;
     };
+
     struct Pattern {
         std::uint64_t asset = 0;
         rime::core::Vec3 scale;
@@ -57,10 +64,10 @@ private:
 
     [[nodiscard]] bool bind_collision(rime::app::EditorPlayContext& context);
     [[nodiscard]] bool add_body(rime::physics::PhysicsWorld& physics,
-                                 const rime::physics::BodyDesc& description);
+                                const rime::physics::BodyDesc& description);
     [[nodiscard]] bool bind_pattern(rime::physics::PhysicsWorld& physics,
-                                     std::uint64_t asset,
-                                     const rime::core::Transform& pose);
+                                    std::uint64_t asset,
+                                    const rime::core::Transform& pose);
     void cleanup(rime::physics::PhysicsWorld& physics);
     void release_input() noexcept;
     [[nodiscard]] bool write_camera(rime::ecs::World& world);
