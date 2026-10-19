@@ -51,6 +51,7 @@ enum class EditorMessage : std::uint16_t {
     SceneLoadReport =
         0x0209, // engine -> editor: the --scene load's outcome, once after the schema (E3)
     ThermalPreview = 0x020A,  // engine -> editor: optional bounded readonly thermal diagnostics
+    PlayControlState = 0x020B, // engine -> editor: optional play-control capability + state
     SetComponent = 0x0210,    // editor -> engine: set a component's bytes on an entity
     Spawn = 0x0211,           // editor -> engine: spawn an empty entity
     Despawn = 0x0212,         // editor -> engine: despawn an entity
@@ -65,6 +66,7 @@ enum class EditorMessage : std::uint16_t {
     Step = 0x021B,  // editor -> engine: run exactly one fixed tick, then stay Paused (m9.7)
     Stop = 0x021C,  // editor -> engine: restore the pre-play snapshot; back to Edit (m9.7)
     SaveScene = 0x021D, // editor -> engine: write the world back to a .rscene path (m14.3)
+    PlayControl = 0x021E, // editor -> engine: optional select Inspect/Player, capture, release
 };
 
 // True if `type` (as received by recv_message) is an editor-channel message (the reserved band).
