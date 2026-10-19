@@ -394,3 +394,53 @@ TEST_CASE("player preview: removed camera and foreign session ticks cannot move 
     f.stop();
     CHECK_FALSE(f.player.active());
 }
+
+TEST_CASE("player preview: exact city showcase slab supports settling walking jump versus no-floor "
+          "control") {
+    for (bool with_floor : {false, true}) {
+        Fixture f;
+        const auto* previous = f.world.get<ground::GroundBody>(f.floor);
+        REQUIRE(previous);
+        f.physics.destroy_body(previous->body);
+        const auto ground_pose = pose({76, 0, 0});
+        f.world.get<ecs::LocalTransform>(f.floor)->value = ground_pose;
+        f.world.get<ecs::WorldTransform>(f.floor)->value = ground_pose;
+        *f.world.get<ground::GroundSurface>(f.floor) = {92, 38, 46, 19, 4, 1};
+        f.world.get<ecs::LocalTransform>(f.spawn)->value = pose({-10, 1, 2});
+        if (with_floor)
+            REQUIRE(ground::bind_ground(f.world, f.physics).bound == 1);
+        REQUIRE(f.player.begin(f.context).ok);
+        f.ticks(180);
+        const auto settled = f.player.state();
+        if (!with_floor) {
+            CHECK_FALSE(settled.grounded);
+            CHECK(settled.position.y < -20.0f);
+            f.stop();
+            continue;
+        }
+        REQUIRE(settled.grounded);
+        CHECK(settled.position.y > 0.9f);
+        CHECK(settled.position.y < 1.0f);
+        CHECK(settled.position.x == -10.0f);
+        CHECK(settled.position.z == 2.0f);
+        f.tick(std::array{key(platform::Key::W)});
+        f.ticks(119);
+        REQUIRE(f.player.failure().empty());
+        CHECK(f.player.state().grounded);
+        CHECK(f.player.state().position.z < settled.position.z - 10.0f);
+        CHECK(f.player.state().position.z > -38.0f);
+        CHECK(f.player.state().position.y > 0.9f);
+        CHECK(f.player.state().position.y < 1.0f);
+        f.tick(std::array{key(platform::Key::W, false), key(platform::Key::Space)});
+        REQUIRE(f.player.state().velocity.y > 4.0f);
+        f.ticks(12);
+        CHECK(f.player.state().position.y > settled.position.y + 0.5f);
+        f.tick(std::array{key(platform::Key::Space, false)});
+        f.ticks(120);
+        CHECK(f.player.state().grounded);
+        CHECK(f.player.state().position.y > 0.9f);
+        CHECK(f.player.state().position.y < 1.0f);
+        CHECK(f.player.failure().empty());
+        f.stop();
+    }
+}
