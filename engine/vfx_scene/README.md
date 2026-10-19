@@ -38,9 +38,23 @@ existing shared limits. The setter counts invalid/copy-cap drops, not later
 combined-light budget rejection. Empty input clears transient lights. No enabled
 sources means no particles, no light rows and no additional smoke pass.
 
-This is cosmetic smoke and a warm fire light, with approximate fixed smoke RGB.
-There are no flame meshes, temperature/fuel/spread/damage, soft intersections or
-smoke motion vectors. Source selection uses local handles, not replicated source
+V2 adds three tapered HDR flame sprites per accepted fire source, at most 48.
+They use a fixed array independent of the smoke-pool capacity. Tongue size and
+sway use accepted simulation time and a stable source phase; repeated rendering,
+Pause and rejected ticks do not animate them. Removal, invalid edits, disable,
+extinguish and Stop clear flames alongside the light. Residual smoke keeps its
+normal lifetime. No flame state is written into ECS or a saved scene.
+
+Smoke now has smooth procedural density, soft birth/retirement, cooler ambient
+colour and bounded warm illumination from the same local fire lights. This is an
+approximate incident-light calculation, not self-shadowing or a density solver.
+Flames composite into HDR before smoke, so a plume can attenuate them. Both keep
+depth read-only and preserve it for subsequent passes. Off/empty lists declare
+no pass; the renderer independently caps and counts copied/submitted sprites.
+
+These are cosmetic billboards and a warm fire light. There is no temperature,
+fuel, spread, damage, soft scene intersections or smoke motion vectors. Source
+selection uses local handles, not replicated source
 identity. New enabled scenes still need hardware capacity and multiplayer
 lifecycle evidence before release. The authoring tests exercise the C++ host
 edit/inverse, save/load and Play-session seams; they do not claim a clicked GUI
