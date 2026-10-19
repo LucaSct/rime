@@ -89,13 +89,11 @@ void main() {
     vec3 v = normalize(frame.camera_pos.xyz - v_world_pos);
     // ALPHA MASK (m15.6). Sample once, mask, then use the rgb. `draw.emissive.w` is the cutoff and
     // zero means "no masking" — so an opaque or blended material takes the false branch on a
-    // comparison that can never be true, and needs no shader variant. The discard is FIRST because
-    // a discarded fragment must not have written depth or run the BRDF.
+    // comparison that can never be true, and needs no shader variant. Derivative-dependent
+    // texture reads and normal filtering precede discard: a cutout must not remove helper
+    // lanes before its neighbours measure their pixel footprint. No lighting/depth writes yet.
     vec4 base_sample = texture(base_color_tex, v_uv);
     float base_alpha = draw.base_color.a * base_sample.a;
-    if (draw.emissive.w > 0.0 && base_alpha < draw.emissive.w) {
-        discard;
-    }
     vec3 albedo = draw.base_color.rgb * base_sample.rgb;
 
     // Metallic-roughness map: glTF packs roughness in G and metallic in B; each multiplies its
@@ -106,11 +104,16 @@ void main() {
     float roughness = clamp(draw.params.y * mr.x, 0.045, 1.0);
     float alpha = roughness * roughness;
     alpha = filter_specular_alpha(n, alpha); // geometric specular AA, ADR-0078 step 1a
+    float ao_sample = texture(occlusion_tex, v_uv).r;
+    vec3 emissive_sample = texture(emissive_tex, v_uv).rgb;
+    if (draw.emissive.w > 0.0 && base_alpha < draw.emissive.w) {
+        discard;
+    }
 
     // Ambient occlusion scales the AMBIENT term ONLY — never the direct lights, which cast their own
     // real shadows; multiplying direct light by a baked AO map double-counts and greys out lit
     // contact edges (docs/math/pbr.md). occlusion_strength (params.w) lerps the map toward 1.
-    float ao = mix(1.0, texture(occlusion_tex, v_uv).r, draw.params.w);
+    float ao = mix(1.0, ao_sample, draw.params.w);
 
     // Constant ambient: a deliberately crude stand-in for global illumination (M10) — treat
     // `ambient` as isotropic irradiance and reflect it diffusely, occluded by AO. Enough to keep
@@ -144,7 +147,7 @@ void main() {
     // Emissive: the surface's own light, added AFTER the BRDF so it shows even with no light present
     // (glowing screens, lava). Factor × map; the default-black factor with the white fallback is 0,
     // so a non-emissive material pays nothing.
-    out_radiance += draw.emissive.rgb * texture(emissive_tex, v_uv).rgb;
+    out_radiance += draw.emissive.rgb * emissive_sample;
 
     out_hdr = vec4(out_radiance, 1.0);
 }
