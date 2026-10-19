@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 #include <tuple>
 
 #include "rime/core/math/transform.hpp"
@@ -21,6 +22,41 @@ bool equal(core::Vec3 a, core::Vec3 b) {
     return a.x == b.x && a.y == b.y && a.z == b.z;
 }
 } // namespace
+
+SmokeAppearance smoke_appearance(const vfx::Particle& particle,
+                                 std::span<const vfx::FireLightContribution> lights) noexcept {
+    if (!finite(particle.position) || !std::isfinite(particle.age) ||
+        !std::isfinite(particle.lifetime) || particle.lifetime <= 0.0f || particle.age < 0.0f ||
+        particle.age >= particle.lifetime)
+        return {};
+    const auto smooth = [](float x) {
+        x = std::clamp(x, 0.0f, 1.0f);
+        return x * x * (3.0f - 2.0f * x);
+    };
+    const float life = particle.age / particle.lifetime;
+    SmokeAppearance result{{0.24f, 0.27f, 0.30f},
+                           0.38f * smooth(particle.age / 0.15f) * smooth((1.0f - life) / 0.8f)};
+    // A bounded single-scattering approximation, not a volume-lighting claim. The same fire
+    // rows illuminate meshes through normal scene extraction; smoke only borrows their falloff.
+    for (const auto& light : lights.first(std::min(lights.size(), Effects::max_sources))) {
+        if (!finite(light.position) || !finite(light.color) || !std::isfinite(light.intensity) ||
+            !std::isfinite(light.radius) || light.radius <= 0.0f || light.intensity <= 0.0f)
+            continue;
+        const core::Vec3 d = particle.position - light.position;
+        const double distance_squared = double(d.x) * d.x + double(d.y) * d.y + double(d.z) * d.z;
+        const double radius_squared = double(light.radius) * light.radius;
+        const float attenuation =
+            static_cast<float>(std::max(0.0, 1.0 - distance_squared / radius_squared));
+        const float incident = 0.35f * std::min(light.intensity, 4.0f) * attenuation * attenuation;
+        result.color.x += std::clamp(light.color.x, 0.0f, 1.0f) * incident;
+        result.color.y += std::clamp(light.color.y, 0.0f, 1.0f) * incident;
+        result.color.z += std::clamp(light.color.z, 0.0f, 1.0f) * incident;
+    }
+    result.color = {std::min(result.color.x, 1.5f),
+                    std::min(result.color.y, 1.5f),
+                    std::min(result.color.z, 1.5f)};
+    return result;
+}
 
 Effects::Effects() {
     sources_.reserve(max_sources);
@@ -160,6 +196,9 @@ bool Effects::tick(ecs::World& world, std::uint64_t tick, float dt) {
         stats_.emission_budget_dropped_particles +=
             after.dropped_particles - before.dropped_particles;
     }
+    // Commit presentation time only after admitting the tick. Reconcile/render/Pause and a
+    // refused tick cannot animate flame tongues or advance the smoke's age.
+    presentation_seconds_ += dt;
     collect_lights();
     has_tick_ = true;
     if (light_count_ != 0)
@@ -171,14 +210,45 @@ bool Effects::tick(ecs::World& world, std::uint64_t tick, float dt) {
 
 void Effects::collect_lights() {
     light_count_ = 0;
+    flame_count_ = 0;
     stats_.deferred_particles = 0;
     for (const auto& source : sources_) {
         stats_.deferred_particles += source.description.fire
                                          ? source.fire.smoke_stats().deferred_particles
                                          : source.plume.stats().deferred_particles;
         if (source.description.fire && source.light_current)
-            if (const auto light = source.fire.light())
+            if (const auto light = source.fire.light()) {
                 lights_[light_count_++] = *light;
+                const auto& d = source.description;
+                const core::Vec3 extent = d.hi - d.lo;
+                const float size =
+                    std::clamp(0.20f + 0.35f * std::max(extent.x, extent.z), 0.12f, 1.2f) *
+                    std::sqrt(d.intensity);
+                // Three offset tongues share a source, instead of emitting one flame for every
+                // smoke particle. The hard 16-source admission bounds this at 48 sprites. Phase
+                // uses accepted simulation duration and stable source identity, never frame time.
+                const float seed =
+                    static_cast<float>((d.entity.index * 37u + d.entity.generation * 17u) % 101u) /
+                    101.0f;
+                const float time = static_cast<float>(std::fmod(presentation_seconds_, 8.0)) *
+                                   (2.0f * std::numbers::pi_v<float> / 8.0f);
+                for (unsigned tongue = 0; tongue < 3; ++tongue) {
+                    const float phase = time * (7.0f + float(tongue)) +
+                                        seed * 2.0f * std::numbers::pi_v<float> +
+                                        float(tongue) * 2.1f;
+                    const float pulse = 0.88f + 0.12f * std::sin(phase);
+                    const float width = size * (tongue == 0 ? 1.0f : 0.7f) * pulse;
+                    const float sway = time * (3.0f + float(tongue)) + seed * 4.0f;
+                    const core::Vec3 position{light->position.x + size * 0.24f * std::sin(sway),
+                                              d.lo.y + width * 1.35f,
+                                              light->position.z + size * 0.20f * std::cos(sway)};
+                    flames_[flame_count_++] = {position,
+                                               width,
+                                               {2.8f, 2.2f, 1.4f},
+                                               std::min(d.intensity, 1.0f) *
+                                                   (tongue == 0 ? 0.65f : 0.4f)};
+                }
+            }
     }
 }
 
@@ -188,6 +258,8 @@ void Effects::reset() {
     next_sources_.clear();
     field_.clear();
     light_count_ = 0;
+    flame_count_ = 0;
+    presentation_seconds_ = 0.0;
     stats_.deferred_particles = 0;
     has_tick_ = false;
     last_tick_ = 0;

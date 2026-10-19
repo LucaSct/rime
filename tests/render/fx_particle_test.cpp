@@ -649,6 +649,59 @@ TEST_CASE("transient scene lights illuminate without authored components and cle
     CHECK(frame() == off);
 }
 
+TEST_CASE("SceneRenderer flame V2 copies input, composes before smoke and clears exactly") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    MaterialRegistry materials;
+    ecs::World world;
+    register_render_components(world);
+    (void)world.spawn_with(ecs::WorldTransform{}, Camera{});
+    SceneRenderer renderer(*device, meshes, materials);
+    renderer.set_temporal_jitter_enabled(false);
+    renderer.set_taa_resolve_enabled(false);
+    const auto frame = [&] {
+        RenderGraph graph(*device);
+        const auto out = renderer.render(graph, world, {kSize, kSize}, true);
+        graph.export_texture(out.hdr);
+        auto cmd = device->begin_commands();
+        graph.execute(*cmd);
+        device->submit_blocking(*cmd);
+        return read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8);
+    };
+    const auto baseline = frame();
+    FxSettings on{};
+    on.enabled = true;
+    on.max_particles = 1;
+    std::vector<GpuParticle> flames(3, smoke(-3.0f, 4.0f, 3.0f, 2.0f));
+    renderer.set_flame_particles(flames, on);
+    for (auto& flame : flames)
+        flame.color_alpha[3] = 0.0f; // copy ownership, not a borrowed caller span
+    const auto fire = frame();
+    CHECK(fire != baseline);
+    CHECK(renderer.flame_particles_dropped() == 2);
+    const auto dark_smoke = smoke(-2.5f, 0.0f, 0.0f, 0.0f, 0.9f);
+    renderer.set_smoke_particles({&dark_smoke, 1}, on);
+    const auto obscured = frame();
+    const auto fire_image = decode_hdr(fire, kSize, kSize);
+    const auto obscured_image = decode_hdr(obscured, kSize, kSize);
+    float fire_energy = 0.0f, obscured_energy = 0.0f;
+    for (std::uint32_t y = 0; y < kSize; ++y)
+        for (std::uint32_t x = 0; x < kSize; ++x) {
+            fire_energy += fire_image.luminance(x, y);
+            obscured_energy += obscured_image.luminance(x, y);
+        }
+    CHECK(fire_energy > 0.0f);
+    CHECK(obscured_energy < fire_energy * 0.9f);
+    renderer.set_flame_particles({}, on);
+    renderer.set_smoke_particles({}, on);
+    CHECK(frame() == baseline);
+}
+
 TEST_CASE("flame V2 gate, empty input, alpha zero, depth and intensity controls") {
     auto device = rhi::create_device({});
     if (!device) {

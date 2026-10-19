@@ -352,6 +352,18 @@ void SceneRenderer::set_smoke_particles(std::span<const GpuParticle> particles,
     smoke_particles_dropped_ += particles.size() - count;
 }
 
+void SceneRenderer::set_flame_particles(std::span<const GpuParticle> particles,
+                                        FxSettings settings) {
+    flame_settings_ = settings;
+    flame_particles_.clear();
+    if (!settings.enabled || particles.empty())
+        return;
+    constexpr std::size_t kFlameCapacity = 256;
+    const std::size_t count = std::min(particles.size(), kFlameCapacity);
+    flame_particles_.assign(particles.begin(), particles.begin() + count);
+    flame_particles_dropped_ += particles.size() - count;
+}
+
 bool SceneRenderer::set_surface_appearances(std::span<const SurfaceAppearance> rows) {
     surface_appearance_count_ = 0;
     const auto refuse = [&] {
@@ -1163,6 +1175,22 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         sky_.note_skyview_state(rhi::ResourceState::ShaderRead);
     }
 
+    if (flame_settings_.enabled && !flame_particles_.empty()) {
+        if (!flame_pass_) {
+            flame_pass_ = std::make_unique<FxParticlePass>(device_, 256, FxBlendMode::Flame);
+            (void)flame_pass_->set_frames_in_flight(
+                static_cast<std::uint32_t>(frame_ubos_.size() - 1));
+        }
+        FxView flame_view{};
+        flame_view.view_proj = fu.view_proj;
+        flame_view.right = {
+            scene.camera.view.at(0, 0), scene.camera.view.at(0, 1), scene.camera.view.at(0, 2)};
+        flame_view.up = {
+            scene.camera.view.at(1, 0), scene.camera.view.at(1, 1), scene.camera.view.at(1, 2)};
+        // Emissive flame is composited before alpha smoke, so a dense plume attenuates it.
+        // Neither pass writes depth or changes authored lights, geometry, or game state.
+        flame_pass_->add(graph, tonemap_src, depth, flame_particles_, flame_view, flame_settings_);
+    }
     if (smoke_settings_.enabled && !smoke_particles_.empty()) {
         if (!smoke_pass_) {
             smoke_pass_ = std::make_unique<FxParticlePass>(device_, 4096, FxBlendMode::SmokeAlpha);

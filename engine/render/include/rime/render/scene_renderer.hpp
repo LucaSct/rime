@@ -516,6 +516,10 @@ public:
     // TAA can ghost moving puffs. No vfx module dependency is implied.
     void set_smoke_particles(std::span<const GpuParticle> particles, FxSettings settings);
 
+    // Bounded copied HDR flame tongues through the existing billboard substrate. GPU resources
+    // and the pass are lazy until a nonempty enabled render. Empty/off clears presentation.
+    void set_flame_particles(std::span<const GpuParticle> particles, FxSettings settings);
+
     // Whole bounded batch admission. Null/duplicate entities, nonfinite/out-of-range factors,
     // or more than 16 rows refuse AND clear previous rows. Empty input restores authored looks.
     // Generations are matched exactly; no ECS or shared registry writes. Owned until replaced.
@@ -537,6 +541,10 @@ public:
     // Cumulative rejects from the owned-list cap and FxParticlePass validation/draw budget.
     [[nodiscard]] std::uint64_t smoke_particles_dropped() const noexcept {
         return smoke_particles_dropped_ + (smoke_pass_ ? smoke_pass_->particles_dropped() : 0);
+    }
+
+    [[nodiscard]] std::uint64_t flame_particles_dropped() const noexcept {
+        return flame_particles_dropped_ + (flame_pass_ ? flame_pass_->particles_dropped() : 0);
     }
 
     // Where per-submesh materials come from (m16.3). Null — the default — means every submesh uses
@@ -585,6 +593,10 @@ private:
     std::vector<GpuParticle> smoke_particles_;
     FxSettings smoke_settings_{};
     std::uint64_t smoke_particles_dropped_ = 0;
+    std::unique_ptr<FxParticlePass> flame_pass_;
+    std::vector<GpuParticle> flame_particles_;
+    FxSettings flame_settings_{};
+    std::uint64_t flame_particles_dropped_ = 0;
     std::vector<GpuPointLight> transient_point_lights_;
     std::uint64_t transient_point_lights_dropped_ = 0;
     std::vector<DrawItem> frame_first_person_draws_;

@@ -232,3 +232,97 @@ TEST_CASE("environment preview: transformed bounds and admission ignore archetyp
     CHECK(fx.field().count() <= vfx_scene::Effects::max_particles);
     CHECK(fx.field().stats().dropped_capacity > 0);
 }
+
+TEST_CASE("environment v2: flame clock freezes, refuses atomically and restarts on Stop") {
+    ecs::World w;
+    prepare(w);
+    const auto e = source(w, fire());
+    const auto authored = scene::save_scene_to_string(w);
+    vfx_scene::Effects fx;
+    REQUIRE(fx.flames().empty());
+    REQUIRE(fx.tick(w, 1, 0.25f));
+    REQUIRE(fx.flames().size() == 3);
+    const auto first = fx.flames()[0];
+    CHECK(first.half_size > 0.0f);
+    CHECK(first.opacity > 0.0f);
+    CHECK(scene::save_scene_to_string(w) == authored);
+    for (unsigned paused_frame = 0; paused_frame < 100; ++paused_frame)
+        fx.reconcile(w);
+    CHECK(fx.flames()[0].position.x == first.position.x);
+    CHECK(fx.flames()[0].position.y == first.position.y);
+    CHECK(fx.flames()[0].half_size == first.half_size);
+    CHECK_FALSE(fx.tick(w, 1, 0.25f));
+    CHECK_FALSE(fx.tick(w, 2, std::numeric_limits<float>::infinity()));
+    CHECK(fx.flames()[0].position.x == first.position.x);
+    REQUIRE(fx.tick(w, 2, 0.25f));
+    CHECK(fx.flames()[0].position.x != first.position.x);
+
+    // Extinguish/remove clears visible fire immediately, including in Pause. The existing
+    // smoke pool retains its independent lifetime, instead of vanishing with the flame.
+    w.get<vfx_scene::FireEmitter>(e)->intensity = 0.0f;
+    fx.reconcile(w);
+    CHECK(fx.flames().empty());
+    CHECK(fx.lights().empty());
+    CHECK(fx.field().count() > 0);
+    w.get<vfx_scene::FireEmitter>(e)->intensity = 1.0f;
+    fx.reset();
+    REQUIRE(fx.tick(w, 1, 0.25f));
+    REQUIRE(fx.flames().size() == 3);
+    CHECK(fx.flames()[0].position.x == first.position.x);
+    CHECK(fx.flames()[0].half_size == first.half_size);
+    REQUIRE(w.despawn(e));
+    fx.reconcile(w);
+    CHECK(fx.flames().empty());
+}
+
+TEST_CASE("environment v2: flame sprites remain capped independently of smoke saturation") {
+    ecs::World w;
+    prepare(w);
+    for (std::size_t i = 0; i < vfx_scene::Effects::max_sources + 8; ++i)
+        (void)source(w, fire(1024.0f));
+    vfx_scene::Effects fx;
+    for (std::uint64_t t = 1; t <= 100; ++t) {
+        REQUIRE(fx.tick(w, t, 0.25f));
+        REQUIRE(fx.flames().size() == vfx_scene::Effects::max_flames);
+        for (const auto& flame : fx.flames()) {
+            CHECK(std::isfinite(flame.position.x));
+            CHECK(std::isfinite(flame.position.y));
+            CHECK(std::isfinite(flame.position.z));
+            CHECK(flame.half_size > 0.0f);
+            CHECK(flame.opacity >= 0.0f);
+            CHECK(flame.opacity <= 1.0f);
+        }
+    }
+    CHECK(fx.stats().source_cap_drops > 0);
+    CHECK(fx.field().stats().dropped_capacity > 0);
+    fx.reset();
+    CHECK(fx.flames().empty());
+}
+
+TEST_CASE("environment v2: smoke has soft lifetime and bounded local fire illumination") {
+    vfx::Particle p{};
+    p.lifetime = 4.0f;
+    CHECK(vfx_scene::smoke_appearance(p, {}).opacity == 0.0f);
+    p.age = 1.0f;
+    const auto unlit = vfx_scene::smoke_appearance(p, {});
+    CHECK(unlit.opacity > 0.0f);
+    vfx::FireLightContribution light{{0.0f, 0.0f, 0.0f}, {1.0f, 0.35f, 0.08f}, 1.0f, 2.0f};
+    const auto lit = vfx_scene::smoke_appearance(p, {&light, 1});
+    CHECK(lit.color.x > unlit.color.x);
+    CHECK(lit.color.y > unlit.color.y);
+    CHECK(lit.color.x - unlit.color.x > lit.color.z - unlit.color.z);
+    CHECK(lit.opacity == unlit.opacity);
+    p.position.x = 3.0f;
+    const auto outside = vfx_scene::smoke_appearance(p, {&light, 1});
+    CHECK(outside.color.x == unlit.color.x);
+    p.age = 3.99f;
+    CHECK(vfx_scene::smoke_appearance(p, {}).opacity < unlit.opacity * 0.01f);
+    p.age = 4.0f;
+    CHECK(vfx_scene::smoke_appearance(p, {}).opacity == 0.0f);
+    p.age = 1.0f;
+    p.lifetime = std::numeric_limits<float>::quiet_NaN();
+    CHECK(vfx_scene::smoke_appearance(p, {}).opacity == 0.0f);
+    p.lifetime = 4.0f;
+    light.radius = std::numeric_limits<float>::infinity();
+    CHECK(vfx_scene::smoke_appearance(p, {&light, 1}).color.x == unlit.color.x);
+}
