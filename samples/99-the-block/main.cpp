@@ -79,6 +79,7 @@
 #include <utility>
 #include <vector>
 
+#include "authored_environment.hpp"
 #include "play_building_support.hpp"
 #include "play_city.hpp"
 #include "play_effects.hpp"
@@ -1693,6 +1694,7 @@ struct Visuals {
     render::MeshRegistry meshes;
     render::MaterialRegistry materials;
     destruction_render::PartLeafRenderer leaves;
+    block_play::AuthoredEnvironment authored_environment;
     render::SceneRenderer renderer;
     std::unique_ptr<render::SceneRenderer> scope_renderer;
     render::text::HudRenderer hud;
@@ -1717,7 +1719,8 @@ struct Visuals {
     std::uint64_t spot_maps_total = 0; // rendered + reused
 
     explicit Visuals(rhi::Device& device)
-        : meshes(device), renderer(device, meshes, materials), hud(device, render::kLdrFormat) {
+        : meshes(device), authored_environment(&device), renderer(device, meshes, materials),
+          hud(device, render::kLdrFormat) {
         // ── THE WHOLE M10 STACK, ON (m13.L) ──────────────────────────────────────────────────────
         //
         // It was not, and that is worth writing down rather than quietly fixing. m13.5 set
@@ -2199,6 +2202,7 @@ struct Demo {
                 settings.max_particles = block_play::PlayEffects::kParticleCapacity;
                 visuals->scope_renderer->set_smoke_particles(smoke_particles, settings);
             }
+            visuals->authored_environment.apply_to(*visuals->scope_renderer);
         }
     }
 
@@ -2264,6 +2268,8 @@ struct Demo {
     // One simulation tick, plus everything downstream of it that is not drawing.
     void step_sim(const replication::InputCommand& intent) {
         session.tick(intent);
+        if (visuals)
+            (void)visuals->authored_environment.tick(session.client.world, session.tick_index, kDt);
         if (effects)
             (void)effects->tick(
                 session.tick_index, session.client.destruction.events(), static_cast<float>(kDt));
@@ -2434,6 +2440,8 @@ struct Demo {
             if (visuals->scope_renderer)
                 visuals->scope_renderer->set_smoke_particles(smoke_particles, settings);
         }
+        visuals->authored_environment.publish(
+            world, smoke_particles, visuals->renderer, visuals->scope_renderer.get());
         if (weapon_fx) {
             weapon_fx->advance(static_cast<float>(ctx.frame_dt));
         }

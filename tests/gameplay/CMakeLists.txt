@@ -7,6 +7,7 @@
 # under engine/*/src.
 rime_add_test(rime_gameplay_tests
     first_person_test.cpp
+    authored_environment_test.cpp
     character_slope_test.cpp
     character_step_test.cpp
     character_slide_test.cpp
@@ -21,12 +22,14 @@ rime_add_test(rime_gameplay_tests
     play_weapon_policy_test.cpp
     play_effects_test.cpp
     player_spawn_test.cpp
+    ../../samples/99-the-block/authored_environment.cpp
     ../../samples/99-the-block/play_effects.cpp
     ../../samples/99-the-block/play_arm_ik.cpp)
 
 target_link_libraries(rime_gameplay_tests
     PRIVATE rime::gameplay rime::physics rime::assets rime::render rime::vfx rime::destruction
-            rime::scene rime::worldkit rime::blockkit rime::ecs)
+            rime::scene rime::worldkit rime::blockkit rime::ecs
+            rime::vfx_scene rime::fluids_render)
 
 # The shared fixture header (character_fixture.hpp) lives beside these sources.
 target_include_directories(rime_gameplay_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
