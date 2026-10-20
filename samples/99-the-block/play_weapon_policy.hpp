@@ -10,6 +10,12 @@
 
 namespace rime::block_play {
 
+// Shared capsule-relative eye policy. Rendering and authoritative firing configure their
+// existing eye-height fields from this function so changing capsule height cannot separate them.
+[[nodiscard]] inline float play_eye_height(const gameplay::CharacterConfig& character) noexcept {
+    return character.half_height * .8f;
+}
+
 // The play sample's three guns, expressed ONLY through the engine's existing trigger contract.
 //
 // WHY THIS IS A CONFIGURATION AND NOT AN INVENTORY. The authoritative weapon is one

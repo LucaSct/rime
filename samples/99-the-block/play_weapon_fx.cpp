@@ -9,6 +9,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/physics/world.hpp"
 #include "rime/render/components.hpp"
+#include "rime/rhi/rhi.hpp"
 
 namespace rime::block_play {
 namespace {
@@ -22,6 +23,49 @@ core::Quat along_z(core::Vec3 unit) {
     if (unit.z < -0.999999f)
         return core::quat_from_axis_angle({0, 1, 0}, 3.14159265359f);
     return core::normalize(core::Quat{-unit.y, unit.x, 0.0f, 1.0f + unit.z});
+}
+
+constexpr std::array<core::Vec3, 7> kSurfaceColors{{{.30f, .29f, .27f},
+                                                    {.34f, .12f, .065f},
+                                                    {.55f, .51f, .44f},
+                                                    {.16f, .085f, .035f},
+                                                    {.8f, .35f, .06f},
+                                                    {.20f, .36f, .44f},
+                                                    {.24f, .12f, .045f}}};
+
+float random01(std::uint32_t& seed) {
+    // Counter-seeded xorshift: replaying accepted shots reproduces their cosmetic spray without
+    // consuming the simulation RNG or depending on render frame rate.
+    seed ^= seed << 13;
+    seed ^= seed >> 17;
+    seed ^= seed << 5;
+    return static_cast<float>(seed & 0xffffu) / 65535.0f;
+}
+
+render::CpuMesh decal_quad() {
+    render::CpuMesh mesh;
+    mesh.vertices = {{-.01f, -.01f, 0, 0, 0, 1, 0, 0},
+                     {.01f, -.01f, 0, 0, 0, 1, 1, 0},
+                     {.01f, .01f, 0, 0, 0, 1, 1, 1},
+                     {-.01f, .01f, 0, 0, 0, 1, 0, 1}};
+    mesh.indices = {0, 1, 2, 0, 2, 3};
+    render::compute_tangents(mesh);
+    return mesh;
+}
+
+render::CpuMesh splash_ring() {
+    render::CpuMesh mesh;
+    for (unsigned i = 0; i <= 32; ++i) {
+        const float angle = static_cast<float>(i) * 6.2831853f / 32;
+        for (const float radius : {.008f, .01f})
+            mesh.vertices.push_back(
+                {std::cos(angle) * radius, std::sin(angle) * radius, 0, 0, 0, 1, 0, 0});
+        if (i != 0) {
+            const auto b = i * 2;
+            mesh.indices.insert(mesh.indices.end(), {b - 2, b, b - 1, b - 1, b, b + 1});
+        }
+    }
+    return mesh;
 }
 
 render::CpuMesh case_mesh() {
@@ -80,10 +124,15 @@ render::CpuMesh case_mesh() {
 }
 } // namespace
 
-PlayWeaponFx::PlayWeaponFx(rhi::Device&,
+PlayWeaponFx::PlayWeaponFx(rhi::Device& device,
                            render::MeshRegistry& meshes,
                            render::MaterialRegistry& materials) noexcept
-    : meshes_(meshes), materials_(materials) {}
+    : device_(device), meshes_(meshes), materials_(materials) {}
+
+PlayWeaponFx::~PlayWeaponFx() {
+    if (scar_texture_.is_valid())
+        device_.destroy(scar_texture_);
+}
 
 bool PlayWeaponFx::initialize() {
     if (attempted_)
@@ -95,8 +144,12 @@ bool PlayWeaponFx::initialize() {
     // This keeps millimetre-wide tracers above the inverse's determinant guard as well.
     burst_ = meshes_.add(render::make_uv_sphere(.01f, 4, 8), "weapon-feedback-burst");
     brass_ = meshes_.add(case_mesh(), "weapon-feedback-case");
-    // The sphere serves flash, tracer, spark and marks; cases share one low-poly cylinder.
-    if (!meshes_.contains(burst_) || !meshes_.contains(brass_))
+    // The sphere still serves flash/tracer/spray; cases share one low-poly cylinder. Marks now
+    // use an alpha-tested planar quad, so their thickness cannot silhouette as a sphere blob.
+    scar_ = meshes_.add(decal_quad(), "weapon-scar-quad");
+    ring_ = meshes_.add(splash_ring(), "weapon-water-ring");
+    if (!meshes_.contains(burst_) || !meshes_.contains(brass_) || !meshes_.contains(scar_) ||
+        !meshes_.contains(ring_))
         return false;
     // These are LINEAR RADIANCE values fed straight to the ACES fit in tonemap.frag -- there is no
     // exposure system yet, so the curve is the only thing between these numbers and the screen.
@@ -107,8 +160,36 @@ bool PlayWeaponFx::initialize() {
     // of sRGB (1.0, 0.55, 0.15) gives green 0.18 and blue 0.02; red stays well above 1 so the core
     // still blows out and blooms, which is what reads as heat. Re-derive these if an exposure
     // system lands, because every one of them is relative to a curve with no exposure in front.
+    // A tiny procedural coverage/albedo stamp supplies a dark crater and pale chipped rim.
+    // Alpha testing uses the existing material path; the transparent corners leave the wall
+    // visible, and a 2 mm normal offset prevents z-fighting without adding physical thickness.
+    constexpr unsigned texels = 64;
+    std::array<std::uint8_t, texels * texels * 4> pixels{};
+    for (unsigned y = 0; y < texels; ++y)
+        for (unsigned x = 0; x < texels; ++x) {
+            const float u = (static_cast<float>(x) + .5f) / texels * 2 - 1;
+            const float v = (static_cast<float>(y) + .5f) / texels * 2 - 1;
+            const float angle = std::atan2(v, u);
+            const float edge = .78f + .08f * std::sin(angle * 7) + .04f * std::cos(angle * 11);
+            const float radius = std::sqrt(u * u + v * v) / edge;
+            const auto shade = static_cast<std::uint8_t>(radius < .58f ? 22 : 130);
+            const unsigned at = (y * texels + x) * 4;
+            pixels[at] = shade;
+            pixels[at + 1] = shade;
+            pixels[at + 2] = shade;
+            pixels[at + 3] = radius < 1 ? 255 : 0;
+        }
+    rhi::TextureDesc texture{};
+    texture.extent = {texels, texels};
+    texture.format = rhi::Format::RGBA8Srgb;
+    texture.usage = rhi::TextureUsage::Sampled | rhi::TextureUsage::TransferDst;
+    texture.debug_name = "weapon-scar-mask";
+    scar_texture_ = device_.create_texture(texture);
+    if (!scar_texture_.is_valid())
+        return false;
+    device_.write_texture(scar_texture_, pixels.data(), pixels.size());
     constexpr float colors[5][3] = {
-        {10.0f, 0.18f, 0.02f}, {0, 0, 0}, {8.0f, 0.14f, 0.015f}, {0, 0, 0}, {0, 0, 0}};
+        {10.0f, 0.18f, 0.02f}, {5, 1.1f, .20f}, {.30f, .26f, .20f}, {0, 0, 0}, {0, 0, 0}};
     for (std::size_t i = 0; i < material_ids_.size(); ++i) {
         render::PbrMaterialDesc material{};
         const bool brass = i == 4;
@@ -119,8 +200,36 @@ bool PlayWeaponFx::initialize() {
         material.metallic = brass ? .8f : i == 1 ? .7f : 0;
         material.roughness = brass ? .32f : i == 1 ? .35f : 1.0f;
         std::copy(std::begin(colors[i]), std::end(colors[i]), material.emissive);
+        if (i == 2) {
+            material.base_color[0] = .55f;
+            material.base_color[1] = .50f;
+            material.base_color[2] = .42f;
+        }
+        if (i == 3) {
+            material.base_color[0] = material.base_color[1] = material.base_color[2] = 1;
+            material.base_color_texture = scar_texture_;
+            material.alpha_cutoff = .5f;
+            material.clamp_uv = true;
+        }
         material_ids_[i] = materials_.add(material);
     }
+    for (std::size_t i = 0; i < surface_materials_.size(); ++i) {
+        render::PbrMaterialDesc desc{};
+        const auto color = kSurfaceColors[i];
+        desc.base_color[0] = color.x;
+        desc.base_color[1] = color.y;
+        desc.base_color[2] = color.z;
+        desc.roughness = i == static_cast<std::size_t>(Surface::Water) ? .18f : .95f;
+        if (i == static_cast<std::size_t>(Surface::Metal)) {
+            desc.emissive[0] = 7;
+            desc.emissive[1] = 1.2f;
+            desc.emissive[2] = .12f;
+        }
+        surface_materials_[i] = materials_.add(desc);
+    }
+    for (std::size_t i = 0; i < kSlots; ++i)
+        tracer_materials_[i] =
+            i == 0 ? material_ids_[1] : materials_.add(materials_.get(material_ids_[1]));
     ready_ = true;
     return true;
 }
@@ -132,27 +241,68 @@ void PlayWeaponFx::fire(core::Vec3 eye,
                         bool hit_surface,
                         core::Vec3 normal,
                         physics::BodyId body,
-                        const physics::PhysicsWorld* physics) noexcept {
+                        const physics::PhysicsWorld* physics,
+                        Surface surface,
+                        bool tracer) noexcept {
     const float length = core::length(direction);
     const float distance = core::length(hit - muzzle);
     if (!ready_ || !finite(eye) || !finite(direction) || !finite(muzzle) || !finite(hit) ||
         !std::isfinite(length) || length < 1e-5f || !std::isfinite(distance))
         return;
+    std::uint32_t seed = ++sequence_ * 0x9e3779b9u;
     auto& shot = shots_[next_];
     next_ = (next_ + 1) % kSlots; // overwrite the oldest feedback, never grow a particle collection
     shot.direction = direction / length;
     shot.muzzle = muzzle;
     shot.hit = hit;
     const auto toward_eye = core::normalize(eye - hit);
-    // No surface normal is supplied: this is a raised luminous spark, not a decal or a scar.
+    // Raised impact feedback remains distinct from the persistent, surface-aligned scar.
     shot.spark = hit + (finite(toward_eye) ? toward_eye : -shot.direction) * 0.015f;
     shot.hit_surface = hit_surface;
+    shot.surface = surface;
+    shot.tracer = tracer;
+    const float normal_size = core::length(normal);
+    shot.normal = finite(normal) && normal_size > .5f ? normal / normal_size : -shot.direction;
+    if (hit_surface) {
+        const auto color = kSurfaceColors[static_cast<std::size_t>(surface)];
+        const auto tangent = core::rotate(along_z(shot.normal), core::Vec3{1, 0, 0});
+        const auto bitangent = core::cross(shot.normal, tangent);
+        for (unsigned i = 0; i < 6; ++i) {
+            auto& fragment = fragments_[next_fragment_];
+            next_fragment_ = (next_fragment_ + 1) % kFragmentSlots;
+            const float angle = random01(seed) * 6.2831853f;
+            const float speed = surface == Surface::Metal ? 4.5f : 1.2f;
+            fragment.origin = hit + shot.normal * .018f;
+            fragment.velocity = shot.normal * (.6f + random01(seed) * speed) +
+                                (tangent * std::cos(angle) + bitangent * std::sin(angle)) *
+                                    (.4f + random01(seed) * speed);
+            if (surface == Surface::Water)
+                fragment.velocity = shot.normal * (2.0f + random01(seed) * 1.8f) +
+                                    (tangent * std::cos(angle) + bitangent * std::sin(angle)) * .3f;
+            fragment.surface = surface;
+            fragment.age = 0;
+            fragment.life = surface == Surface::Metal ? .18f : .45f;
+            fragment.size = surface == Surface::Metal ? .004f : .009f + random01(seed) * .012f;
+        }
+        if (surface != Surface::Metal && surface != Surface::Water)
+            for (unsigned i = 0; i < 5; ++i) {
+                auto& dust = dust_[next_dust_];
+                next_dust_ = (next_dust_ + 1) % kDustSlots;
+                dust.origin = hit + shot.normal * .04f;
+                dust.velocity = shot.normal * (.25f + random01(seed) * .7f) +
+                                tangent * ((random01(seed) - .5f) * .9f) +
+                                bitangent * ((random01(seed) - .5f) * .9f);
+                dust.color = color;
+                dust.age = 0;
+                dust.size = .045f + random01(seed) * .055f;
+            }
+    }
     shot.age = 0.0f;
     shot.presented = false;
     physics::BodyState state{};
     const float normal_length = core::length(normal);
-    if (hit_surface && physics && finite(normal) && normal_length > .5f &&
-        physics->get_body_state(body, state)) {
+    if (hit_surface && surface != Surface::Water && surface != Surface::Soil && physics &&
+        finite(normal) && normal_length > .5f && physics->get_body_state(body, state)) {
         // Surface marks live in the hit body's frame, so a moving target carries its scar.
         // Generational BodyId lookup removes it when that collider is fractured/replaced.
         auto& impact = impacts_[next_impact_];
@@ -162,15 +312,21 @@ void PlayWeaponFx::fire(core::Vec3 eye,
         impact.local_normal = core::rotate(inverse, normal / normal_length);
         impact.body = body;
         impact.age = 0;
+        impact.spin = (random01(seed) - .5f) * 1.2f;
     }
 }
 
 void PlayWeaponFx::advance(float dt) noexcept {
     if (!std::isfinite(dt) || dt <= 0.0f)
         return;
+    exposure_ = std::min(dt, 1.0f / 30.0f);
     for (auto& shot : shots_)
         if (shot.presented)
-            shot.age = std::min(shot.age + dt, kSparkLifetime);
+            shot.age = std::min(shot.age + dt, kTracerLifetime);
+    for (auto& fragment : fragments_)
+        fragment.age = std::min(fragment.age + dt, fragment.life);
+    for (auto& dust : dust_)
+        dust.age = std::min(dust.age + dt, .65f);
     for (auto& impact : impacts_)
         impact.age = std::min(impact.age + dt, kImpactLifetime);
     for (auto& casing : cases_) {
@@ -187,6 +343,28 @@ void PlayWeaponFx::advance(float dt) noexcept {
     }
     // A shot accepted by the sim just before a slow render still gets one visible presentation.
     // After that, real elapsed time expires effects; no frame-rate-dependent age clamp.
+}
+
+void PlayWeaponFx::append_smoke(std::vector<render::GpuParticle>& particles) const {
+    // Analytic drag and expansion turn five soft billboards into a dust puff. Age is bounded,
+    // no collision queries or engine VFX state are needed, and opacity retires smoothly.
+    for (const auto& dust : dust_) {
+        if (dust.age >= .65f)
+            continue;
+        const float t = dust.age;
+        const auto position =
+            dust.origin + dust.velocity * ((1 - std::exp(-3 * t)) / 3) + core::Vec3{0, .08f * t, 0};
+        render::GpuParticle p{};
+        p.position_size[0] = position.x;
+        p.position_size[1] = position.y;
+        p.position_size[2] = position.z;
+        p.position_size[3] = dust.size + t * .16f;
+        p.color_alpha[0] = dust.color.x;
+        p.color_alpha[1] = dust.color.y;
+        p.color_alpha[2] = dust.color.z;
+        p.color_alpha[3] = .38f * (1 - t / .65f);
+        particles.push_back(p);
+    }
 }
 
 void PlayWeaponFx::queue_case() noexcept {
@@ -232,6 +410,12 @@ void PlayWeaponFx::pose(ecs::World& world,
         for (auto& impact : impacts_)
             impact.entity = world.spawn_with(
                 ecs::WorldTransform{}, render::MeshRef{}, render::MaterialRef{material_ids_[3]});
+        for (auto& fragment : fragments_)
+            fragment.entity = world.spawn_with(ecs::WorldTransform{},
+                                               render::MeshRef{},
+                                               render::MaterialRef{surface_materials_[0]});
+        for (std::size_t i = 0; i < kSlots; ++i)
+            world.get<render::MaterialRef>(shots_[i].entities[1])->material = tracer_materials_[i];
         for (auto& casing : cases_)
             casing.entity = world.spawn_with(
                 ecs::WorldTransform{}, render::MeshRef{}, render::MaterialRef{material_ids_[4]});
@@ -258,7 +442,8 @@ void PlayWeaponFx::pose(ecs::World& world,
             casing.settled = false;
         }
     }
-    for (auto& shot : shots_) {
+    for (std::size_t slot = 0; slot < kSlots; ++slot) {
+        auto& shot = shots_[slot];
         core::Transform flash{};
         // Only live muzzle effects follow the latest camera/viewmodel pose. The fallback keeps
         // old callers usable; neither path changes the accepted hit or tracer's world path.
@@ -278,29 +463,47 @@ void PlayWeaponFx::pose(ecs::World& world,
         const float distance = core::length(path);
         const auto direction = distance > 1e-5f ? path / distance : shot.direction;
         const bool forward_path = core::dot(path, shot.direction) > .28f;
-        // A short swept streak visualizes the already-resolved hitscan. Its travel time is
-        // presentation only: it does not postpone damage, collision, or any ShotEvent.
-        // A 30 mm total length needs a 15 mm Z half-extent, expressed in base centimetres.
-        // Start beyond the live flare and suppress a pellet for a hit too close to the muzzle.
+        // Exposure-length swept segment: intersect the travelled interval with the accepted
+        // ray, rather than drawing a 3 cm pellet that jumps 13 m between 60 Hz frames. The
+        // last interval stays visible even when its head has reached the target; damage is
+        // still immediate hitscan. A per-slot emissive material fades without changing peers.
         const float head = std::min(distance, .28f + 800.0f * shot.age);
-        const float tail = std::max(.25f, head - .03f);
+        const float tail = std::max(.25f, .28f + 800.0f * (shot.age - exposure_));
         tracer.translation = shot.muzzle + direction * ((head + tail) * 0.5f);
         tracer.rotation = along_z(direction);
-        tracer.scale = {.3f, .3f, std::max((head - tail) * 50.0f, .1f)};
+        tracer.scale = {.35f, .35f, std::max((head - tail) * 50.0f, .1f)};
+        auto glow = materials_.get(tracer_materials_[slot]);
+        const float fade = std::max(0.0f, 1 - shot.age / kTracerLifetime);
+        glow.emissive[0] = 5 * fade;
+        glow.emissive[1] = 1.1f * fade;
+        glow.emissive[2] = .20f * fade;
+        materials_.update(tracer_materials_[slot], glow);
         show(world,
              shot.entities[1],
-             shot.age < kTracerLifetime && head < distance && forward_path ? burst_
-                                                                           : render::kInvalidMeshId,
+             shot.tracer && shot.age < kTracerLifetime && tail < head && forward_path
+                 ? burst_
+                 : render::kInvalidMeshId,
              tracer);
 
         core::Transform spark{};
         spark.translation = shot.spark;
-        spark.rotation = along_z(-shot.direction);
-        const float size = 0.015f + 0.065f * (1.0f - shot.age / kSparkLifetime);
-        spark.scale = {size * 100.0f, size * 100.0f, size * 150.0f};
+        spark.rotation = along_z(shot.normal);
+        const bool water = shot.surface == Surface::Water;
+        const bool metal = shot.surface == Surface::Metal;
+        const float size = .01f + .025f * (1 - std::min(shot.age / kSparkLifetime, 1.0f));
+        spark.scale = water ? core::Vec3{5 + shot.age * 90, 5 + shot.age * 90, 1}
+                            : core::Vec3{size * 100, size * 100, .25f};
+        auto* spark_mat = world.get<render::MaterialRef>(shot.entities[2]);
+        spark_mat->material =
+            water || metal || shot.surface == Surface::Soil || shot.surface == Surface::Wood
+                ? surface_materials_[static_cast<std::size_t>(shot.surface)]
+                : material_ids_[2];
+        world.mark_changed<render::MaterialRef>(shot.entities[2]);
         show(world,
              shot.entities[2],
-             shot.hit_surface && shot.age < kSparkLifetime ? burst_ : render::kInvalidMeshId,
+             shot.hit_surface && shot.age < (water ? kTracerLifetime : .045f)
+                 ? (water ? ring_ : burst_)
+                 : render::kInvalidMeshId,
              spark);
         // Short-lived inverse-square lights illuminate nearby walls and enter the normal HDR
         // reflection path. Point lights avoid allocating extra shadow maps for every round.
@@ -320,7 +523,8 @@ void PlayWeaponFx::pose(ecs::World& world,
             light->color_g = .14f;
             light->color_b = .018f;
             light->radius = muzzle ? 4.0f : 2.0f;
-            light->intensity = (muzzle || shot.hit_surface) ? (muzzle ? 35.0f : 18.0f) * fade : 0;
+            light->intensity =
+                (muzzle || (shot.hit_surface && metal)) ? (muzzle ? 35.0f : 3.0f) * fade : 0;
             world.mark_changed<ecs::WorldTransform>(shot.entities[part]);
             world.mark_changed<render::PointLight>(shot.entities[part]);
         }
@@ -334,11 +538,32 @@ void PlayWeaponFx::pose(ecs::World& world,
         if (active) {
             const auto normal = core::rotate(state.orientation, impact.local_normal);
             scar.translation = state.position +
-                               core::rotate(state.orientation, impact.local_point) + normal * .004f;
-            scar.rotation = along_z(normal);
-            scar.scale = {4.5f, 4.5f, .6f};
+                               core::rotate(state.orientation, impact.local_point) + normal * .002f;
+            scar.rotation = along_z(normal) * core::quat_from_axis_angle({0, 0, 1}, impact.spin);
+            scar.scale = {3.0f, 3.0f, 1.0f};
         }
-        show(world, impact.entity, active ? burst_ : render::kInvalidMeshId, scar);
+        show(world, impact.entity, active ? scar_ : render::kInvalidMeshId, scar);
+    }
+    for (auto& fragment : fragments_) {
+        const bool active = fragment.age < fragment.life;
+        core::Transform transform{};
+        if (active) {
+            const float t = fragment.age;
+            transform.translation =
+                fragment.origin + fragment.velocity * t + core::Vec3{0, -4.905f * t * t, 0};
+            transform.rotation = along_z(core::normalize(fragment.velocity));
+            const float fade = 1 - t / fragment.life;
+            const float size = fragment.size * 100 * std::max(fade, .15f);
+            transform.scale = {size,
+                               size,
+                               fragment.surface == Surface::Metal   ? size * 8
+                               : fragment.surface == Surface::Water ? size * 4
+                                                                    : size};
+            auto* material = world.get<render::MaterialRef>(fragment.entity);
+            material->material = surface_materials_[static_cast<std::size_t>(fragment.surface)];
+            world.mark_changed<render::MaterialRef>(fragment.entity);
+        }
+        show(world, fragment.entity, active ? burst_ : render::kInvalidMeshId, transform);
     }
     for (auto& casing : cases_) {
         const bool active = casing.age < kCaseLifetime;

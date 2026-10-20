@@ -8,6 +8,7 @@
 #include "rime/core/math/transform.hpp"
 #include "rime/ecs/entity.hpp"
 #include "rime/physics/body.hpp"
+#include "rime/render/fx_pass.hpp"
 #include "rime/render/material.hpp"
 #include "rime/render/mesh.hpp"
 
@@ -25,9 +26,10 @@ namespace rime::block_play {
 // is seen by both parent and optical cameras. The world owns one fixed pool for its lifetime.
 class PlayWeaponFx {
 public:
+    enum class Surface : std::uint8_t { Concrete, Brick, Plaster, Soil, Metal, Water, Wood, Count };
     static constexpr std::size_t kSlots = 8;
     static constexpr float kFlashLifetime = 0.04f;
-    static constexpr float kTracerLifetime = 0.06f;
+    static constexpr float kTracerLifetime = 0.18f;
     static constexpr float kSparkLifetime = 0.12f;
     // 48 marks is the pool, 20 s is the age at which one expires -- and the pool is the binding
     // limit, not the clock. A held trigger at 600 RPM lays down 10 marks a second, so sustained
@@ -38,7 +40,10 @@ public:
     static constexpr float kImpactLifetime = 20.0f;
     static constexpr std::size_t kCaseSlots = 32;
     static constexpr float kCaseLifetime = 3.0f;
-    static constexpr std::size_t kEntityCount = kSlots * 5 + kImpactSlots + kCaseSlots;
+    static constexpr std::size_t kFragmentSlots = 64;
+    static constexpr std::size_t kDustSlots = 96;
+    static constexpr std::size_t kEntityCount =
+        kSlots * 5 + kImpactSlots + kCaseSlots + kFragmentSlots;
 
     struct ViewPose {
         core::Vec3 eye{};
@@ -51,6 +56,7 @@ public:
     PlayWeaponFx(rhi::Device&,
                  render::MeshRegistry& meshes,
                  render::MaterialRegistry& materials) noexcept;
+    ~PlayWeaponFx();
     PlayWeaponFx(const PlayWeaponFx&) = delete;
     PlayWeaponFx& operator=(const PlayWeaponFx&) = delete;
     // One attempt only: burst and brass meshes plus fixed materials; no per-shot uploads.
@@ -62,14 +68,17 @@ public:
               bool hit_surface,
               core::Vec3 normal = {},
               physics::BodyId body = {},
-              const physics::PhysicsWorld* physics = nullptr) noexcept;
+              const physics::PhysicsWorld* physics = nullptr,
+              Surface surface = Surface::Concrete,
+              bool tracer = true) noexcept;
     void advance(float dt) noexcept;
+    void append_smoke(std::vector<render::GpuParticle>& particles) const;
     // Queue a spent case for the next pose. The bounded queue is also valid before the first
     // pose; it creates no entities. The caller chooses extraction timing (shot or bolt cycle).
     void queue_case() noexcept;
-    // First call binds one world and creates kEntityCount entities: 40 shot parts, 48 marks,
-    // 32 cases. Later calls only write components. Provide the camera/viewmodel pose AFTER
-    // posing the viewmodel. Flash and muzzle light follow it for their short lifetime;
+    // First call binds one world and creates kEntityCount entities: shot parts, marks,
+    // cases and fragments. Later calls only write components. Provide the camera/viewmodel pose
+    // AFTER posing the viewmodel. Flash and muzzle light follow it for their short lifetime;
     // accepted shot paths and impacts remain fixed in world/body space.
     void pose(ecs::World& world,
               const physics::PhysicsWorld* physics = nullptr,
@@ -77,8 +86,10 @@ public:
 
 private:
     struct Shot {
-        core::Vec3 direction{}, muzzle{}, hit{}, spark{};
-        float age = kSparkLifetime;
+        core::Vec3 direction{}, muzzle{}, hit{}, spark{}, normal{0, 1, 0};
+        Surface surface = Surface::Concrete;
+        bool tracer = true;
+        float age = kTracerLifetime;
         bool hit_surface = false;
         bool presented = true;
         std::array<ecs::Entity, 5> entities{};
@@ -89,6 +100,7 @@ private:
         physics::BodyId body{};
         ecs::Entity entity{};
         float age = kImpactLifetime;
+        float spin = 0;
     };
 
     struct Case {
@@ -100,16 +112,39 @@ private:
         bool settled = false;
     };
 
+    struct Fragment {
+        core::Vec3 origin{}, velocity{};
+        float age = .6f, life = .6f, size = .01f;
+        Surface surface = Surface::Concrete;
+        ecs::Entity entity{};
+    };
+
+    struct Dust {
+        core::Vec3 origin{}, velocity{}, color{};
+        float age = .65f, size = .08f;
+    };
+
     void show(ecs::World& world,
               ecs::Entity entity,
               render::MeshId mesh,
               const core::Transform& transform);
+    rhi::Device& device_;
+    rhi::TextureHandle scar_texture_{};
     render::MeshRegistry& meshes_;
     render::MaterialRegistry& materials_;
     std::array<Shot, kSlots> shots_{};
     std::array<render::MaterialId, 5> material_ids_{};
     std::array<Impact, kImpactSlots> impacts_{};
     std::array<Case, kCaseSlots> cases_{};
+    std::array<Fragment, kFragmentSlots> fragments_{};
+    std::array<Dust, kDustSlots> dust_{};
+    std::array<render::MaterialId, static_cast<std::size_t>(Surface::Count)> surface_materials_{};
+    std::array<render::MaterialId, kSlots> tracer_materials_{};
+    render::MeshId scar_ = render::kInvalidMeshId;
+    render::MeshId ring_ = render::kInvalidMeshId;
+    float exposure_ = 1.0f / 60.0f;
+    std::uint32_t sequence_ = 0;
+    std::size_t next_fragment_ = 0, next_dust_ = 0;
     render::MeshId burst_ = render::kInvalidMeshId;
     render::MeshId brass_ = render::kInvalidMeshId;
     ecs::World* world_ = nullptr; // identity check only; never dereferenced by destruction

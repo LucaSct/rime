@@ -65,6 +65,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -72,9 +73,11 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -98,6 +101,7 @@
 #include "rime/assets/manifest.hpp"
 #include "rime/assets/sdf_asset.hpp"
 #include "rime/audio/mixer.hpp"
+#include "rime/audio/sink.hpp"
 #include "rime/blockkit/block.hpp"
 #include "rime/blockkit/palette.hpp"
 #include "rime/blockkit/role.hpp"
@@ -207,6 +211,8 @@ std::uint64_t g_ticks = kDefaultTicks;
 // thing the counters are describing.
 std::string g_ppm;
 bool g_effects_preview = false;
+bool g_network_impairment = false;
+bool g_mute = false;
 
 // --island-profile: per-island solve TIMING (#311). Off by default because it reads a clock once
 // per active island -- off the per-constraint path and tiny, but not free, so A RUN TAKEN WITH THIS
@@ -743,11 +749,21 @@ struct ClientPeer : Peer {
 
     [[nodiscard]] core::Transform camera_transform() const {
         gameplay::FirstPersonView v = view;
-        v.eye_height =
-            config.half_height * 0.8f; // eyes near the top of the capsule, not its centre
+        v.eye_height = block_play::play_eye_height(config);
         return gameplay::eye_transform(v, eye_anchor());
     }
 };
+
+void push_loose_hit(physics::PhysicsWorld& world,
+                    physics::BodyId body,
+                    core::Vec3 point,
+                    core::Vec3 impulse) {
+    // Impulse at contact supplies both translation and torque. Clamp momentum rather than
+    // velocity, preserving mass/inertia response; PhysicsWorld rejects dead or immovable ids.
+    const float magnitude = core::length(impulse);
+    if (std::isfinite(magnitude) && magnitude > 0)
+        world.apply_impulse(body, impulse * (std::min(magnitude, 25.0f) / magnitude), point);
+}
 
 // One process, both peers, a lossy wire between them. In-process and deterministic
 // (ScriptedNetwork) rather than real sockets, because the demo's claim is about COMPOSITION at
@@ -974,7 +990,64 @@ struct Session {
         total_ops = 0;
     }
 
-    explicit Session(std::uint64_t seed) : network(seed, {kLossRate, 0.0f, kOneWayMs, kOneWayMs}) {
+    using HitSurface = block_play::PlayWeaponFx::Surface;
+    std::array<HitSurface, 64> shot_surfaces{};
+
+    [[nodiscard]] HitSurface hit_surface(physics::BodyId body, core::Vec3 point) {
+        // Classify authored roles, not colors sampled from a rendered frame. Resolve detached
+        // debris back to its source slab so a metal lamp stays metal after it falls over.
+        destruction::InstanceId source{};
+        for (std::size_t i = 0; i < server.destruction.debris_count(); ++i)
+            if (server.destruction.debris_body(i) == body) {
+                source = server.destruction.debris_source(i);
+                break;
+            }
+        HitSurface surface = HitSurface::Soil; // untagged streamed heightfield
+        server.world.query<blockkit::SlabRole>().for_each([&](ecs::Entity e,
+                                                              const blockkit::SlabRole& role) {
+            const auto* handle = server.world.get<physics::RigidBodyHandle>(e);
+            const auto* instance = server.world.get<destruction::DestructibleInstanceRef>(e);
+            const bool same_instance =
+                instance && ((source.is_valid() && instance->instance == source.index) ||
+                             server.destruction.body_of({instance->instance, 0}) == body);
+            if (!(handle && handle->body == body) && !same_instance)
+                return;
+            using namespace blockkit::slab_kind;
+            switch (role.kind) {
+                case kWall:
+                case kHalfWall:
+                case kSideWall:
+                    surface = role.tint == 1   ? HitSurface::Brick
+                              : role.tint == 0 ? HitSurface::Concrete
+                                               : HitSurface::Plaster;
+                    break;
+                case kLampMast:
+                case kLampHead:
+                    surface = HitSurface::Metal;
+                    break;
+                case kCrate:
+                case kTimber:
+                    surface = HitSurface::Wood;
+                    break;
+                // The playable street's outer strips are dressed as grass/path at |z|>14.4,
+                // sharing the same solid slab. This is a cosmetic surface override only.
+                case kStreet:
+                    surface = std::abs(point.z) > 14.4f ? HitSurface::Soil : HitSurface::Concrete;
+                    break;
+                default:
+                    surface = HitSurface::Concrete;
+                    break;
+            }
+        });
+        return surface;
+    }
+
+    explicit Session(std::uint64_t seed, bool impaired)
+        : network(seed,
+                  {impaired ? kLossRate : 0.0f,
+                   0.0f,
+                   impaired ? kOneWayMs : 0u,
+                   impaired ? kOneWayMs : 0u}) {
         // Both peers solve on the SAME job system (m17.5) — see Peer::use_jobs.
         server.use_jobs(jobs);
         client.use_jobs(jobs);
@@ -998,6 +1071,7 @@ struct Session {
                              std::uint64_t ground_material) {
         // A rifle, not a demolition charge: cooked parts stand at 1.0 health, so the damage number
         // is expressed against that scale and a building takes sustained fire rather than one shot.
+        server.weapon.eye_height = block_play::play_eye_height(server.character);
         server.weapon.damage = 0.34f;
         server.weapon.damage_radius = 0.35f;
         server.weapon.cooldown_ticks = server.weapon.automatic ? 6 : 3;
@@ -1267,7 +1341,12 @@ struct Session {
 
                 // The weapon → destruction glue: the consumer's job, kept out of the engine so that
                 // `gameplay_net` never links `destruction` (ADR-0035 §3).
+                std::size_t surface_index = 0;
                 for (const gameplay_net::ShotEvent& shot : server.gameplay.shots()) {
+                    if (surface_index < shot_surfaces.size())
+                        shot_surfaces[surface_index++] = shot.did_hit
+                                                             ? hit_surface(shot.body, shot.point)
+                                                             : HitSurface::Concrete;
                     ++shots_fired;
                     if (!shot.did_hit) {
                         continue; // a miss is still an event — a tracer and a report, no damage
@@ -1284,7 +1363,8 @@ struct Session {
                     if (!instance.is_valid() ||
                         server.destruction.part_from_child(instance, shot.child) ==
                             destruction::kInvalidPartIndex) {
-                        continue; // the street, or rubble — not a standing destructible
+                        push_loose_hit(server.physics, shot.body, shot.point, shot.impulse);
+                        continue; // static street is a no-op; live rubble wakes and moves
                     }
                     server.destruction.apply_damage(
                         instance, shot.point, shot.damage_radius, shot.damage, shot.impulse);
@@ -1881,9 +1961,118 @@ struct Visuals {
 // ONE object for all three modes, because three modes that each build the world their own way is
 // three things to keep in step and only one of them is ever run by CI. What differs between the
 // modes is where the input comes from and who owns the loop — never what is standing there.
+constexpr audio::SoundId kGunReport = audio::sound::kUserBase;
+constexpr audio::SoundId kBulletImpact = kGunReport + 3;
+
+audio::SoundBank play_sound_bank() {
+    auto bank = audio::SoundBank::engine_defaults();
+    // Subtractive transient synthesis: filtered deterministic noise supplies the report's crack,
+    // a short low sine supplies its body, and exponential envelopes prevent discontinuous tails.
+    // Build these mono buffers once; the existing mixer spatializes bounded one-shot voices.
+    for (unsigned weapon = 0; weapon < 3; ++weapon) {
+        auto report = audio::noise_burst(.24f, .72f, weapon == 2 ? 23.0f : 32.0f, 0x706u + weapon);
+        audio::mix_into(report, audio::decaying_sine(.24f, weapon == 2 ? 85.0f : 130.0f, 35), .55f);
+        bank.set(kGunReport + weapon, std::move(report));
+    }
+    for (unsigned material = 0;
+         material < static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Count);
+         ++material) {
+        const bool metal =
+            material == static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Metal);
+        const bool water =
+            material == static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Water);
+        auto impact = audio::noise_burst(.18f,
+                                         metal   ? .85f
+                                         : water ? .08f
+                                                 : .24f,
+                                         water ? 20.0f : 45.0f,
+                                         0x173u + material);
+        if (metal)
+            audio::mix_into(impact, audio::decaying_sine(.18f, 2300, 28), .35f);
+        bank.set(kBulletImpact + material, std::move(impact));
+    }
+    return bank;
+}
+
+class PlayAudioOutput {
+public:
+    static constexpr std::size_t kSamples = (audio::kSampleRate / 60) * 2;
+
+    ~PlayAudioOutput() {
+        if (worker_.joinable()) {
+            worker_.request_stop();
+            ready_.notify_one();
+            worker_.join();
+            std::printf("play audio: %llu blocks delivered, %llu dropped, %llu underruns\n",
+                        static_cast<unsigned long long>(delivered_),
+                        static_cast<unsigned long long>(dropped_),
+                        static_cast<unsigned long long>(sink_->underruns()));
+        }
+    }
+
+    void start() {
+        sink_ = audio::open_audio_sink(audio::kSampleRate);
+        if (!sink_) {
+            std::printf("play audio: no output device available; mixer remains active\n");
+            return;
+        }
+        active_ = true;
+        std::printf("play audio: %s output enabled\n", sink_->backend_name());
+        // Producer/consumer queue: AudioSink::write is a blocking device-clock operation. Keep
+        // it off the simulation thread, with at most three ticks of latency. On overload discard
+        // the oldest queued block so current gunfire never trails a long backlog of rubble noise.
+        worker_ = std::jthread([this](std::stop_token stop) {
+            while (!stop.stop_requested()) {
+                std::array<float, kSamples> block{};
+                {
+                    std::unique_lock lock(mutex_);
+                    ready_.wait(lock, [&] { return count_ != 0 || stop.stop_requested(); });
+                    if (stop.stop_requested())
+                        break;
+                    block = queue_[read_];
+                    read_ = (read_ + 1) % queue_.size();
+                    --count_;
+                }
+                if (!sink_->write(block)) {
+                    std::lock_guard lock(mutex_);
+                    active_ = false;
+                    std::fprintf(stderr, "play audio: device write failed; output disabled\n");
+                    break;
+                }
+                ++delivered_;
+            }
+        });
+    }
+
+    void submit(std::span<const float> samples) {
+        std::lock_guard lock(mutex_);
+        if (!active_ || samples.size() != kSamples)
+            return;
+        if (count_ == queue_.size()) {
+            read_ = (read_ + 1) % queue_.size();
+            --count_;
+            ++dropped_;
+        }
+        auto& destination = queue_[(read_ + count_) % queue_.size()];
+        std::copy(samples.begin(), samples.end(), destination.begin());
+        ++count_;
+        ready_.notify_one();
+    }
+
+private:
+    std::unique_ptr<audio::AudioSink> sink_;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::array<std::array<float, kSamples>, 3> queue_{};
+    std::size_t read_ = 0, count_ = 0;
+    std::uint64_t delivered_ = 0, dropped_ = 0;
+    bool active_ = false;
+    std::jthread worker_;
+};
+
 struct Demo {
     app::Application app;
-    Session session{0x13B10Cull};
+    Session session;
     std::unique_ptr<block_play::PlayEnvironment> environment;
     std::unique_ptr<block_play::PlayEffects> effects;
     std::vector<render::GpuParticle> smoke_particles;
@@ -1897,6 +2086,8 @@ struct Demo {
     std::unique_ptr<block_play::PlayViewmodel> viewmodel;
     std::unique_ptr<block_play::PlayWeaponFx> weapon_fx;
     bool shot_presented = false;
+    std::array<std::uint32_t, 3> weapon_rounds{};
+    std::vector<render::GpuParticle> combined_weapon_smoke;
     bool streamed_world = false;
     bool environment_enabled = false; // the playable art layer, also exercised without weapon art
     bool development_hud = true;
@@ -1934,7 +2125,8 @@ struct Demo {
         return c;
     }
 
-    audio::Mixer mixer{audio::SoundBank::engine_defaults(), block_mix()};
+    audio::Mixer mixer{play_sound_bank(), block_mix()};
+    PlayAudioOutput audio_output;
     audio::MixStats audio_stats{};
 
     // Pose the camera from the SCENE rather than from the player.
@@ -1956,7 +2148,10 @@ struct Demo {
     // block goes (F calls fire_charge()).
     bool scripted_charge = true;
 
-    explicit Demo(const app::AppConfig& cfg) : app(cfg) {}
+    // Proof/perf sessions explicitly retain the deterministic impaired wire. Interactive play
+    // opts in with --network-impairment; removing fake WAN delay does not bypass the protocol.
+    explicit Demo(const app::AppConfig& cfg, bool impaired = true)
+        : app(cfg), session(0x13B10Cull, impaired) {}
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked, std::string_view scene_path) {
         // The city is the PLAYABLE street: the environment layer on a generated scene. Headless,
@@ -2149,6 +2344,8 @@ struct Demo {
             visuals->renderer.set_lighting(lighting);
         }
         if (environment_enabled && visuals) {
+            combined_weapon_smoke.reserve(block_play::AuthoredEnvironment::smoke_capacity +
+                                          block_play::PlayWeaponFx::kDustSlots);
             weapon_fx = std::make_unique<block_play::PlayWeaponFx>(
                 *app.device(), visuals->meshes, visuals->materials);
             if (!weapon_fx->initialize())
@@ -2245,6 +2442,59 @@ struct Demo {
         return true;
     }
 
+    bool water_intersection(core::Vec3 origin, core::Vec3 direction, core::Vec3& hit) {
+        if (!environment || !visuals)
+            return false;
+        bool found = false;
+        float nearest = core::length(hit - origin);
+        // Cosmetic water sheets have no solid collider. Intersect their local plane before
+        // the physics hit, inside an ellipse inscribed in their mesh bounds. The conservative
+        // footprint avoids splashes in dry bounding-box corners of the irregular shoreline.
+        session.client.world.query<ecs::WorldTransform, render::MeshRef, render::MaterialRef>()
+            .for_each([&](ecs::Entity,
+                          const ecs::WorldTransform& pose,
+                          const render::MeshRef& mesh,
+                          const render::MaterialRef& material) {
+                if (material.material != environment->water_material() ||
+                    !visuals->meshes.contains(mesh.mesh))
+                    return;
+                const auto inverse = core::inverse(core::to_matrix(pose.value));
+                const auto local = core::transform_point(inverse, origin);
+                const auto ray = core::transform_vector(inverse, direction);
+                if (ray.y >= -1e-5f)
+                    return;
+                const float t = -local.y / ray.y;
+                if (t < 0 || t >= nearest)
+                    return;
+                const auto at = local + ray * t;
+                const auto& shape = visuals->meshes.get(mesh.mesh);
+                const float rx = (shape.local_max.x - shape.local_min.x) * .42f;
+                const float rz = (shape.local_max.z - shape.local_min.z) * .42f;
+                if (rx <= 0 || rz <= 0)
+                    return;
+                const float x = (at.x - (shape.local_max.x + shape.local_min.x) * .5f) / rx;
+                const float z = (at.z - (shape.local_max.z + shape.local_min.z) * .5f) / rz;
+                if (x * x + z * z > 1)
+                    return;
+                nearest = t;
+                hit = origin + direction * t;
+                found = true;
+            });
+        return found;
+    }
+
+    [[nodiscard]] core::Transform render_camera_transform() const {
+        auto eye = session.client.camera_transform();
+        if (viewmodel && viewmodel_enabled) {
+            // Presentation-only view punch: compose a small local rotation onto a COPY of the
+            // eye. Both the parent camera and the optical pose inherit it, while the input tape
+            // and authoritative hitscan continue to use the untouched simulation view.
+            const auto kick = viewmodel->recoil_rotation();
+            eye.rotation = eye.rotation * core::quat_from_euler(kick.x * .35f, kick.y * .10f, 0);
+        }
+        return eye;
+    }
+
     // The shared live-input seam is also exercised by the accepted-shot smoke proof.
     void step_play(gameplay::CharacterInput input) {
         if (viewmodel) {
@@ -2276,7 +2526,12 @@ struct Demo {
                 session.tick_index, session.client.destruction.events(), static_cast<float>(kDt));
         // Session::tick has joined both jobs: these are accepted authoritative shots, including
         // misses. Rejected cooldown inputs produce neither recoil nor visual feedback.
+        std::size_t surface_index = 0;
         for (const auto& shot : session.server.gameplay.shots()) {
+            auto surface = surface_index < session.shot_surfaces.size()
+                               ? session.shot_surfaces[surface_index]
+                               : block_play::PlayWeaponFx::Surface::Concrete;
+            ++surface_index;
             if (session.server.avatars.empty() ||
                 shot.shooter_entity != session.server.avatars.front())
                 continue;
@@ -2285,16 +2540,29 @@ struct Demo {
                 const auto eye = session.client.camera_transform();
                 const auto muzzle =
                     viewmodel ? viewmodel->muzzle_world(eye) : shot.origin + shot.direction * .5f;
+                auto hit = shot.did_hit
+                               ? shot.point
+                               : shot.origin + shot.direction * session.server.weapon.range;
+                const bool water = water_intersection(shot.origin, shot.direction, hit);
+                if (water)
+                    surface = block_play::PlayWeaponFx::Surface::Water;
+                const unsigned weapon =
+                    viewmodel ? static_cast<unsigned>(viewmodel->selected()) : 0;
+                const unsigned stride = weapon == 0 ? 3 : 4;
+                const bool tracer = weapon != 2 && weapon_rounds[weapon]++ % stride == 0;
                 weapon_fx->fire(shot.origin,
                                 shot.direction,
                                 muzzle,
-                                shot.did_hit
-                                    ? shot.point
-                                    : shot.origin + shot.direction * session.server.weapon.range,
-                                shot.did_hit,
-                                shot.normal,
+                                hit,
+                                shot.did_hit || water,
+                                water ? core::Vec3{0, 1, 0} : shot.normal,
                                 shot.body,
-                                &session.server.physics);
+                                &session.server.physics,
+                                surface,
+                                tracer);
+                mixer.play(kGunReport + weapon, shot.origin, .85f);
+                if (shot.did_hit || water)
+                    mixer.play(kBulletImpact + static_cast<unsigned>(surface), hit, .65f);
                 if (!viewmodel || !viewmodel->scoped())
                     weapon_fx->queue_case();
             }
@@ -2347,11 +2615,12 @@ struct Demo {
             }
         }
         // Render one tick's worth of audio so the mixer's voices actually age and retire. CI is
-        // deaf, so the samples go nowhere — but a mixer that is never rendered would report a voice
-        // count that only ever grows, and the "voices retire" claim would be untested here.
+        // deaf, so only interactive play submits to the device — a mixer never rendered reports a
+        // voice count that only ever grows, and the "voices retire" claim would be untested here.
         static std::vector<float> scratch(
             static_cast<std::size_t>(static_cast<double>(audio::kSampleRate) * kDt) * 2u, 0.0f);
         mixer.render(scratch);
+        audio_output.submit(scratch);
         audio_stats = mixer.stats();
 
         // DRESS WHATEVER JUST ARRIVED, before the leaves are built from it.
@@ -2393,6 +2662,7 @@ struct Demo {
             return;
         }
         ecs::World& world = session.client.world;
+        smoke_particles.clear();
         if (effects) {
             smoke_particles.clear();
             const auto fire = effects_visible ? effects->light() : std::nullopt;
@@ -2445,10 +2715,24 @@ struct Demo {
             world, smoke_particles, visuals->renderer, visuals->scope_renderer.get());
         if (weapon_fx) {
             weapon_fx->advance(static_cast<float>(ctx.frame_dt));
+            // Merge AFTER authored publication, retaining its full budget. Bullet dust owns a
+            // separate fixed pool and must not displace scripted smoke or overwrite fire smoke.
+            const auto& authored = visuals->authored_environment.snapshot();
+            const auto base = authored.override_smoke
+                                  ? authored.smoke_span()
+                                  : std::span<const render::GpuParticle>(smoke_particles);
+            combined_weapon_smoke.assign(base.begin(), base.end());
+            weapon_fx->append_smoke(combined_weapon_smoke);
+            render::FxSettings settings{};
+            settings.enabled = true;
+            settings.max_particles = block_play::AuthoredEnvironment::smoke_capacity +
+                                     block_play::PlayWeaponFx::kDustSlots;
+            visuals->renderer.set_smoke_particles(combined_weapon_smoke, settings);
+            if (visuals->scope_renderer)
+                visuals->scope_renderer->set_smoke_particles(combined_weapon_smoke, settings);
         }
         if (auto* tf = world.get<ecs::WorldTransform>(visuals->camera)) {
-            tf->value =
-                use_authored_camera ? visuals->authored_camera : session.client.camera_transform();
+            tf->value = use_authored_camera ? visuals->authored_camera : render_camera_transform();
         }
         if (play_world) {
             // --world-gpu-smoke pins the camera at a far, deterministic pose; live play and
@@ -2465,7 +2749,7 @@ struct Demo {
             play_world->mark_drawn();
         }
         if (viewmodel && viewmodel_enabled) {
-            const core::Transform eye = session.client.camera_transform();
+            const core::Transform eye = render_camera_transform();
             viewmodel->observe_camera(eye.translation);
             visuals->renderer.set_first_person_draws(viewmodel->pose(eye),
                                                      viewmodel->identity_epoch());
@@ -4414,6 +4698,25 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
             okay = false;
         }
     };
+    // Compare the ray with the actual client camera using the SAME capsule anchor: network
+    // smoothing can legitimately separate client/server positions, but never their eye offsets.
+    gameplay::CharacterState eye_state{};
+    eye_state.position = demo.session.client.eye_anchor();
+    gameplay::CharacterInput eye_input{};
+    eye_input.pressed = gameplay::kActionFire;
+    const auto eye_aim = gameplay::character_aim(eye_state, eye_input, demo.session.server.weapon);
+    gameplay::ShotResult eye_shot{};
+    (void)gameplay::step_weapon({},
+                                eye_input,
+                                demo.session.server.weapon,
+                                eye_aim,
+                                demo.session.server.physics,
+                                {},
+                                &eye_shot);
+    check(eye_shot.fired &&
+              core::length(eye_shot.shot.origin -
+                           demo.session.client.camera_transform().translation) <= .001f,
+          "shot origin equals camera eye to one millimetre at the same capsule pose");
     check(demo.visuals->scope_renderer && !demo.visuals->scope_renderer->taa_history_allocated(),
           "scope loading primes resources without retaining a stale aiming image");
     const auto capture = [&]() {
@@ -4827,6 +5130,35 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
                 peak_angle,
                 recovery_angle,
                 recovery_position);
+    // The render helper is the same seam used by the parent camera and the scoped optic.
+    // Sample every weapon's full recovery, and independently observe the immutable aim vector.
+    for (const auto weapon : {block_play::PlayViewmodel::Weapon::Scar,
+                              block_play::PlayViewmodel::Weapon::M4,
+                              block_play::PlayViewmodel::Weapon::Sniper}) {
+        demo.viewmodel->select(weapon);
+        demo.viewmodel->set_aiming(true);
+        demo.viewmodel->advance(1.0f, {}, false);
+        const auto simulation_view = demo.session.client.view;
+        const auto aim = gameplay::look_direction(simulation_view);
+        float peak_pitch = 0, recovered_pitch = 0;
+        for (unsigned frame = 0; frame < 36; ++frame) {
+            demo.viewmodel->advance(kDt, {}, frame == 0);
+            const auto rendered =
+                core::rotate(demo.render_camera_transform().rotation, core::Vec3{0, 0, -1});
+            recovered_pitch = std::abs(std::asin(rendered.y) - std::asin(aim.y));
+            peak_pitch = std::max(peak_pitch, recovered_pitch);
+            check(core::length(gameplay::look_direction(demo.session.client.view) - aim) == 0 &&
+                      demo.session.client.view.yaw == simulation_view.yaw &&
+                      demo.session.client.view.pitch == simulation_view.pitch,
+                  "view punch never changes simulation aim");
+        }
+        check(peak_pitch > .001f && recovered_pitch < .001f,
+              "render camera pitch kicks and recovers by 0.6 seconds for every weapon");
+        std::printf("viewmodel-smoke: camera weapon %u peak %.6f recovery %.6f rad\n",
+                    static_cast<unsigned>(weapon),
+                    peak_pitch,
+                    recovered_pitch);
+    }
     demo.viewmodel->set_aiming(false);
     demo.viewmodel->advance(0.0f, {}, false);
     check(demo.viewmodel->cycling() && !demo.viewmodel->take_case_ejection(),
@@ -5379,6 +5711,24 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         const auto target_body = fx_physics.create_body(target_desc);
         check(floor_body.is_valid() && target_body.is_valid(),
               "weapon fx probe: isolated bodies created");
+        physics::BodyDesc rubble{};
+        rubble.shape.type = physics::ShapeType::Box;
+        rubble.shape.half_extents = {.2f, .2f, .2f};
+        rubble.mass = 5;
+        rubble.position = {10, 2, 0};
+        const auto rubble_body = fx_physics.create_body(rubble);
+        push_loose_hit(fx_physics, rubble_body, {10, 2.1f, 0}, {250, 0, 0});
+        physics::BodyState pushed{};
+        check(fx_physics.get_body_state(rubble_body, pushed) &&
+                  std::abs(pushed.linear_velocity.x - 5) < .001f &&
+                  core::length(pushed.angular_velocity) > .01f,
+              "bullet impulse wakes dynamic rubble with bounded momentum and contact torque");
+        physics::BodyState static_before{}, static_after{};
+        const bool static_read = fx_physics.get_body_state(target_body, static_before);
+        push_loose_hit(fx_physics, target_body, {4, 1, 0}, {250, 0, 0});
+        check(static_read && fx_physics.get_body_state(target_body, static_after) &&
+                  core::length(static_after.linear_velocity - static_before.linear_velocity) == 0,
+              "bullet impulse leaves static scenery immovable");
 
         // Materials are the stable key into a known entity's role: fire()/pose() assign
         // material_ids_[0..4] to flash/tracer/spark/impact/case respectively (play_weapon_fx.cpp),
@@ -5457,6 +5807,17 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         const auto flash_pos_a = transform_of(flash_a);
         const auto tracer_pos_a = transform_of(find_by_material(tracer_mat));
         const auto impact_pos_a = transform_of(find_by_material(impact_mat));
+        const auto scar_entity = find_by_material(impact_mat);
+        const auto* scar_mesh_ref = fx_world.get<render::MeshRef>(scar_entity);
+        const auto* scar_pose = fx_world.get<ecs::WorldTransform>(scar_entity);
+        check(scar_mesh_ref && scar_pose &&
+                  demo.visuals->meshes.get(scar_mesh_ref->mesh).local_min.z ==
+                      demo.visuals->meshes.get(scar_mesh_ref->mesh).local_max.z &&
+                  core::dot(core::rotate(scar_pose->value.rotation, core::Vec3{0, 0, 1}),
+                            core::Vec3{-1, 0, 0}) > .999f,
+              "scar geometry is flat and faces the hit normal");
+        check(demo.visuals->materials.get(tracer_mat).emissive[0] > 1,
+              "accepted tracer uses emissive radiance");
         check(flash_a != ecs::Entity{} && finite3(transform_of(flash_a)),
               "weapon fx probe: flash entity is live under the first view pose");
         check(fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount,
@@ -5580,6 +5941,67 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
             [&](ecs::WorldTransform& t) { any_nan |= !finite3(t.value.translation); });
         check(!any_nan, "weapon fx probe: a NaN view/dt never reaches a posed WorldTransform");
 
+        // Surface responses share the bounded path but must differ in both dust and light.
+        // A quiet interval isolates each material; metal/water must never emit masonry dust.
+        using Surface = block_play::PlayWeaponFx::Surface;
+        const auto resource_count = demo.visuals->materials.size();
+        for (const auto surface : {Surface::Concrete,
+                                   Surface::Brick,
+                                   Surface::Plaster,
+                                   Surface::Soil,
+                                   Surface::Metal,
+                                   Surface::Water}) {
+            fx.advance(1);
+            fx.pose(fx_world, &fx_physics, &view_a);
+            fx.fire(view_a.eye,
+                    view_a.direction,
+                    view_a.muzzle,
+                    {4, 1, 0},
+                    true,
+                    {-1, 0, 0},
+                    target_body,
+                    &fx_physics,
+                    surface,
+                    false);
+            fx.pose(fx_world, &fx_physics, &view_a);
+            std::vector<render::GpuParticle> dust;
+            fx.append_smoke(dust);
+            const bool dusty = surface != Surface::Metal && surface != Surface::Water;
+            check(dusty ? !dust.empty() : dust.empty(),
+                  "masonry and soil produce dust; metal sparks and water splash do not");
+            if (surface == Surface::Brick || surface == Surface::Soil)
+                check(!dust.empty() && dust.front().color_alpha[0] > dust.front().color_alpha[2],
+                      "brick and soil dust carry warm material color");
+            unsigned lights = 0;
+            fx_world.query<render::PointLight>().for_each(
+                [&](const render::PointLight& light) { lights += light.intensity > 0 ? 1u : 0u; });
+            check(lights == (surface == Surface::Metal ? 2u : 1u),
+                  "only metal impacts add spark lighting beyond the muzzle light");
+            check(inverse_safe_effects(), "every surface effect has a valid normal matrix");
+        }
+        for (unsigned i = 0; i < 100; ++i)
+            fx.fire(view_a.eye,
+                    view_a.direction,
+                    view_a.muzzle,
+                    {4, 1, 0},
+                    true,
+                    {-1, 0, 0},
+                    target_body,
+                    &fx_physics,
+                    Surface::Brick,
+                    false);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        std::vector<render::GpuParticle> dust;
+        fx.append_smoke(dust);
+        check(dust.size() <= block_play::PlayWeaponFx::kDustSlots &&
+                  fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount &&
+                  demo.visuals->materials.size() == resource_count,
+              "sustained impacts keep particle, entity and material pools bounded");
+        fx.advance(1);
+        dust.clear();
+        fx.append_smoke(dust);
+        check(dust.empty(), "impact dust fully expires");
+
         std::printf("environment-smoke: weapon fx probe flash-move %.3f m / case fall %.3f m, "
                     "min height %.3f\n",
                     static_cast<double>(flash_moved),
@@ -5697,7 +6119,11 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path, u
     // unsupported surfaces retain FIFO. This changes presentation, not simulation cadence.
     cfg.vsync = false;
 
-    Demo demo(cfg);
+    Demo demo(cfg, g_network_impairment);
+    std::printf("play network: impairment %s (one-way %u ms, loss %.0f%%)\n",
+                g_network_impairment ? "ON" : "OFF",
+                g_network_impairment ? kOneWayMs : 0,
+                g_network_impairment ? double(kLossRate * 100) : 0.0);
     demo.scripted_charge = false; // interactive: wait for F, not the tape
     demo.session.server.weapon.automatic = true;
     demo.streamed_world = true;
@@ -5774,6 +6200,8 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path, u
                         double(demo.session.client.view.yaw),
                         double(demo.session.client.view.pitch));
     }
+    if (!g_mute && demo.app.windowed())
+        demo.audio_output.start(); // smoke/headless paths never open a device
     gameplay::InputBindings bindings{};
 
     if (demo.app.windowed()) {
@@ -5909,6 +6337,7 @@ int main(int argc, char** argv) {
         const std::string_view a(argv[i]);
         if (a == "--help" || a == "-h") {
             std::printf("the_block --play [--scene file.rscene] [--frames N] [--ppm file.ppm]\n"
+                        "          [--network-impairment] [--mute]\n"
                         "          --content dir | --cooked dir --viewmodel-content dir\n"
                         "          --write-city new-file.rscene | --scene-info | --headless\n"
                         "A copied development bundle starts windowed play with no arguments.\n"
@@ -5942,6 +6371,10 @@ int main(int argc, char** argv) {
             mode = Mode::EnvironmentSmoke;
         } else if (a == "--effects-smoke") {
             mode = Mode::EffectsSmoke;
+        } else if (a == "--network-impairment") {
+            g_network_impairment = true;
+        } else if (a == "--mute") {
+            g_mute = true;
         } else if (a == "--effects-preview") {
             g_effects_preview = true;
         } else if (a == "--perf") {

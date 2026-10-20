@@ -80,6 +80,8 @@ public:
 
     [[nodiscard]] Weapon selected() const noexcept { return selected_; }
 
+    [[nodiscard]] core::Vec3 recoil_rotation() const noexcept { return recoil_rotation_.position; }
+
     [[nodiscard]] std::uint64_t identity_epoch() const noexcept { return identity_epoch_; }
 
     [[nodiscard]] std::size_t selected_draw_count() const noexcept;
