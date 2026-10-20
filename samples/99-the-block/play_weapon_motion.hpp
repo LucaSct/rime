@@ -22,7 +22,16 @@ public:
         float magazine_pull = 0.0f;
         float right_bolt = 0.0f;
         float bolt_pull = 0.0f;
+        // 0..1..0 weapon jolt as the fresh magazine seats; overshoots, so a spring-like bump.
+        float seat = 0.0f;
+        // Seconds since the spent magazine left the hand; negative while it is not falling.
+        float old_mag_fall = -1.0f;
     };
+
+    // Release instant of the spent magazine, as a fraction of the reload, and how long its
+    // ballistic fall stays visible before it is culled as "out of sight below the frame".
+    static constexpr float kMagReleaseFraction = 0.50f;
+    static constexpr float kMagFallSeconds = 0.45f;
 
     static constexpr float kRifleReloadSeconds = 2.2f;
     static constexpr float kSniperReloadSeconds = 2.8f;
@@ -103,12 +112,23 @@ public:
         if (action_ == Action::Reload) {
             // Approach, grip, extract, pause, reseat, then return. The support wrist and
             // magazine share magazine_pull while gripped; idle and completed reloads are zero.
-            return {window(t, 0.0f, 0.18f, 0.75f, 1.0f),
-                    window(t, 0.04f, 0.24f, 0.72f, 0.97f),
-                    window(t, 0.10f, 0.30f, 0.80f, 0.94f),
-                    window(t, 0.34f, 0.48f, 0.61f, 0.77f),
-                    0.0f,
-                    0.0f};
+            // Rifles finish with a short bolt-catch slap: the right hand reaches up and
+            // forward, taps, and returns while the weapon is already settling.
+            const bool rifle = weapon_ != Weapon::Sniper;
+            Pose p{window(t, 0.0f, 0.18f, 0.75f, 1.0f),
+                   window(t, 0.04f, 0.24f, 0.72f, 0.97f),
+                   window(t, 0.10f, 0.30f, 0.80f, 0.94f),
+                   // Pull-out eases out (a quick yank that decelerates against the stop); the
+                   // fresh magazine eases IN to the well, accelerating until the seat stops it.
+                   pull_window(t),
+                   rifle ? 0.5f * window(t, 0.80f, 0.86f, 0.90f, 0.95f) : 0.0f,
+                   rifle ? window(t, 0.86f, 0.89f, 0.89f, 0.93f) : 0.0f,
+                   seat_pulse(t),
+                   -1.0f};
+            const float released = (t - kMagReleaseFraction) * duration;
+            if (released >= 0.0f && released < kMagFallSeconds)
+                p.old_mag_fall = released;
+            return p;
         }
         // The sniper's right hand reaches the bolt, pulls, and returns to its grip.
         return {0.28f * window(t, 0.03f, 0.16f, 0.70f, 0.95f),
@@ -127,6 +147,24 @@ private:
     static float smooth(float t) noexcept {
         t = std::clamp(t, 0.0f, 1.0f);
         return t * t * (3.0f - 2.0f * t);
+    }
+
+    // Rise eases out, fall eases in (cubic): the opposite curves of smooth(), so the hand
+    // snaps away from the well and then accelerates into it, like a real insertion.
+    static float pull_window(float t) noexcept {
+        const float up = std::clamp((t - 0.34f) / 0.14f, 0.0f, 1.0f);
+        const float down = std::clamp((t - 0.61f) / 0.16f, 0.0f, 1.0f);
+        const float rise = 1.0f - (1.0f - up) * (1.0f - up) * (1.0f - up);
+        return rise * (1.0f - down * down * down);
+    }
+
+    // The seat: a fast ease-out rise on contact (t=0.77) and a longer settle, peaking around 0.80
+    // and undershooting slightly so the weapon rebounds instead of stopping dead.
+    static float seat_pulse(float t) noexcept {
+        const float u = (t - 0.77f) / 0.17f;
+        if (u <= 0.0f || u >= 1.0f)
+            return 0.0f;
+        return std::sin(3.14159265f * std::sqrt(u)) * std::exp(-2.5f * u) * 1.6f;
     }
 
     static float

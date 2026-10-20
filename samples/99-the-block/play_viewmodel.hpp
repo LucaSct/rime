@@ -222,6 +222,8 @@ private:
     ReachStats reach_stats_{};
     std::array<core::Vec3, 2> wrist_world_{};
     core::Mat4 magazine_world_{};
+    core::Vec3
+        release_offset_{}; // weapon-local hand-held magazine offset at the last pre-release pose
     core::Vec3 magazine_contact_world_{};
     float magazine_contact_gap_ = 0.0f;
     std::size_t resident_meshes_ = 0;

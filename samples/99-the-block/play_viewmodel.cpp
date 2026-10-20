@@ -848,13 +848,21 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     // viewport with near-clipped faces even when all projected magazine targets were valid.
     const bool reload = motion_.reloading();
     constexpr std::array<core::Vec3, 3> reload_offsets{
-        {{-.08f, 0, -.10f}, {-.08f, .03f, 0}, {.04f, .03f, -.10f}}};
-    constexpr std::array<float, 3> reload_pitch{.50f, .35f, .35f};
-    constexpr std::array<float, 3> reload_roll{.20f, .20f, -.20f};
+        {{-.06f, .15f, -.04f}, {-.06f, .125f, 0}, {.02f, .09f, -.10f}}};
+    // Reload pose: the weapon ROLLS about its bore (z) by 24-27 degrees so the magazine well
+    // turns toward the support hand and the viewer, and dips its muzzle slightly (negative x
+    // pitch). Rolling, rather than pitching the muzzle up as round 1 did, keeps the well and
+    // the hand inside the lower frame instead of swinging them out of the bottom.
+    constexpr std::array<float, 3> reload_pitch{.14f, .14f, .20f};
+    constexpr std::array<float, 3> reload_roll{-.50f, -.50f, -.45f};
     const core::Vec3 action_offset = reload ? reload_offsets[index] : core::Vec3{-.16f, .14f, .04f};
     local.translation = local.translation + action_offset * motion_pose.lower;
+    // Seat jolt: the fresh magazine slams home, kicking the weapon up and slightly back; the
+    // pulse is already shaped (fast rise, damped rebound) by PlayWeaponMotion::seat_pulse.
+    if (reload)
+        local.translation = local.translation + core::Vec3{0.0f, .012f, .018f} * motion_pose.seat;
     local.rotation = core::quat_from_euler(
-        recoil_rotation_.position.x + (reload ? 0.0f : .07f) * motion_pose.lower,
+        recoil_rotation_.position.x + (reload ? .05f * motion_pose.seat : .07f * motion_pose.lower),
         recoil_rotation_.position.y +
             .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount,
         recoil_rotation_.position.z + (reload ? 0.0f : .24f) * motion_pose.tilt);
@@ -879,7 +887,7 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     // Approach reach and pull reach are solved separately. Once the wrist reaches the socket,
     // any pull limit scales BOTH wrist and mesh displacement; otherwise the magazine stays seated
     // and magazine_contact_gap reports the missed contact on all three authored guns.
-    const core::Vec3 pull{0.0f, -0.11f, 0.035f};
+    const core::Vec3 pull{0.0f, -0.09f, 0.06f};
     const core::Vec3 support_grip = core::transform_point(grips[0], {});
     const core::Vec3 approach =
         selected.magazine_triangles != 0 ? selected.magazine_contact - support_grip : core::Vec3{};
@@ -928,6 +936,8 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     grips[1] = core::mat4_translation(right_offset * right_fraction) * grips[1];
     wrist_world_[1] = core::transform_point(model * grips[1], {});
     const core::Mat4 magazine_local = core::mat4_translation(pull * (pull_amount * pull_fraction));
+    if (motion_pose.old_mag_fall < 0.0f)
+        release_offset_ = pull * (pull_amount * pull_fraction);
     magazine_world_ = model * magazine_local;
     magazine_contact_world_ = core::transform_point(magazine_world_, selected.magazine_contact);
     magazine_contact_gap_ = selected.magazine_triangles != 0
@@ -953,6 +963,20 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
         draw.first_index = part.first_index;
         draw.index_count = part.index_count;
         draws_.push_back(draw);
+        // The spent magazine: dropped from the hand at release and falling ballistically
+        // (y = -g t^2 / 2 in camera space) while tumbling, then culled once it is out of sight.
+        if (part.magazine && motion_pose.old_mag_fall >= 0.0f) {
+            const float tau = motion_pose.old_mag_fall;
+            const core::Vec3 fall{-.05f * tau, -4.905f * tau * tau, .10f * tau};
+            const core::Mat4 spin =
+                core::to_mat4(core::quat_from_euler(2.5f * tau, 0, -3.0f * tau));
+            const core::Vec3 centre = selected.magazine_contact;
+            render::DrawItem spent = draw;
+            spent.model = camera_matrix * core::mat4_translation(fall) * weapon_local *
+                          core::mat4_translation(release_offset_) * core::mat4_translation(centre) *
+                          spin * core::mat4_translation(-centre);
+            draws_.push_back(spent);
+        }
     }
     if (scoped()) {
         lens_.model = model;
