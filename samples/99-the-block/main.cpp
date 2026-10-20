@@ -4779,27 +4779,54 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         write_ppm((g_ppm + ".target-scoped.ppm").c_str(), scoped_target, kW, kH);
     }
     (void)demo.session.client.world.despawn(target_entity);
-    // The accepted scoped shot retains the exact optic pose through a hold longer than the
-    // entire bolt timeline. Releasing aim starts the one deferred cycle and extraction.
-    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
-    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Sniper);
-    demo.viewmodel->set_aiming(true);
-    demo.viewmodel->advance(1.0f, {}, false);
-    (void)demo.viewmodel->pose(eye_pose);
-    const auto held_optic = demo.viewmodel->optic_world();
-    demo.viewmodel->advance(1.0f / 60.0f, {}, true);
-    demo.viewmodel->advance(2.0f, {}, false);
-    (void)demo.viewmodel->pose(eye_pose);
-    const auto held_eye = core::transform_point(held_optic, {});
-    const auto after_hold_eye = core::transform_point(demo.viewmodel->optic_world(), {});
-    const auto held_axis = core::transform_point(held_optic, {0, 0, -1});
-    const auto after_hold_axis = core::transform_point(demo.viewmodel->optic_world(), {0, 0, -1});
-    check(demo.viewmodel->busy() && !demo.viewmodel->cycling() &&
-              demo.viewmodel->aim_fraction() > .99f &&
-              core::length(after_hold_eye - held_eye) < .0001f &&
-              core::length(after_hold_axis - held_axis) < .0001f &&
-              demo.viewmodel->scope_feed_visible(eye_pose) && !demo.viewmodel->take_case_ejection(),
-          "accepted scoped shot holds optical focus without recoil, bolt or extraction");
+    // Replay an accepted shot through the actual optic/arm pose. The angular witness is
+    // independent of translation: a moving ocular alone cannot prove muzzle rise. A second
+    // identical input sequence must reproduce every pose, including the hashed yaw/roll.
+    const auto scoped_recoil = [&]() {
+        std::array<core::Mat4, 37> poses{};
+        demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+        demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Sniper);
+        demo.viewmodel->set_aiming(true);
+        demo.viewmodel->advance(1.0f, {}, false);
+        for (std::size_t i = 0; i < poses.size(); ++i) {
+            if (i != 0)
+                demo.viewmodel->advance(1.0f / 60.0f, {}, i == 1);
+            (void)demo.viewmodel->pose(eye_pose);
+            poses[i] = demo.viewmodel->optic_world();
+            check(!demo.viewmodel->cycling() && !demo.viewmodel->take_case_ejection(),
+                  "scoped recoil never starts the deferred bolt or extracts a case");
+            const auto& arms = demo.viewmodel->arm_stats();
+            check(arms.valid_input && arms.clamped_targets == 0,
+                  "scoped recoil keeps both arm targets reachable");
+        }
+        return poses;
+    };
+    const auto shot_poses = scoped_recoil();
+    const auto replay_poses = scoped_recoil();
+    const auto optic_angle = [&](const core::Mat4& pose) {
+        const auto a = core::transform_vector(shot_poses.front(), {0, 0, -1});
+        const auto b = core::transform_vector(pose, {0, 0, -1});
+        return std::atan2(core::length(core::cross(a, b)), core::dot(a, b));
+    };
+    float peak_angle = 0.0f;
+    for (std::size_t i = 0; i < shot_poses.size(); ++i) {
+        peak_angle = std::max(peak_angle, optic_angle(shot_poses[i]));
+        check(core::approx_eq(shot_poses[i], replay_poses[i], 1e-6f),
+              "identical scoped shot inputs reproduce the same optic pose");
+    }
+    const float recovery_angle = optic_angle(shot_poses.back());
+    const float recovery_position = core::length(core::transform_point(shot_poses.back(), {}) -
+                                                 core::transform_point(shot_poses.front(), {}));
+    check(peak_angle > .00872665f,
+          "accepted scoped shot kicks optic axis by more than 0.5 degrees");
+    check(recovery_angle < .00174533f && recovery_position < .001f && demo.viewmodel->busy() &&
+              !demo.viewmodel->cycling() && demo.viewmodel->aim_fraction() > .99f &&
+              demo.viewmodel->scope_feed_visible(eye_pose),
+          "scoped optic recovers within 0.1 degrees and 1 mm by 0.6 seconds, bolt still deferred");
+    std::printf("viewmodel-smoke: scoped recoil peak %.6f rad, at 0.6 s %.6f rad / %.6f m\n",
+                peak_angle,
+                recovery_angle,
+                recovery_position);
     demo.viewmodel->set_aiming(false);
     demo.viewmodel->advance(0.0f, {}, false);
     check(demo.viewmodel->cycling() && !demo.viewmodel->take_case_ejection(),
@@ -4950,8 +4977,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         check(reload.hand_travel[0] >= .03f,
               "the support hand still visibly reaches toward the magazine within arm reach");
     }
-    // The bolt is measured only after the shot's recoil has decayed (exp(-14 t) is under 0.4%
-    // by 0.4 s), so what remains is the right hand's reach to the bolt and its pull. Sniper is
+    // The bolt is measured after the main spring kick has settled (its envelope is under 1%
+    // by 0.4 s), so the right hand's reach and pull dominate the motion. Sniper is
     // still selected and idle after the loop above.
     {
         const auto bolt = sweep(block_play::PlayWeaponMotion::kBoltSeconds + .1f, true, .4f);

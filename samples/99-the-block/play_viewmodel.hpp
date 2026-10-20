@@ -202,7 +202,14 @@ private:
     bool have_eye_ = false;
     float gait_phase_ = 0.0f;
     float bob_amount_ = 0.0f;
-    float recoil_ = 0.0f;
+
+    struct Spring {
+        core::Vec3 position{}, velocity{};
+        void advance(float dt, float frequency, float damping) noexcept;
+    };
+
+    Spring recoil_translation_, recoil_rotation_;
+    std::uint32_t shot_sequence_ = 0;
     PlayWeaponMotion motion_;
     bool aiming_ = false;
     float aim_ = 0.0f;

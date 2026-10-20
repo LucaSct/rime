@@ -78,5 +78,16 @@ changed topology. Regenerating the optional artwork can require deliberately rec
 the split, visible surfaces and contact pose before updating those fingerprints;
 never automatically accept an observed hash.
 
-A scoped MSR shot retains focus while aim is held. Releasing aim begins the one bolt
-cycle and case extraction. Automatic rifle trigger behavior remains separate.
+The torso keeps the firing shoulder seated and slopes the support shoulder down by
+0.25 radians. The authored upper-arm sleeve ends are open rings; the slope keeps
+those cuts below the reload view while the wrist solver retains magazine contact.
+
+Shots drive analytic underdamped translation and rotation springs. The tuning table
+in `play_viewmodel.cpp` starts from projectile momentum and weapon mass, with shoulder
+compliance and angular coupling controlling the visible kick. The MSR has the largest,
+slowest response; the two rifles recover faster. Per-shot yaw/roll signs are deterministic.
+
+A scoped MSR shot kicks the physical optic and its rendered sight picture while aim
+is held, recovering near the starting pose by 0.6 seconds. Releasing aim begins the
+one deferred bolt cycle and case extraction, without a second recoil impulse.
+Automatic rifle trigger behavior remains separate.

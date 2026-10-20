@@ -27,6 +27,23 @@ constexpr std::array<const char*, 6> kSources{"held-scar-h.glb",
                                               "arms-msr.glb"};
 constexpr std::size_t kMaxDraws = 32; // SceneRenderer's first-person draw contract
 
+struct RecoilTuning {
+    float bullet_mass;      // kg
+    float muzzle_velocity;  // m/s
+    float weapon_mass;      // kg
+    float gases;            // multiplier on projectile momentum, including propellant gases
+    float translation_gain; // shoulder compliance: fraction of free rearward velocity
+    float rotation_gain;    // rad/m: effective bore/shoulder torque coupling
+    float frequency;        // undamped angular frequency, rad/s (k = frequency squared)
+    float damping;          // damping ratio (c = 2 * damping * frequency), below 1 overshoots
+};
+
+constexpr std::array<RecoilTuning, 3> kRecoil{{
+    {.0095f, 800.0f, 3.9f, 1.5f, .14f, .40f, 32.0f, .60f}, // SCAR-H, 7.62 mm
+    {.0040f, 910.0f, 3.1f, 1.5f, .14f, .40f, 36.0f, .60f}, // M4, 5.56 mm
+    {.0160f, 900.0f, 6.8f, 1.5f, .26f, .55f, 20.0f, .60f}, // MSR, .338 class
+}};
+
 constexpr std::array<core::Vec3, 3> kAimOffsets{
     {{-.14f, .09f, .37f}, {-.137777f, .0947244f, .37f}, {-.14f, .118f, .035f}}};
 constexpr std::array<core::Vec3, 3> kHipOffsets{{{0, 0, .22f}, {0, 0, .22f}, {0, 0, 0}}};
@@ -519,6 +536,11 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             model.camera_from_arms =
                 core::mat4_translation(seat) *
                 core::to_mat4(core::quat_from_axis_angle({0, 1, 0}, -1.0471975512f)) *
+                // Shoulder slope: retain the seated firing shoulder while lowering the
+                // support shoulder. The authored sleeves end in open upper-arm rings; a
+                // level, strongly bladed torso projected that cut into the reload view.
+                // Tilting the torso keeps the cut below frame without hiding forearm faces.
+                core::to_mat4(core::quat_from_axis_angle({0, 0, 1}, .25f)) *
                 core::mat4_translation(-shoulder);
             model.arms_from_camera = core::inverse(model.camera_from_arms);
             model.elbow_poles = {
@@ -676,7 +698,9 @@ void PlayViewmodel::select(Weapon weapon) noexcept {
         selected_ = weapon;
         ++identity_epoch_;
         gait_phase_ = 0.0f;
-        recoil_ = 0.0f;
+        recoil_translation_ = {};
+        recoil_rotation_ = {};
+        shot_sequence_ = 0;
         aim_ = 0.0f;
         motion_.cancel(static_cast<PlayWeaponMotion::Weapon>(weapon));
         for (auto& model : models_)
@@ -734,18 +758,53 @@ bool PlayViewmodel::scope_feed_visible(const core::Transform& eye) const noexcep
            p.x * p.x + p.y * p.y < support * support;
 }
 
+void PlayViewmodel::Spring::advance(float dt, float frequency, float damping) noexcept {
+    // Analytic underdamped spring: solve x'' + 2*zeta*omega*x' + omega^2*x = 0 between
+    // shot impulses. Velocity carries the kick through one visible overshoot and recovery;
+    // exponential position decay cannot do that. The closed form stays stable for long frames
+    // and gives the same trajectory when a frame is subdivided, without per-frame allocation.
+    const float decay = damping * frequency;
+    const float oscillation = frequency * std::sqrt(1.0f - damping * damping);
+    const float envelope = std::exp(-decay * dt);
+    if (envelope < 1e-8f) {
+        position = velocity = {};
+        return;
+    }
+    const float sine = std::sin(oscillation * dt) / oscillation;
+    const float cosine = std::cos(oscillation * dt);
+    const auto prior = position;
+    position = (prior * cosine + (velocity + prior * decay) * sine) * envelope;
+    velocity = (velocity * cosine - (velocity * decay + prior * (frequency * frequency)) * sine) *
+               envelope;
+}
+
 void PlayViewmodel::advance(float frame_dt, core::Vec3 actual_velocity, bool fired) noexcept {
     // Animation time uses the entire finite frame; a slow frame must not extend a reload.
     const float dt = std::isfinite(frame_dt) && frame_dt >= 0.0f ? frame_dt : 0.0f;
-    const bool pending_bolt = motion_.pending_bolt();
     motion_.advance(frame_dt, static_cast<PlayWeaponMotion::Weapon>(selected_), fired, aiming_);
     const float speed =
         std::sqrt(actual_velocity.x * actual_velocity.x + actual_velocity.z * actual_velocity.z);
     gait_phase_ += std::min(speed, 10.0f) * dt * 1.6f;
     bob_amount_ = std::clamp(speed / 6.0f, 0.0f, 1.0f);
-    if ((fired && !motion_.pending_bolt()) || (pending_bolt && motion_.cycling()))
-        recoil_ = std::min(recoil_ + (scoped() ? 0.028f : 0.012f), 0.06f);
-    recoil_ *= std::exp(-14.0f * dt);
+    const auto& tuning = kRecoil[static_cast<unsigned>(selected_)];
+    if (fired) {
+        // Conservation of momentum supplies a velocity IMPULSE, not a position jump. The
+        // shoulder absorbs most of the free-rifle speed; bore/shoulder leverage turns some
+        // into muzzle rise. A counter hash varies yaw/roll without global RNG or frame timing.
+        const float velocity =
+            tuning.bullet_mass * tuning.muzzle_velocity * tuning.gases / tuning.weapon_mass;
+        std::uint32_t hash = ++shot_sequence_ * 0x9e3779b9u;
+        hash ^= hash >> 16;
+        const float yaw_sign = (hash & 1u) ? 1.0f : -1.0f;
+        const float roll_sign = (hash & 2u) ? 1.0f : -1.0f;
+        const float kick = velocity * tuning.rotation_gain;
+        recoil_translation_.velocity +=
+            core::Vec3{0, .10f, 1} * (velocity * tuning.translation_gain);
+        recoil_rotation_.velocity +=
+            core::Vec3{kick, yaw_sign * kick * .10f, roll_sign * kick * .16f};
+    }
+    recoil_translation_.advance(dt, tuning.frequency, tuning.damping);
+    recoil_rotation_.advance(dt, tuning.frequency, tuning.damping);
     const float target_aim = aiming_ && !motion_.reloading() && !motion_.cycling() ? 1.0f : 0.0f;
     aim_ += (target_aim - aim_) * (1.0f - std::exp(-16.0f * dt));
 }
@@ -756,7 +815,9 @@ void PlayViewmodel::observe_camera(core::Vec3 eye) noexcept {
     if (have_eye_ && core::length(eye - previous_eye_) > 2.0f) {
         ++identity_epoch_;
         gait_phase_ = 0.0f;
-        recoil_ = 0.0f;
+        recoil_translation_ = {};
+        recoil_rotation_ = {};
+        shot_sequence_ = 0;
         for (auto& model : models_)
             model.history = false;
     }
@@ -769,10 +830,12 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     const auto motion_pose = motion_.pose();
     core::Transform local{};
     local.translation = {0.006f * std::sin(gait_phase_) * bob_amount_,
-                         0.008f * std::sin(2.0f * gait_phase_) * bob_amount_ - recoil_,
-                         recoil_ * 0.5f};
+                         0.008f * std::sin(2.0f * gait_phase_) * bob_amount_,
+                         0.0f};
     const float pose_amount = 1.0f - aim_ * .85f;
-    local.translation = local.translation * pose_amount;
+    // A firm ADS shoulder reduces travel, but never suppresses the optic's shot impulse.
+    local.translation =
+        local.translation * pose_amount + recoil_translation_.position * (1.0f - .35f * aim_);
     // These weapon-local sight lines are authored in metres: SCAR holographic glass, M4 peep,
     // and PM II ocular. Align each line with the eye without changing the world camera.
     // Rifle aim has no magnification; only the sniper owns a second optical camera.
@@ -790,10 +853,11 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     constexpr std::array<float, 3> reload_roll{.20f, .20f, -.20f};
     const core::Vec3 action_offset = reload ? reload_offsets[index] : core::Vec3{-.16f, .14f, .04f};
     local.translation = local.translation + action_offset * motion_pose.lower;
-    local.rotation =
-        core::quat_from_euler(recoil_ * .8f + (reload ? 0.0f : .07f) * motion_pose.lower,
-                              .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount,
-                              (reload ? 0.0f : .24f) * motion_pose.tilt);
+    local.rotation = core::quat_from_euler(
+        recoil_rotation_.position.x + (reload ? 0.0f : .07f) * motion_pose.lower,
+        recoil_rotation_.position.y +
+            .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount,
+        recoil_rotation_.position.z + (reload ? 0.0f : .24f) * motion_pose.tilt);
     const core::Mat4 camera_matrix = core::to_matrix(camera);
     const core::Vec3 pivot = models_[index].stock;
     const core::Mat4 reload_rotation =
