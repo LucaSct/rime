@@ -77,6 +77,12 @@ public:
         return bounds_[slot];
     }
 
+    // The caller fills all participating slots before dispatch, then only reads during fork/join.
+    [[nodiscard]] const Bounds& read(std::uint32_t slot) const noexcept {
+        assert(slot < bounds_.size() && valid_[slot] != 0);
+        return bounds_[slot];
+    }
+
     [[nodiscard]] std::uint64_t computed() const noexcept { return computed_; }
 
 private:

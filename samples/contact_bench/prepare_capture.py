@@ -29,6 +29,20 @@ def instrument(source, header):
     anchor = 'void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) const {\n'
     source = exactly(source, anchor, anchor +
                      '    ::contact_capture::Step capture_step(this, zone(StepZone::Step), dt);\n')
+    # One recorder owns the entire contact build. Pass it to every joined range rather than
+    # creating a Step per task, which would incorrectly count chunks as simulation steps.
+    declaration = ('void build_contact_range(std::span<const Pair> pairs, float dt, '
+                   'ContactScratch& scratch) const;')
+    source = exactly(source, declaration, declaration.replace(
+        'ContactScratch& scratch)', 'ContactScratch& scratch, ::contact_capture::Step& capture_step)'))
+    call = ('build_contact_range(std::span<const Pair>(pairs).subspan(begin, end - begin), '
+            'dt, scratch);')
+    source = exactly(source, call, call.replace('dt, scratch)', 'dt, scratch, capture_step)'))
+    definition = """void PhysicsWorld::Impl::build_contact_range(std::span<const Pair> pairs,
+                                             float dt,
+                                             ContactScratch& scratch) const {"""
+    source = exactly(source, definition, definition.replace(
+        'ContactScratch& scratch)', 'ContactScratch& scratch, ::contact_capture::Step& capture_step)'))
     anchor = '        if (!touching) {\n            // The exact shapes do not overlap.'
     hook = '''        ::contact_capture::record(capture_step, pr.a, pr.b,
             shape[da], position[da], orientation[da], linear_velocity[da],
