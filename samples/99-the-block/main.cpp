@@ -6145,6 +6145,175 @@ int run_effects_smoke(const std::filesystem::path& cooked, std::string_view scen
     return okay ? 0 : 1;
 }
 
+// ── Shimmer trace (diagnosis, env-gated: RIME_SHIMMER_TRACE=<csv path>) ─────────────────────────
+// The owner reported tree shadows on walls and ground that "shimmer" while the camera only turns
+// or strafes. Shadow-map probes at fixed world points were stable, so the change must enter later,
+// on the SCREEN. This measures it there: a scripted, frame-indexed camera path (so every
+// configuration is rendered from IDENTICAL poses -- a mouse-driven sweep never repeats), after each
+// frame the LDR output is read back and fixed WORLD points are reprojected with the frame's own
+// unjittered view-projection to pixels; the 15x15 mean luma around each is one CSV column.
+// A point whose world position never changes but whose pixel value does is exactly "shimmer".
+// RIME_SHIMMER_OFF is a comma list that disables candidate stages one at a time:
+//   taa, jitter, ssr, ddgi, shadows (control: removes the signal), gifade, clouds.
+void run_shimmer_trace(Demo& demo, const char* csv_path) {
+    constexpr std::uint32_t kW = kWidth, kH = kHeight;
+    const std::string off = std::getenv("RIME_SHIMMER_OFF") ? std::getenv("RIME_SHIMMER_OFF") : "";
+    const auto has = [&](const char* t) {
+        return ("," + off + ",").find(std::string(",") + t + ",") != std::string::npos;
+    };
+    auto& r = demo.visuals->renderer;
+    auto lighting = r.lighting();
+    if (has("ssr"))
+        lighting.ssr_enabled = false;
+    if (has("ddgi"))
+        lighting.ddgi_enabled = false;
+    if (has("shadows"))
+        lighting.shadows_enabled = false;
+    if (has("gifade"))
+        lighting.ddgi_volume_fade = false;
+    // Diagnostic knobs for the DDGI field:
+    // RIME_SHIMMER_DDGI="hyst=0.97,spacing=2,count=16,rays=64,dist=20".
+    if (const char* knobs = std::getenv("RIME_SHIMMER_DDGI")) {
+        const std::string k = knobs;
+        const auto get = [&](const char* key, float fallback) {
+            const auto at = ("," + k).find(std::string(",") + key + "=");
+            return at == std::string::npos
+                       ? fallback
+                       : static_cast<float>(std::atof(k.c_str() + at + std::strlen(key) + 1));
+        };
+        lighting.ddgi_hysteresis = get("hyst", lighting.ddgi_hysteresis);
+        lighting.ddgi_probe_spacing = get("spacing", lighting.ddgi_probe_spacing);
+        lighting.ddgi_max_trace_distance = get("dist", lighting.ddgi_max_trace_distance);
+        lighting.ddgi_rays_per_probe =
+            static_cast<std::uint32_t>(get("rays", float(lighting.ddgi_rays_per_probe)));
+        const auto c = static_cast<std::uint32_t>(get("count", 0));
+        if (c != 0)
+            lighting.ddgi_probe_count_x = lighting.ddgi_probe_count_y =
+                lighting.ddgi_probe_count_z = c;
+    }
+    r.set_lighting(lighting);
+    if (has("jitter"))
+        r.set_temporal_jitter_enabled(false);
+    if (has("taa"))
+        r.set_taa_resolve_enabled(false);
+    if (has("clouds")) {
+        auto sky = r.sky();
+        sky.clouds_enabled = false;
+        r.set_sky(sky);
+    }
+    // Sensitivity control for the shadow probe (RIME_SHIMMER_SUN_NUDGE_DEG): turn the one sun by a
+    // known small angle about world Y, so a probe that claims "stable to 5e-5" can be shown to
+    // MOVE when the world really does move by this much.
+    if (const char* nudge = std::getenv("RIME_SHIMMER_SUN_NUDGE_DEG")) {
+        const core::Quat dq = core::quat_from_axis_angle(
+            {0, 1, 0}, static_cast<float>(std::atof(nudge)) * 0.0174532925f);
+        for (ecs::World* w : {&demo.session.server.world, &demo.session.client.world})
+            w->query<render::DirectionalLight>().for_each(
+                [&](ecs::Entity e, render::DirectionalLight&) {
+                    if (auto* lt = w->get<ecs::LocalTransform>(e))
+                        lt->value.rotation = dq * lt->value.rotation;
+                    if (auto* wt = w->get<ecs::WorldTransform>(e))
+                        wt->value.rotation = dq * wt->value.rotation;
+                });
+    }
+    std::vector<core::Vec3> pts;
+    for (float y : {2.0f, 3.8f, 5.2f})
+        for (float z : {-6.0f, -8.0f, -10.0f})
+            pts.push_back({11.84f, y, z});
+    for (float x : {6.0f, 7.5f, 8.5f, 9.5f, 10.5f, 11.2f})
+        for (float z : {-4.5f, -6.0f, -8.0f, -10.0f, -12.0f, -15.0f})
+            pts.push_back({x, 0.012f, z});
+    const char* env_pitch = std::getenv("RIME_SHIMMER_PITCH");
+    const float pitch = env_pitch ? static_cast<float>(std::atof(env_pitch)) : 0.4475f;
+    const bool flip = std::getenv("RIME_SHIMMER_FLIPY") != nullptr;
+    constexpr float kBaseYaw = -0.6435f;
+    constexpr int kWarm = 200, kStatic = 120, kYaw = 240, kStrafe = 120;
+    std::FILE* csv = std::fopen(csv_path, "w");
+    if (csv == nullptr)
+        return;
+    std::fprintf(csv, "frame,phase,yaw,x");
+    for (std::size_t i = 0; i < pts.size(); ++i)
+        std::fprintf(csv, ",p%zu_luma,p%zu_u,p%zu_v", i, i, i);
+    std::fprintf(csv, "\n");
+    const auto project = [&](const core::Mat4& vp, core::Vec3 p, double& u, double& v) {
+        const core::Vec4 c = vp * core::Vec4{p.x, p.y, p.z, 1.0f};
+        if (c.w <= 0.05f)
+            return false;
+        u = (c.x / c.w * .5 + .5) * kW;
+        v = (c.y / c.w * .5 + .5) * kH;
+        if (flip)
+            v = kH - v;
+        return u >= 8 && v >= 8 && u < kW - 8 && v < kH - 8;
+    };
+    const int total = kWarm + kStatic + kYaw + kStrafe;
+    for (int f = 0; f < total; ++f) {
+        const int t = f - kWarm;
+        float yaw = kBaseYaw,
+              x = std::getenv("RIME_SHIMMER_X0")
+                      ? static_cast<float>(std::atof(std::getenv("RIME_SHIMMER_X0")))
+                      : 9.0f;
+        int phase = 0;
+        if (t >= kStatic && t < kStatic + kYaw) {
+            phase = 1;
+            yaw += 0.2f * std::sin(6.2831853f * static_cast<float>(t - kStatic) / 120.0f);
+        } else if (t >= kStatic + kYaw) {
+            phase = 2;
+            x += 0.75f *
+                 (1.0f - std::cos(6.2831853f * static_cast<float>(t - kStatic - kYaw) / 120.0f));
+        }
+        gameplay::FirstPersonView v{};
+        v.yaw = yaw;
+        v.pitch = pitch;
+        v.eye_height = 0.0f;
+        demo.visuals->authored_camera = gameplay::eye_transform(v, {x, 1.6f, -5.0f});
+        demo.use_authored_camera = true;
+        demo.app.run_frames(1);
+        if (t < 0)
+            continue;
+        const rhi::TextureHandle tex = demo.app.graph()->physical(demo.visuals->last_ldr);
+        const auto px = read_rgba8(*demo.app.device(), tex, kW, kH);
+        const core::Mat4 vp = r.view_proj_unjittered();
+        std::fprintf(csv, "%d,%d,%.5f,%.4f", t, phase, double(yaw), double(x));
+        auto marked = px;
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            double u = -1, vv = -1, luma = -1;
+            if (project(vp, pts[i], u, vv)) {
+                const int cx = static_cast<int>(u), cy = static_cast<int>(vv);
+                double sum = 0;
+                // 15x15 window: a 3x3 mean follows individual brick/mortar texels as the point
+                // slides by a sub-pixel, which is texture aliasing, not lighting shimmer.
+                for (int dy = -7; dy <= 7; ++dy)
+                    for (int dx = -7; dx <= 7; ++dx) {
+                        const std::uint8_t* q =
+                            &px[(static_cast<std::size_t>(cy + dy) * kW + (cx + dx)) * 4];
+                        sum += 0.2126 * q[0] + 0.7152 * q[1] + 0.0722 * q[2];
+                    }
+                luma = sum / 225.0;
+                for (int d = -6; d <= 6; ++d) {
+                    auto* a = &marked[(static_cast<std::size_t>(cy) * kW +
+                                       std::clamp(cx + d, 0, int(kW) - 1)) *
+                                      4];
+                    auto* b =
+                        &marked[(static_cast<std::size_t>(std::clamp(cy + d, 0, int(kH) - 1)) * kW +
+                                 cx) *
+                                4];
+                    a[0] = b[0] = 255;
+                    a[1] = a[2] = b[1] = b[2] = 0;
+                }
+            } else {
+                u = vv = -1;
+            }
+            std::fprintf(csv, ",%.3f,%.1f,%.1f", luma, u, vv);
+        }
+        std::fprintf(csv, "\n");
+        if (t == 0 || t == kStatic + 60)
+            write_ppm(
+                (std::string(csv_path) + (t == 0 ? ".f0.ppm" : ".f1.ppm")).c_str(), marked, kW, kH);
+    }
+    std::fclose(csv);
+    demo.app.finish_gpu();
+}
+
 int run_play(const std::filesystem::path& cooked, std::string_view scene_path, unsigned frames) {
     app::AppConfig cfg{};
     cfg.gpu = true;
@@ -6327,7 +6496,9 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path, u
         demo.render(ctx);
     });
 
-    if (demo.app.windowed()) {
+    if (const char* trace = std::getenv("RIME_SHIMMER_TRACE")) {
+        run_shimmer_trace(demo, trace);
+    } else if (demo.app.windowed()) {
         if (frames)
             demo.app.run_frames(static_cast<int>(frames));
         else
