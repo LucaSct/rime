@@ -4557,10 +4557,13 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
           "100m/s control traversed hundreds of negative metres");
     check(min_client_x < stress_start - 280.0f && min_visual_x < stress_start - 280.0f,
           "client predicted and visual control traversed negative terrain");
-    const core::Vec3 remote{min_x, 60.0f, 0.0f};
+    // Start above the tallest terrain the u16 height encoding can express (252 m): the distant
+    // ranges (assets::apply_procedural_backdrop) are real collision now, so the old 60 m origin
+    // could sit inside a hill. The assertion is unchanged: the ray must still hit terrain.
+    const core::Vec3 remote{min_x, 300.0f, 0.0f};
     physics::RayHit remote_hit;
     check(demo.session.server.physics.raycast(
-              physics::Ray{remote, {0.0f, -1.0f, 0.0f}, 120.0f}, remote_hit, statics),
+              physics::Ray{remote, {0.0f, -1.0f, 0.0f}, 400.0f}, remote_hit, statics),
           "negative-coordinate terrain answers a physics ray");
     physics::RayHit missing_hit;
     check(!demo.session.server.physics.raycast(
