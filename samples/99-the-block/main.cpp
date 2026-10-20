@@ -105,6 +105,7 @@
 #include "rime/blockkit/block.hpp"
 #include "rime/blockkit/palette.hpp"
 #include "rime/blockkit/role.hpp"
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/core/diagnostics/perf_report.hpp"
 #include "rime/core/diagnostics/profile.hpp"
 #include "rime/core/diagnostics/work_ledger.hpp"
@@ -2674,6 +2675,74 @@ struct Demo {
         charge_fired = true;
         const blockkit::BlockParams p;
         (void)detonate(session, p.hero_south, hero_charge(p));
+    }
+
+    // AIMED CHARGE for --play. fire_charge() above targets the authored hero corner of the
+    // generated block, which is empty ground on an authored city scene, so F did nothing there.
+    // Here the charge goes where the player looks: a ray from the eye finds the first
+    // surface within reach, and the blast is offered to EVERY destructible instance, because an
+    // authored scene has no SlabRole building index. apply_damage tests each part against the
+    // radius, so far-away instances cost a bounds check and stay intact. Returns false (nothing
+    // detonated) when the ray hits nothing, so a charge thrown at the sky is not spent.
+    bool fire_charge_aimed(float reach = 60.0f) {
+        const core::Transform eye = session.client.camera_transform();
+        const core::Vec3 forward = core::rotate(eye.rotation, core::Vec3{0, 0, -1});
+        // Aim against the CLIENT's replica (what the player sees), excluding the player's own
+        // capsule or the ray stops at distance ~0. Only the hit POINT crosses to the server, as
+        // a world position, so the two worlds' differing BodyIds never meet.
+        physics::QueryFilter filter;
+        filter.exclude = session.client.local_body();
+        physics::RayHit hit{};
+        if (!session.client.physics.raycast({eye.translation, forward, reach}, hit, filter)) {
+            RIME_INFO(
+                "play: aimed charge: ray from ({:.1f}, {:.1f}, {:.1f}) hit nothing within {} m",
+                eye.translation.x,
+                eye.translation.y,
+                eye.translation.z,
+                reach);
+            return false;
+        }
+        charge_fired = true;
+        {
+            // DIAGNOSTIC: the same ray on the SERVER world, and which destructible instance (if
+            // any) owns the body it strikes.
+            physics::RayHit shit{};
+            const bool sh =
+                session.server.physics.raycast({eye.translation, forward, reach}, shit, {});
+            std::size_t owner = static_cast<std::size_t>(-1);
+            for (std::size_t i = 0; sh && i < session.server.destruction.instance_count(); ++i)
+                if (session.server.destruction.body_of(
+                        destruction::InstanceId{static_cast<std::uint32_t>(i), 0}) == shit.body)
+                    owner = i;
+            RIME_INFO("play: server ray hit={} dist={:.1f} body={} owning_instance={} of {}",
+                      sh,
+                      shit.distance,
+                      shit.body.index,
+                      static_cast<long long>(owner),
+                      session.server.destruction.instance_count());
+        }
+        Charge charge;
+        // Pull the centre back off the surface so the blast straddles the wall instead of
+        // sitting on its face, where half the sphere would be wasted in open air.
+        charge.at = hit.point - forward * 0.5f;
+        charge.radius = 4.0f; // a breach, not the whole-building hero blow-out (11 m)
+        // Walk the destruction world's own instance table, as the bullet path does.
+        auto& destruction = session.server.destruction;
+        const std::size_t offered = destruction.instance_count();
+        for (std::size_t i = 0; i < offered; ++i)
+            destruction.apply_damage(destruction::InstanceId{static_cast<std::uint32_t>(i), 0},
+                                     charge.at,
+                                     charge.radius,
+                                     charge.damage,
+                                     {0.0f, charge.impulse * 0.3f, 0.0f});
+        RIME_INFO("play: aimed charge at ({:.1f}, {:.1f}, {:.1f}), {:.1f} m away, offered to {} "
+                  "destructible instances",
+                  charge.at.x,
+                  charge.at.y,
+                  charge.at.z,
+                  hit.distance,
+                  offered);
+        return true;
     }
 
     // Pose the camera from the PREDICTED player and draw the client's world. `ctx.world` is the
@@ -6476,7 +6545,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path, u
             demo.app.request_quit();
         }
         if (demo.session.client.devices.key_pressed(platform::Key::F)) {
-            demo.fire_charge();
+            (void)demo.fire_charge_aimed();
         }
         if (demo.viewmodel) {
             // map_frame_input has already folded this frame's events and applied mouse motion.
