@@ -10,6 +10,7 @@
 #include <span>
 #include <vector>
 
+#include "play_ammo.hpp"
 #include "play_arm_ik.hpp"
 #include "play_weapon_motion.hpp"
 #include "rime/assets/asset_server.hpp"
@@ -55,6 +56,21 @@ public:
     }
 
     [[nodiscard]] bool reloading() const noexcept { return motion_.reloading(); }
+
+    // Per-weapon magazines. Consumed per accepted shot by the sample's tick loop; refilled by
+    // advance() when the reload animation reports the magazine seated.
+    [[nodiscard]] PlayAmmo& ammo() noexcept { return ammo_; }
+
+    [[nodiscard]] const PlayAmmo& ammo() const noexcept { return ammo_; }
+
+    [[nodiscard]] PlayWeaponMotion::Weapon weapon() const noexcept {
+        return static_cast<PlayWeaponMotion::Weapon>(selected_);
+    }
+
+    // R, and the automatic reload on an empty trigger pull: refused on a full magazine.
+    [[nodiscard]] bool begin_ammo_reload() noexcept {
+        return ammo_.wants_reload(weapon()) && begin_reload();
+    }
 
     [[nodiscard]] bool cycling() const noexcept { return motion_.cycling(); }
 
@@ -213,6 +229,7 @@ private:
     Spring recoil_translation_, recoil_rotation_;
     std::uint32_t shot_sequence_ = 0;
     PlayWeaponMotion motion_;
+    PlayAmmo ammo_;
     bool aiming_ = false;
     float aim_ = 0.0f;
     render::DrawItem lens_{};

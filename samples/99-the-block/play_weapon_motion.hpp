@@ -33,6 +33,10 @@ public:
     static constexpr float kMagReleaseFraction = 0.50f;
     static constexpr float kMagFallSeconds = 0.45f;
 
+    // The instant the fresh magazine seats, as a fraction of the reload: where seat_pulse() starts
+    // (contact). Ammunition becomes available HERE, not when the animation begins or ends.
+    static constexpr float kMagSeatFraction = 0.77f;
+
     static constexpr float kRifleReloadSeconds = 2.2f;
     static constexpr float kSniperReloadSeconds = 2.8f;
     static constexpr float kBoltSeconds = 1.1f;
@@ -72,6 +76,9 @@ public:
         elapsed_ = std::min(duration, elapsed_ + dt);
         if (action_ == Action::Bolt && prior < kExtractionSeconds && elapsed_ >= kExtractionSeconds)
             ++pending_cases_;
+        if (action_ == Action::Reload && prior < kMagSeatFraction * duration &&
+            elapsed_ >= kMagSeatFraction * duration)
+            mag_seated_ = true;
         if (elapsed_ >= duration) {
             action_ = Action::Idle;
             elapsed_ = 0.0f;
@@ -83,6 +90,14 @@ public:
         action_ = Action::Idle;
         elapsed_ = 0.0f;
         pending_cases_ = 0;
+        mag_seated_ = false; // a cancelled reload never delivered its magazine
+    }
+
+    // One-shot event: the reload crossed its seat instant since the last call.
+    [[nodiscard]] bool take_mag_seated() noexcept {
+        const bool seated = mag_seated_;
+        mag_seated_ = false;
+        return seated;
     }
 
     [[nodiscard]] bool reloading() const noexcept { return action_ == Action::Reload; }
@@ -177,6 +192,7 @@ private:
     Action action_ = Action::Idle;
     float elapsed_ = 0.0f;
     std::uint32_t pending_cases_ = 0;
+    bool mag_seated_ = false;
 };
 
 } // namespace rime::block_play
