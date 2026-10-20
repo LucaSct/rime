@@ -8,6 +8,14 @@ struct PhaseOptics {
     vec3 f0;
     vec3 transmission;
     float roughness;
+    // Inputs to the screen-space refraction path (WATER_PASS only): the absorption coefficient
+    // per metre, the in-scattered body colour, the authored water column that exists even when
+    // the floor mesh is flush with the sheet, and how milky the medium is (ice inclusions).
+    vec3 sigma;
+    vec3 body;
+    vec3 milk;
+    float virtual_depth;
+    float cloudy;
 };
 
 
@@ -62,6 +70,14 @@ PhaseOptics phase_optics(vec3 geometric, vec3 detail_normal, vec3 tangent, vec3 
     vec3 mapped = detail_normal / max(dot(detail_normal, N), .25) - N;
     o.normal = normalize(N + mapped * mix(.18, .06, wet) +
                          wet * vec3(-slope.x, 0.0, -slope.y));
+    // Grazing guard. At a low camera the steep side of a wave tilts the mirror direction BELOW the
+    // surface, where the reflection resolves to the dark "ground" half of the sky and the crest
+    // reads as a black hole. Real waves self-shadow there; we instead pull the normal toward the
+    // flat one until the reflected ray clears the horizon of the sheet.
+    for (int guard = 0; guard < 2; ++guard) {
+        float up = dot(reflect(-view, o.normal), N);
+        o.normal = normalize(mix(o.normal, N, clamp((.06 - up) * 5.0, 0.0, 1.0)));
+    }
     // Ice inclusions: the existing cellular frost field supplies branching internal cracks.
     // Sparse hashed air pockets add a second scale; their scattering fades continuously on
     // melting. Frost has more scattering and a wider lobe than polished bulk ice.
@@ -96,6 +112,83 @@ PhaseOptics phase_optics(vec3 geometric, vec3 detail_normal, vec3 tangent, vec3 
     // Schlick energy split: the transmitted/scattered share is exactly the complement
     // of the reflected share. The specular lobe uses F0 through the existing sky/SSR path.
     o.transmission = transmitted * (vec3(1.0) - f_schlick(nv, o.f0));
+    o.sigma = sigma;
+    o.body = body;
+    o.milk = vec3(.72, .84, .87);
+    o.virtual_depth = thickness;
+    o.cloudy = cloudy;
     return o;
 }
+
+#ifdef WATER_PASS
+// ── SCREEN-SPACE REFRACTION ─────────────────────────────────────────────────────────────────
+//
+// Water is mostly TRANSPARENT: what you see is the floor, bent by refraction, dimmed and tinted by
+// the water column, with the sky mirrored on top in proportion to Fresnel. A bottom-colour proxy
+// cannot show that, so this pass draws water AFTER the opaque scene and reads a copy of the
+// finished scene colour and depth (scene_copy.frag; a pass cannot sample what it renders into).
+//
+// 1. Thickness. The depth copy holds the opaque floor, because water is excluded from the
+//    pre-pass. Floor point B and surface point P give the vertical water column h = (P-B).N. A
+//    sheet laid flush on its floor measures ~0, so the authored depth is a lower bound: the shader
+//    uses max(measured, authored). At the bank the authored depth tapers to zero, so edges are
+//    clear and depth darkens naturally.
+// 2. Refraction. Snell's law bends the view ray into the water (eta = 1/1.333). The refracted ray
+//    reaches the floor after h / cos(theta_r) along its length; that point Q projects to a screen
+//    position, and the opaque colour THERE is what the camera sees through the surface. Rippled
+//    normals bend the ray differently per pixel, which is the wobble.
+// 3. Rejection. If the colour at Q's screen position belongs to something in FRONT of the water
+//    (a post, the bank wall) the lookup would smear foreground onto the water, so the unbent pixel
+//    is used instead.
+// 4. Beer-Lambert. Light dims exponentially with path length, per channel: T = exp(-sigma * path).
+//    Red dies first, leaving the blue-green of deep water; in-scattered light fills in the part
+//    the column absorbed, so a deep pond tends to its body colour rather than to black.
+// 5. Caustics. The wavy surface focuses sunlight on the floor into bright moving filaments, faked
+//    here with two crossing ridge patterns that drift with the waves, fading with depth.
+vec3 water_unproject(mat4 inv_vp, vec2 uv, float depth) {
+    vec4 c = inv_vp * vec4(uv * 2.0 - 1.0, depth, 1.0);
+    return c.xyz / c.w;
+}
+
+float water_caustic(vec2 p, float t) {
+    vec2 a = p * 5.3 + vec2(sin(p.y * 3.1 + t * .9), cos(p.x * 2.7 - t * .7));
+    vec2 b = p * 8.1 + vec2(cos(p.y * 4.3 - t * 1.3), sin(p.x * 3.9 + t * 1.1));
+    float c1 = 1.0 - abs(sin(a.x + sin(a.y)));
+    float c2 = 1.0 - abs(sin(b.x + sin(b.y)));
+    return pow(c1 * c2, 3.0);
+}
+
+vec3 water_refracted_radiance(PhaseOptics o, vec3 P, vec3 Ngeo, vec3 v, vec3 incident,
+                              float sun_visibility, float time) {
+    vec2 size = vec2(textureSize(water_scene_color, 0));
+    ivec2 px = ivec2(gl_FragCoord.xy);
+    vec2 uv = gl_FragCoord.xy / size;
+    mat4 inv_vp = inverse(frame.view_proj);
+    float d0 = uintBitsToFloat(texelFetch(water_scene_depth, px, 0).r);
+    bool has_floor = d0 < .99999;
+    vec3 B0 = water_unproject(inv_vp, uv, d0);
+    float h_scene = has_floor ? max(dot(P - B0, Ngeo), 0.0) : 8.0;
+    float h = max(h_scene, o.virtual_depth);
+    vec3 r = refract(-v, o.normal, 1.0 / 1.333);
+    float cos_r = max(dot(-r, Ngeo), .05);
+    float path = h / cos_r;
+    vec3 Q = P + r * path;
+    vec4 cq = frame.view_proj * vec4(Q, 1.0);
+    vec2 uvq = clamp(cq.xy / cq.w * .5 + .5, vec2(.002), vec2(.998));
+    float dq = uintBitsToFloat(texelFetch(water_scene_depth, ivec2(uvq * size), 0).r);
+    vec3 Bq = water_unproject(inv_vp, uvq, dq);
+    float eye_to_surface = distance(frame.camera_pos.xyz, P);
+    if (has_floor && distance(frame.camera_pos.xyz, Bq) < eye_to_surface - .03)
+        uvq = uv; // foreground in the way: fall back to the unbent lookup
+    vec3 bottom = texture(water_scene_color, uvq).rgb;
+    float shallow = 1.0 - smoothstep(.0, .6, h);
+    // Light reaching the floor is also attenuated on its way down; caustics live in that light.
+    float caustic = water_caustic(Q.xz, time) * sun_visibility * shallow;
+    bottom *= 1.0 + caustic * 1.6;
+    vec3 T = exp(-o.sigma * path);
+    vec3 col = bottom * T + o.body * incident * (1.0 - T);
+    col = mix(col, o.milk * incident * .6 + bottom * T * .25, o.cloudy * .65);
+    return col;
+}
+#endif
 #endif

@@ -916,6 +916,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                 }
             }
         }
+        // Water and ice sheets are drawn AFTER the opaque scene (the water pass), because they
+        // refract it. The flag only routes: a frame that cannot run that pass leaves it unused.
+        if (surface.kind == SurfaceKind::Water || surface.kind == SurfaceKind::Ice) {
+            frame_draws_[i].flags |= DrawItem::Water;
+        }
         // Route this draw to the alpha-testing depth pipeline (m16.4). A nonzero cutoff is exactly
         // what "this material masks" means -- the same single float the shader branches on, so the
         // CPU and GPU cannot disagree about which draws are masked.
@@ -1158,19 +1163,6 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         gbuffer_material =
             graph.create_texture({extent, kGbufferMaterialFormat, "scene-gbuffer-material"});
     }
-    if (use_depth_prepass)
-        depth_prepass_.add(graph, depth, data);
-    // Motion vectors (ADR-0078 step 1c): a SEPARATE pass that depth-tests Equal against the
-    // pre-pass, so it needs the pre-pass. Off, or no pre-pass: nothing is allocated or declared.
-    RGTexture velocity;
-    if (motion_vectors_enabled_ && use_depth_prepass) {
-        velocity = graph.create_texture({extent, kVelocityFormat, "scene-velocity"});
-        velocity_.add(graph, velocity, depth, data);
-    } else if (motion_vectors_enabled_ && !warned_velocity_no_prepass_) {
-        RIME_WARN("render: motion vectors need the depth pre-pass (the velocity pass depth-tests "
-                  "Equal against it) -- no velocity target this frame");
-        warned_velocity_no_prepass_ = true;
-    }
     // The M10 forward path (ADR-0032 §11 regression bridge) runs only when a feature actually has
     // something to do: shadows enabled with a directional light (m10.1 cascades) and/or spot lights
     // (m10.2), clustering enabled with point lights to cull (m10.3), or DDGI actually running
@@ -1196,11 +1188,41 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // These three are declared out here because the terrain scene pass below also binds them: it
     // uses the SAME cascades as the forward pass, with no second fit and no second shadow render.
     // `shadow` stays invalid when the baseline path is taken, which the terrain block handles.
+    // THE WATER SPLIT. Water refracts the finished opaque scene, so it cannot be part of it: the
+    // opaque passes below skip Water-flagged draws and a later water pass draws only those. That
+    // pass rides the shadowed pipeline (the only one carrying the sky/SSR bindings), so the split
+    // exists only when this frame takes that path; otherwise water stays in the opaque passes and
+    // shades with the old bottom-colour proxy.
+    const bool shadowed_path = has_sun || has_local || has_clusters || has_ddgi || has_ssr ||
+                               has_sky_light || first_person_active;
+    SceneDrawData water_data = data;
+    std::size_t water_draw_count = 0;
+    if (shadowed_path) {
+        for (const DrawItem& item : data.draws)
+            water_draw_count += (item.flags & DrawItem::Water) != 0 ? 1 : 0;
+        if (water_draw_count > 0) {
+            data.skip_flags = DrawItem::Water;
+            water_data.only_flags = DrawItem::Water;
+            shadow_data.skip_flags = DrawItem::Water; // a thin sheet must not shade its own floor
+        }
+    }
+    if (use_depth_prepass)
+        depth_prepass_.add(graph, depth, data);
+    // Motion vectors (ADR-0078 step 1c): a SEPARATE pass that depth-tests Equal against the
+    // pre-pass, so it needs the pre-pass. Off, or no pre-pass: nothing is allocated or declared.
+    RGTexture velocity;
+    if (motion_vectors_enabled_ && use_depth_prepass) {
+        velocity = graph.create_texture({extent, kVelocityFormat, "scene-velocity"});
+        velocity_.add(graph, velocity, depth, data);
+    } else if (motion_vectors_enabled_ && !warned_velocity_no_prepass_) {
+        RIME_WARN("render: motion vectors need the depth pre-pass (the velocity pass depth-tests "
+                  "Equal against it) -- no velocity target this frame");
+        warned_velocity_no_prepass_ = true;
+    }
     ShadowBinding shadow{};
     LocalShadowBinding local{};
     ClusterBinding clusters{};
-    if (has_sun || has_local || has_clusters || has_ddgi || has_ssr || has_sky_light ||
-        first_person_active) {
+    if (shadowed_path) {
         // The cascade binding: the real fit when there is a sun, else a valid count-0 placeholder
         // so the shadowed pipeline's binding 7/8 is always satisfied (a spot-only scene).
         if (has_sun) {
@@ -1302,6 +1324,38 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // setter call next frame so a temporary draw list cannot become a dangling borrow.
     terrain_pass_ = nullptr;
     terrain_draws_ = {};
+
+    // The water pass: snapshot the finished opaque scene (terrain included), then draw the water
+    // and ice sheets over it, refracting the snapshot. Sheets write colour, the SSR G-buffer and
+    // depth, so everything downstream (sky composite, SSR reflection, TAA) treats the surface as
+    // ordinary geometry; a velocity pass for the sheets keeps TAA from smearing their motion.
+    if (water_draw_count > 0) {
+        const RGTexture refract_color =
+            graph.create_texture({extent, kHdrFormat, "scene-hdr-refract"});
+        const RGTexture refract_depth =
+            graph.create_texture({extent, rhi::Format::R32Uint, "scene-depth-bits"});
+        forward_.add_scene_copy(graph, hdr, depth, refract_color, refract_depth);
+        forward_.add_shadowed(graph,
+                              hdr,
+                              depth,
+                              use_depth_prepass,
+                              water_data,
+                              shadow,
+                              local,
+                              clusters,
+                              ddgi_binding,
+                              sky_binding,
+                              gbuffer,
+                              gbuffer_material,
+                              nullptr,
+                              rhi::LoadOp::Load,
+                              false,
+                              "forward-pbr water",
+                              refract_color,
+                              refract_depth);
+        if (velocity.is_valid())
+            velocity_.add(graph, velocity, depth, water_data, rhi::LoadOp::Load, "velocity-water");
+    }
 
     // Sky (m17.0): composite the procedural sky into the background — the pixels the depth buffer
     // says nothing was drawn on — writing a THIRD HDR target the next stage reads. It goes here,

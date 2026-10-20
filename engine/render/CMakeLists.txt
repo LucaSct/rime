@@ -67,6 +67,7 @@ rime_add_shaders(rime_render
     shaders/sky_specular_prefilter.comp
     shaders/sky_specular_dfg.comp
     shaders/fullscreen.vert
+    shaders/scene_copy.frag
     shaders/first_person_depth.frag
     shaders/scope_lens.vert
     shaders/scope_lens.frag
@@ -98,6 +99,12 @@ rime_add_shaders(rime_render
 # the baseline shadowed shader stays free of the unused second output.
 rime_add_shader_variant(rime_render
     shaders/pbr_forward_shadowed.frag WRITE_GBUFFER pbr_forward_shadowed_gbuffer.frag)
+# The water pass (screen-space refraction): the same shader drawn after the opaque scene, reading a
+# copy of it through two extra bindings. Two modules, as for the G-buffer: SSR on / SSR off.
+rime_add_shader_variant(rime_render
+    shaders/pbr_forward_shadowed.frag WATER_PASS pbr_forward_water.frag)
+rime_add_shader_variant(rime_render
+    shaders/pbr_forward_shadowed.frag WATER_PASS_GBUFFER pbr_forward_water_gbuffer.frag)
 rime_add_shader_variant(rime_render
     shaders/pbr_forward_shadowed.frag FIRST_PERSON pbr_forward_first_person.frag)
 rime_add_shader_variant(rime_render

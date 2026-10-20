@@ -21,6 +21,13 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+// The water pass (screen-space refraction): the same shading, drawn after the opaque scene, reading
+// a copy of it. WATER_PASS_GBUFFER is the SSR-on twin and so also writes the G-buffer.
+#ifdef WATER_PASS_GBUFFER
+#define WATER_PASS
+#define WRITE_GBUFFER
+#endif
+
 #ifdef FIRST_PERSON_SDF_SPECULAR
 #define FIRST_PERSON
 #define SDF_SPECULAR_OCCLUSION
@@ -189,6 +196,12 @@ layout(location = 2) out vec4 out_gbuffer_material;
 #endif
 
 #include "brdf.glsl"
+#ifdef WATER_PASS
+// Bindings 21/22 are the SDF variant's slots; the two variants never meet. Colour is a linear
+// sampler; depth travels as raw float bits in an R32_UINT target (the RHI has no R32_SFLOAT).
+layout(set = 0, binding = 21) uniform sampler2D water_scene_color;
+layout(set = 0, binding = 22) uniform usampler2D water_scene_depth;
+#endif
 #include "water_surface.glsl"
 
 // One point light's contribution. Factored out (m10.3) so the uniform-block loop and the clustered
@@ -682,7 +695,16 @@ void main() {
                                normalize(-frame.dir_lights[i].direction.xyz)), 0.0);
             incident += frame.dir_lights[i].radiance.rgb * nl / kPi * (i == 0u ? sun_factor : 1.0);
         }
+#ifdef WATER_PASS
+        // Transmitted share = (1 - F): the reflected remainder is added by the SSR resolve with
+        // the same F0, so refraction + reflection conserve energy.
+        out_radiance += water_refracted_radiance(
+                            optics, v_world_pos, normalize(v_world_normal), v, incident,
+                            sun_factor, draw.emissive.x) *
+                        (vec3(1.0) - f_schlick(max(dot(n, v), 0.0), optics.f0));
+#else
         out_radiance += optics.transmission * incident;
+#endif
     } else {
         out_radiance += draw.emissive.rgb * emissive_sample;
     }
