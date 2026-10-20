@@ -40,8 +40,12 @@ public:
     static constexpr float kImpactLifetime = 20.0f;
     static constexpr std::size_t kCaseSlots = 32;
     static constexpr float kCaseLifetime = 3.0f;
-    static constexpr std::size_t kFragmentSlots = 64;
-    static constexpr std::size_t kDustSlots = 96;
+    static constexpr std::size_t kFragmentSlots = 96;
+    // Each masonry hit puffs kDustPerHit billboards that live kDustLifetime seconds, so 192 slots
+    // hold the last ~16 hits -- ample for a burst at 600 RPM (about 1.5 s of fire).
+    static constexpr std::size_t kDustSlots = 192;
+    static constexpr unsigned kDustPerHit = 12;
+    static constexpr float kDustLifetime = 1.4f;
     static constexpr std::size_t kEntityCount =
         kSlots * 5 + kImpactSlots + kCaseSlots + kFragmentSlots;
 
@@ -121,7 +125,7 @@ private:
 
     struct Dust {
         core::Vec3 origin{}, velocity{}, color{};
-        float age = .65f, size = .08f;
+        float age = kDustLifetime, size = .08f;
     };
 
     void show(ecs::World& world,

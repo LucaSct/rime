@@ -163,20 +163,42 @@ bool PlayWeaponFx::initialize() {
     // A tiny procedural coverage/albedo stamp supplies a dark crater and pale chipped rim.
     // Alpha testing uses the existing material path; the transparent corners leave the wall
     // visible, and a 2 mm normal offset prevents z-fighting without adding physical thickness.
-    constexpr unsigned texels = 64;
+    // Crater stamp, alpha-tested. Three zones, because a bullet hole reads as a hole only when
+    // something is darker than the wall AND something is lighter around it: a near-black core
+    // (the void), a charcoal-to-grey scorched band, and a pale, ragged chipped rim where the
+    // surface skin spalled off and exposed fresh, lighter material. The rim's outer edge is
+    // broken by hashed noise so it never reads as a printed circle, and the texels carry a
+    // radial gradient so downsampling at 15 m still leaves a dark centre. Everything is a pure
+    // function of the texel, so the stamp is deterministic.
+    constexpr unsigned texels = 128;
     std::array<std::uint8_t, texels * texels * 4> pixels{};
+    const auto hash = [](unsigned x, unsigned y) {
+        std::uint32_t h = x * 374761393u + y * 668265263u;
+        h = (h ^ (h >> 13)) * 1274126177u;
+        return static_cast<float>((h ^ (h >> 16)) & 0xffu) / 255.0f;
+    };
     for (unsigned y = 0; y < texels; ++y)
         for (unsigned x = 0; x < texels; ++x) {
             const float u = (static_cast<float>(x) + .5f) / texels * 2 - 1;
             const float v = (static_cast<float>(y) + .5f) / texels * 2 - 1;
             const float angle = std::atan2(v, u);
-            const float edge = .78f + .08f * std::sin(angle * 7) + .04f * std::cos(angle * 11);
+            const float edge = .80f + .07f * std::sin(angle * 7) + .05f * std::cos(angle * 11) +
+                               .06f * (hash(x / 4, y / 4) - .5f);
             const float radius = std::sqrt(u * u + v * v) / edge;
-            const auto shade = static_cast<std::uint8_t>(radius < .58f ? 22 : 130);
+            float shade;
+            if (radius < .42f)
+                shade = 6 + 26 * radius;
+            else if (radius < .58f)
+                shade = 18 + 70 * (radius - .42f) / .16f;
+            else
+                shade = 185 + 50 * hash(x, y) - 40 * (radius - .58f);
+            const auto byte = static_cast<std::uint8_t>(std::clamp(shade, 0.0f, 255.0f));
             const unsigned at = (y * texels + x) * 4;
-            pixels[at] = shade;
-            pixels[at + 1] = shade;
-            pixels[at + 2] = shade;
+            // Slight warm bias on the pale rim only (spalled masonry is buff, not blue-grey).
+            const bool rim = radius >= .58f;
+            pixels[at] = rim ? static_cast<std::uint8_t>(std::min(byte + 14, 255)) : byte;
+            pixels[at + 1] = byte;
+            pixels[at + 2] = rim ? static_cast<std::uint8_t>(byte * 85 / 100) : byte;
             pixels[at + 3] = radius < 1 ? 255 : 0;
         }
     rhi::TextureDesc texture{};
@@ -189,7 +211,7 @@ bool PlayWeaponFx::initialize() {
         return false;
     device_.write_texture(scar_texture_, pixels.data(), pixels.size());
     constexpr float colors[5][3] = {
-        {10.0f, 0.18f, 0.02f}, {5, 1.1f, .20f}, {.30f, .26f, .20f}, {0, 0, 0}, {0, 0, 0}};
+        {10.0f, 0.18f, 0.02f}, {5, 1.1f, .20f}, {3.2f, 1.7f, .6f}, {0, 0, 0}, {0, 0, 0}};
     for (std::size_t i = 0; i < material_ids_.size(); ++i) {
         render::PbrMaterialDesc material{};
         const bool brass = i == 4;
@@ -267,11 +289,11 @@ void PlayWeaponFx::fire(core::Vec3 eye,
         const auto color = kSurfaceColors[static_cast<std::size_t>(surface)];
         const auto tangent = core::rotate(along_z(shot.normal), core::Vec3{1, 0, 0});
         const auto bitangent = core::cross(shot.normal, tangent);
-        for (unsigned i = 0; i < 6; ++i) {
+        for (unsigned i = 0; i < (surface == Surface::Metal ? 14u : 9u); ++i) {
             auto& fragment = fragments_[next_fragment_];
             next_fragment_ = (next_fragment_ + 1) % kFragmentSlots;
             const float angle = random01(seed) * 6.2831853f;
-            const float speed = surface == Surface::Metal ? 4.5f : 1.2f;
+            const float speed = surface == Surface::Metal ? 6.0f : 2.4f;
             fragment.origin = hit + shot.normal * .018f;
             fragment.velocity = shot.normal * (.6f + random01(seed) * speed) +
                                 (tangent * std::cos(angle) + bitangent * std::sin(angle)) *
@@ -281,20 +303,27 @@ void PlayWeaponFx::fire(core::Vec3 eye,
                                     (tangent * std::cos(angle) + bitangent * std::sin(angle)) * .3f;
             fragment.surface = surface;
             fragment.age = 0;
-            fragment.life = surface == Surface::Metal ? .18f : .45f;
-            fragment.size = surface == Surface::Metal ? .004f : .009f + random01(seed) * .012f;
+            fragment.life = surface == Surface::Metal ? .22f : .6f;
+            fragment.size = surface == Surface::Metal ? .005f : .016f + random01(seed) * .02f;
         }
         if (surface != Surface::Metal && surface != Surface::Water)
-            for (unsigned i = 0; i < 5; ++i) {
+            for (unsigned i = 0; i < kDustPerHit; ++i) {
                 auto& dust = dust_[next_dust_];
                 next_dust_ = (next_dust_ + 1) % kDustSlots;
                 dust.origin = hit + shot.normal * .04f;
-                dust.velocity = shot.normal * (.25f + random01(seed) * .7f) +
-                                tangent * ((random01(seed) - .5f) * .9f) +
-                                bitangent * ((random01(seed) - .5f) * .9f);
-                dust.color = color;
-                dust.age = 0;
-                dust.size = .045f + random01(seed) * .055f;
+                // Billow: mostly along the hit normal (soil kicks straight up, which for a floor
+                // is its normal), with a sideways spread so the cloud mushrooms.
+                dust.velocity = shot.normal * (.7f + random01(seed) * 1.3f) +
+                                tangent * ((random01(seed) - .5f) * 1.6f) +
+                                bitangent * ((random01(seed) - .5f) * 1.6f);
+                // Dust is pulverised material, i.e. paler than the intact surface; lift the
+                // albedo toward grey so dark brick still yields a visible reddish puff.
+                const float lift = surface == Surface::Soil ? .05f : .10f;
+                dust.color = {std::min(color.x * 1.6f + lift, .9f),
+                              std::min(color.y * 1.5f + lift * .8f, .85f),
+                              std::min(color.z * 1.4f + lift * .6f, .8f)};
+                dust.age = -random01(seed) * .05f; // staggered start so puffs are not one blob
+                dust.size = .07f + random01(seed) * .07f;
             }
     }
     shot.age = 0.0f;
@@ -326,7 +355,7 @@ void PlayWeaponFx::advance(float dt) noexcept {
     for (auto& fragment : fragments_)
         fragment.age = std::min(fragment.age + dt, fragment.life);
     for (auto& dust : dust_)
-        dust.age = std::min(dust.age + dt, .65f);
+        dust.age = std::min(dust.age + dt, kDustLifetime);
     for (auto& impact : impacts_)
         impact.age = std::min(impact.age + dt, kImpactLifetime);
     for (auto& casing : cases_) {
@@ -349,20 +378,21 @@ void PlayWeaponFx::append_smoke(std::vector<render::GpuParticle>& particles) con
     // Analytic drag and expansion turn five soft billboards into a dust puff. Age is bounded,
     // no collision queries or engine VFX state are needed, and opacity retires smoothly.
     for (const auto& dust : dust_) {
-        if (dust.age >= .65f)
+        if (dust.age >= kDustLifetime)
             continue;
-        const float t = dust.age;
-        const auto position =
-            dust.origin + dust.velocity * ((1 - std::exp(-3 * t)) / 3) + core::Vec3{0, .08f * t, 0};
+        const float t = std::max(dust.age, 0.0f);
+        const auto position = dust.origin + dust.velocity * ((1 - std::exp(-2.2f * t)) / 2.2f) +
+                              core::Vec3{0, .12f * t, 0};
         render::GpuParticle p{};
         p.position_size[0] = position.x;
         p.position_size[1] = position.y;
         p.position_size[2] = position.z;
-        p.position_size[3] = dust.size + t * .16f;
+        p.position_size[3] = dust.size + t * .26f;
         p.color_alpha[0] = dust.color.x;
         p.color_alpha[1] = dust.color.y;
         p.color_alpha[2] = dust.color.z;
-        p.color_alpha[3] = .38f * (1 - t / .65f);
+        // Ease in over the first 60 ms (no pop), then fade linearly to nothing at kDustLifetime.
+        p.color_alpha[3] = .42f * (1 - t / kDustLifetime) * std::min(1.0f, .35f + t / .06f);
         particles.push_back(p);
     }
 }
@@ -490,7 +520,7 @@ void PlayWeaponFx::pose(ecs::World& world,
         spark.rotation = along_z(shot.normal);
         const bool water = shot.surface == Surface::Water;
         const bool metal = shot.surface == Surface::Metal;
-        const float size = .01f + .025f * (1 - std::min(shot.age / kSparkLifetime, 1.0f));
+        const float size = .012f + .035f * (1 - std::min(shot.age / kSparkLifetime, 1.0f));
         spark.scale = water ? core::Vec3{5 + shot.age * 90, 5 + shot.age * 90, 1}
                             : core::Vec3{size * 100, size * 100, .25f};
         auto* spark_mat = world.get<render::MaterialRef>(shot.entities[2]);
@@ -501,7 +531,7 @@ void PlayWeaponFx::pose(ecs::World& world,
         world.mark_changed<render::MaterialRef>(shot.entities[2]);
         show(world,
              shot.entities[2],
-             shot.hit_surface && shot.age < (water ? kTracerLifetime : .045f)
+             shot.hit_surface && shot.age < (water ? kTracerLifetime : .06f)
                  ? (water ? ring_ : burst_)
                  : render::kInvalidMeshId,
              spark);
@@ -540,7 +570,9 @@ void PlayWeaponFx::pose(ecs::World& world,
             scar.translation = state.position +
                                core::rotate(state.orientation, impact.local_point) + normal * .002f;
             scar.rotation = along_z(normal) * core::quat_from_axis_angle({0, 0, 1}, impact.spin);
-            scar.scale = {3.0f, 3.0f, 1.0f};
+            // Quad is 2 cm; x6.5 gives a 13 cm stamp whose crater (0.58 x edge) is ~5 cm and whose
+            // pale rim reaches ~10 cm: readable at 15 m (about 20 px at 1280x720).
+            scar.scale = {6.5f, 6.5f, 1.0f};
         }
         show(world, impact.entity, active ? scar_ : render::kInvalidMeshId, scar);
     }
