@@ -1963,6 +1963,9 @@ struct Visuals {
 // modes is where the input comes from and who owns the loop — never what is standing there.
 constexpr audio::SoundId kGunReport = audio::sound::kUserBase;
 constexpr audio::SoundId kBulletImpact = kGunReport + 3;
+// One id past the last impact material: the empty-magazine click.
+constexpr audio::SoundId kDryClick =
+    kBulletImpact + static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Count);
 
 audio::SoundBank play_sound_bank() {
     auto bank = audio::SoundBank::engine_defaults();
@@ -1991,6 +1994,11 @@ audio::SoundBank play_sound_bank() {
             audio::mix_into(impact, audio::decaying_sine(.18f, 2300, 28), .35f);
         bank.set(kBulletImpact + material, std::move(impact));
     }
+    // Dry click: a very short bright noise tick plus a high, fast-dying sine -- the hammer
+    // falling on an empty chamber. Built once like the other one-shots.
+    auto click = audio::noise_burst(.05f, .6f, 90.0f, 0x2c1u);
+    audio::mix_into(click, audio::decaying_sine(.05f, 1800, 120), .35f);
+    bank.set(kDryClick, std::move(click));
     return bank;
 }
 
@@ -2512,6 +2520,16 @@ struct Demo {
                         static_cast<block_play::PlayWeaponMotion::Weapon>(viewmodel->selected()));
             input = block_play::filter_busy_fire(
                 input, viewmodel->busy(), session.server.weapon.fire_bit);
+            // Empty magazine: the pull produces no shot (so no recoil, tracer or report, all of
+            // which hang off an accepted shot), clicks once and starts the reload. The busy
+            // filter above already owns the trigger during a reload, so there is one click.
+            const auto trigger = viewmodel->ammo().filter_trigger(
+                input, viewmodel->weapon(), viewmodel->busy(), session.server.weapon.fire_bit);
+            input = trigger.input;
+            if (trigger.dry_fire) {
+                mixer.play(kDryClick, session.client.camera_transform().translation, .7f);
+                (void)viewmodel->begin_ammo_reload();
+            }
         }
         step_sim(gameplay_net::to_input_command(input));
     }
@@ -2536,6 +2554,9 @@ struct Demo {
                 shot.shooter_entity != session.server.avatars.front())
                 continue;
             shot_presented = true;
+            // One round per accepted shot, counted per tick (never per render frame).
+            if (viewmodel)
+                (void)viewmodel->ammo().consume(viewmodel->weapon());
             if (weapon_fx) {
                 const auto eye = session.client.camera_transform();
                 const auto muzzle =
@@ -2866,6 +2887,19 @@ struct Demo {
                      names[static_cast<unsigned>(viewmodel->selected())],
                      st::kAccent,
                      14.0f);
+            // rounds / capacity, right above the hint; red-ish while empty, amber while reloading.
+            const auto weapon = viewmodel->weapon();
+            char ammo_text[32];
+            std::snprintf(ammo_text,
+                          sizeof(ammo_text),
+                          viewmodel->reloading() ? "%u / %u  RELOADING" : "%u / %u",
+                          viewmodel->ammo().rounds(weapon),
+                          block_play::PlayAmmo::capacity(weapon));
+            hud.text(st::kPadding,
+                     static_cast<float>(ctx.extent.height) - 48.0f,
+                     ammo_text,
+                     viewmodel->ammo().empty(weapon) ? st::kWarn : st::kText,
+                     22.0f);
         }
         constexpr float kW = 300.0f;
         const float h = st::kPadding * 2.0f + st::kLineHeight * 7.4f;

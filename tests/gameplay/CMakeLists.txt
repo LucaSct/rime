@@ -19,6 +19,7 @@ rime_add_test(rime_gameplay_tests
     input_map_test.cpp
     weapon_test.cpp
     play_arm_ik_test.cpp
+    play_ammo_test.cpp
     play_weapon_motion_test.cpp
     play_weapon_policy_test.cpp
     play_effects_test.cpp

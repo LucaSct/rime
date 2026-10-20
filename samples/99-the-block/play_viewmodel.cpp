@@ -729,10 +729,10 @@ void PlayViewmodel::apply_controls(const platform::Input& devices,
         if (event.key.key == platform::Key::Num3)
             select(Weapon::Sniper);
         if (event.key.key == platform::Key::R)
-            (void)begin_reload();
+            (void)begin_ammo_reload();
     }
     if (devices.key_pressed(platform::Key::R))
-        (void)begin_reload();
+        (void)begin_ammo_reload();
     set_aiming(devices.key_down(platform::Key::Q) ||
                devices.mouse_down(platform::MouseButton::Right));
 }
@@ -782,6 +782,10 @@ void PlayViewmodel::advance(float frame_dt, core::Vec3 actual_velocity, bool fir
     // Animation time uses the entire finite frame; a slow frame must not extend a reload.
     const float dt = std::isfinite(frame_dt) && frame_dt >= 0.0f ? frame_dt : 0.0f;
     motion_.advance(frame_dt, static_cast<PlayWeaponMotion::Weapon>(selected_), fired, aiming_);
+    // The magazine arrives at the seat instant. A switch mid-reload cancels the motion, which
+    // clears this event, so the abandoned weapon keeps its old count.
+    if (motion_.take_mag_seated())
+        ammo_.refill(static_cast<PlayWeaponMotion::Weapon>(selected_));
     const float speed =
         std::sqrt(actual_velocity.x * actual_velocity.x + actual_velocity.z * actual_velocity.z);
     gait_phase_ += std::min(speed, 10.0f) * dt * 1.6f;
