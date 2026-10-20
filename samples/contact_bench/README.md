@@ -95,3 +95,31 @@ when judging an otherwise bit-identical optimization.
 
 The committed capture and results are in
 [`docs/perf/contact-oracle-2026-10-18`](../../docs/perf/contact-oracle-2026-10-18/README.md).
+
+## Production contact scheduling and per-step determinism
+
+The corpus replay above calls private convex dispatch directly; it cannot measure
+broadphase or the world's parallel contact scheduling, and it has no world state
+to hash. Use the separate fixed-world mode for those changes:
+
+```sh
+build/release/bin/contact_bench --fixed-world --workers 1
+build/release/bin/contact_bench --fixed-world --workers 4
+build/release/bin/contact_bench --fixed-world --workers 8
+```
+
+It builds a deterministic 448-body box/hull/compound pile, disables sleeping, and
+warms the inspection path once. Seven batches of twenty `compute_contacts` calls
+then observe identical poses. The reported contact milliseconds include production
+broadphase, bounds, dispatch, ordered merge and cache commit; they exclude scene
+construction and integration. Afterwards 120 simulation steps emit **every**
+`world_hash`, outside the timing interval. `--workers 0` uses the sequential path;
+positive counts name background workers, with the submitting thread also helping.
+`--profile` enables contact counters/timers for diagnostic equality checks only.
+
+For before/after comparisons, link the same benchmark fixture against each physics
+version, retain both binaries, and alternate A/B at least five times per worker
+count. Compare all 120 hashes across versions and worker counts before reporting
+performance. Record system load alongside each process's median, and report both
+the median and min/max of those medians. A gain smaller than the baseline A/A
+spread is unresolved. Frozen-pile contact time is not a city frame-time prediction.

@@ -7,6 +7,7 @@
 #include <fstream>
 #include <string_view>
 
+#include "fixed_world.hpp"
 #include "rime/core/hash.hpp"
 #include "workload.hpp"
 
@@ -127,6 +128,8 @@ Results replay(const cw::Workload& w, bool verify, cw::Candidate candidate, bool
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc > 1 && std::string_view(argv[1]) == "--fixed-world")
+        return fixed_contact_world::run(argc, argv);
     bool verify_only = true;
     cw::Candidate candidate = cw::Candidate::None;
     bool cached = false;

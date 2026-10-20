@@ -265,7 +265,8 @@ struct IslandSolveCost {
 };
 
 // Optional, per-world diagnostic for the most recent contact build. Counts describe work; times
-// are wall-clock samples and must never enter simulation state or world_hash(). The time buckets
+// are summed task wall-clock samples (not elapsed parallel time) and must never enter simulation
+// state or world_hash(). The time buckets
 // are disjoint: compound_midphase_ns is whole compound child-loop time less the separately timed
 // exact, speculative, and cache regions. Its remainder includes AABB testing, loop overhead,
 // manifold setup, feature folding, and output append. heightfield_ns includes terrain's cache
@@ -408,7 +409,9 @@ public:
     [[nodiscard]] std::uint32_t contacts_warm_started_last() const noexcept;
 
     // --- Islands, sleeping & the parallel step (M7.5) ---------------------------------------
-    // Borrow a job system so step() solves independent simulation islands in parallel. Passing null
+    // Borrow a job system for independent contact-pair ranges and simulation islands. Contact
+    // builds read a frozen snapshot, then merge range outputs in canonical pair/child/patch order.
+    // Passing null
     // (the default) solves them sequentially. Either way the result is BIT-IDENTICAL: islands share
     // no dynamic body and immovable bodies are read-only in the solver, so an island's math is a
     // pure function of that island regardless of which worker runs it (the determinism contract,

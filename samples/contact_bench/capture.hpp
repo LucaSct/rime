@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <atomic>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
@@ -114,7 +115,10 @@ inline Recorder& recorder() {
 struct Step {
     Recorder& owner;
     std::string world;
-    std::uint64_t index = 0, queries = 0;
+    std::uint64_t index = 0;
+    // Range tasks share this build's recorder. A relaxed integer count needs no ordering; the
+    // fork/join completes all records before Step's destructor folds the count into the ledger.
+    std::atomic<std::uint64_t> queries{0};
     float dt;
     bool selected = false;
 
@@ -145,9 +149,9 @@ struct Step {
         if (!owner.enabled)
             return;
         std::lock_guard lock(owner.mutex);
-        owner.ledger.queries += queries;
+        owner.ledger.queries += queries.load(std::memory_order_relaxed);
         if (selected)
-            owner.ledger.selected_queries += queries;
+            owner.ledger.selected_queries += queries.load(std::memory_order_relaxed);
     }
 };
 
@@ -182,7 +186,7 @@ inline void record(Step& step,
                    const physics::ConvexHull* hb,
                    bool touching,
                    const physics::Manifold& expected) {
-    ++step.queries;
+    step.queries.fetch_add(1, std::memory_order_relaxed);
     if (!step.owner.enabled || !step.selected)
         return;
     auto& r = step.owner;

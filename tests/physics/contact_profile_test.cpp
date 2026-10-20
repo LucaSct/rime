@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "rime/core/jobs/job_system.hpp"
 #include "rime/physics/physics.hpp"
 
 using namespace rime;
@@ -117,7 +118,9 @@ TEST_CASE("contact profile counts all dispatch arms without changing contact res
         CHECK(profile.plain_bounds_ns > 0);
         CHECK(profile.compound_pairs > 0);
         CHECK(profile.heightfield_pairs > 0);
-        CHECK(profile.duplicate_keys > 0);
+        // Superseded by the lower-slot ownership rule: mover-mover pairs are emitted once, so
+        // the broadphase now produces no duplicate keys at all (it used to find each twice).
+        CHECK(profile.duplicate_keys == 0);
         CHECK(profile.posed_children > 0);
         CHECK(profile.tested_child_pairs > profile.culled_child_pairs);
         CHECK(profile.culled_child_pairs > 0);
@@ -202,4 +205,64 @@ TEST_CASE("contact profile counts speculative dispatch on an approaching CCD pai
     CHECK(on.contact_profile().plain_speculative_ns > 0);
     CHECK(on.contact_profile().produced_manifolds > 0);
     CHECK(off.contact_profile().speculative_calls == 0);
+}
+
+TEST_CASE("parallel contact ranges preserve mixed manifolds warm starts and profile counts") {
+    for (const unsigned workers : {1u, 4u, 8u}) {
+        CAPTURE(workers);
+        core::JobSystem jobs(workers);
+        physics::PhysicsWorld serial, parallel;
+        fill_scene(serial);
+        fill_scene(parallel);
+        parallel.set_job_system(&jobs);
+        serial.set_contact_profile_enabled(true);
+        parallel.set_contact_profile_enabled(true);
+        // Overlapping small bodies push the pair count beyond the parallel dispatch threshold.
+        // The existing fixture supplies compound and terrain pairs in the SAME canonical stream,
+        // so ordered comparison catches a merge that loses either arm or changes child order.
+        std::vector<physics::BodyId> ids_a, ids_b;
+        for (unsigned i = 0; i < 80; ++i) {
+            const core::Vec3 pos{static_cast<float>(i % 10) * 0.45f,
+                                 0.4f + static_cast<float>(i / 10) * 0.45f,
+                                 0.2f};
+            ids_a.push_back(add(serial, box({0.25f, 0.25f, 0.25f}), pos));
+            ids_b.push_back(add(parallel, box({0.25f, 0.25f, 0.25f}), pos));
+        }
+        for (unsigned step = 0; step < 20; ++step) {
+            CAPTURE(step);
+            if (step == 10) {
+                // Reuse a freed slot after dense compaction: immutable bounds must be rebuilt,
+                // and generation checks must keep the new body's warm-cache reads isolated.
+                serial.destroy_body(ids_a[3]);
+                parallel.destroy_body(ids_b[3]);
+                CHECK(add(serial, box({0.3f, 0.3f, 0.3f}), {0, 0.2f, 0}) ==
+                      add(parallel, box({0.3f, 0.3f, 0.3f}), {0, 0.2f, 0}));
+            }
+            serial.step(1.0f / 60.0f);
+            parallel.step(1.0f / 60.0f);
+            CHECK(serial.world_hash() == parallel.world_hash());
+            CHECK(serial.contacts_warm_started_last() == parallel.contacts_warm_started_last());
+            const auto& a = serial.contact_profile();
+            const auto& b = parallel.contact_profile();
+            CHECK(a.unique_pairs > 64);
+            CHECK(a.unique_pairs == b.unique_pairs);
+            CHECK(a.raw_candidate_keys == a.unique_pairs);
+            CHECK(b.duplicate_keys == 0);
+            CHECK(a.plain_pairs == b.plain_pairs);
+            CHECK(a.compound_pairs == b.compound_pairs);
+            CHECK(a.heightfield_pairs == b.heightfield_pairs);
+            CHECK(a.posed_children == b.posed_children);
+            CHECK(a.tested_child_pairs == b.tested_child_pairs);
+            CHECK(a.culled_child_pairs == b.culled_child_pairs);
+            CHECK(a.exact_narrowphase_calls == b.exact_narrowphase_calls);
+            CHECK(a.speculative_calls == b.speculative_calls);
+            CHECK(a.plain_bounds_bodies == b.plain_bounds_bodies);
+            CHECK(a.plain_bounds_rejected == b.plain_bounds_rejected);
+            CHECK(a.produced_manifolds == b.produced_manifolds);
+            std::vector<physics::Manifold> ma, mb;
+            serial.compute_contacts(ma);
+            parallel.compute_contacts(mb);
+            check_manifolds(ma, mb);
+        }
+    }
 }
