@@ -10,6 +10,40 @@ struct PhaseOptics {
     float roughness;
 };
 
+
+// Water slope field: a sum of travelling sine waves, one per octave of wavelength.
+//
+// A heightfield h(p,t) = sum a_i sin(k_i.p - w_i t) has slope grad h = sum a_i k_i cos(...) dir_i,
+// so we sum SLOPES directly and never need the height. Each term carries a target slope (the
+// steepness a_i k_i, dimensionless), which is what the eye reads as glitter: rms ~0.09 is a
+// breezy pond. Frequencies follow the capillary-gravity dispersion w = sqrt(g k (1 + (k/370)^2)),
+// so long waves crawl and short ripples dart, which is what makes the motion look like water
+// rather than a texture scrolling. Directions fan +-40 degrees around the wind, and phases are
+// irrational offsets so no two terms line up into a visible lattice.
+//
+// Anti-aliasing: a wave shorter than ~4 pixels of footprint only produces shimmering noise, so each
+// term fades out as wavelength/footprint falls. The residual roughness is supplied by the
+// specular filter, which is the same energy the faded waves would have carried.
+vec2 water_slope(vec2 p, float t, float footprint) {
+    const float kWavelength[8] = float[](4.1, 2.3, 1.27, .73, .41, .235, .135, .078);
+    const float kSlope[8] = float[](.020, .030, .042, .052, .056, .050, .040, .030);
+    const float kAngle[8] = float[](.00, .55, -.62, .31, -.28, .70, -.74, .12);
+    vec2 s = vec2(0.0);
+    for (int i = 0; i < 8; ++i) {
+        float k = 6.2831853 / kWavelength[i];
+        float w = sqrt(9.81 * k * (1.0 + (k / 370.0) * (k / 370.0)));
+        float ang = .3398 + kAngle[i]; // wind direction (0.94, 0.34) plus the fan offset
+        vec2 d = vec2(cos(ang), sin(ang));
+        float resolved = smoothstep(2.0, 8.0, kWavelength[i] / footprint);
+        s += d * (kSlope[i] * resolved * cos(k * dot(d, p) - w * t + float(i) * 1.7));
+        // A crossing train at a different angle and speed breaks the straight crests into chop.
+        vec2 e = vec2(cos(ang + 1.9), sin(ang + 1.9));
+        s += e * (kSlope[i] * .55 * resolved *
+                  cos(k * 1.13 * dot(e, p) - w * 0.83 * t + float(i) * 2.9 + 1.0));
+    }
+    return s;
+}
+
 PhaseOptics phase_optics(vec3 geometric, vec3 detail_normal, vec3 tangent, vec3 position,
                         vec2 uv, vec3 view, vec3 tint, vec3 frost_map,
                         float authored_roughness, vec4 phase, vec3 presentation) {
@@ -19,19 +53,15 @@ PhaseOptics phase_optics(vec3 geometric, vec3 detail_normal, vec3 tangent, vec3 
     vec3 N = normalize(geometric);
     vec3 T = normalize(tangent - N * dot(N, tangent));
     vec3 B = normalize(cross(N, T));
-    // Slope-space detail: continuous capillary waves ride the analytic Gerstner normal.
-    // Static frost slopes fade with the exact liquid fraction, avoiding the old 1/8 atlas
-    // jumps. The clock is committed simulation time, so paused/refused ticks remain still.
+    // Living surface: a spectrum of travelling slope waves (see water_slope above). Static frost
+    // slopes still fade with the exact liquid fraction, avoiding the old 1/8 atlas jumps. The
+    // clock is committed simulation time, so paused/refused ticks remain still.
     vec2 p = position.xz;
-    vec2 ripple = vec2(.94, .34) * (.026 * cos(dot(p, vec2(23.5, 8.5)) -
-                                                           presentation.x * 8.0));
-    ripple += vec2(.82, .57) * (.014 * cos(dot(p, vec2(39.4, 27.4)) -
-                                                           presentation.x * 11.0 + 1.7));
-    ripple += vec2(.99, -.09) * (.008 * cos(dot(p, vec2(73.3, -6.7)) -
-                                                           presentation.x * 16.0 + 4.2));
+    float footprint = max(length(fwidth(position)), 1e-4);
+    vec2 slope = water_slope(p, presentation.x, footprint);
     vec3 mapped = detail_normal / max(dot(detail_normal, N), .25) - N;
     o.normal = normalize(N + mapped * mix(.18, .06, wet) +
-                         wet * (T * ripple.x + B * ripple.y));
+                         wet * vec3(-slope.x, 0.0, -slope.y));
     // Ice inclusions: the existing cellular frost field supplies branching internal cracks.
     // Sparse hashed air pockets add a second scale; their scattering fades continuously on
     // melting. Frost has more scattering and a wider lobe than polished bulk ice.
