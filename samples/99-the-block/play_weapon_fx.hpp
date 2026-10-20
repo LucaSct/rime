@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 
@@ -40,10 +41,14 @@ public:
     static constexpr float kImpactLifetime = 20.0f;
     static constexpr std::size_t kCaseSlots = 32;
     static constexpr float kCaseLifetime = 3.0f;
-    static constexpr std::size_t kFragmentSlots = 64;
-    static constexpr std::size_t kDustSlots = 96;
+    static constexpr std::size_t kFragmentSlots = 96;
+    // Each masonry hit puffs kDustPerHit billboards that live kDustLifetime seconds, so 192 slots
+    // hold the last ~16 hits -- ample for a burst at 600 RPM (about 1.5 s of fire).
+    static constexpr std::size_t kDustSlots = 200;
+    static constexpr unsigned kDustPerHit = 12;
+    static constexpr float kDustLifetime = 1.4f;
     static constexpr std::size_t kEntityCount =
-        kSlots * 5 + kImpactSlots + kCaseSlots + kFragmentSlots;
+        kSlots * 6 + kImpactSlots + kCaseSlots + kFragmentSlots;
 
     struct ViewPose {
         core::Vec3 eye{};
@@ -71,6 +76,11 @@ public:
               const physics::PhysicsWorld* physics = nullptr,
               Surface surface = Surface::Concrete,
               bool tracer = true) noexcept;
+
+    // Muzzle-flash size multiplier for subsequent shots (1 = rifle; the caller sets ~1.8 for a
+    // sniper rifle's larger brake). fire() has no weapon argument, so this is the seam.
+    void set_flash_size(float scale) noexcept { flash_size_ = std::clamp(scale, .25f, 4.0f); }
+
     void advance(float dt) noexcept;
     void append_smoke(std::vector<render::GpuParticle>& particles) const;
     // Queue a spent case for the next pose. The bounded queue is also valid before the first
@@ -92,7 +102,8 @@ private:
         float age = kTracerLifetime;
         bool hit_surface = false;
         bool presented = true;
-        std::array<ecs::Entity, 5> entities{};
+        std::array<ecs::Entity, 6> entities{};
+        float flash_roll = 0, flash_scale = 1;
     };
 
     struct Impact {
@@ -121,7 +132,7 @@ private:
 
     struct Dust {
         core::Vec3 origin{}, velocity{}, color{};
-        float age = .65f, size = .08f;
+        float age = kDustLifetime, size = .08f, life = kDustLifetime;
     };
 
     void show(ecs::World& world,
@@ -133,7 +144,7 @@ private:
     render::MeshRegistry& meshes_;
     render::MaterialRegistry& materials_;
     std::array<Shot, kSlots> shots_{};
-    std::array<render::MaterialId, 5> material_ids_{};
+    std::array<render::MaterialId, 6> material_ids_{};
     std::array<Impact, kImpactSlots> impacts_{};
     std::array<Case, kCaseSlots> cases_{};
     std::array<Fragment, kFragmentSlots> fragments_{};
@@ -142,6 +153,8 @@ private:
     std::array<render::MaterialId, kSlots> tracer_materials_{};
     render::MeshId scar_ = render::kInvalidMeshId;
     render::MeshId ring_ = render::kInvalidMeshId;
+    render::MeshId star_ = render::kInvalidMeshId;
+    float flash_size_ = 1.0f;
     float exposure_ = 1.0f / 60.0f;
     std::uint32_t sequence_ = 0;
     std::size_t next_fragment_ = 0, next_dust_ = 0;

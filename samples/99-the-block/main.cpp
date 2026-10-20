@@ -5951,7 +5951,7 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
                                    Surface::Soil,
                                    Surface::Metal,
                                    Surface::Water}) {
-            fx.advance(1);
+            fx.advance(block_play::PlayWeaponFx::kDustLifetime + .1f);
             fx.pose(fx_world, &fx_physics, &view_a);
             fx.fire(view_a.eye,
                     view_a.direction,
@@ -5997,7 +5997,11 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
                   fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount &&
                   demo.visuals->materials.size() == resource_count,
               "sustained impacts keep particle, entity and material pools bounded");
-        fx.advance(1);
+        fx.advance(1.0f);
+        dust.clear();
+        fx.append_smoke(dust);
+        check(!dust.empty(), "impact dust still drifts one second after the hit");
+        fx.advance(block_play::PlayWeaponFx::kDustLifetime);
         dust.clear();
         fx.append_smoke(dust);
         check(dust.empty(), "impact dust fully expires");
