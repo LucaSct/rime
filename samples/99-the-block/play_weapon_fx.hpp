@@ -108,6 +108,9 @@ private:
 
     struct Impact {
         core::Vec3 local_point{}, local_normal{};
+        // Last world pose seen while the anchor body was alive. If the body is then fractured
+        // away this is where we look for the piece that inherited the surface (re-anchoring).
+        core::Vec3 world_point{}, world_normal{0, 1, 0};
         physics::BodyId body{};
         ecs::Entity entity{};
         float age = kImpactLifetime;
@@ -146,6 +149,7 @@ private:
     std::array<Shot, kSlots> shots_{};
     std::array<render::MaterialId, 6> material_ids_{};
     std::array<Impact, kImpactSlots> impacts_{};
+    static constexpr std::size_t kReanchorsPerFrame = 64; // cap; leftovers carry to next frame
     std::array<Case, kCaseSlots> cases_{};
     std::array<Fragment, kFragmentSlots> fragments_{};
     std::array<Dust, kDustSlots> dust_{};
