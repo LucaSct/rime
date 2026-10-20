@@ -2548,6 +2548,7 @@ struct Demo {
                     surface = block_play::PlayWeaponFx::Surface::Water;
                 const unsigned weapon =
                     viewmodel ? static_cast<unsigned>(viewmodel->selected()) : 0;
+                weapon_fx->set_flash_size(block_play::PlayWeaponFx::kWeaponFlashSize[weapon]);
                 const unsigned stride = weapon == 0 ? 3 : 4;
                 const bool tracer = weapon != 2 && weapon_rounds[weapon]++ % stride == 0;
                 weapon_fx->fire(shot.origin,

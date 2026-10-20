@@ -79,6 +79,10 @@ public:
 
     // Muzzle-flash size multiplier for subsequent shots (1 = rifle; the caller sets ~1.8 for a
     // sniper rifle's larger brake). fire() has no weapon argument, so this is the seam.
+    // Per-weapon flash scale, indexed like PlayViewmodel::Weapon (SCAR, M4, MSR). The MSR's
+    // long muzzle brake throws a visibly bigger flash than the carbines, so it gets 1.8x.
+    static constexpr std::array<float, 3> kWeaponFlashSize{1.0f, 1.0f, 1.8f};
+
     void set_flash_size(float scale) noexcept { flash_size_ = std::clamp(scale, .25f, 4.0f); }
 
     void advance(float dt) noexcept;

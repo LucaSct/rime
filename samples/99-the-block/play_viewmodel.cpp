@@ -848,13 +848,15 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     // viewport with near-clipped faces even when all projected magazine targets were valid.
     const bool reload = motion_.reloading();
     constexpr std::array<core::Vec3, 3> reload_offsets{
-        {{-.06f, .15f, -.04f}, {-.06f, .125f, 0}, {.02f, .09f, -.10f}}};
+        {{-.06f, .15f, -.04f}, {-.06f, .125f, 0}, {.0f, .18f, -.02f}}};
+    // The MSR's values are retuned (smaller roll/pitch, weapon lifted) because its long receiver
+    // swung the support hand and magazine off the bottom edge mid-reload.
     // Reload pose: the weapon ROLLS about its bore (z) by 24-27 degrees so the magazine well
     // turns toward the support hand and the viewer, and dips its muzzle slightly (negative x
     // pitch). Rolling, rather than pitching the muzzle up as round 1 did, keeps the well and
     // the hand inside the lower frame instead of swinging them out of the bottom.
-    constexpr std::array<float, 3> reload_pitch{.14f, .14f, .20f};
-    constexpr std::array<float, 3> reload_roll{-.50f, -.50f, -.45f};
+    constexpr std::array<float, 3> reload_pitch{.14f, .14f, .10f};
+    constexpr std::array<float, 3> reload_roll{-.50f, -.50f, -.30f};
     const core::Vec3 action_offset = reload ? reload_offsets[index] : core::Vec3{-.16f, .14f, .04f};
     local.translation = local.translation + action_offset * motion_pose.lower;
     // Seat jolt: the fresh magazine slams home, kicking the weapon up and slightly back; the
