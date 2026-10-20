@@ -10,6 +10,7 @@
 #include "rime/physics/world.hpp"
 #include "rime/render/components.hpp"
 #include "rime/rhi/rhi.hpp"
+#include "scar_reanchor.hpp"
 
 namespace rime::block_play {
 namespace {
@@ -378,13 +379,16 @@ void PlayWeaponFx::fire(core::Vec3 eye,
     if (hit_surface && surface != Surface::Water && surface != Surface::Soil && physics &&
         finite(normal) && normal_length > .5f && physics->get_body_state(body, state)) {
         // Surface marks live in the hit body's frame, so a moving target carries its scar.
-        // Generational BodyId lookup removes it when that collider is fractured/replaced.
+        // Generational BodyId lookup notices when that collider is fractured/replaced; pose()
+        // then re-anchors the scar to whatever solid piece now holds that spot.
         auto& impact = impacts_[next_impact_];
         next_impact_ = (next_impact_ + 1) % kImpactSlots;
         const auto inverse = core::conjugate(state.orientation);
         impact.local_point = core::rotate(inverse, hit - state.position);
         impact.local_normal = core::rotate(inverse, normal / normal_length);
         impact.body = body;
+        impact.world_point = hit;
+        impact.world_normal = normal / normal_length;
         impact.age = 0;
         impact.spin = (random01(seed) - .5f) * 1.2f;
     }
@@ -618,15 +622,51 @@ void PlayWeaponFx::pose(ecs::World& world,
         }
         shot.presented = true;
     }
+    // RE-ANCHOR, DON'T DROP (see scar_reanchor.hpp). A scar whose body vanished (the wall
+    // fractured and its collider was replaced) probes the world once at its last known pose:
+    // a body there inherits the scar, nothing there means the piece left and the scar goes.
+    // Work is capped per frame; scars past the cap are simply retried next frame, still hidden
+    // until then (a one-frame blink is cheaper than a hitch after a building-sized collapse).
+    std::size_t reanchor_budget = kReanchorsPerFrame;
     for (auto& impact : impacts_) {
         physics::BodyState state{};
-        const bool active =
-            impact.age < kImpactLifetime && physics && physics->get_body_state(impact.body, state);
+        bool active = false;
+        if (impact.age < kImpactLifetime && physics) {
+            active = physics->get_body_state(impact.body, state);
+            if (!active && reanchor_budget > 0) {
+                --reanchor_budget;
+                ScarProbeHit found{};
+                const bool anchored = find_scar_anchor(
+                    impact.world_point,
+                    impact.world_normal,
+                    [&](core::Vec3 origin, core::Vec3 dir, float reach, ScarProbeHit& out) {
+                        physics::RayHit ray_hit{};
+                        if (!physics->raycast({origin, dir, reach}, ray_hit))
+                            return false;
+                        out = {ray_hit.body, ray_hit.point};
+                        return true;
+                    },
+                    found);
+                physics::BodyState fresh{};
+                if (anchored && physics->get_body_state(found.body, fresh)) {
+                    const auto inverse = core::conjugate(fresh.orientation);
+                    impact.local_point = core::rotate(inverse, impact.world_point - fresh.position);
+                    impact.local_normal = core::rotate(inverse, impact.world_normal);
+                    impact.body = found.body;
+                    state = fresh;
+                    active = true;
+                } else {
+                    impact.age = kImpactLifetime; // the piece it was on left: retire the scar
+                }
+            }
+        }
         core::Transform scar{};
         if (active) {
             const auto normal = core::rotate(state.orientation, impact.local_normal);
-            scar.translation = state.position +
-                               core::rotate(state.orientation, impact.local_point) + normal * .002f;
+            impact.world_normal = normal;
+            impact.world_point =
+                state.position + core::rotate(state.orientation, impact.local_point);
+            scar.translation = impact.world_point + normal * .002f;
             scar.rotation = along_z(normal) * core::quat_from_axis_angle({0, 0, 1}, impact.spin);
             // Quad is 2 cm; x10 gives a 20 cm stamp whose crater (0.5 x edge) is ~8 cm and whose
             // pale rim reaches ~16 cm: readable at 15 m (about 20 px at 1280x720).

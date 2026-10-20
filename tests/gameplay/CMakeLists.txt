@@ -22,6 +22,7 @@ rime_add_test(rime_gameplay_tests
     play_weapon_motion_test.cpp
     play_weapon_policy_test.cpp
     play_effects_test.cpp
+    scar_reanchor_test.cpp
     player_spawn_test.cpp
     ../../samples/99-the-block/editor_preview_player.cpp
     ../../samples/99-the-block/play_city.cpp
