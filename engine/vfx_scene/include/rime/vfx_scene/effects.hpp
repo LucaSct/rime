@@ -36,6 +36,7 @@ struct FlamePresentation {
     float half_size = 0.0f;
     core::Vec3 color{1.0f, 0.35f, 0.06f};
     float opacity = 0.0f;
+    bool core = false; // broad, persistent fuel lobe; tongues/embers use the tall profile
 };
 
 struct SmokeAppearance {
@@ -57,7 +58,12 @@ class Effects {
 public:
     static constexpr std::size_t max_sources = 16;
     static constexpr std::size_t max_particles = 256;
-    static constexpr std::size_t max_flames = max_sources * 3;
+    static constexpr std::size_t max_fire_motes_per_source = 12;
+    static constexpr std::size_t core_flames_per_source = 4;
+    static constexpr std::size_t upper_tongues_per_source = 4;
+    static constexpr std::size_t max_flames =
+        max_sources *
+        (3 + core_flames_per_source + upper_tongues_per_source + max_fire_motes_per_source);
 
     Effects();
     // Reconcile removals/disable/invalid edits even while paused, without aging or emitting.
@@ -79,6 +85,11 @@ public:
         return {flames_.data(), flame_count_};
     }
 
+    // The renderer sees the three stable tongues, four fuel cores and capped flame/ember motes.
+    [[nodiscard]] std::span<const FlamePresentation> render_flames() const noexcept {
+        return {render_flames_.data(), render_flame_count_};
+    }
+
     [[nodiscard]] std::size_t source_count() const noexcept { return sources_.size(); }
 
     [[nodiscard]] const EffectsStats& stats() const noexcept { return stats_; }
@@ -93,15 +104,26 @@ private:
     };
 
     struct Source {
+        struct FireMote {
+            core::Vec3 position{}, velocity{};
+            float age = 0.0f, lifetime = 1.0f, size = 0.1f;
+            bool ember = false;
+        };
+
         Description description;
         vfx::PlumeEmitter plume{vfx::lingering_smoke(), 8, 16};
         vfx::FirePresentationSource fire;
         bool light_current = false;
+        std::array<FireMote, max_fire_motes_per_source> motes{};
+        std::size_t mote_count = 0;
+        double mote_debt = 0.0;
+        std::uint32_t mote_sequence = 0;
 
         explicit Source(Description d) : description(d), fire(d.rate, 8, 16) {}
     };
 
     void collect_lights();
+    void advance_fire(Source& source, float dt);
 
     vfx::ParticleField field_{max_particles};
     std::vector<Source> sources_, next_sources_;
@@ -109,6 +131,8 @@ private:
     std::size_t light_count_ = 0;
     std::array<FlamePresentation, max_flames> flames_{};
     std::size_t flame_count_ = 0;
+    std::array<FlamePresentation, max_flames> render_flames_{};
+    std::size_t render_flame_count_ = 0;
     double presentation_seconds_ = 0.0;
     bool has_tick_ = false;
     std::uint64_t last_tick_ = 0;

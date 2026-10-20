@@ -22,6 +22,20 @@ bool finite(core::Vec3 v) {
 bool equal(core::Vec3 a, core::Vec3 b) {
     return a.x == b.x && a.y == b.y && a.z == b.z;
 }
+
+// SplitMix's finalizer is a tiny keyed scatter: source identity and emission number select a
+// reproducible birth pose without advancing the smoke field's independent random stream.
+std::uint32_t fire_hash(std::uint32_t x) noexcept {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16);
+}
+
+float fire_unit(std::uint32_t x) noexcept {
+    return float(fire_hash(x) >> 8) * (1.0f / 16777216.0f);
+}
 } // namespace
 
 SmokeAppearance smoke_appearance(const vfx::Particle& particle,
@@ -161,6 +175,8 @@ void Effects::reconcile(ecs::World& world) {
                 kept.fire.reset();
                 kept.plume.reset();
                 kept.light_current = false;
+                kept.mote_count = 0;
+                kept.mote_debt = 0.0;
             }
             kept.description = d;
         }
@@ -186,6 +202,8 @@ bool Effects::tick(ecs::World& world, std::uint64_t tick, float dt) {
                 (std::uint64_t{d.entity.index} << 32) | d.entity.generation;
             ok = source.fire.consume(field_, {source_key, tick, d.lo, d.hi, d.intensity}, dt);
             source.light_current = ok;
+            if (ok && d.intensity > 0.0f)
+                advance_fire(source, dt);
         } else if (d.intensity == 0.0f) {
             source.plume.reset();
         } else {
@@ -209,9 +227,72 @@ bool Effects::tick(ecs::World& world, std::uint64_t tick, float dt) {
     return true;
 }
 
+void Effects::advance_fire(Source& source, float dt) {
+    const auto& d = source.description;
+    const std::uint32_t seed = fire_hash(d.entity.index ^ (d.entity.generation * 0x9e3779b9u));
+    const float time = static_cast<float>(presentation_seconds_);
+    const core::Vec3 center = (d.lo + d.hi) * 0.5f;
+
+    // A divergence-free trigonometric field has no artificial sinks: each velocity component
+    // depends only on the other two coordinates, so its spatial divergence is exactly zero.
+    // Semi-implicit Euler then combines that twisting flow with buoyancy, age-dependent drag,
+    // and a low-frequency wind. The array never grows beyond its twelve fixed slots.
+    std::size_t alive = 0;
+    for (std::size_t i = 0; i < source.mote_count; ++i) {
+        auto mote = source.motes[i];
+        mote.age += dt;
+        if (mote.age >= mote.lifetime)
+            continue;
+        const float life = mote.age / mote.lifetime;
+        const core::Vec3 p = mote.position - center;
+        const core::Vec3 curl{std::sin(3.1f * p.y + 1.7f * p.z + time * 2.2f),
+                              0.18f * std::sin(2.5f * p.z + 2.9f * p.x + time),
+                              std::sin(2.7f * p.x - 1.9f * p.y - time * 1.8f)};
+        const core::Vec3 wind{
+            0.18f + 0.09f * std::sin(time * 0.8f + float(seed % 19u)), 0.0f, 0.05f};
+        const float drag = (mote.ember ? 0.8f : 1.2f + 2.3f * life);
+        const core::Vec3 acceleration = curl * (mote.ember ? 0.45f : 0.95f) +
+                                        (wind - mote.velocity) * drag +
+                                        core::Vec3{0.0f, mote.ember ? 1.1f : 2.3f, 0.0f};
+        mote.velocity += acceleration * dt;
+        mote.position += mote.velocity * dt;
+        source.motes[alive++] = mote;
+    }
+    source.mote_count = alive;
+
+    // Seeded, clock-crossing flare events add a few births rather than scaling every frame.
+    // The debt is bounded, so a long frame or full pool cannot cause an unbounded catch-up burst.
+    const float period = 1.9f + 0.13f * float(seed % 7u);
+    const float phase = period * fire_unit(seed + 11u);
+    const bool flare =
+        std::floor((time + dt + phase) / period) > std::floor((time + phase) / period);
+    source.mote_debt = std::min(8.0, source.mote_debt + double(dt) * 7.0 * d.intensity);
+    unsigned births = static_cast<unsigned>(source.mote_debt);
+    source.mote_debt -= births;
+    births += flare ? 3u : 0u;
+    births = std::min(births, 8u);
+    for (unsigned i = 0; i < births && source.mote_count < source.motes.size(); ++i) {
+        const std::uint32_t n = seed + source.mote_sequence++ * 0x9e3779b9u;
+        const bool ember = source.mote_sequence % 6u == 0u;
+        const float rx = fire_unit(n + 1u) * 2.0f - 1.0f;
+        const float rz = fire_unit(n + 2u) * 2.0f - 1.0f;
+        const float size = std::clamp(0.16f + 0.07f * fire_unit(n + 3u), 0.10f, 0.26f);
+        source.motes[source.mote_count++] = {
+            {center.x + rx * std::max(0.12f, (d.hi.x - d.lo.x) * 0.42f),
+             d.lo.y + 0.08f,
+             center.z + rz * std::max(0.12f, (d.hi.z - d.lo.z) * 0.42f)},
+            {rx * 0.32f, 0.65f + fire_unit(n + 4u) * 0.65f, rz * 0.32f},
+            0.0f,
+            ember ? 0.8f + fire_unit(n + 5u) * 0.5f : 0.65f + fire_unit(n + 5u) * 0.45f,
+            ember ? 0.018f + 0.010f * fire_unit(n + 6u) : size,
+            ember};
+    }
+}
+
 void Effects::collect_lights() {
     light_count_ = 0;
     flame_count_ = 0;
+    render_flame_count_ = 0;
     stats_.deferred_particles = 0;
     for (const auto& source : sources_) {
         stats_.deferred_particles += source.description.fire
@@ -287,6 +368,80 @@ void Effects::collect_lights() {
                 }
             }
     }
+    // Stable roots stay first for the editor API; independent motes fill only spare draw slots.
+    // The render budget reserves 19 billboards per source: 3 tongues, 4 cores, 12 motes. With
+    // 16 admitted sources the hard draw cap is 304; no source can starve another's fuel body.
+    for (std::size_t i = 0; i < flame_count_; ++i)
+        render_flames_[render_flame_count_++] = flames_[i];
+    for (const auto& source : sources_) {
+        if (!source.description.fire || !source.light_current)
+            continue;
+        const auto& d = source.description;
+        const core::Vec3 center = (d.lo + d.hi) * 0.5f;
+        const float size =
+            std::clamp(0.20f + 0.35f * std::max(d.hi.x - d.lo.x, d.hi.z - d.lo.z), 0.12f, 1.2f) *
+            std::sqrt(d.intensity);
+        // Persistent overlapping fuel lobes decouple body coverage from short-lived tongues.
+        // Slow incommensurate phase motion churns their overlap without gaps at particle births;
+        // the shallow billboard profile puts a wide yellow-white core directly on the fuel.
+        for (std::size_t i = 0; i < core_flames_per_source; ++i) {
+            const float phase = float(presentation_seconds_) * (0.9f + 0.13f * float(i)) +
+                                float(i) * 1.5708f + float(d.entity.index % 17u);
+            const float radius = size * (0.82f + 0.08f * std::sin(phase * 1.3f));
+            render_flames_[render_flame_count_++] = {{center.x + size * 0.43f * std::cos(phase),
+                                                      d.lo.y + radius * 0.46f,
+                                                      center.z + size * 0.43f * std::sin(phase)},
+                                                     radius,
+                                                     {4.2f, 3.1f, 1.4f},
+                                                     std::min(d.intensity, 1.0f) *
+                                                         (0.78f + 0.08f * std::sin(phase)),
+                                                     true};
+        }
+        // Upper tongues: render-only billboards born INSIDE the core's upper half so the fire
+        // visibly continues the core instead of floating above it. A fire is taller than wide
+        // because buoyant gas accelerates upward; each tongue therefore gets a tall sprite
+        // (mode 2 stretches it 1.5x) whose height surges on its own incommensurate frequency,
+        // which reads as flicker. Phases come from accepted presentation time and source
+        // identity only, so replays are bit-identical.
+        for (std::size_t i = 0; i < upper_tongues_per_source; ++i) {
+            const float fi = float(i);
+            const float phase = float(presentation_seconds_) * (1.7f + 0.37f * fi) + fi * 2.4f +
+                                float(d.entity.index % 13u);
+            const float lobe = 0.5f + 0.5f * std::sin(phase) * std::sin(phase * 0.43f + fi);
+            const float ang = fi * 1.5708f + 0.6f * std::sin(phase * 0.31f);
+            const float width = size * (0.36f + 0.16f * lobe);
+            const float lean = size * (0.20f + 0.10f * std::sin(phase * 0.7f));
+            render_flames_[render_flame_count_++] = {
+                {center.x + lean * std::cos(ang),
+                 d.lo.y + size * (0.80f + 0.55f * lobe),
+                 center.z + lean * std::sin(ang)},
+                width,
+                {3.2f, 2.0f, 0.8f},
+                std::clamp(std::min(d.intensity, 1.0f) * (0.38f + 0.30f * lobe), 0.0f, 1.0f)};
+        }
+        for (std::size_t i = 0; i < source.mote_count && render_flame_count_ < max_flames; ++i) {
+            const auto& mote = source.motes[i];
+            const float life = mote.age / mote.lifetime;
+            // Temperature falls as a flame rises: bright yellow-white birth, orange body, red
+            // dying tip. Embers retain a hotter pinprick then cool and wink out independently.
+            const float heat = 1.0f - life * life;
+            const core::Vec3 color =
+                mote.ember ? core::Vec3{3.4f * heat + 0.7f, 1.5f * heat + 0.08f, 0.28f * heat}
+                           : core::Vec3{2.0f + 2.5f * heat,
+                                        0.35f + 3.2f * heat,
+                                        0.04f + 1.9f * heat * heat};
+            const float opacity = std::clamp(std::min(source.description.intensity, 1.0f) *
+                                                 std::min(1.0f, mote.age / 0.09f) * (1.0f - life) *
+                                                 (mote.ember ? 0.95f : 0.48f),
+                                             0.0f,
+                                             1.0f);
+            render_flames_[render_flame_count_++] = {mote.position,
+                                                     mote.size *
+                                                         (mote.ember ? 1.0f : 1.0f - 0.35f * life),
+                                                     color,
+                                                     opacity};
+        }
+    }
 }
 
 void Effects::reset() {
@@ -296,6 +451,7 @@ void Effects::reset() {
     field_.clear();
     light_count_ = 0;
     flame_count_ = 0;
+    render_flame_count_ = 0;
     presentation_seconds_ = 0.0;
     stats_.deferred_particles = 0;
     has_tick_ = false;

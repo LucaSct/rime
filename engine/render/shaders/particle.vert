@@ -34,12 +34,14 @@ layout(push_constant) uniform Pc {
     mat4 view_proj;  // clip-from-world
     vec4 camera_right; // xyz = camera right in world space
     vec4 camera_up;    // xyz = camera up in world space
+    vec4 depth_params; // A, B, intersection fade width, perspective flag
 } pc;
 
 layout(location = 0) out vec2 out_uv;
 layout(location = 1) out vec4 out_color;
 layout(location = 2) flat out int out_mode;
 layout(location = 3) flat out vec2 out_noise_origin;
+layout(location = 4) flat out float out_half_size;
 
 void main() {
     // Two triangles from six indices, in the corner order (-1,-1) (1,-1) (-1,1) / (-1,1) (1,-1)
@@ -56,7 +58,8 @@ void main() {
 
     const vec3 centre = p.position_size.xyz;
     const float half_size = p.position_size.w;
-    const int mode = pc.camera_right.w > 1.5 ? 2 : (pc.camera_right.w > 0.5 ? 1 : 0);
+    const int mode = pc.camera_right.w > 1.5 ? (p.color_alpha.a > 1.5 ? 3 : 2) :
+                     (pc.camera_right.w > 0.5 ? 1 : 0);
     // Flame needs vertical room for a tongue, rather than the square puff used by dust/smoke.
     // Keep the original additive geometry expression intact for its pixel regression bridge.
     vec3 world = centre + pc.camera_right.xyz * (corner.x * half_size) +
@@ -66,11 +69,27 @@ void main() {
                 pc.camera_up.xyz * (corner.y * half_size * 1.5);
     }
 
+    // Core billboards cover the fuel horizontally, while tongues keep their tall silhouette.
+    // Overlapping broad lobes provide continuous radiance even between independent mote births.
+    if (mode == 3) {
+        // Teardrop proportions: narrow quad, tall, with the lower edge dropped just under the
+        // fuel. The fragment stage narrows the silhouette upward, so the sprite reads taller than
+        // wide (~2:1) rather than as a round puff.
+        world = centre + pc.camera_right.xyz * (corner.x * half_size * 0.62) +
+                pc.camera_up.xyz * ((corner.y * 1.65 + 1.05) * half_size);
+    }
+
     gl_Position = pc.view_proj * vec4(world, 1.0);
     out_uv = corner;            // [-1,1]² — the fragment stage's radial falloff domain
     out_color = p.color_alpha;
+    if (mode == 3) out_color.a -= 2.0;
     out_mode = mode;
+    out_half_size = half_size;
     // Continuous world-space offsets give nearby puffs related but different detail, without a
     // clock, random frame seed, or quantized position hash that pops when a puff moves.
+    // A flame mote carries its own animation phase in its moving centre and fading opacity.
+    // This scrolls each sprite's noise separately without a wall-clock uniform or new RHI state.
     out_noise_origin = centre.xz * 0.71 + vec2(centre.y * 0.37, half_size * 0.83);
+    if (mode >= 2)
+        out_noise_origin += vec2(p.color_alpha.a * 1.7, -centre.y * 1.3);
 }

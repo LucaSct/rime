@@ -28,15 +28,16 @@ namespace {
     return device.create_shader(sd);
 }
 
-// The push block, mirroring particle.vert's. 96 bytes — inside the 128-byte floor every Vulkan
+// The push block, mirroring particle.vert's. 112 bytes — inside the 128-byte floor every Vulkan
 // implementation guarantees, so this needs no capability check.
 struct FxPush {
     core::Mat4 view_proj;
     float right[4] = {1.0f, 0.0f, 0.0f, 0.0f};
     float up[4] = {0.0f, 1.0f, 0.0f, 0.0f};
+    float depth[4] = {}; // NDC depth = A + B / view distance; fade width and enable
 };
 
-static_assert(sizeof(FxPush) == 96, "FxPush must match particle.vert's push_constant block");
+static_assert(sizeof(FxPush) == 112, "FxPush must match particle.vert's push_constant block");
 
 } // namespace
 
@@ -55,6 +56,7 @@ FxParticlePass::FxParticlePass(rhi::Device& device, std::uint32_t max_particles,
 
     const rhi::BindingDesc bindings[] = {
         {0, rhi::BindingType::StorageBuffer, rhi::StageMask::Vertex},
+        {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
     };
 
     rhi::GraphicsPipelineDesc pd{};
@@ -81,6 +83,10 @@ FxParticlePass::FxParticlePass(rhi::Device& device, std::uint32_t max_particles,
                                                       : "fx-particles";
     pipeline_ = device.create_graphics_pipeline(pd);
 
+    rhi::SamplerDesc sampler{};
+    sampler.min_filter = sampler.mag_filter = rhi::Filter::Nearest;
+    sampler.address_mode = rhi::AddressMode::ClampToEdge;
+    depth_sampler_ = device_.create_sampler(sampler);
     (void)set_frames_in_flight(2);
 }
 
@@ -107,6 +113,7 @@ bool FxParticlePass::set_frames_in_flight(std::uint32_t frames) {
 FxParticlePass::~FxParticlePass() {
     for (rhi::BufferHandle instance : instances_)
         device_.destroy(instance);
+    device_.destroy(depth_sampler_);
     device_.destroy(pipeline_);
     device_.destroy(fragment_shader_);
     device_.destroy(vertex_shader_);
@@ -212,6 +219,22 @@ void FxParticlePass::add(RenderGraph& graph,
     push.up[0] = view.up.x;
     push.up[1] = view.up.y;
     push.up[2] = view.up.z;
+    // Perspective depth reconstruction: rows 2 and 3 of clip-from-world share the camera's
+    // forward axis. Their ratio gives A, and subtracting translation gives B in z = A + B/w.
+    // This recovers metric view distance without assuming the camera's near/far planes. For
+    // orthographic views (constant w), the row-2 length directly converts NDC gaps to metres.
+    const auto& m = view.view_proj;
+    const core::Vec3 z{m.at(2, 0), m.at(2, 1), m.at(2, 2)};
+    const core::Vec3 w{m.at(3, 0), m.at(3, 1), m.at(3, 2)};
+    const float w2 = core::dot(w, w);
+    if (w2 > 1.0e-8f) {
+        push.depth[0] = core::dot(z, w) / w2;
+        push.depth[1] = m.at(2, 3) - push.depth[0] * m.at(3, 3);
+        push.depth[3] = 1.0f;
+    } else {
+        push.depth[1] = std::abs(m.at(3, 3)) / std::max(core::length(z), 1.0e-8f);
+    }
+    push.depth[2] = 0.18f;
 
     // LOAD the HDR target — this pass blends with a frame the forward pass already shaded, so a
     // Clear here would erase it. Depth is loaded READ-ONLY, which is what tells the graph this pass
@@ -228,16 +251,21 @@ void FxParticlePass::add(RenderGraph& graph,
     RenderGraph::RasterPassDesc desc{};
     desc.colors = colors;
     desc.depth = &depth_att;
+    const RGTexture sampled[] = {depth};
+    desc.sampled = sampled;
 
     const rhi::PipelineHandle pipeline = pipeline_;
     const std::uint32_t instance_count = count;
+    const rhi::SamplerHandle sampler = depth_sampler_;
     graph.add_raster_pass(blend_ == FxBlendMode::SmokeAlpha ? "fx-smoke"
                           : blend_ == FxBlendMode::Flame    ? "fx-flame"
                                                             : "fx-particles",
                           desc,
-                          [pipeline, instances, instance_count, push](rhi::CommandBuffer& cmd) {
+                          [pipeline, instances, instance_count, push, sampler, depth, &graph](
+                              rhi::CommandBuffer& cmd) {
                               cmd.bind_pipeline(pipeline);
                               cmd.bind_storage_buffer(0, instances);
+                              cmd.bind_texture(1, graph.physical(depth), sampler);
                               cmd.push_constants(&push, sizeof(push));
                               // Six vertices synthesised per particle; the vertex stage reads the
                               // array by gl_InstanceIndex. No vertex buffer is bound because there

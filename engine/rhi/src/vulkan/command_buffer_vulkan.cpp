@@ -270,7 +270,10 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
             // color transition above: reuse must order against prior writes — that is exactly
             // the pre-pass -> forward-pass handoff, where the second pass LOADS the depth the
             // first one stored (hence READ in the destination access too).
-            const VkImageLayout layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            const auto depth_state =
+                to_vk(info.depth_stencil->read_only ? ResourceState::DepthReadOnly
+                                                    : ResourceState::DepthTarget);
+            const VkImageLayout layout = depth_state.layout;
             const bool fresh = dtex->layout == VK_IMAGE_LAYOUT_UNDEFINED;
             transition_image(cmd_,
                              dtex->image,
@@ -279,10 +282,8 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
                              fresh ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT
                                    : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                              fresh ? VkAccessFlags2{0} : VK_ACCESS_2_MEMORY_WRITE_BIT,
-                             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
-                                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                             depth_state.stages,
+                             depth_state.access,
                              aspect_for(dtex->format));
             dtex->layout = layout;
 
@@ -403,8 +404,12 @@ void VulkanCommandBuffer::bind_texture(std::uint32_t binding,
     // Sampling normally promises SHADER_READ_ONLY_OPTIMAL; an image living in GENERAL (a storage
     // image a dispatch just wrote) is sampled in GENERAL instead — valid, and it saves the
     // caller a transition the render graph will later own (ADR-0019).
-    pb.layout = tex->layout == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL
-                                                       : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    // Sampling an attached read-only depth image must promise the attachment's exact layout;
+    // advertising SHADER_READ_ONLY here would disagree with dynamic rendering at draw time.
+    pb.layout = tex->layout == VK_IMAGE_LAYOUT_GENERAL ||
+                        tex->layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                    ? tex->layout
+                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     bindings_dirty_ = true;
 }
 

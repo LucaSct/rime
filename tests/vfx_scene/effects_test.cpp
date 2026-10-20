@@ -400,7 +400,12 @@ TEST_CASE("environment v2: flame sprites remain capped independently of smoke sa
     vfx_scene::Effects fx;
     for (std::uint64_t t = 1; t <= 100; ++t) {
         REQUIRE(fx.tick(w, t, 0.25f));
-        REQUIRE(fx.flames().size() == vfx_scene::Effects::max_flames);
+        REQUIRE(fx.flames().size() == vfx_scene::Effects::max_sources * 3);
+        REQUIRE(fx.render_flames().size() <= vfx_scene::Effects::max_flames);
+        CHECK(std::count_if(fx.render_flames().begin(),
+                            fx.render_flames().end(),
+                            [](const auto& flame) { return flame.core; }) ==
+              vfx_scene::Effects::max_sources * vfx_scene::Effects::core_flames_per_source);
         for (const auto& flame : fx.flames()) {
             CHECK(std::isfinite(flame.position.x));
             CHECK(std::isfinite(flame.position.y));
@@ -414,6 +419,56 @@ TEST_CASE("environment v2: flame sprites remain capped independently of smoke sa
     CHECK(fx.field().stats().dropped_capacity > 0);
     fx.reset();
     CHECK(fx.flames().empty());
+}
+
+TEST_CASE("fire motes replay deterministically within the bounded render budget") {
+    ecs::World w;
+    prepare(w);
+    (void)source(w, fire());
+    vfx_scene::Effects fx;
+
+    struct Frame {
+        std::size_t count;
+        core::Vec3 position;
+        float size;
+        float opacity;
+    };
+
+    std::vector<Frame> first;
+    const auto run = [&](std::vector<Frame>& frames) {
+        bool saw_ember = false;
+        bool saw_extra_flame = false;
+        for (std::uint64_t tick = 1; tick <= 160; ++tick) {
+            REQUIRE(fx.tick(w, tick, 0.05f));
+            const auto rendered = fx.render_flames();
+            REQUIRE(fx.flames().size() == 3);
+            REQUIRE(rendered.size() <= vfx_scene::Effects::max_flames);
+            if (rendered.size() > 3) {
+                saw_extra_flame = true;
+                const auto& mote = rendered.back();
+                frames.push_back({rendered.size(), mote.position, mote.half_size, mote.opacity});
+            } else {
+                frames.push_back({rendered.size(), {}, 0.0f, 0.0f});
+            }
+            for (const auto& mote : rendered.subspan(3))
+                saw_ember |= mote.half_size < 0.04f;
+        }
+        CHECK(saw_extra_flame);
+        CHECK(saw_ember);
+    };
+    run(first);
+    fx.reset();
+    std::vector<Frame> replay;
+    run(replay);
+    REQUIRE(first.size() == replay.size());
+    for (std::size_t i = 0; i < first.size(); ++i) {
+        CHECK(first[i].count == replay[i].count);
+        CHECK(first[i].position.x == replay[i].position.x);
+        CHECK(first[i].position.y == replay[i].position.y);
+        CHECK(first[i].position.z == replay[i].position.z);
+        CHECK(first[i].size == replay[i].size);
+        CHECK(first[i].opacity == replay[i].opacity);
+    }
 }
 
 TEST_CASE("environment v2: smoke has soft lifetime and bounded local fire illumination") {
