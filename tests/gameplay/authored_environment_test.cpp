@@ -337,7 +337,12 @@ TEST_CASE("city authored environment: lazy phase maps follow accepted time and c
     CHECK(frame() == phase); // repeated render/Pause cannot advance immutable map selection
     REQUIRE(environment.tick(world, 1, .25));
     environment.publish(world, {}, renderer);
-    CHECK(environment.snapshot().surfaces.rows[0].normal_texture != initial.normal_texture);
+    // Phase shading is continuous: the detail map stays fixed and the accepted presentation
+    // clock reaches the shader per row, so time shows up as the row's seconds and as pixels.
+    CHECK(environment.snapshot().surfaces.rows[0].normal_texture == initial.normal_texture);
+    CHECK(initial.seconds == 0.f);
+    CHECK(environment.snapshot().surfaces.rows[0].seconds == .25f);
+    CHECK(frame() != phase);
     CHECK(environment.thermal().presentation_seconds() == .25);
     environment.reset();
     environment.apply_to(renderer);
