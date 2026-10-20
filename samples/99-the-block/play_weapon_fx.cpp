@@ -53,6 +53,26 @@ render::CpuMesh decal_quad() {
     return mesh;
 }
 
+render::CpuMesh flash_star() {
+    // Muzzle flash is a flat star: 8 petals of uneven length with a short valley between each,
+    // because a perfect disc reads as a sticker while a ragged star reads as escaping gas. It is
+    // emitted double-sided (both windings) so it needs no culling exemption from the material.
+    render::CpuMesh mesh;
+    mesh.vertices.push_back({0, 0, 0, 0, 0, 1, .5f, .5f});
+    constexpr unsigned petals = 8;
+    for (unsigned i = 0; i < petals * 2; ++i) {
+        const float a = static_cast<float>(i) * 3.14159265f / petals;
+        const float tip = .75f + .25f * std::sin(static_cast<float>(i / 2) * 2.7f + 1.3f);
+        const float r = (i % 2 == 0 ? tip : .30f) * .01f;
+        mesh.vertices.push_back({std::cos(a) * r, std::sin(a) * r, 0, 0, 0, 1, 0, 0});
+    }
+    for (unsigned i = 0; i < petals * 2; ++i) {
+        const unsigned a = 1 + i, b = 1 + (i + 1) % (petals * 2);
+        mesh.indices.insert(mesh.indices.end(), {0, a, b, 0, b, a});
+    }
+    return mesh;
+}
+
 render::CpuMesh splash_ring() {
     render::CpuMesh mesh;
     for (unsigned i = 0; i <= 32; ++i) {
@@ -148,8 +168,9 @@ bool PlayWeaponFx::initialize() {
     // use an alpha-tested planar quad, so their thickness cannot silhouette as a sphere blob.
     scar_ = meshes_.add(decal_quad(), "weapon-scar-quad");
     ring_ = meshes_.add(splash_ring(), "weapon-water-ring");
+    star_ = meshes_.add(flash_star(), "weapon-flash-star");
     if (!meshes_.contains(burst_) || !meshes_.contains(brass_) || !meshes_.contains(scar_) ||
-        !meshes_.contains(ring_))
+        !meshes_.contains(ring_) || !meshes_.contains(star_))
         return false;
     // These are LINEAR RADIANCE values fed straight to the ACES fit in tonemap.frag -- there is no
     // exposure system yet, so the curve is the only thing between these numbers and the screen.
@@ -186,16 +207,16 @@ bool PlayWeaponFx::initialize() {
                                .06f * (hash(x / 4, y / 4) - .5f);
             const float radius = std::sqrt(u * u + v * v) / edge;
             float shade;
-            if (radius < .42f)
-                shade = 6 + 26 * radius;
-            else if (radius < .58f)
-                shade = 18 + 70 * (radius - .42f) / .16f;
+            if (radius < .5f)
+                shade = 2 + 12 * radius;
+            else if (radius < .62f)
+                shade = 14 + 90 * (radius - .5f) / .12f;
             else
-                shade = 185 + 50 * hash(x, y) - 40 * (radius - .58f);
+                shade = 200 + 50 * hash(x, y) - 40 * (radius - .62f);
             const auto byte = static_cast<std::uint8_t>(std::clamp(shade, 0.0f, 255.0f));
             const unsigned at = (y * texels + x) * 4;
             // Slight warm bias on the pale rim only (spalled masonry is buff, not blue-grey).
-            const bool rim = radius >= .58f;
+            const bool rim = radius >= .62f;
             pixels[at] = rim ? static_cast<std::uint8_t>(std::min(byte + 14, 255)) : byte;
             pixels[at + 1] = byte;
             pixels[at + 2] = rim ? static_cast<std::uint8_t>(byte * 85 / 100) : byte;
@@ -210,8 +231,12 @@ bool PlayWeaponFx::initialize() {
     if (!scar_texture_.is_valid())
         return false;
     device_.write_texture(scar_texture_, pixels.data(), pixels.size());
-    constexpr float colors[5][3] = {
-        {10.0f, 0.18f, 0.02f}, {5, 1.1f, .20f}, {3.2f, 1.7f, .6f}, {0, 0, 0}, {0, 0, 0}};
+    constexpr float colors[6][3] = {{7.0f, 0.9f, 0.05f},
+                                    {5, 1.1f, .20f},
+                                    {3.2f, 1.7f, .6f},
+                                    {0, 0, 0},
+                                    {0, 0, 0},
+                                    {18.0f, 13.0f, 4.5f}};
     for (std::size_t i = 0; i < material_ids_.size(); ++i) {
         render::PbrMaterialDesc material{};
         const bool brass = i == 4;
@@ -232,6 +257,11 @@ bool PlayWeaponFx::initialize() {
             material.base_color_texture = scar_texture_;
             material.alpha_cutoff = .5f;
             material.clamp_uv = true;
+        }
+        if (i == 5) {
+            material.base_color[0] = .9f;
+            material.base_color[1] = .8f;
+            material.base_color[2] = .5f;
         }
         material_ids_[i] = materials_.add(material);
     }
@@ -280,6 +310,8 @@ void PlayWeaponFx::fire(core::Vec3 eye,
     const auto toward_eye = core::normalize(eye - hit);
     // Raised impact feedback remains distinct from the persistent, surface-aligned scar.
     shot.spark = hit + (finite(toward_eye) ? toward_eye : -shot.direction) * 0.015f;
+    shot.flash_roll = random01(seed) * 6.2831853f;
+    shot.flash_scale = (.75f + random01(seed) * .5f) * flash_size_;
     shot.hit_surface = hit_surface;
     shot.surface = surface;
     shot.tracer = tracer;
@@ -322,9 +354,22 @@ void PlayWeaponFx::fire(core::Vec3 eye,
                 dust.color = {std::min(color.x * 1.6f + lift, .9f),
                               std::min(color.y * 1.5f + lift * .8f, .85f),
                               std::min(color.z * 1.4f + lift * .6f, .8f)};
+                dust.life = kDustLifetime;
                 dust.age = -random01(seed) * .05f; // staggered start so puffs are not one blob
                 dust.size = .07f + random01(seed) * .07f;
             }
+    }
+    if (tracer) {
+        // A tiny grey puff of propellant gas just ahead of the muzzle. Only on tracer rounds so
+        // a burst does not bury the screen in smoke; it shares the dust ring with a short life.
+        auto& puff = dust_[next_dust_];
+        next_dust_ = (next_dust_ + 1) % kDustSlots;
+        puff.origin = muzzle + shot.direction * .35f;
+        puff.velocity = shot.direction * .6f;
+        puff.color = {.62f, .62f, .6f};
+        puff.age = 0;
+        puff.life = .55f;
+        puff.size = .035f * flash_size_;
     }
     shot.age = 0.0f;
     shot.presented = false;
@@ -355,7 +400,7 @@ void PlayWeaponFx::advance(float dt) noexcept {
     for (auto& fragment : fragments_)
         fragment.age = std::min(fragment.age + dt, fragment.life);
     for (auto& dust : dust_)
-        dust.age = std::min(dust.age + dt, kDustLifetime);
+        dust.age = std::min(dust.age + dt, dust.life);
     for (auto& impact : impacts_)
         impact.age = std::min(impact.age + dt, kImpactLifetime);
     for (auto& casing : cases_) {
@@ -378,7 +423,7 @@ void PlayWeaponFx::append_smoke(std::vector<render::GpuParticle>& particles) con
     // Analytic drag and expansion turn five soft billboards into a dust puff. Age is bounded,
     // no collision queries or engine VFX state are needed, and opacity retires smoothly.
     for (const auto& dust : dust_) {
-        if (dust.age >= kDustLifetime)
+        if (dust.age >= dust.life)
             continue;
         const float t = std::max(dust.age, 0.0f);
         const auto position = dust.origin + dust.velocity * ((1 - std::exp(-2.2f * t)) / 2.2f) +
@@ -392,7 +437,7 @@ void PlayWeaponFx::append_smoke(std::vector<render::GpuParticle>& particles) con
         p.color_alpha[1] = dust.color.y;
         p.color_alpha[2] = dust.color.z;
         // Ease in over the first 60 ms (no pop), then fade linearly to nothing at kDustLifetime.
-        p.color_alpha[3] = .42f * (1 - t / kDustLifetime) * std::min(1.0f, .35f + t / .06f);
+        p.color_alpha[3] = .42f * (1 - t / dust.life) * std::min(1.0f, .35f + t / .06f);
         particles.push_back(p);
     }
 }
@@ -431,6 +476,9 @@ void PlayWeaponFx::pose(ecs::World& world,
                 shot.entities[part] = world.spawn_with(ecs::WorldTransform{},
                                                        render::MeshRef{},
                                                        render::MaterialRef{material_ids_[part]});
+        for (auto& shot : shots_)
+            shot.entities[5] = world.spawn_with(
+                ecs::WorldTransform{}, render::MeshRef{}, render::MaterialRef{material_ids_[5]});
         for (auto& shot : shots_)
             for (std::size_t part = 3; part < 5; ++part) {
                 render::PointLight light{};
@@ -480,13 +528,22 @@ void PlayWeaponFx::pose(ecs::World& world,
         const auto muzzle = valid_view ? view->muzzle : shot.muzzle;
         const auto muzzle_dir = valid_view ? view->direction / view_dir_length : shot.direction;
         flash.translation = muzzle + muzzle_dir * (valid_view ? .035f : .15f);
-        flash.rotation = along_z(muzzle_dir);
+        flash.rotation =
+            along_z(muzzle_dir) * core::quat_from_axis_angle({0, 0, 1}, shot.flash_roll);
         const float flare = 1.0f - std::min(shot.age / kFlashLifetime, 1.0f);
-        flash.scale = {2.0f + 3.0f * flare, 2.0f + 3.0f * flare, 6.0f * flare + 2.0f};
+        const float star = shot.flash_scale * (13.0f + 11.0f * flare);
+        flash.scale = {star, star, 1.0f};
         show(world,
              shot.entities[0],
-             shot.age < kFlashLifetime ? burst_ : render::kInvalidMeshId,
+             shot.age < kFlashLifetime ? star_ : render::kInvalidMeshId,
              flash);
+        core::Transform core_t = flash;
+        core_t.translation = flash.translation + muzzle_dir * .005f;
+        core_t.scale = core::Vec3{1, 1, 1} * (2.2f * shot.flash_scale * (.4f + .6f * flare));
+        show(world,
+             shot.entities[5],
+             shot.age < kFlashLifetime ? burst_ : render::kInvalidMeshId,
+             core_t);
 
         core::Transform tracer{};
         const auto path = shot.hit - shot.muzzle;
@@ -545,16 +602,17 @@ void PlayWeaponFx::pose(ecs::World& world,
             if (!light || !transform)
                 continue;
             const bool muzzle = part == 3;
-            const float life = muzzle ? kFlashLifetime : kSparkLifetime;
+            // The muzzle light is a one-frame flicker (~16 ms); a longer one floods the whole wall.
+            const float life = muzzle ? .016f : kSparkLifetime;
             const float fade = 1 - std::min(shot.age / life, 1.0f);
             transform->value.translation =
                 muzzle ? flash.translation : shot.spark + (-shot.direction) * .08f;
             light->color_r = 1;
             light->color_g = .14f;
             light->color_b = .018f;
-            light->radius = muzzle ? 4.0f : 2.0f;
+            light->radius = muzzle ? 3.0f : 1.0f;
             light->intensity =
-                (muzzle || (shot.hit_surface && metal)) ? (muzzle ? 35.0f : 3.0f) * fade : 0;
+                (muzzle || (shot.hit_surface && metal)) ? (muzzle ? 12.0f : 1.5f) * fade : 0;
             world.mark_changed<ecs::WorldTransform>(shot.entities[part]);
             world.mark_changed<render::PointLight>(shot.entities[part]);
         }
@@ -570,9 +628,9 @@ void PlayWeaponFx::pose(ecs::World& world,
             scar.translation = state.position +
                                core::rotate(state.orientation, impact.local_point) + normal * .002f;
             scar.rotation = along_z(normal) * core::quat_from_axis_angle({0, 0, 1}, impact.spin);
-            // Quad is 2 cm; x6.5 gives a 13 cm stamp whose crater (0.58 x edge) is ~5 cm and whose
-            // pale rim reaches ~10 cm: readable at 15 m (about 20 px at 1280x720).
-            scar.scale = {6.5f, 6.5f, 1.0f};
+            // Quad is 2 cm; x10 gives a 20 cm stamp whose crater (0.5 x edge) is ~8 cm and whose
+            // pale rim reaches ~16 cm: readable at 15 m (about 20 px at 1280x720).
+            scar.scale = {10.0f, 10.0f, 1.0f};
         }
         show(world, impact.entity, active ? scar_ : render::kInvalidMeshId, scar);
     }
