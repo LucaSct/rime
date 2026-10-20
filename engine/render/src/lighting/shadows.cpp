@@ -12,9 +12,14 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string_view>
 #include <utility>
+
+#include "depth_masked.frag.spv.h"
+#include "depth_only_masked.vert.spv.h"
 
 namespace rime::render {
 
@@ -24,6 +29,243 @@ namespace {
 // the universally-valid uniform-offset alignment (as in kDrawUniformStride); depth_only.vert reads
 // only the leading mat4.
 constexpr std::uint32_t kCascadeStride = 256;
+
+// Fixed-world shadow probes: replay the production depth pass into private attachments, then
+// depth-test the SAME masked shader at Equal to retain the winning caster's textureQueryLod.
+// Readback and CPU bilinear comparison reproduce the nine-tap PCF at a stationary world point,
+// separating cascade motion from screen-pixel motion. This deliberately blocking experiment is
+// enabled only by RIME_SHADOW_PROBES=1; normal frames allocate and submit none of these resources.
+void trace_shadow_probes(rhi::Device& device,
+                         const DepthPrepass& prepass,
+                         const SceneDrawData& source,
+                         const CascadeFit& fit,
+                         const CascadeInputs& inputs,
+                         const LightingSettings& settings) {
+    const char* enabled = std::getenv("RIME_SHADOW_PROBES");
+    if (enabled == nullptr || std::string_view(enabled) != "1")
+        return;
+    static std::uint64_t frame = 0;
+    ++frame;
+    constexpr std::array<core::Vec3, 6> points{{{11.84f, 2.0f, -8.0f},
+                                                {11.84f, 3.8f, -8.0f},
+                                                {11.84f, 5.2f, -8.0f},
+                                                {9.0f, 0.012f, -8.0f},
+                                                {9.5f, 0.012f, -4.5f},
+                                                {6.0f, 0.012f, -15.0f}}};
+    const auto eye = core::transform_point(core::inverse(inputs.camera_view), core::Vec3{});
+    const auto forward = core::transform_vector(core::inverse(inputs.camera_view), {0, 0, -1});
+    std::fprintf(stderr,
+                 "shadow_camera,%llu,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f\n",
+                 static_cast<unsigned long long>(frame),
+                 eye.x,
+                 eye.y,
+                 eye.z,
+                 forward.x,
+                 forward.y,
+                 forward.z);
+    const unsigned res = settings.shadow_map_resolution;
+    const std::size_t pixels = static_cast<std::size_t>(res) * res;
+    const auto vs = device.create_shader({rhi::ShaderStage::Vertex,
+                                          depth_only_masked_vert_spv,
+                                          sizeof(depth_only_masked_vert_spv),
+                                          "main",
+                                          "probe-depth-vertex"});
+    const auto fs = device.create_shader({rhi::ShaderStage::Fragment,
+                                          depth_masked_frag_spv,
+                                          sizeof(depth_masked_frag_spv),
+                                          "main",
+                                          "probe-leaf-lod"});
+    const rhi::BindingDesc bindings[] = {
+        {0, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex},
+        {1, rhi::BindingType::UniformBuffer, rhi::StageMask::Vertex | rhi::StageMask::Fragment},
+        {2, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment}};
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vs;
+    pd.fragment_shader = fs;
+    pd.vertex_layout.stride = MeshRegistry::vertex_stride();
+    pd.vertex_layout.attributes = MeshRegistry::vertex_attributes();
+    pd.color_format = rhi::Format::RGBA32Float;
+    pd.depth_format = kDepthFormat;
+    pd.depth_test = true;
+    pd.depth_write = false;
+    pd.depth_compare = rhi::CompareOp::Equal;
+    pd.bindings = bindings;
+    pd.debug_name = "shadow-probe-lod";
+    const auto pipeline = device.create_graphics_pipeline(pd);
+    const auto readback = device.create_buffer(
+        {pixels * 4 * sizeof(float), rhi::BufferUsage::TransferDst, rhi::MemoryUsage::GpuToCpu});
+    std::vector<float> depth(pixels), lod(pixels * 4);
+    std::array<std::array<float, kMaxCascades>, points.size()> vis{}, weights{};
+    auto smooth = [](float lo, float hi, float x) {
+        const float t = std::clamp((x - lo) / (hi - lo), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
+    for (unsigned c = 0; c < fit.count; ++c) {
+        RenderGraph probe(device);
+        const auto map = probe.create_texture({{res, res}, kDepthFormat, "probe-depth"});
+        const auto mip = probe.create_texture({{res, res}, rhi::Format::RGBA32Float, "probe-mip"});
+        const auto vp = probe.push_frame_data(&fit.view_proj[c], sizeof(core::Mat4));
+        SceneDrawData data = source;
+        data.bind_frame_ubo(vp.buffer, vp.offset, vp.size);
+        prepass.add(probe, map, data);
+        RGDepthAttachment da{};
+        da.texture = map;
+        da.load = rhi::LoadOp::Load;
+        da.store = rhi::StoreOp::Store;
+        da.read_only = true;
+        RGColorAttachment ca{};
+        ca.texture = mip;
+        ca.clear = {1.0f, -1.0f, -1.0f, 0.0f};
+        probe.add_raster_pass(
+            "probe-mip",
+            {.colors = {&ca, 1}, .depth = &da},
+            [data, pipeline](rhi::CommandBuffer& cmd) {
+                cmd.bind_pipeline(pipeline);
+                cmd.bind_uniform_buffer(
+                    0, data.frame_ubo, data.frame_ubo_offset, data.frame_ubo_size);
+                for (std::size_t i = 0; i < data.draws.size(); ++i) {
+                    const auto& item = data.draws[i];
+                    const auto& mesh = data.meshes->get(item.mesh);
+                    cmd.set_cull_mode((item.flags & DrawItem::DoubleSided) != 0
+                                          ? rhi::CullMode::None
+                                          : rhi::CullMode::Back);
+                    cmd.bind_vertex_buffer(
+                        item.vertex_override.is_valid() ? item.vertex_override : mesh.vertices,
+                        item.vertex_override.is_valid() ? item.vertex_override_offset : 0);
+                    cmd.bind_index_buffer(mesh.indices, rhi::IndexType::Uint32);
+                    cmd.bind_uniform_buffer(
+                        1, data.draw_ubo, i * kDrawUniformStride, sizeof(GpuDrawUniforms));
+                    cmd.bind_texture(2,
+                                     data.base_color_textures[i],
+                                     (item.flags & DrawItem::ClampUv) != 0 ? data.clamp_sampler
+                                                                           : data.material_sampler);
+                    cmd.draw_indexed(item.index_count, 1, item.first_index);
+                }
+            });
+        probe.export_texture(mip);
+        auto cmd = device.begin_commands();
+        if (!cmd)
+            break;
+        probe.execute(*cmd);
+        // The RHI readback copies colour aspects only. Export gl_FragCoord.z under an Equal
+        // depth test instead: it is the winning stored depth, without an invalid depth copy.
+        cmd->texture_barrier(
+            probe.physical(mip), rhi::ResourceState::ColorTarget, rhi::ResourceState::TransferSrc);
+        cmd->copy_texture_to_buffer(probe.physical(mip), readback);
+        if (!device.submit_blocking(*cmd))
+            break;
+        device.read_buffer(readback, lod.data(), pixels * 4 * sizeof(float));
+        for (std::size_t i = 0; i < pixels; ++i)
+            depth[i] = lod[4 * i];
+        if (frame == 1 && std::getenv("RIME_SHADOW_PROBE_SCAN") != nullptr) {
+            for (int iz = -40; iz <= -8; ++iz) {
+                for (int ix = -12; ix <= 24; ++ix) {
+                    const core::Vec3 world{ix * .5f, .012f + settings.shadow_normal_bias, iz * .5f};
+                    const auto q = core::transform_point(fit.view_proj[c], world);
+                    const float tx = (q.x * .5f + .5f) * res - .5f;
+                    const float ty = (q.y * .5f + .5f) * res - .5f;
+                    const int x = int(std::floor(tx)), y = int(std::floor(ty));
+                    float value = 0;
+                    for (int dy = -1; dy <= 2; ++dy) {
+                        for (int dx = -1; dx <= 2; ++dx) {
+                            const auto at = std::size_t(std::clamp(y + dy, 0, int(res) - 1)) * res +
+                                            std::clamp(x + dx, 0, int(res) - 1);
+                            value += q.z - settings.shadow_depth_bias <= depth[at] ? 1.0f / 16 : 0;
+                        }
+                    }
+                    std::fprintf(
+                        stderr, "shadow_scan,%u,%.2f,%.2f,%.6f\n", c, ix * .5f, iz * .5f, value);
+                }
+            }
+        }
+        for (std::size_t id = 0; id < points.size(); ++id) {
+            const core::Vec3 normal = id < 3 ? core::Vec3{-1, 0, 0} : core::Vec3{0, 1, 0};
+            const auto p = core::transform_point(fit.view_proj[c],
+                                                 points[id] + normal * settings.shadow_normal_bias);
+            const float u = p.x * 0.5f + 0.5f, v = p.y * 0.5f + 0.5f;
+            const float guard =
+                std::min(0.25f, (std::max(settings.shadow_pcf_radius, 0.0f) + 0.5f) / res);
+            const bool covered = u >= guard && u <= 1.0f - guard && v >= guard &&
+                                 v <= 1.0f - guard && p.z >= 0 && p.z <= 1;
+            const float edge = std::min({u, v, 1 - u, 1 - v});
+            weights[id][c] = covered ? std::min(smooth(guard, guard + .04f, edge),
+                                                smooth(0, .04f, std::min(p.z, 1 - p.z)))
+                                     : 0;
+            float sum = 0, lod_min = 100, lod_max = -1;
+            for (int y = -1; y <= 1; ++y) {
+                for (int x = -1; x <= 1; ++x) {
+                    const float tx = u * res - .5f + x * settings.shadow_pcf_radius;
+                    const float ty = v * res - .5f + y * settings.shadow_pcf_radius;
+                    const int ix = static_cast<int>(std::floor(tx)),
+                              iy = static_cast<int>(std::floor(ty));
+                    const float fx = tx - ix, fy = ty - iy;
+                    for (int by = 0; by <= 1; ++by) {
+                        for (int bx = 0; bx <= 1; ++bx) {
+                            const auto at =
+                                static_cast<std::size_t>(std::clamp(iy + by, 0, int(res) - 1)) *
+                                    res +
+                                std::clamp(ix + bx, 0, int(res) - 1);
+                            const float w = (bx ? fx : 1 - fx) * (by ? fy : 1 - fy);
+                            sum += (p.z - settings.shadow_depth_bias <= depth[at] ? w : 0);
+                            if (lod[4 * at + 1] >= 0 && w > 0) {
+                                lod_min = std::min(lod_min, lod[4 * at + 1]);
+                                lod_max = std::max(lod_max, lod[4 * at + 1]);
+                            }
+                        }
+                    }
+                }
+            }
+            vis[id][c] = sum / 9;
+            // A positive bound excludes upstream clipping: all corners of every overlapping
+            // masked caster are inside the near plane. A negative bound is only a candidate,
+            // since a conservative box can cross a plane without the actual leaves crossing it.
+            float near_min = 100;
+            for (const auto& draw : source.draws) {
+                if ((draw.flags & DrawItem::AlphaMasked) == 0)
+                    continue;
+                const auto& mesh = source.meshes->get(draw.mesh);
+                core::Vec3 lo{100000, 100000, 100000}, hi{-100000, -100000, -100000};
+                for (unsigned corner = 0; corner < 8; ++corner) {
+                    const core::Vec3 local{(corner & 1) ? mesh.local_max.x : mesh.local_min.x,
+                                           (corner & 2) ? mesh.local_max.y : mesh.local_min.y,
+                                           (corner & 4) ? mesh.local_max.z : mesh.local_min.z};
+                    const auto q = core::transform_point(fit.view_proj[c],
+                                                         core::transform_point(draw.model, local));
+                    lo = {std::min(lo.x, q.x), std::min(lo.y, q.y), std::min(lo.z, q.z)};
+                    hi = {std::max(hi.x, q.x), std::max(hi.y, q.y), std::max(hi.z, q.z)};
+                }
+                if (p.x >= lo.x && p.x <= hi.x && p.y >= lo.y && p.y <= hi.y)
+                    near_min = std::min(near_min, lo.z);
+            }
+            std::fprintf(stderr,
+                         "shadow_probe,%llu,%zu,%u,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d\n",
+                         static_cast<unsigned long long>(frame),
+                         id,
+                         c,
+                         vis[id][c],
+                         weights[id][c],
+                         lod_max < 0 ? -1 : lod_min,
+                         lod_max,
+                         p.z,
+                         near_min,
+                         int(covered));
+        }
+    }
+    for (std::size_t id = 0; id < points.size(); ++id) {
+        float result = 1;
+        for (unsigned c = fit.count; c-- > 0;)
+            result = std::lerp(result, vis[id][c], weights[id][c]);
+        std::fprintf(stderr,
+                     "shadow_combined,%llu,%zu,%.6f\n",
+                     static_cast<unsigned long long>(frame),
+                     id,
+                     result);
+    }
+    device.destroy(readback);
+    device.destroy(pipeline);
+    device.destroy(fs);
+    device.destroy(vs);
+}
 
 } // namespace
 
@@ -143,10 +385,12 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
                                      const DepthPrepass& prepass,
                                      const SceneDrawData& scene_data,
                                      const CascadeInputs& inputs,
-                                     const LightingSettings& settings) {
+                                     const LightingSettings& settings,
+                                     const ExtraCasters& extra_casters) {
     caster_stats_ = std::make_shared<std::array<CullStats, kMaxCascades>>();
     resolution_ = settings.shadow_map_resolution;
     const CascadeFit fit = compute_cascades(inputs, settings);
+    trace_shadow_probes(device_, prepass, scene_data, fit, inputs, settings);
 
     // Upload each cascade's light view_proj into its 256-byte slice (the depth passes read binding
     // 0 at frame_ubo_offset = c * stride), and fill the ShadowUniforms the forward pass samples
@@ -213,6 +457,9 @@ ShadowBinding CascadedShadowMap::add(RenderGraph& graph,
                     kCascadeLabels[c],
                     caster_frustum,
                     std::move(counter));
+        if (extra_casters) {
+            extra_casters(graph, cascades, c, fit.view_proj[c]);
+        }
     }
 
     return ShadowBinding{cascades, su_slice, compare_sampler_};
