@@ -22,6 +22,31 @@ layout(location = 3) flat in vec2 in_noise_origin;
 layout(location = 4) flat in float in_half_size;
 
 layout(location = 0) out vec4 out_color;
+layout(binding = 1) uniform sampler2D scene_depth;
+layout(push_constant) uniform Pc {
+    mat4 view_proj;
+    vec4 camera_right;
+    vec4 camera_up;
+    vec4 depth_params;
+} pc;
+
+// Depth-difference soft particles replace the sharp billboard/geometry intersection with a
+// metric ramp. Perspective depth is nonlinear, so reconstruct both view distances before
+// subtracting; fading raw depth would shrink the fade with camera distance. Smoke deliberately
+// keeps its established opacity. Nearest texel fetch avoids blending foreground/background depth.
+float intersection_fade() {
+    float scene = texelFetch(scene_depth, ivec2(gl_FragCoord.xy), 0).r;
+    if (scene >= 1.0) return 1.0;
+    float gap;
+    if (pc.depth_params.w > 0.5) {
+        float scene_distance = pc.depth_params.y / (scene - pc.depth_params.x);
+        float particle_distance = 1.0 / gl_FragCoord.w;
+        gap = scene_distance - particle_distance;
+    } else {
+        gap = (scene - gl_FragCoord.z) * pc.depth_params.y;
+    }
+    return smoothstep(0.0, pc.depth_params.z, gap);
+}
 
 // Smooth value noise: interpolate deterministic lattice values with a cubic curve whose slope
 // is zero at cell boundaries. Multiple scales break up opacity without hard pixel-sized speckle.
@@ -39,14 +64,34 @@ float smooth_noise(vec2 p) {
 }
 
 void main() {
+    if (in_mode == 3) {
+        // Broad fuel lobes have a filled lower body and turbulent tapered upper shoulders.
+        // Warping the height before tapering avoids an elliptical glowing puck: overlapping
+        // lobes join at the fuel, but retain different rising peaks and a soft orange fringe.
+        const float height = in_uv.y * 0.5 + 0.5;
+        const float noise = smooth_noise(in_uv * vec2(3.2, 3.8) + in_noise_origin);
+        const float warped = clamp(height + (noise - 0.5) * 0.32 * height, 0.0, 1.0);
+        const float width = pow(1.0 - warped, 0.62) * mix(0.82, 1.12, noise);
+        const float across = abs(in_uv.x + (noise - 0.5) * height * 0.25) / max(width, 0.01);
+        const float body = (1.0 - smoothstep(0.18, 1.0, across)) *
+                           smoothstep(0.0, 0.18, height) *
+                           (1.0 - smoothstep(0.72, 1.0, warped));
+        const float heat_level = (1.0 - smoothstep(0.32, 0.90, warped)) *
+                                 (1.0 - smoothstep(0.35, 1.0, across));
+        const vec3 heat = mix(vec3(1.0, 0.42, 0.035), vec3(1.0, 0.94, 0.68), heat_level);
+        out_color = vec4(in_color.rgb * heat * body * mix(0.72, 1.0, noise) *
+                         in_color.a * intersection_fade(), 0.0);
+        return;
+    }
     if (in_mode == 2) {
+        const float soft = intersection_fade();
         // Tiny fire particles are embers: compact bright discs that cool in the CPU colour
         // ramp and wink out with their own age. The size tag preserves the billboard ABI.
         if (in_half_size < 0.04) {
             const float r2 = dot(in_uv, in_uv);
             if (r2 >= 1.0) discard;
             const float glow = (1.0 - r2) * (1.0 - r2) * in_color.a;
-            out_color = vec4(in_color.rgb * glow, 0.0);
+            out_color = vec4(in_color.rgb * glow * soft, 0.0);
             return;
         }
         const float height = in_uv.y * 0.5 + 0.5;
@@ -58,7 +103,7 @@ void main() {
         // tips; the smooth envelopes prevent a square top or hard cut at the base.
         const float bend = (coarse - 0.5) * height * 0.48 +
                            sin(height * 7.0 + in_noise_origin.x) * height * 0.11;
-        const float width = (0.85 * pow(1.0 - height, 0.74) + 0.01) *
+        const float width = (0.85 * pow(1.0 - height, 0.95) + 0.01) *
                             mix(0.72, 1.08, detail);
         const float across = abs(in_uv.x - bend) / max(width, 0.015);
         const float tongue = (1.0 - smoothstep(0.23, 1.0, across)) *
@@ -72,13 +117,14 @@ void main() {
         }
         // A compact blackbody-inspired ramp reads from red cooling edges through orange and
         // yellow to the near-white core. Colour still fades to zero with each mote's lifetime.
-        const float core = pow(max(1.0 - across, 0.0), 2.0) * (1.0 - height) * filament;
-        const vec3 heat = mix(mix(vec3(0.75, 0.055, 0.008),
-                                   vec3(1.0, 0.43, 0.025),
+        const float core = pow(max(1.0 - across, 0.0), 0.55) *
+                           (1.0 - smoothstep(0.28, 0.95, height)) * mix(0.78, 1.0, filament);
+        const vec3 heat = mix(mix(vec3(0.85, 0.09, 0.008),
+                                   vec3(1.0, 0.58, 0.07),
                                    smoothstep(0.0, 0.45, core)),
                               vec3(1.0, 0.94, 0.72),
-                              smoothstep(0.45, 1.0, core));
-        out_color = vec4(in_color.rgb * heat * opacity, 0.0);
+                              smoothstep(0.28, 0.80, core));
+        out_color = vec4(in_color.rgb * heat * opacity * soft, 0.0);
         return;
     }
 

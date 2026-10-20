@@ -56,7 +56,11 @@ AuthoredEnvironment::prepare(ecs::World& world, std::span<const render::GpuParti
     for (const auto& flame : effects_.render_flames())
         snapshot_.flames[snapshot_.flame_count++] = {
             {flame.position.x, flame.position.y, flame.position.z, flame.half_size},
-            {flame.color.x, flame.color.y, flame.color.z, flame.opacity}};
+            // A flame-only alpha tag selects the broad core without changing the shared GPU ABI.
+            {flame.color.x,
+             flame.color.y,
+             flame.color.z,
+             flame.opacity + (flame.core ? 2.0f : 0.0f)}};
     std::size_t fire_index = 0;
     for (const auto& light : effects_.lights()) {
         // The scene light borrows the same smoothly moving tongue amplitudes as the flame.
@@ -69,14 +73,16 @@ AuthoredEnvironment::prepare(ecs::World& world, std::span<const render::GpuParti
             std::clamp(0.86f + 0.15f * root.opacity + 0.12f * side.opacity, 0.86f, 1.12f);
         const core::Vec3 light_position{
             light.position.x + 0.16f * (side.position.x - light.position.x),
-            light.position.y,
+            light.position.y + 0.28f,
             light.position.z + 0.16f * (side.position.z - light.position.z)};
+        // Raising the emitter slightly gives the ground a useful incidence angle; a bounded
+        // wider radius lights the fuel surround instead of a tiny point underneath it. Radiance
+        // is presentation-only so the authored intensity and smoke lighting remain unchanged.
+        const float radius = std::min(8.0f, light.radius * 2.5f);
+        const float radiance = light.intensity * modulation * 4.0f;
         snapshot_.lights[snapshot_.light_count++] = {
-            {light_position.x, light_position.y, light_position.z, light.radius},
-            {light.color.x * light.intensity * modulation,
-             light.color.y * light.intensity * modulation,
-             light.color.z * light.intensity * modulation,
-             0}};
+            {light_position.x, light_position.y, light_position.z, radius},
+            {light.color.x * radiance, light.color.y * radiance, light.color.z * radiance, 0}};
         ++fire_index;
     }
 

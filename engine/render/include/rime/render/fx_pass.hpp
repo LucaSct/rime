@@ -93,7 +93,8 @@ struct FxView {
 };
 
 // Flame uses additive radiance with a procedural tapered silhouette. Its size is the base
-// half-size: the billboard spans 0.55 times that horizontally and 1.5 times it vertically.
+// half-size: tongues span 0.55 times that horizontally and 1.5 vertically. A flame-only alpha
+// tag of 2 + opacity selects a broad fuel core (1.15 horizontally, 0.65 vertically).
 enum class FxBlendMode { Additive, SmokeAlpha, Flame };
 
 class FxParticlePass {
@@ -143,6 +144,7 @@ private:
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
     rhi::PipelineHandle pipeline_;
+    rhi::SamplerHandle depth_sampler_;
     std::vector<rhi::BufferHandle> instances_;
     FxBlendMode blend_;
     std::uint32_t capacity_;

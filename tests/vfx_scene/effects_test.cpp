@@ -400,7 +400,12 @@ TEST_CASE("environment v2: flame sprites remain capped independently of smoke sa
     vfx_scene::Effects fx;
     for (std::uint64_t t = 1; t <= 100; ++t) {
         REQUIRE(fx.tick(w, t, 0.25f));
-        REQUIRE(fx.flames().size() == vfx_scene::Effects::max_flames);
+        REQUIRE(fx.flames().size() == vfx_scene::Effects::max_sources * 3);
+        REQUIRE(fx.render_flames().size() <= vfx_scene::Effects::max_flames);
+        CHECK(std::count_if(fx.render_flames().begin(),
+                            fx.render_flames().end(),
+                            [](const auto& flame) { return flame.core; }) ==
+              vfx_scene::Effects::max_sources * vfx_scene::Effects::core_flames_per_source);
         for (const auto& flame : fx.flames()) {
             CHECK(std::isfinite(flame.position.x));
             CHECK(std::isfinite(flame.position.y));
@@ -416,7 +421,7 @@ TEST_CASE("environment v2: flame sprites remain capped independently of smoke sa
     CHECK(fx.flames().empty());
 }
 
-TEST_CASE("fire motes replay deterministically within the unchanged render budget") {
+TEST_CASE("fire motes replay deterministically within the bounded render budget") {
     ecs::World w;
     prepare(w);
     (void)source(w, fire());

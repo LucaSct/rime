@@ -36,6 +36,7 @@ struct FlamePresentation {
     float half_size = 0.0f;
     core::Vec3 color{1.0f, 0.35f, 0.06f};
     float opacity = 0.0f;
+    bool core = false; // broad, persistent fuel lobe; tongues/embers use the tall profile
 };
 
 struct SmokeAppearance {
@@ -57,8 +58,10 @@ class Effects {
 public:
     static constexpr std::size_t max_sources = 16;
     static constexpr std::size_t max_particles = 256;
-    static constexpr std::size_t max_flames = max_sources * 3;
     static constexpr std::size_t max_fire_motes_per_source = 12;
+    static constexpr std::size_t core_flames_per_source = 4;
+    static constexpr std::size_t max_flames =
+        max_sources * (3 + core_flames_per_source + max_fire_motes_per_source);
 
     Effects();
     // Reconcile removals/disable/invalid edits even while paused, without aging or emitting.
@@ -80,7 +83,7 @@ public:
         return {flames_.data(), flame_count_};
     }
 
-    // The renderer sees the three stable tongues plus capped simulated flame/ember motes.
+    // The renderer sees the three stable tongues, four fuel cores and capped flame/ember motes.
     [[nodiscard]] std::span<const FlamePresentation> render_flames() const noexcept {
         return {render_flames_.data(), render_flame_count_};
     }

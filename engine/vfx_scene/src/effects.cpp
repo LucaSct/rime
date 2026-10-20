@@ -369,23 +369,45 @@ void Effects::collect_lights() {
             }
     }
     // Stable roots stay first for the editor API; independent motes fill only spare draw slots.
-    // The 48-billboard render cap is unchanged even with every one of the 16 sources active.
+    // The render budget reserves 19 billboards per source: 3 tongues, 4 cores, 12 motes. With
+    // 16 admitted sources the hard draw cap is 304; no source can starve another's fuel body.
     for (std::size_t i = 0; i < flame_count_; ++i)
         render_flames_[render_flame_count_++] = flames_[i];
     for (const auto& source : sources_) {
         if (!source.description.fire || !source.light_current)
             continue;
+        const auto& d = source.description;
+        const core::Vec3 center = (d.lo + d.hi) * 0.5f;
+        const float size =
+            std::clamp(0.20f + 0.35f * std::max(d.hi.x - d.lo.x, d.hi.z - d.lo.z), 0.12f, 1.2f) *
+            std::sqrt(d.intensity);
+        // Persistent overlapping fuel lobes decouple body coverage from short-lived tongues.
+        // Slow incommensurate phase motion churns their overlap without gaps at particle births;
+        // the shallow billboard profile puts a wide yellow-white core directly on the fuel.
+        for (std::size_t i = 0; i < core_flames_per_source; ++i) {
+            const float phase = float(presentation_seconds_) * (0.9f + 0.13f * float(i)) +
+                                float(i) * 1.5708f + float(d.entity.index % 17u);
+            const float radius = size * (0.82f + 0.08f * std::sin(phase * 1.3f));
+            render_flames_[render_flame_count_++] = {{center.x + size * 0.43f * std::cos(phase),
+                                                      d.lo.y + radius * 0.46f,
+                                                      center.z + size * 0.43f * std::sin(phase)},
+                                                     radius,
+                                                     {4.8f, 4.3f, 2.9f},
+                                                     std::min(d.intensity, 1.0f) *
+                                                         (0.78f + 0.08f * std::sin(phase)),
+                                                     true};
+        }
         for (std::size_t i = 0; i < source.mote_count && render_flame_count_ < max_flames; ++i) {
             const auto& mote = source.motes[i];
             const float life = mote.age / mote.lifetime;
             // Temperature falls as a flame rises: bright yellow-white birth, orange body, red
             // dying tip. Embers retain a hotter pinprick then cool and wink out independently.
-            const float heat = 1.0f - life;
+            const float heat = 1.0f - life * life;
             const core::Vec3 color =
                 mote.ember ? core::Vec3{3.4f * heat + 0.7f, 1.5f * heat + 0.08f, 0.28f * heat}
-                           : core::Vec3{1.3f + 2.0f * heat,
-                                        0.12f + 2.2f * heat * heat,
-                                        0.02f + 1.1f * heat * heat * heat};
+                           : core::Vec3{2.0f + 2.5f * heat,
+                                        0.35f + 3.2f * heat,
+                                        0.04f + 1.9f * heat * heat};
             const float opacity = std::clamp(std::min(source.description.intensity, 1.0f) *
                                                  std::min(1.0f, mote.age / 0.09f) * (1.0f - life) *
                                                  (mote.ember ? 0.95f : 0.48f),

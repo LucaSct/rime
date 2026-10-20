@@ -902,3 +902,49 @@ TEST_CASE("flame V2 preserves occluder depth for a following translucent pass") 
     CHECK(flame_pass.particles_drawn() == 2);
     CHECK(smoke_pass.particles_drawn() == 2); // both draws submitted; depth rejected hidden pixels
 }
+
+TEST_CASE("fire soft intersections use metric gaps while smoke retains its opacity") {
+    // Validation plus pixels exercise the shared graph/RHI state: a correctly shaded image alone
+    // would not prove that descriptor and attachment layouts agree on every driver's scheduler.
+    VuidCounter validation("VUID-");
+    auto device = rhi::create_device({.enable_validation = true});
+    if (!device) {
+        if (vulkan_required())
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        return;
+    }
+    FxParticlePass flame(*device, 4, FxBlendMode::Flame);
+    FxParticlePass smoke_pass(*device, 4, FxBlendMode::SmokeAlpha);
+    FxSettings on{};
+    on.enabled = true;
+    for (float distance : {3.0f, 10.0f}) {
+        auto p = smoke(6.0f - distance, 7.5f, 6.8f, 4.6f);
+        for (bool core : {false, true}) {
+            p.color_alpha[3] = core ? 2.8f : 0.8f;
+            const float full = render_frame(*device, flame, {&p, 1}, on).total_radiance;
+            REQUIRE(full > 10.0f);
+            float previous = 0.0f;
+            for (float gap : {0.03f, 0.09f, 0.25f}) {
+                const auto clip =
+                    make_view().view_proj * core::Vec4{0.0f, 0.0f, 6.0f - distance - gap, 1.0f};
+                const float ratio =
+                    render_frame(*device, flame, {&p, 1}, on, clip.z / clip.w).total_radiance /
+                    full;
+                CHECK(ratio > previous);
+                if (gap == 0.03f)
+                    CHECK(ratio < 0.12f);
+                if (gap == 0.09f)
+                    CHECK(ratio == doctest::Approx(0.5f).epsilon(0.02f));
+                if (gap == 0.25f)
+                    CHECK(ratio == doctest::Approx(1.0f).epsilon(0.01f));
+                previous = ratio;
+            }
+        }
+        p.color_alpha[3] = 0.5f;
+        const auto clip =
+            make_view().view_proj * core::Vec4{0.0f, 0.0f, 6.0f - distance - 0.03f, 1.0f};
+        CHECK(render_frame(*device, smoke_pass, {&p, 1}, on, clip.z / clip.w).bytes ==
+              render_frame(*device, smoke_pass, {&p, 1}, on).bytes);
+    }
+    CHECK_MESSAGE(validation.count() == 0, validation.last());
+}

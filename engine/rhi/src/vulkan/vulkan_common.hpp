@@ -405,6 +405,17 @@ struct StateInfo {
                         VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
                     VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                         VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT};
+        case ResourceState::DepthReadOnly:
+            // A shared read-only layout lets the depth test and shader sample the same image.
+            // Both consumer stage/access masks are necessary after a depth-writing prepass.
+            return {VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                        VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+                        VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                        VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
         case ResourceState::ShaderRead:
             return {VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |
