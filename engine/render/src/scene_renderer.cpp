@@ -1081,7 +1081,22 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                                       fu.dir_lights[0].direction[1],
                                       fu.dir_lights[0].direction[2]};
             // shadow_data, not data: a caster off-screen still casts into the view.
-            shadow = csm_.add(graph, depth_prepass_, shadow_data, ci, lighting_);
+            // Terrain joins the cascades as a depth-only caster, so hills shadow a low sun. It is
+            // drawn with the same LOD choice as the camera pass. Skipped when no terrain is set.
+            const core::Vec3 shadow_eye{fu.camera_pos[0], fu.camera_pos[1], fu.camera_pos[2]};
+            CascadedShadowMap::ExtraCasters terrain_casters;
+            if (terrain_pass_ != nullptr && !terrain_draws_.empty()) {
+                terrain_casters = [this, shadow_eye](RenderGraph& g,
+                                                     RGTexture cascades,
+                                                     std::uint32_t layer,
+                                                     const core::Mat4& light_vp) {
+                    for (const TerrainSceneDraw& draw : terrain_draws_) {
+                        terrain_pass_->add_shadow_caster(
+                            g, cascades, layer, draw.tile, light_vp, shadow_eye, draw.lod);
+                    }
+                };
+            }
+            shadow = csm_.add(graph, depth_prepass_, shadow_data, ci, lighting_, terrain_casters);
         } else {
             shadow = csm_.empty_binding(graph, dummy_shadow_array_);
         }

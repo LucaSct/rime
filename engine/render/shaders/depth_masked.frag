@@ -31,13 +31,20 @@ layout(std140, set = 0, binding = 1) uniform DrawUniforms {
 
 layout(set = 0, binding = 2) uniform sampler2D base_color_tex;
 
+// A diagnostic colour attachment can retain the sampler's actual mip query at the winning
+// leaf fragment. Ordinary depth pipelines have no colour attachment, so this output is unused.
+layout(location = 0) out vec4 out_shadow_probe;
+
 void main() {
+    out_shadow_probe = vec4(gl_FragCoord.z,
+                            draw.emissive.w > 0.0 ? textureQueryLod(base_color_tex, v_uv) : vec2(-1.0),
+                            draw.emissive.w > 0.0 ? 1.0 : 0.0);
     vec4 base_sample = texture(base_color_tex, v_uv);
     float base_alpha = draw.base_color.a * base_sample.a;
     if (draw.emissive.w > 0.0 && base_alpha < draw.emissive.w) {
         discard;
     }
-    // No colour output and no explicit depth write: surviving fragments take the fixed-function
+    // No production colour attachment and no explicit depth write: surviving fragments take the fixed-function
     // depth exactly as the unmasked variant does, so the two agree on every pixel that is not
     // discarded.
 }
