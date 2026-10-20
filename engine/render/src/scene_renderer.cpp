@@ -373,6 +373,101 @@ void SceneRenderer::set_flame_particles(std::span<const GpuParticle> particles,
     flame_particles_dropped_ += particles.size() - count;
 }
 
+std::vector<MeshVertex> phase_surface_vertices(const SurfaceGeometry& geometry,
+                                               const core::Mat4& model,
+                                               float liquid,
+                                               double seconds,
+                                               float depth) {
+    // ECS chunks copy components with memcpy. Keep only a small parametric description
+    // there; reconstruct the bounded grid in renderer-owned frame scratch, never a vector
+    // inside a component. Vertex order exactly matches the creation-time index topology.
+    std::vector<MeshVertex> vertices;
+    vertices.reserve(geometry.vertex_count);
+    const auto append = [&](float x, float z) {
+        MeshVertex v;
+        v.px = x;
+        v.py = geometry.top;
+        v.pz = z;
+        v.nx = v.nz = 0;
+        v.ny = 1;
+        v.u = .5f + x / (2 * geometry.half_x);
+        v.v = .5f + z / (2 * geometry.half_z);
+        v.tw = -1;
+        vertices.push_back(v);
+    };
+    if (geometry.oval) {
+        append(0, 0);
+        for (unsigned ring = 1; ring <= 32; ++ring)
+            for (unsigned i = 0; i < 64; ++i) {
+                const float angle = 6.2831853f * float(i) / 64;
+                const float radius = (.88f + .07f * std::sin(angle * 3 + geometry.seed) +
+                                      .05f * std::sin(angle * 7)) *
+                                     float(ring) / 32;
+                append(std::cos(angle) * geometry.half_x * radius,
+                       std::sin(angle) * geometry.half_z * radius);
+            }
+    } else {
+        for (unsigned z = 0; z <= 32; ++z)
+            for (unsigned x = 0; x <= 32; ++x)
+                append((float(x) / 16 - 1) * geometry.half_x,
+                       (float(z) / 16 - 1) * geometry.half_z);
+    }
+    if (liquid <= 0)
+        return vertices;
+    const auto inverse = core::inverse(model);
+    const auto transpose = core::transpose(model);
+    const auto xaxis = model * core::Vec4{1, 0, 0, 0};
+    const auto zaxis = model * core::Vec4{0, 0, 1, 0};
+    // Bounded Gerstner waves: three wind-aligned trochoids, with total Q*k*A < .18.
+    // Their horizontal Jacobian stays positive, so no crest can loop. Analytic derivatives
+    // include the shoreline envelope; positions and normals describe the same surface.
+    constexpr std::array<core::Vec4, 3> waves{
+        {{.940f, .342f, 1.8f, 1.0f},
+         {.819f, .574f, .93f, .48f},
+         {.996f, -.087f, .47f, .22f}}}; // direction xz, wavelength metres, amplitude share
+    const float amplitude = std::min(.012f, depth * .12f) * liquid;
+    for (auto& vertex : vertices) {
+        const auto p = model * core::Vec4{vertex.px, vertex.py, vertex.pz, 1};
+        const float x = vertex.px / geometry.half_x, z = vertex.pz / geometry.half_z;
+        const float ex = std::max(0.f, 1 - x * x), ez = std::max(0.f, 1 - z * z);
+        const float edge = geometry.oval ? std::max(0.f, 1 - x * x - z * z) : ex * ez;
+        const float envelope = edge * edge;
+        const float gx = -4 * edge * x / geometry.half_x * (geometry.oval ? 1 : ez);
+        const float gz = -4 * edge * z / geometry.half_z * (geometry.oval ? 1 : ex);
+        core::Vec3 offset{}, dx{xaxis.x, xaxis.y, xaxis.z}, dz{zaxis.x, zaxis.y, zaxis.z};
+        for (std::size_t i = 0; i < waves.size(); ++i) {
+            const auto w = waves[i];
+            const float k = 6.2831853f / w.z;
+            const float phase =
+                k * (w.x * p.x + w.y * p.z) -
+                static_cast<float>(std::fmod(seconds, 4096.0)) * std::sqrt(9.81f * k) +
+                float(i) * 2.17f;
+            const float s = std::sin(phase), c = std::cos(phase);
+            const float a = amplitude * w.w;
+            constexpr float q = .55f;
+            const core::Vec3 shape{q * w.x * c, s, q * w.y * c};
+            const core::Vec3 slope{-q * w.x * s, c, -q * w.y * s};
+            offset = offset + shape * (a * envelope);
+            dx = dx + (shape * gx + slope * (envelope * k * (w.x * xaxis.x + w.y * xaxis.z))) * a;
+            dz = dz + (shape * gz + slope * (envelope * k * (w.x * zaxis.x + w.y * zaxis.z))) * a;
+        }
+        const auto local = inverse * core::Vec4{p.x + offset.x, p.y + offset.y, p.z + offset.z, 1};
+        const auto normal = core::normalize(core::cross(dz, dx));
+        const auto n = transpose * core::Vec4{normal.x, normal.y, normal.z, 0};
+        const auto t = inverse * core::Vec4{dx.x, dx.y, dx.z, 0};
+        vertex.px = local.x;
+        vertex.py = local.y;
+        vertex.pz = local.z;
+        vertex.nx = n.x;
+        vertex.ny = n.y;
+        vertex.nz = n.z;
+        vertex.tx = t.x;
+        vertex.ty = t.y;
+        vertex.tz = t.z;
+    }
+    return vertices;
+}
+
 bool SceneRenderer::set_surface_appearances(std::span<const SurfaceAppearance> rows) {
     surface_appearance_count_ = 0;
     const auto refuse = [&] {
@@ -388,6 +483,10 @@ bool SceneRenderer::set_surface_appearances(std::span<const SurfaceAppearance> r
             r.base_color.x < 0 || r.base_color.x > 1 || r.base_color.y < 0 || r.base_color.y > 1 ||
             r.base_color.z < 0 || r.base_color.z > 1 || !std::isfinite(r.roughness) ||
             r.roughness < 0 || r.roughness > 1 ||
+            static_cast<unsigned>(r.kind) > static_cast<unsigned>(SurfaceKind::Frost) ||
+            !std::isfinite(r.liquid_fraction) || r.liquid_fraction < 0 || r.liquid_fraction > 1 ||
+            !std::isfinite(r.thickness) || r.thickness <= 0 || r.thickness > 100 ||
+            !std::isfinite(r.seconds) || r.seconds < 0 ||
             (r.override_detail &&
              (!std::isfinite(r.normal_scale) || r.normal_scale < 0 || r.normal_scale > 2)))
             return refuse();
@@ -712,18 +811,27 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     if (track_motion) {
         next_prev_models.reserve(frame_draws_.size());
     }
+    std::unordered_map<std::uint64_t, std::vector<MeshVertex>> next_surface_vertices;
     for (std::uint32_t i = 0; i < draw_count; ++i) {
-        const DrawItem& item = frame_draws_[i];
+        DrawItem& item = frame_draws_[i];
         // Out-of-range material ids are a caller bug, but a defensive default keeps a bad id
         // from becoming an out-of-bounds read.
         PbrMaterialDesc material =
             item.material < materials_.size() ? materials_.get(item.material) : PbrMaterialDesc{};
         // Change the private frame copy, never the registry or authored components. Matching
         // after resolve_draws applies the same diagnostic appearance to every submesh of a cell.
+        const auto* geometry = world.get<SurfaceGeometry>(scene.draw_entities[i]);
+        SurfaceAppearance surface;
+        if (geometry && !geometry->thermal) {
+            surface.kind = SurfaceKind::Water;
+            surface.thickness = geometry->depth;
+            surface.seconds = geometry->seconds;
+        }
         for (std::size_t j = 0; j < surface_appearance_count_; ++j) {
             const auto& appearance = surface_appearances_[j];
             if (appearance.entity != scene.draw_entities[i])
                 continue;
+            surface = appearance;
             material.base_color[0] = appearance.base_color.x;
             material.base_color[1] = appearance.base_color.y;
             material.base_color[2] = appearance.base_color.z;
@@ -764,6 +872,50 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         du.emissive[1] = material.emissive[1];
         du.emissive[2] = material.emissive[2];
         du.emissive[3] = material.alpha_cutoff;
+        if (surface.kind != SurfaceKind::Ordinary) {
+            // Reuse the existing draw ABI's unused world-motion lanes: kind/liquid/depth.
+            // SSR already accepts RGB F0 via its metallic endpoint, so the fragment writes
+            // that representation for this specular lobe and adds transmission separately.
+            const float liquid = surface.kind == SurfaceKind::Frost ? 0.f : surface.liquid_fraction;
+            du.motion_params[1] = static_cast<float>(surface.kind);
+            du.motion_params[2] = liquid;
+            du.motion_params[3] = surface.thickness;
+            du.emissive[0] = static_cast<float>(std::fmod(surface.seconds, 4096.0));
+            du.emissive[1] = geometry && geometry->oval ? 1.f : 0.f;
+            du.emissive[2] = surface.override_detail ? 1.f : 0.f;
+            du.emissive[3] = 0;
+            if (geometry && geometry->vertex_count == meshes_.get(item.mesh).vertex_count &&
+                geometry->vertex_count == (geometry->oval ? 2049u : 1089u) &&
+                geometry->half_x > 0 && geometry->half_z > 0 && std::fabs(det) > 1e-12f) {
+                auto vertices = phase_surface_vertices(
+                    *geometry, item.model, liquid, surface.seconds, surface.thickness);
+                const auto key = std::bit_cast<std::uint64_t>(scene.draw_entities[i]);
+                const auto previous = surface_previous_vertices_.find(key);
+                const auto stream =
+                    graph.push_frame_data(vertices.data(), vertices.size() * sizeof(MeshVertex));
+                next_surface_vertices[key] = vertices;
+                // Deformation velocity: the velocity pass already understands previous local
+                // position in the normal lanes. Actual history avoids TAA smearing the waves.
+                for (std::size_t v = 0; v < vertices.size(); ++v) {
+                    const auto& old = previous != surface_previous_vertices_.end() &&
+                                              previous->second.size() == vertices.size()
+                                          ? previous->second[v]
+                                          : vertices[v];
+                    vertices[v].nx = old.px;
+                    vertices[v].ny = old.py;
+                    vertices[v].nz = old.pz;
+                }
+                const auto velocity =
+                    graph.push_frame_data(vertices.data(), vertices.size() * sizeof(MeshVertex));
+                if (stream.buffer.is_valid() && velocity.buffer.is_valid()) {
+                    item.vertex_override = stream.buffer;
+                    item.vertex_override_offset = stream.offset;
+                    item.velocity_vertex_override = velocity.buffer;
+                    item.velocity_vertex_override_offset = velocity.offset;
+                    du.motion_params[0] = 1;
+                }
+            }
+        }
         // Route this draw to the alpha-testing depth pipeline (m16.4). A nonzero cutoff is exactly
         // what "this material masks" means -- the same single float the shader branches on, so the
         // CPU and GPU cannot disagree about which draws are masked.
@@ -818,6 +970,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             [&](const WorldAabb& region) { local_shadows_.invalidate(region); },
             [&] { local_shadows_.invalidate_all(); });
     }
+    surface_previous_vertices_ = std::move(next_surface_vertices);
     if (draw_count > 0)
         device_.write_buffer(draw_ubos_[ubo_slot_], draw_staging_.data(), draw_staging_.size());
     if (motion_vectors_enabled_) {

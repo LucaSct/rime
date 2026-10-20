@@ -25,6 +25,11 @@ bool AuthoredEnvironment::tick(ecs::World& world, std::uint64_t tick, double dt)
     const bool valid_dt = std::isfinite(dt) && dt > 0 && dt <= .25;
     const bool fx = effects_.tick(world, tick, valid_dt ? static_cast<float>(dt) : -1.0f);
     const bool thermal = thermal_.tick(world, tick, dt);
+    // Ponds have no thermal cell, but share the accepted presentation clock. Advancing only
+    // here keeps paused renders and repeated publications still, including smoke-test controls.
+    if (thermal && valid_dt && world.is_registered<render::SurfaceGeometry>())
+        world.query<render::SurfaceGeometry>().for_each(
+            [&](render::SurfaceGeometry& surface) { surface.seconds += dt; });
     return fx && thermal;
 }
 

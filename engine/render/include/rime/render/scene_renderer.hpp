@@ -138,7 +138,29 @@ struct FirstPersonDeformation {
 
 // Copied presentation factors for a whole entity, after submesh/material-set resolution.
 // Optional detail maps are borrowed immutable resources: the owner must outlive this renderer
-// AND pending GPU work. Geometry, alpha and other authored properties stay unchanged.
+// AND pending GPU work. Ordinary appearances leave geometry and alpha unchanged.
+enum class SurfaceKind : std::uint32_t { Ordinary, Water, Ice, Frost };
+
+// Optional creation-time tessellation for a phase sheet. The compact grid description stays
+// immutable; each render uploads a private stream so depth, shadows and colour see the same waves.
+// Thermal sheets require an admitted appearance; standalone ponds use their authored depth.
+struct SurfaceGeometry {
+    std::uint32_t vertex_count = 0, seed = 0;
+    float top = 0;
+    float half_x = 1, half_z = 1;
+    float depth = .12f;
+    bool oval = false;
+    bool thermal = false;
+    double seconds = 0;
+};
+
+// Pure bounded CPU displacement, also exposed to the phase geometry proof.
+[[nodiscard]] std::vector<MeshVertex> phase_surface_vertices(const SurfaceGeometry& geometry,
+                                                             const core::Mat4& model,
+                                                             float liquid,
+                                                             double seconds,
+                                                             float depth);
+
 struct SurfaceAppearance {
     ecs::Entity entity{};
     core::Vec3 base_color{1.0f, 1.0f, 1.0f};
@@ -147,6 +169,10 @@ struct SurfaceAppearance {
     bool override_detail = false;
     rhi::TextureHandle normal_texture{}, base_color_texture{};
     float normal_scale = 1.0f;
+    SurfaceKind kind = SurfaceKind::Ordinary;
+    float liquid_fraction = 1.0f;
+    float thickness = .12f; // metres: visual column, not simulated mass or collision thickness
+    double seconds = 0;
 };
 
 // ── The renderer ──────────────────────────────────────────────────────────────────────────────
@@ -707,6 +733,7 @@ private:
     std::array<SurfaceAppearance, 16> surface_appearances_{};
     std::size_t surface_appearance_count_ = 0;
     std::uint64_t surface_appearance_refusals_ = 0;
+    std::unordered_map<std::uint64_t, std::vector<MeshVertex>> surface_previous_vertices_;
     float ambient_[3] = {0.02f, 0.02f, 0.02f};
     bool warned_lights_ = false;
     bool warned_no_camera_ = false;

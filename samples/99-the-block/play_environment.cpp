@@ -9,7 +9,9 @@
 #include <numbers>
 
 #include "rime/core/math.hpp"
+#include "rime/ecs/query.hpp"
 #include "rime/ecs/transform.hpp"
+#include "rime/fluids_render/phase_surface.hpp"
 #include "rime/render/components.hpp"
 
 namespace rime::block_play {
@@ -331,14 +333,27 @@ render::CpuMesh water_patch(float half_x, float half_z, unsigned seed) {
     // the existing filtered sky handles misses. Refraction/transparency are separate features.
     render::CpuMesh m;
     m.vertices.push_back({0, 0, 0, 0, 1, 0, 0, 0});
-    constexpr unsigned kSides = 64;
-    for (unsigned i = 0; i < kSides; ++i) {
-        const float a = 2 * kPi * static_cast<float>(i) / kSides;
-        const float radius = .88f + .07f * std::sin(a * 3 + seed) + .05f * std::sin(a * 7);
-        const float x = std::cos(a) * half_x * radius, z = std::sin(a) * half_z * radius;
-        m.vertices.push_back({x, 0, z, 0, 1, 0, x * .2f, z * .2f});
-        m.indices.insert(m.indices.end(), {0, (i + 1) % kSides + 1, i + 1});
-    }
+    // Polar tessellation: 32 radial rings × 64 sectors + centre = 2,049 vertices.
+    // The old 65-vertex fan could only tilt its huge triangles, not form wave silhouettes.
+    constexpr unsigned kSides = 64, kRings = 32;
+    m.vertices[0].u = m.vertices[0].v = .5f;
+    for (unsigned ring = 1; ring <= kRings; ++ring)
+        for (unsigned i = 0; i < kSides; ++i) {
+            const float a = 2 * kPi * static_cast<float>(i) / kSides;
+            const float radius = (.88f + .07f * std::sin(a * 3 + seed) + .05f * std::sin(a * 7)) *
+                                 float(ring) / kRings;
+            const float x = std::cos(a) * half_x * radius, z = std::sin(a) * half_z * radius;
+            m.vertices.push_back(
+                {x, 0, z, 0, 1, 0, .5f + x / (2 * half_x), .5f + z / (2 * half_z)});
+            const auto b = 1 + (ring - 1) * kSides + i;
+            const auto c = 1 + (ring - 1) * kSides + (i + 1) % kSides;
+            if (ring == 1)
+                m.indices.insert(m.indices.end(), {0, c, b});
+            else {
+                const auto a0 = b - kSides, d = c - kSides;
+                m.indices.insert(m.indices.end(), {a0, c, b, a0, d, c});
+            }
+        }
     render::compute_tangents(m);
     return m;
 }
@@ -488,18 +503,79 @@ bool PlayEnvironment::build(ecs::World& world,
                                                  {35, .024f, -2.1f},
                                                  {42, .023f, 3.4f},
                                                  {-3, .022f, 1.8f}}};
+    (void)world.register_component<render::SurfaceGeometry>();
+    // Tessellate only opted-in thermal sheets at creation. Preserve the thin slab's top
+    // height, transform and material; collision/thermal mass remain entirely independent.
+    std::vector<ecs::Entity> sheets;
+    world.query<fluids_render::ThermalSurface, render::MeshRef>().for_each(
+        [&](ecs::Entity e, const fluids_render::ThermalSurface& s, const render::MeshRef&) {
+            if (s.enabled)
+                sheets.push_back(e);
+        });
+    for (const auto e : sheets) {
+        const auto old = world.get<render::MeshRef>(e)->mesh;
+        if (!meshes.contains(old))
+            continue;
+        const auto lo = meshes.get(old).local_min, hi = meshes.get(old).local_max;
+        render::CpuMesh grid;
+        constexpr unsigned cells = 32; // 1,089 vertices, 2,048 triangles per basin
+        for (unsigned z = 0; z <= cells; ++z)
+            for (unsigned x = 0; x <= cells; ++x) {
+                const float u = float(x) / cells, v = float(z) / cells;
+                grid.vertices.push_back(
+                    {std::lerp(lo.x, hi.x, u), hi.y, std::lerp(lo.z, hi.z, v), 0, 1, 0, u, v});
+                if (x < cells && z < cells) {
+                    const auto a = z * (cells + 1) + x, b = a + cells + 1;
+                    grid.indices.insert(grid.indices.end(), {a, b, a + 1, a + 1, b, b + 1});
+                }
+            }
+        render::compute_tangents(grid);
+        const auto id = meshes.add(grid, "phase-sheet-grid");
+        if (!meshes.contains(id))
+            return false;
+        world.get<render::MeshRef>(e)->mesh = id;
+        render::SurfaceGeometry geometry;
+        geometry.vertex_count = static_cast<std::uint32_t>(grid.vertices.size());
+        geometry.top = hi.y;
+        geometry.half_x = (hi.x - lo.x) * .5f;
+        geometry.half_z = (hi.z - lo.z) * .5f;
+        geometry.thermal = true;
+        world.add_component<render::SurfaceGeometry>(e, std::move(geometry));
+    }
+    const auto spawn_water = [&](render::CpuMesh mesh,
+                                 core::Vec3 at,
+                                 float yaw,
+                                 float hx,
+                                 float hz,
+                                 float depth,
+                                 unsigned seed) {
+        const auto id = meshes.add(mesh, "play-water-grid");
+        core::Transform tf;
+        tf.translation = at;
+        tf.rotation = core::quat_from_axis_angle({0, 1, 0}, yaw);
+        render::SurfaceGeometry geometry;
+        geometry.vertex_count = static_cast<std::uint32_t>(mesh.vertices.size());
+        geometry.seed = seed;
+        geometry.half_x = hx;
+        geometry.half_z = hz;
+        geometry.depth = depth;
+        geometry.oval = true;
+        (void)world.spawn_with(ecs::LocalTransform{tf},
+                               ecs::WorldTransform{tf},
+                               render::MeshRef{id},
+                               render::MaterialRef{water},
+                               std::move(geometry));
+    };
     for (unsigned i = 0; i < puddles.size(); ++i) {
-        const auto m = meshes.add(
-            water_patch(1.3f + random(i) * 1.5f, .55f + random(i + 7) * .6f, i), "play-puddle");
-        spawn(world, m, water, puddles[i], 1, random(i + 15) * kPi);
+        const float hx = 1.3f + random(i) * 1.5f, hz = .55f + random(i + 7) * .6f;
+        spawn_water(water_patch(hx, hz, i), puddles[i], random(i + 15) * kPi, hx, hz, .025f, i);
         ++stats_.puddles;
     }
     // A shallow park pool sits on the flat authored surface. Its dirt rim and plants make the
     // shoreline legible without changing the shared collision heightfield or creating a hole.
     const auto bank = meshes.add(water_patch(7.6f, 5.2f, 13), "play-pond-bank");
-    const auto pond = meshes.add(water_patch(6.9f, 4.5f, 13), "play-pond-water");
     spawn(world, bank, dirt, {28, .018f, 26});
-    spawn(world, pond, water, {28, .035f, 26});
+    spawn_water(water_patch(6.9f, 4.5f, 13), {28, .035f, 26}, 0, 6.9f, 4.5f, .35f, 13);
     ++stats_.ponds;
 
     for (unsigned i = 0; i < terrain_.size(); ++i) {
