@@ -1232,7 +1232,7 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
 
     if (flame_settings_.enabled && !flame_particles_.empty()) {
         if (!flame_pass_) {
-            flame_pass_ = std::make_unique<FxParticlePass>(device_, 304, FxBlendMode::Flame);
+            flame_pass_ = std::make_unique<FxParticlePass>(device_, 368, FxBlendMode::Flame);
             (void)flame_pass_->set_frames_in_flight(
                 static_cast<std::uint32_t>(frame_ubos_.size() - 1));
         }

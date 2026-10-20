@@ -72,8 +72,11 @@ void main() {
     // Core billboards cover the fuel horizontally, while tongues keep their tall silhouette.
     // Overlapping broad lobes provide continuous radiance even between independent mote births.
     if (mode == 3) {
-        world = centre + pc.camera_right.xyz * (corner.x * half_size * 1.15) +
-                pc.camera_up.xyz * (corner.y * half_size * 0.65);
+        // Teardrop proportions: narrow quad, tall, with the lower edge dropped just under the
+        // fuel. The fragment stage narrows the silhouette upward, so the sprite reads taller than
+        // wide (~2:1) rather than as a round puff.
+        world = centre + pc.camera_right.xyz * (corner.x * half_size * 0.62) +
+                pc.camera_up.xyz * ((corner.y * 1.65 + 1.05) * half_size);
     }
 
     gl_Position = pc.view_proj * vec4(world, 1.0);

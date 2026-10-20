@@ -60,8 +60,10 @@ public:
     static constexpr std::size_t max_particles = 256;
     static constexpr std::size_t max_fire_motes_per_source = 12;
     static constexpr std::size_t core_flames_per_source = 4;
+    static constexpr std::size_t upper_tongues_per_source = 4;
     static constexpr std::size_t max_flames =
-        max_sources * (3 + core_flames_per_source + max_fire_motes_per_source);
+        max_sources *
+        (3 + core_flames_per_source + upper_tongues_per_source + max_fire_motes_per_source);
 
     Effects();
     // Reconcile removals/disable/invalid edits even while paused, without aging or emitting.

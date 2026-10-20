@@ -65,21 +65,30 @@ float smooth_noise(vec2 p) {
 
 void main() {
     if (in_mode == 3) {
-        // Broad fuel lobes have a filled lower body and turbulent tapered upper shoulders.
-        // Warping the height before tapering avoids an elliptical glowing puck: overlapping
-        // lobes join at the fuel, but retain different rising peaks and a soft orange fringe.
+        // Teardrop core: wide at the fuel, narrowing to a tip. The boundary is eroded by two
+        // octaves of noise that scroll with the sprite's own animation phase, so the outline is
+        // ragged rather than elliptical. Heat (the pale yellow heart) is confined to the lower
+        // third; above it the sprite is orange, so it reads as a flame body, not a white puff.
         const float height = in_uv.y * 0.5 + 0.5;
-        const float noise = smooth_noise(in_uv * vec2(3.2, 3.8) + in_noise_origin);
-        const float warped = clamp(height + (noise - 0.5) * 0.32 * height, 0.0, 1.0);
-        const float width = pow(1.0 - warped, 0.62) * mix(0.82, 1.12, noise);
-        const float across = abs(in_uv.x + (noise - 0.5) * height * 0.25) / max(width, 0.01);
-        const float body = (1.0 - smoothstep(0.18, 1.0, across)) *
-                           smoothstep(0.0, 0.18, height) *
-                           (1.0 - smoothstep(0.72, 1.0, warped));
-        const float heat_level = (1.0 - smoothstep(0.32, 0.90, warped)) *
-                                 (1.0 - smoothstep(0.35, 1.0, across));
-        const vec3 heat = mix(vec3(1.0, 0.42, 0.035), vec3(1.0, 0.94, 0.68), heat_level);
-        out_color = vec4(in_color.rgb * heat * body * mix(0.72, 1.0, noise) *
+        const vec2 flow = vec2(in_uv.x * 2.6, in_uv.y * 3.4);
+        const float n1 = smooth_noise(flow + in_noise_origin);
+        const float n2 = smooth_noise(flow * 2.3 + in_noise_origin.yx + vec2(5.1, 1.7));
+        const float noise = 0.65 * n1 + 0.35 * n2;
+        const float bend = (n1 - 0.5) * height * 0.55;
+        const float taper = pow(clamp(1.0 - height * 0.92, 0.0, 1.0), 0.85);
+        const float width = max(taper * mix(0.62, 1.15, noise), 0.02);
+        const float across = abs(in_uv.x - bend) / width;
+        // Erode: raising the threshold with height lets noise bite the shoulders and tip.
+        const float erode = across + (0.55 - noise) * (0.35 + 0.9 * height);
+        const float body = (1.0 - smoothstep(0.35, 1.0, erode)) *
+                           smoothstep(0.0, 0.10, height) *
+                           (1.0 - smoothstep(0.78, 1.0, height + (noise - 0.5) * 0.25));
+        const float heart = (1.0 - smoothstep(0.12, 0.40, height)) *
+                            (1.0 - smoothstep(0.2, 0.9, across));
+        const float mid = (1.0 - smoothstep(0.25, 0.75, height));
+        const vec3 heat = mix(mix(vec3(0.95, 0.30, 0.03), vec3(1.0, 0.55, 0.09), mid),
+                              vec3(1.0, 0.78, 0.34), heart);
+        out_color = vec4(in_color.rgb * heat * body * mix(0.7, 1.0, noise) *
                          in_color.a * intersection_fade(), 0.0);
         return;
     }

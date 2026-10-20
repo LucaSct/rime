@@ -392,10 +392,32 @@ void Effects::collect_lights() {
                                                       d.lo.y + radius * 0.46f,
                                                       center.z + size * 0.43f * std::sin(phase)},
                                                      radius,
-                                                     {4.8f, 4.3f, 2.9f},
+                                                     {4.2f, 3.1f, 1.4f},
                                                      std::min(d.intensity, 1.0f) *
                                                          (0.78f + 0.08f * std::sin(phase)),
                                                      true};
+        }
+        // Upper tongues: render-only billboards born INSIDE the core's upper half so the fire
+        // visibly continues the core instead of floating above it. A fire is taller than wide
+        // because buoyant gas accelerates upward; each tongue therefore gets a tall sprite
+        // (mode 2 stretches it 1.5x) whose height surges on its own incommensurate frequency,
+        // which reads as flicker. Phases come from accepted presentation time and source
+        // identity only, so replays are bit-identical.
+        for (std::size_t i = 0; i < upper_tongues_per_source; ++i) {
+            const float fi = float(i);
+            const float phase = float(presentation_seconds_) * (1.7f + 0.37f * fi) + fi * 2.4f +
+                                float(d.entity.index % 13u);
+            const float lobe = 0.5f + 0.5f * std::sin(phase) * std::sin(phase * 0.43f + fi);
+            const float ang = fi * 1.5708f + 0.6f * std::sin(phase * 0.31f);
+            const float width = size * (0.36f + 0.16f * lobe);
+            const float lean = size * (0.20f + 0.10f * std::sin(phase * 0.7f));
+            render_flames_[render_flame_count_++] = {
+                {center.x + lean * std::cos(ang),
+                 d.lo.y + size * (0.80f + 0.55f * lobe),
+                 center.z + lean * std::sin(ang)},
+                width,
+                {3.2f, 2.0f, 0.8f},
+                std::clamp(std::min(d.intensity, 1.0f) * (0.38f + 0.30f * lobe), 0.0f, 1.0f)};
         }
         for (std::size_t i = 0; i < source.mote_count && render_flame_count_ < max_flames; ++i) {
             const auto& mote = source.motes[i];
