@@ -95,7 +95,15 @@ inline int apply(ecs::World& world) {
     }
     authored.intensity = 0.06f;
     authored.use_scene_sun = true;
-    authored.angular_radius = 0.012f;
+    // The disc's radiance is now E / (pi r^2) (sky_common.glsl), the value that delivers exactly
+    // the irradiance the DirectionalLight and the sky LUT use, so this radius only sets how big the
+    // sun LOOKS, not how bright the scene is. 0.0075 rad is ~1.6x the real sun (0.0047): large
+    // enough to read at 1280x720 without the old 2.6x cartoon disc.
+    authored.angular_radius = 0.0075f;
+    // Aerial perspective: a street scene with hills 1-3 km out wants more cueing than physical
+    // Earth air gives (optical depth ~0.1 in blue at 3 km); x20 makes distant hills visibly hazy
+    // while 50 m of air still dims by only a few percent, so nearby geometry is unchanged.
+    authored.aerial_density = 20.0f;
     // A broken cloud deck rather than a clear test sky. Wind stays fixed here: changing this
     // bake every frame would also animate the environment lighting while diagnosing stability.
     authored.coverage = .62f;

@@ -671,6 +671,54 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         fu.point_lights[i] = scene.point_lights[i];
     fu.light_counts[0] = ndir;
     fu.light_counts[1] = npoint;
+    // ── The sky resolved EARLY, so cloud can dim the sun (sun vs cloud) ──────────────────────
+    // The frame uniform buffer below carries the sun's radiance, so whatever dims the sun has to be
+    // known before it uploads. The sky (including its sun coupling) is therefore resolved here,
+    // once; the bake and composite further down reuse this same `sp`, so a scene still cannot be
+    // lit by one sky and painted with another.
+    const bool sky_on = sky_params_.enabled || scene.has_sky;
+    SkyParams sp = sky_params_;
+    if (scene.has_sky) {
+        const Sky& a = scene.sky;
+        sp.enabled = true;
+        sp.zenith[0] = a.zenith_r;
+        sp.zenith[1] = a.zenith_g;
+        sp.zenith[2] = a.zenith_b;
+        sp.horizon[0] = a.horizon_r;
+        sp.horizon[1] = a.horizon_g;
+        sp.horizon[2] = a.horizon_b;
+        sp.intensity = a.intensity;
+        sp.angular_radius = a.sun_angular_radius;
+        sp.clouds_enabled = a.clouds;
+        sp.coverage = a.cloud_coverage;
+        sp.density = a.cloud_density;
+        sp.altitude = a.cloud_altitude;
+        sp.scale = a.cloud_scale;
+        sp.sharpness = a.cloud_sharpness;
+        sp.wind[0] = a.wind_x;
+        sp.wind[1] = a.wind_z;
+    }
+    // The sun couples to the scene's first directional light unless a caller pinned it. Note
+    // the SIGN: DirectionalLight::direction is the direction light TRAVELS, and the shader
+    // wants the direction it comes FROM, which is what "toward the sun" means.
+    if (sp.use_scene_sun && ndir > 0) {
+        sp.sun_direction[0] = -fu.dir_lights[0].direction[0];
+        sp.sun_direction[1] = -fu.dir_lights[0].direction[1];
+        sp.sun_direction[2] = -fu.dir_lights[0].direction[2];
+    }
+    // A cloud over the sun must dim the DIRECT light and not only the painted disc, or the sun is
+    // visibly hidden while shadows stay razor sharp and fully lit. The sky composite scales the
+    // disc by the same transmittance (sky_common.glsl). It multiplies radiance, so shadow-map
+    // lookups are unchanged and shadows fade smoothly with the light rather than switching off.
+    if (sky_on && ndir > 0) {
+        const float t = sky_sun_cloud_transmittance(sp,
+                                                    core::Vec3{scene.camera.position[0],
+                                                               scene.camera.position[1],
+                                                               scene.camera.position[2]});
+        for (float& c : fu.dir_lights[0].radiance) {
+            c *= t;
+        }
+    }
     device_.write_buffer(frame_ubos_[ubo_slot_], &fu, sizeof(fu));
 
     // ── Per-draw uniforms + resolved textures ─────────────────────────────────────────────
@@ -847,36 +895,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // The SAME resolved SkyParams then feeds the background composite further down. That is the
     // point of resolving here rather than twice: a scene lit by one sky and painted with another
     // would be wrong in a way no screenshot could show you.
-    const bool sky_on = sky_params_.enabled || scene.has_sky;
-    SkyParams sp = sky_params_;
-    if (scene.has_sky) {
-        const Sky& a = scene.sky;
-        sp.enabled = true;
-        sp.zenith[0] = a.zenith_r;
-        sp.zenith[1] = a.zenith_g;
-        sp.zenith[2] = a.zenith_b;
-        sp.horizon[0] = a.horizon_r;
-        sp.horizon[1] = a.horizon_g;
-        sp.horizon[2] = a.horizon_b;
-        sp.intensity = a.intensity;
-        sp.angular_radius = a.sun_angular_radius;
-        sp.clouds_enabled = a.clouds;
-        sp.coverage = a.cloud_coverage;
-        sp.density = a.cloud_density;
-        sp.altitude = a.cloud_altitude;
-        sp.scale = a.cloud_scale;
-        sp.sharpness = a.cloud_sharpness;
-        sp.wind[0] = a.wind_x;
-        sp.wind[1] = a.wind_z;
-    }
-    // The sun couples to the scene's first directional light unless a caller pinned it. Note
-    // the SIGN: DirectionalLight::direction is the direction light TRAVELS, and the shader
-    // wants the direction it comes FROM, which is what "toward the sun" means.
-    if (sp.use_scene_sun && ndir > 0) {
-        sp.sun_direction[0] = -fu.dir_lights[0].direction[0];
-        sp.sun_direction[1] = -fu.dir_lights[0].direction[1];
-        sp.sun_direction[2] = -fu.dir_lights[0].direction[2];
-    }
+    // (`sky_on` and `sp` are resolved earlier, before the frame uniforms upload -- see "sun vs
+    // cloud".)
     SkyInputs ski{};
     ski.view = scene.camera.view;
     ski.proj = proj_rasterized; // the matrix the depth buffer was rasterized with
