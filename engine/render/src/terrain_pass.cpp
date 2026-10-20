@@ -240,6 +240,25 @@ TerrainPass::TerrainPass(rhi::Device& device) : device_(device) {
     pd.debug_name = "terrain";
     pipeline_ = device.create_graphics_pipeline(pd);
 
+    // The shadow-caster pipeline: terrain.vert only, no fragment stage and no colour attachment
+    // (the same depth-only shape DepthPrepass uses). Only binding 0 (the heightfield, read in the
+    // vertex stage) is declared -- the splat/sky/layer bindings are fragment-only and a depth pass
+    // never reads them.
+    {
+        rhi::GraphicsPipelineDesc sd{};
+        sd.vertex_shader = vertex_shader_;
+        sd.color_format = rhi::Format::Undefined;
+        sd.cull = rhi::CullMode::None; // a heightfield casts from either side of its triangles
+        sd.depth_test = true;
+        sd.depth_write = true;
+        sd.depth_compare = rhi::CompareOp::Less;
+        sd.depth_format = kDepthFormat;
+        sd.bindings = std::span<const rhi::BindingDesc>(bindings, 1);
+        sd.push_constant_size = sizeof(TerrainPush);
+        sd.debug_name = "terrain-shadow";
+        shadow_pipeline_ = device.create_graphics_pipeline(sd);
+    }
+
     // Scene pipelines match their exact output set and all read the scene uniform block.
     std::array<rhi::BindingDesc, 16> scene_bindings{};
     std::copy(std::begin(bindings), std::end(bindings), scene_bindings.begin());
@@ -367,6 +386,7 @@ TerrainPass::~TerrainPass() {
     device_.destroy(weight_sampler_);
     device_.destroy(sampler_);
     device_.destroy(pipeline_);
+    device_.destroy(shadow_pipeline_);
     for (auto pipeline : scene_pipelines_) {
         device_.destroy(pipeline);
     }
@@ -729,6 +749,48 @@ void TerrainPass::add_scene(RenderGraph& graph,
              scene_uniforms,
              shadow,
              true);
+}
+
+void TerrainPass::add_shadow_caster(RenderGraph& graph,
+                                    RGTexture cascades,
+                                    std::uint32_t layer,
+                                    TerrainTileId id,
+                                    const core::Mat4& view_proj,
+                                    const core::Vec3& eye,
+                                    const TerrainLodDraw& lod) {
+    if (!contains(id)) {
+        return;
+    }
+    const TerrainTile& tile = tiles_[id];
+    // Bake flags are fragment-only; clear them so the push block describes geometry alone.
+    TerrainLodDraw geometry = lod;
+    geometry.own_bake = false;
+    geometry.parent_bake = false;
+    const TerrainPush push = terrain_push(tile, view_proj, eye, TerrainLight{}, geometry);
+    RGDepthAttachment depth_att{};
+    depth_att.texture = cascades;
+    depth_att.load = rhi::LoadOp::Load; // the cascade was cleared by its mesh pass
+    depth_att.store = rhi::StoreOp::Store;
+    depth_att.layer = layer;
+    RenderGraph::RasterPassDesc desc{};
+    desc.depth = &depth_att;
+    const RGTexture sampled[] = {
+        graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead)};
+    desc.sampled = sampled;
+    graph.add_raster_pass("terrain-shadow",
+                          desc,
+                          [pipeline = shadow_pipeline_,
+                           sampler = sampler_,
+                           heights = tile.heights,
+                           indices = tile.indices,
+                           index_count = tile.index_count,
+                           push](rhi::CommandBuffer& cmd) {
+                              cmd.bind_pipeline(pipeline);
+                              cmd.bind_texture(0, heights, sampler);
+                              cmd.bind_index_buffer(indices, rhi::IndexType::Uint32);
+                              cmd.push_constants(&push, sizeof(push));
+                              cmd.draw_indexed(index_count);
+                          });
 }
 
 void TerrainPass::add_impl(RenderGraph& graph,

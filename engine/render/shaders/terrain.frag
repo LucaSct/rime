@@ -41,6 +41,7 @@ layout(location = 1) in vec2 v_local; // tile-local xz, metres
 // m19.8d3: xy = position in the tile's SAMPLE grid (integers at vertices), z = the vertex stage's
 // geomorph factor, interpolated — see terrain.vert.
 layout(location = 2) in vec3 v_lod;
+layout(location = 3) in vec3 v_normal; // smooth heightfield shading normal (terrain.vert)
 
 // m19.4: the splat weights (RGBA8_UNORM, one texel = the four layer weights) and the per-tile
 // constants. The push block is not the place for per-layer data, so these live in a small uniform buffer made at
@@ -394,10 +395,17 @@ void main() {
     const float alpha = roughness * roughness;
     const vec3 v = normalize(pc.eye.xyz - v_world);
 
-    vec3 n = normalize(cross(dFdx(v_world), dFdy(v_world)));
-    if (n.y < 0.0) {
-        n = -n; // see the header: a heightfield's surface normal is never downward
+    vec3 n_face = normalize(cross(dFdx(v_world), dFdy(v_world)));
+    if (n_face.y < 0.0) {
+        n_face = -n_face; // see the header: a heightfield's surface normal is never downward
     }
+    // SHADING uses the smooth heightfield normal (terrain.vert) so facets do not show as flat
+    // tones; the FACE normal n_face is kept for the shadow-map bias offset below, because bias has
+    // to follow the triangle actually rasterised into the depth buffer.
+    const vec3 n = normalize(v_normal);
+    // UPDATE: `n` is now the SMOOTH heightfield normal, so the filter the G-buffer write applies
+    // below (filter_specular_alpha) is meaningful here. The paragraph that follows records why it
+    // was withheld while `n` was a face normal.
     // NO geometric specular AA here, deliberately (ADR-0078 step 1a applies it in pbr_forward*).
     // The filter measures how fast the SHADING normal turns across a pixel, and terrain's `n` is a
     // per-triangle FACE normal rebuilt from position derivatives just above. Within one facet that
@@ -417,7 +425,7 @@ void main() {
 #ifdef TERRAIN_SCENE
     sun_radiance = scene.sun_radiance.rgb;
     // Only the DIRECT sun is shadowed; ambient, sky, bakes and sky specular below are untouched.
-    sun_radiance *= sun_shadow(v_world, n);
+    sun_radiance *= sun_shadow(v_world, n_face);
 #endif
     vec3 radiance = shade_light(n, v, -pc.sun.xyz, sun_radiance, base, metallic, alpha);
 
@@ -433,6 +441,12 @@ void main() {
         const vec3 sky_diffuse = sky_sh_irradiance(n);
         radiance += (1.0 - metallic) * base * sky_diffuse;
 
+#ifndef TERRAIN_WRITE_GBUFFER
+        // Exactly ONE path may supply a pixel's specular environment (pbr_forward_shadowed.frag
+        // explains it for meshes). The -DSCENE_GBUFFER twins are the SSR-on shaders, and
+        // ssr_resolve.frag adds `reflection * weight` on top of this output, falling back to the
+        // same sky LUT wherever its march misses -- so keeping this term as well would count the
+        // sky twice and brighten terrain whenever SSR is on. Compile-time, no uniform.
         // SPECULAR. What a mirror shows is the sky along r = reflect(-v, n), read from the LUT.
         //
         // BELOW THE HORIZON the LUT holds the PLANET's ground as seen from altitude, which is not
@@ -461,6 +475,7 @@ void main() {
         // sharp-ish sky dimmed by a blurred one, rather than one properly blurred sky.
         const vec3 sky_specular = mix(sky_mirror, sky_diffuse, alpha);
         radiance += sky_specular * env_brdf_approx(f0, roughness, max(dot(n, v), 1e-4));
+#endif
     } else {
         // AMBIENT is a uniform-environment STAND-IN when no sky is bound (m19.5, ADR-0064) —
         // kept instruction for instruction, so a tile without a sky renders as m19.5 did (to one

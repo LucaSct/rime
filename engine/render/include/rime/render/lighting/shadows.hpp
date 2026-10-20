@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 #include "rime/core/math/mat.hpp"
@@ -81,11 +82,19 @@ public:
     // light), upload the cascade matrices, and return what the shadowed forward pass binds.
     // `scene_data` is the same draw list the forward pass uses — the cascade passes render its
     // geometry's depth.
+    //
+    // `extra_casters` (optional) runs once per cascade, right after that cascade's mesh depth
+    // pass, with the cascade array, the layer and the light view_proj. A caster that is not a
+    // SceneDrawData mesh -- the heightfield terrain -- declares its own LOAD-ing depth pass into
+    // the same layer there, so the cascade is cleared once and everything shares its depth.
+    using ExtraCasters = std::function<
+        void(RenderGraph&, RGTexture cascades, std::uint32_t layer, const core::Mat4&)>;
     [[nodiscard]] ShadowBinding add(RenderGraph& graph,
                                     const DepthPrepass& prepass,
                                     const SceneDrawData& scene_data,
                                     const CascadeInputs& inputs,
-                                    const LightingSettings& settings);
+                                    const LightingSettings& settings,
+                                    const ExtraCasters& extra_casters = {});
 
     // The valid-but-empty cascade binding for a shadowed frame with NO directional light (a
     // spot-only scene, m10.2): the shadowed pipeline's binding 7/8 must still point at a real

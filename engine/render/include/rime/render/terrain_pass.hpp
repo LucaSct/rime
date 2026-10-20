@@ -459,6 +459,19 @@ public:
                    RenderGraph::FrameSlice scene_uniforms,
                    const ShadowBinding& shadow);
 
+    // Shadow caster: draw tile `id` depth-only into layer `layer` of the sun's cascade array,
+    // LOADING what the mesh casters already wrote there. `view_proj` is that cascade's light
+    // matrix. Terrain.vert is reused verbatim (same LOD morph, same height fetch), so the caster
+    // surface is exactly the one the camera sees -- a hill shadows what lies behind it from a low
+    // sun. A no-op for a tile this pass does not hold.
+    void add_shadow_caster(RenderGraph& graph,
+                           RGTexture cascades,
+                           std::uint32_t layer,
+                           TerrainTileId id,
+                           const core::Mat4& view_proj,
+                           const core::Vec3& eye,
+                           const TerrainLodDraw& lod);
+
     // Assets `upload()` would not draw. Guardrail 5: a refused tile and a tile that was never
     // handed over produce the same empty frame, so the difference has to be countable.
     [[nodiscard]] std::uint64_t tiles_refused() const noexcept { return refused_; }
@@ -504,6 +517,7 @@ private:
     rhi::ShaderHandle vertex_shader_;
     rhi::ShaderHandle fragment_shader_;
     rhi::PipelineHandle pipeline_;
+    rhi::PipelineHandle shadow_pipeline_; // depth-only, for the sun cascades
     std::array<rhi::ShaderHandle, 4> scene_fragment_shaders_{};
     std::array<rhi::PipelineHandle, 4> scene_pipelines_{};
     rhi::SamplerHandle sampler_;
