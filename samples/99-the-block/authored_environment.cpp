@@ -53,17 +53,32 @@ AuthoredEnvironment::prepare(ecs::World& world, std::span<const render::GpuParti
                 {appearance.color.x, appearance.color.y, appearance.color.z, appearance.opacity}};
         }
     }
-    for (const auto& flame : effects_.flames())
+    for (const auto& flame : effects_.render_flames())
         snapshot_.flames[snapshot_.flame_count++] = {
             {flame.position.x, flame.position.y, flame.position.z, flame.half_size},
             {flame.color.x, flame.color.y, flame.color.z, flame.opacity}};
-    for (const auto& light : effects_.lights())
+    std::size_t fire_index = 0;
+    for (const auto& light : effects_.lights()) {
+        // The scene light borrows the same smoothly moving tongue amplitudes as the flame.
+        // Small modulation and centimetre-scale drift give ground illumination life without
+        // an independent random flicker that could flash when the visible flame is quiet.
+        const auto tongues = effects_.flames();
+        const auto& root = tongues[fire_index * 3];
+        const auto& side = tongues[fire_index * 3 + 1];
+        const float modulation =
+            std::clamp(0.86f + 0.15f * root.opacity + 0.12f * side.opacity, 0.86f, 1.12f);
+        const core::Vec3 light_position{
+            light.position.x + 0.16f * (side.position.x - light.position.x),
+            light.position.y,
+            light.position.z + 0.16f * (side.position.z - light.position.z)};
         snapshot_.lights[snapshot_.light_count++] = {
-            {light.position.x, light.position.y, light.position.z, light.radius},
-            {light.color.x * light.intensity,
-             light.color.y * light.intensity,
-             light.color.z * light.intensity,
+            {light_position.x, light_position.y, light_position.z, light.radius},
+            {light.color.x * light.intensity * modulation,
+             light.color.y * light.intensity * modulation,
+             light.color.z * light.intensity * modulation,
              0}};
+        ++fire_index;
+    }
 
     // Validation and committed-state mapping belong to the shared thermal adapter. Do not clamp
     // bad authored energy, or allocate 266 textures merely because an inert component exists.

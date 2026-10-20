@@ -40,6 +40,7 @@ layout(location = 0) out vec2 out_uv;
 layout(location = 1) out vec4 out_color;
 layout(location = 2) flat out int out_mode;
 layout(location = 3) flat out vec2 out_noise_origin;
+layout(location = 4) flat out float out_half_size;
 
 void main() {
     // Two triangles from six indices, in the corner order (-1,-1) (1,-1) (-1,1) / (-1,1) (1,-1)
@@ -70,7 +71,12 @@ void main() {
     out_uv = corner;            // [-1,1]² — the fragment stage's radial falloff domain
     out_color = p.color_alpha;
     out_mode = mode;
+    out_half_size = half_size;
     // Continuous world-space offsets give nearby puffs related but different detail, without a
     // clock, random frame seed, or quantized position hash that pops when a puff moves.
+    // A flame mote carries its own animation phase in its moving centre and fading opacity.
+    // This scrolls each sprite's noise separately without a wall-clock uniform or new RHI state.
     out_noise_origin = centre.xz * 0.71 + vec2(centre.y * 0.37, half_size * 0.83);
+    if (mode == 2)
+        out_noise_origin += vec2(p.color_alpha.a * 1.7, -centre.y * 1.3);
 }

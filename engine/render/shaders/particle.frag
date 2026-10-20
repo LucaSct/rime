@@ -19,6 +19,7 @@ layout(location = 0) in vec2 in_uv;    // [-1,1]², the billboard's own space
 layout(location = 1) in vec4 in_color; // rgb = linear radiance, a = fade
 layout(location = 2) flat in int in_mode;
 layout(location = 3) flat in vec2 in_noise_origin;
+layout(location = 4) flat in float in_half_size;
 
 layout(location = 0) out vec4 out_color;
 
@@ -39,25 +40,44 @@ float smooth_noise(vec2 p) {
 
 void main() {
     if (in_mode == 2) {
+        // Tiny fire particles are embers: compact bright discs that cool in the CPU colour
+        // ramp and wink out with their own age. The size tag preserves the billboard ABI.
+        if (in_half_size < 0.04) {
+            const float r2 = dot(in_uv, in_uv);
+            if (r2 >= 1.0) discard;
+            const float glow = (1.0 - r2) * (1.0 - r2) * in_color.a;
+            out_color = vec4(in_color.rgb * glow, 0.0);
+            return;
+        }
         const float height = in_uv.y * 0.5 + 0.5;
-        const float turbulence = smooth_noise(in_uv * vec2(3.0, 4.0) + in_noise_origin);
-        // A broad root narrows continuously to a tip. A small lateral bend and smooth noise
-        // make a tongue, while the analytic envelope keeps every quad edge fully transparent.
-        const float bend = sin(height * 8.0 + in_noise_origin.x) * height * 0.17;
-        const float width = (0.78 * pow(1.0 - height, 0.8) + 0.015) *
-                            mix(0.78, 1.0, turbulence);
-        const float across = abs(in_uv.x - bend) / width;
-        const float tongue = (1.0 - smoothstep(0.35, 1.0, across)) *
-                             smoothstep(0.0, 0.12, height) *
-                             (1.0 - smoothstep(0.86, 1.0, height));
-        const float opacity = tongue * mix(0.65, 1.0, turbulence) *
+        const vec2 flow = in_uv * vec2(2.7, 3.5) + in_noise_origin;
+        const float coarse = smooth_noise(flow);
+        const float detail = smooth_noise(flow * 2.1 + vec2(4.3, 7.1));
+        // Domain warping bends the silhouette and advects bright internal filaments as each
+        // mote rises. Tapering by height makes several overlapping sprites separate at their
+        // tips; the smooth envelopes prevent a square top or hard cut at the base.
+        const float bend = (coarse - 0.5) * height * 0.48 +
+                           sin(height * 7.0 + in_noise_origin.x) * height * 0.11;
+        const float width = (0.85 * pow(1.0 - height, 0.74) + 0.01) *
+                            mix(0.72, 1.08, detail);
+        const float across = abs(in_uv.x - bend) / max(width, 0.015);
+        const float tongue = (1.0 - smoothstep(0.23, 1.0, across)) *
+                             smoothstep(0.0, 0.10, height) *
+                             (1.0 - smoothstep(0.89, 1.0, height));
+        const float filament = smoothstep(0.25, 0.8, coarse * 0.7 + detail * 0.3);
+        const float opacity = tongue * mix(0.48, 1.0, filament) *
                               clamp(in_color.a, 0.0, 1.0);
         if (opacity <= 0.0) {
             discard;
         }
-        // The hottest core lives near the broad root; edges and tip retain the orange envelope.
-        const float core = pow(max(1.0 - across, 0.0), 2.0) * (1.0 - height);
-        const vec3 heat = mix(vec3(1.0, 0.28, 0.025), vec3(1.0, 0.95, 0.62), core);
+        // A compact blackbody-inspired ramp reads from red cooling edges through orange and
+        // yellow to the near-white core. Colour still fades to zero with each mote's lifetime.
+        const float core = pow(max(1.0 - across, 0.0), 2.0) * (1.0 - height) * filament;
+        const vec3 heat = mix(mix(vec3(0.75, 0.055, 0.008),
+                                   vec3(1.0, 0.43, 0.025),
+                                   smoothstep(0.0, 0.45, core)),
+                              vec3(1.0, 0.94, 0.72),
+                              smoothstep(0.45, 1.0, core));
         out_color = vec4(in_color.rgb * heat * opacity, 0.0);
         return;
     }
