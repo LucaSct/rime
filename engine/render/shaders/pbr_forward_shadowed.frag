@@ -502,6 +502,10 @@ void main() {
     // the flat constant never had it — ADR-0065's addendum records the gap.)
     const vec3 diffuse_albedo = albedo * (1.0 - metallic);
     vec3 out_radiance;
+    // Diagnostic only (RIME_SHIMMER_TERM, ddgi.enabled_pad.z != 0): remember individual lighting
+    // terms so the pass can output ONE of them. With the id at 0 these are dead stores.
+    vec3 dbg_irradiance = vec3(0.0);
+    float dbg_influence = 0.0;
     if (ddgi.enabled_pad.x != 0u) {
         bool covered;
         const vec3 geometric_normal = normalize(v_world_normal);
@@ -512,12 +516,14 @@ void main() {
         const float surface_bias = max(0.01, ddgi.grid_origin_spacing.w * 0.025);
         vec3 indirect = ddgi_sample_irradiance(v_world_pos + geometric_normal * surface_bias,
                                              geometric_normal, covered);
+        dbg_irradiance = indirect;
         if (ddgi.enabled_pad.y != 0u) {
             // Coverage and radiance are separate: an accepted zero inside the core stays dark.
             // Replace ONE diffuse environment term instead of adding sky on top of measured GI.
             const vec3 fallback = sky_sh_enabled() ? sky_sh_irradiance(normalize(v_world_normal))
                                                    : frame.ambient.rgb;
             const float influence = covered ? ddgi_spatial_influence(v_world_pos, frame.camera_pos.xyz) : 0.0;
+            dbg_influence = influence;
             indirect = mix(fallback, indirect, influence);
         }
         out_radiance = indirect * diffuse_albedo * ao;
@@ -630,6 +636,7 @@ void main() {
     }
 #endif
 
+    const vec3 dbg_ambient_radiance = out_radiance; // everything above is ambient/indirect
     // The sun (light 0) is the shadow caster; its contribution is scaled by the cascade shadow
     // factor. The remaining directional lights (fill lights) are unshadowed in v1.
     float sun_factor = sun_shadow(v_world_pos, normalize(v_world_normal));
@@ -709,6 +716,20 @@ void main() {
         out_radiance += draw.emissive.rgb * emissive_sample;
     }
     out_hdr = vec4(out_radiance, 1.0);
+    // Diagnostic term view (shimmer diagnosis, 2026-10-20). A uniform branch, no extra pass: the
+    // lit colour is replaced by one component so a scripted camera path can ask WHICH term moves
+    // when the camera does. 1 raw DDGI irradiance, 2 DDGI spatial influence (grey), 3 diffuse
+    // ambient (mixed indirect * albedo * ao), 4 specular ambient (zero here when SSR owns it),
+    // 5 direct lighting (final minus ambient). Ids 6-8 are read by ssr_resolve.frag.
+    if (ddgi.enabled_pad.z != 0u) {
+        const uint t = ddgi.enabled_pad.z;
+        vec3 o = vec3(0.0);
+        if (t == 1u) o = dbg_irradiance;
+        else if (t == 2u) o = vec3(dbg_influence);
+        else if (t == 3u) o = dbg_ambient_radiance;
+        else if (t == 5u) o = out_radiance - dbg_ambient_radiance;
+        out_hdr = vec4(o, 1.0);
+    }
 
 #ifdef WRITE_GBUFFER
     // Thin G-buffer for SSR (m10.7a): the shading normal `n` (already normal-mapped, world-space)

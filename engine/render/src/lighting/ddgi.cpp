@@ -832,6 +832,13 @@ DdgiBinding DdgiProbes::add(RenderGraph& graph,
     sp.grid_dims_perrow[3] = probes_per_row;
     sp.enabled_pad[0] = 1u;
     sp.enabled_pad[1] = settings.ddgi_volume_fade ? 1u : 0u;
+    // Diagnostic: RIME_SHIMMER_TERM=<id> makes the shaded passes output one lighting term (see
+    // pbr_forward_shadowed.frag). Read once; 0 (unset) keeps the shaders on their normal path.
+    static const std::uint32_t term_id = [] {
+        const char* e = std::getenv("RIME_SHIMMER_TERM");
+        return e ? static_cast<std::uint32_t>(std::atoi(e)) : 0u;
+    }();
+    sp.enabled_pad[2] = term_id;
     const RenderGraph::FrameSlice sp_slice = graph.push_frame_data(&sp, sizeof(sp));
 
     return DdgiBinding{irradiance_rg, visibility_rg, sp_slice, atlas_sampler_};
