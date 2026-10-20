@@ -52,6 +52,84 @@ vec2 water_slope(vec2 p, float t, float footprint) {
     return s;
 }
 
+// ── ICE FRACTURES ───────────────────────────────────────────────────────────────────────────
+//
+// A frozen pond cracks along stress lines that are long, thin, sparse and irregular, at several
+// scales at once, and some of them run DEEP inside the slab. Three ingredients here:
+//
+// * Fractures are the EDGES of a Voronoi diagram (distance to the bisector of the two nearest
+//   seeds, (d2 - d1)), but only edges a per-pair hash selects survive -- sparse and branching,
+//   instead of the uniform tile grid a full diagram gives. Three scales, thinner and rarer as
+//   they get finer, and the plane is domain-warped by low-frequency noise so no edge is straight.
+// * Depth by parallax. A crack at depth d below the surface appears shifted along the view ray by
+//   d/cos(theta). Evaluating the SAME field at a view-shifted position gives deep layers that
+//   slide against the surface as the camera moves, the cheap cue the eye reads as thickness.
+// * Air bubbles freeze into long white streaks aligned with the growth direction: stripes in a
+//   rotated frame, gated per stripe and broken into segments by value noise.
+//
+// Edge widths are clamped to the pixel footprint (and faded by how far below it they fall) so thin
+// lines shimmer rather than alias.
+float ihash(vec2 p) {
+    p = fract(p * vec2(123.34, 456.21));
+    p += dot(p, p + 45.32);
+    return fract(p.x * p.y);
+}
+
+vec2 ihash2(vec2 p) {
+    return vec2(ihash(p), ihash(p + 19.19));
+}
+
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(ihash(i), ihash(i + vec2(1, 0)), f.x),
+               mix(ihash(i + vec2(0, 1)), ihash(i + vec2(1, 1)), f.x), f.y);
+}
+
+float crack_layer(vec2 p, float scale, float gate, float width, float footprint, float seed) {
+    vec2 q = p * scale + seed;
+    q += (vec2(vnoise(q * .55 + 3.1), vnoise(q * .55 + 9.7)) - .5) * .9; // irregular, not straight
+    vec2 ip = floor(q), fp = fract(q);
+    float d1 = 8.0, d2 = 8.0;
+    vec2 id1 = vec2(0.0), id2 = vec2(0.0);
+    for (int j = -1; j <= 1; ++j)
+        for (int i = -1; i <= 1; ++i) {
+            vec2 g = vec2(i, j);
+            vec2 r = g + ihash2(ip + g) - fp;
+            float d = dot(r, r);
+            if (d < d1) { d2 = d1; id2 = id1; d1 = d; id1 = ip + g; }
+            else if (d < d2) { d2 = d; id2 = ip + g; }
+        }
+    float edge_m = (sqrt(d2) - sqrt(d1)) * .5 / scale; // metres to the nearest edge, roughly
+    float keep = step(ihash(id1 + id2 + seed), gate);
+    float w = max(width, footprint * .9);
+    float strength = clamp(width / max(footprint, 1e-5), .25, 1.0);
+    return keep * strength * (1.0 - smoothstep(w * .35, w, edge_m));
+}
+
+// x = fracture brightness (surface + two deep layers), y = bubble streaks, z = surface scratches.
+vec3 ice_fractures(vec2 p, vec3 view, float footprint) {
+    vec2 shift = -view.xz / max(view.y, .15);
+    float top = max(crack_layer(p, .9, .50, .0030, footprint, 1.0),
+                    max(crack_layer(p, 2.6, .38, .0016, footprint, 7.0),
+                        crack_layer(p, 7.0, .24, .0009, footprint, 13.0) * .8));
+    float deep1 = max(crack_layer(p + shift * .04, 1.2, .45, .0045, footprint, 21.0),
+                      crack_layer(p + shift * .04, 3.4, .30, .0030, footprint, 27.0) * .8);
+    float deep2 = crack_layer(p + shift * .11, .7, .40, .0070, footprint, 33.0);
+    float crack = clamp(max(top, max(deep1 * .55, deep2 * .32)), 0.0, 1.0);
+
+    vec2 q = vec2(dot(p, vec2(.9, .43)), dot(p, vec2(-.43, .9)));
+    float row = floor(q.y * 14.0);
+    float h = ihash(vec2(row, 3.1));
+    float along = vnoise(vec2(q.x * (2.0 + h * 3.0) + h * 50.0, row));
+    float across = 1.0 - smoothstep(.10, .34, abs(fract(q.y * 14.0) - .5));
+    float streaks = step(.86, h) * smoothstep(.62, .85, along) * across * .55;
+
+    vec2 sc = vec2(dot(p, vec2(.8, .6)) * 38.0, dot(p, vec2(-.6, .8)) * 1.3);
+    float scratch = smoothstep(.72, .90, vnoise(sc)) * smoothstep(.5, .8, vnoise(p * 2.3 + 5.0));
+    return vec3(crack, streaks, scratch);
+}
+
 PhaseOptics phase_optics(vec3 geometric, vec3 detail_normal, vec3 tangent, vec3 position,
                         vec2 uv, vec3 view, vec3 tint, vec3 frost_map,
                         float authored_roughness, vec4 phase, vec3 presentation) {
@@ -68,7 +146,7 @@ PhaseOptics phase_optics(vec3 geometric, vec3 detail_normal, vec3 tangent, vec3 
     float footprint = max(length(fwidth(position)), 1e-4);
     vec2 slope = water_slope(p, presentation.x, footprint);
     vec3 mapped = detail_normal / max(dot(detail_normal, N), .25) - N;
-    o.normal = normalize(N + mapped * mix(.18, .06, wet) +
+    o.normal = normalize(N + mapped * (frost > .5 ? .18 : mix(.025, .06, wet)) +
                          wet * vec3(-slope.x, 0.0, -slope.y));
     // Grazing guard. At a low camera the steep side of a wave tilts the mirror direction BELOW the
     // surface, where the reflection resolves to the dark "ground" half of the sky and the crest
@@ -78,16 +156,15 @@ PhaseOptics phase_optics(vec3 geometric, vec3 detail_normal, vec3 tangent, vec3 
         float up = dot(reflect(-view, o.normal), N);
         o.normal = normalize(mix(o.normal, N, clamp((.06 - up) * 5.0, 0.0, 1.0)));
     }
-    // Ice inclusions: the existing cellular frost field supplies branching internal cracks.
-    // Sparse hashed air pockets add a second scale; their scattering fades continuously on
-    // melting. Frost has more scattering and a wider lobe than polished bulk ice.
-    float vein = presentation.z > .5 ? smoothstep(.65, .77, frost_map.r) : 0.0;
-    vec2 cell = floor(uv * 48.0);
-    float h = fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453);
-    vec2 bubble_uv = fract(uv * 48.0) - vec2(.25 + h * .5, .5);
-    float bubble = (1.0 - smoothstep(.025, .11, length(bubble_uv))) * step(.78, h);
-    float cloudy = clamp(vein * .75 + bubble * .5 + frost, 0.0, 1.0) * (1.0 - wet);
-    float ice_roughness = mix(.055, .29, clamp(vein + frost, 0.0, 1.0));
+    // Ice, from the inside out. All of it is procedural in WORLD metres (not uv), so cracks keep
+    // their size on any sheet and never repeat as a visible tile. See ice_fractures above.
+    vec3 ice = ice_fractures(p, view, footprint);
+    float crack = ice.x, streaks = ice.y, scratch = ice.z;
+    float frost_patch = smoothstep(.62, .85, vnoise(p * .9 + 11.0) * .6 + vnoise(p * 2.9 - 4.0) * .4) * .5;
+    float cloudy = clamp(.08 + crack * .85 + streaks * .55 + frost_patch * .3 + frost, 0.0, 1.0) *
+                   (1.0 - wet);
+    // Polished ice is nearly a mirror (sharp sky reflection); scratches and frost patches scatter.
+    float ice_roughness = clamp(.045 + scratch * .22 + frost_patch * .28 + crack * .12, .04, .5);
     // Keep the authored map responsive (including the environment smoke's roughness control),
     // while ordinary liquid texels land in the requested 0.02–0.06 glint range.
     float water_roughness = clamp(authored_roughness * .45, .025, .45);
@@ -104,7 +181,7 @@ PhaseOptics phase_optics(vec3 geometric, vec3 detail_normal, vec3 tangent, vec3 
     float thickness = phase.w * smoothstep(0.0, .55, edge);
     float nv = clamp(dot(o.normal, view), 0.0, 1.0);
     float cos_refracted = sqrt(1.0 - (1.0 - nv * nv) / (1.333 * 1.333));
-    vec3 sigma = mix(vec3(2.4, .65, .28), vec3(4.2, 1.1, .55), wet);
+    vec3 sigma = mix(vec3(6.5, 2.4, 1.2), vec3(3.2, .85, .45), wet);
     vec3 attenuation = exp(-sigma * thickness / cos_refracted);
     vec3 body = mix(vec3(.12, .30, .38), vec3(.012, .085, .12), wet);
     vec3 transmitted = tint * attenuation + body * (1.0 - attenuation);
