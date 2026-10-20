@@ -23,9 +23,12 @@
 #include "pbr_forward_shadowed.frag.spv.h"
 #include "pbr_forward_shadowed_gbuffer.frag.spv.h" // -DWRITE_GBUFFER variant (m10.7a)
 #include "pbr_forward_shadowed_sdf.frag.spv.h"
+#include "pbr_forward_water.frag.spv.h"
+#include "pbr_forward_water_gbuffer.frag.spv.h"
 #include "present.frag.spv.h"
 #include "rime/core/diagnostics/log.hpp"
 #include "rime/render/lighting/sdf_clipmap.hpp"
+#include "scene_copy.frag.spv.h"
 #include "taa_resolve.frag.spv.h"
 #include "tonemap.frag.spv.h"
 #include "velocity.frag.spv.h"
@@ -104,6 +107,10 @@ void record_draws(rhi::CommandBuffer& cmd,
         const DrawItem& item = data.draws[i];
         if ((item.flags & flag_filter) != flag_match) {
             continue; // belongs to the other partition
+        }
+        if ((item.flags & data.skip_flags) != 0 ||
+            (data.only_flags != 0 && (item.flags & data.only_flags) != data.only_flags)) {
+            continue; // the pass-level view (opaque vs water) excludes it
         }
         if (caster_frustum && !item.vertex_override.is_valid() &&
             !item.velocity_vertex_override.is_valid()) {
@@ -683,6 +690,18 @@ void ForwardPbrPass::ensure_first_person_pipelines() const {
 }
 
 ForwardPbrPass::~ForwardPbrPass() {
+    for (auto sampler : {water_linear_sampler_, water_nearest_sampler_})
+        if (sampler.is_valid())
+            device_.destroy(sampler);
+    for (auto pipe : {pipeline_water_, pipeline_water_gbuffer_, pipeline_scene_copy_})
+        if (pipe.is_valid())
+            device_.destroy(pipe);
+    for (auto shader : {water_fragment_shader_,
+                        water_gbuffer_fragment_shader_,
+                        copy_vertex_shader_,
+                        copy_fragment_shader_})
+        if (shader.is_valid())
+            device_.destroy(shader);
     device_.destroy(pipeline_first_person_sdf_);
     device_.destroy(pipeline_first_person_);
     device_.destroy(first_person_sdf_fragment_shader_);
@@ -746,6 +765,102 @@ void ForwardPbrPass::add(RenderGraph& graph,
     });
 }
 
+void ForwardPbrPass::ensure_water_pipelines() const {
+    if (pipeline_water_.is_valid())
+        return;
+    water_fragment_shader_ = make_shader(device_,
+                                         rhi::ShaderStage::Fragment,
+                                         pbr_forward_water_frag_spv,
+                                         sizeof(pbr_forward_water_frag_spv),
+                                         "pbr_forward_water.frag");
+    water_gbuffer_fragment_shader_ = make_shader(device_,
+                                                 rhi::ShaderStage::Fragment,
+                                                 pbr_forward_water_gbuffer_frag_spv,
+                                                 sizeof(pbr_forward_water_gbuffer_frag_spv),
+                                                 "pbr_forward_water_gbuffer.frag");
+    // The SDF variant's slots 21/22 are free here (water never uses the SDF sky variant): 21 is
+    // the opaque scene colour copy, 22 its depth bits.
+    std::vector<rhi::BindingDesc> bindings(std::begin(kShadowedBindings),
+                                           std::end(kShadowedBindings));
+    bindings.push_back({21, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
+    bindings.push_back({22, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment});
+    rhi::GraphicsPipelineDesc pd{};
+    pd.vertex_shader = vertex_shader_;
+    pd.fragment_shader = water_fragment_shader_;
+    pd.vertex_layout.stride = MeshRegistry::vertex_stride();
+    pd.vertex_layout.attributes = MeshRegistry::vertex_attributes();
+    pd.color_format = kHdrFormat;
+    pd.cull = rhi::CullMode::Back;
+    pd.depth_test = true;
+    pd.depth_write = true; // water joins the depth buffer so SSR, TAA and the sky see its surface
+    pd.depth_compare = rhi::CompareOp::Less; // against the OPAQUE depth: hidden water is rejected
+    pd.depth_format = kDepthFormat;
+    pd.bindings = bindings;
+    pd.debug_name = "forward-pbr water";
+    pipeline_water_ = device_.create_graphics_pipeline(pd);
+    const rhi::Format gbuffer_formats[] = {kHdrFormat, kGbufferFormat, kGbufferMaterialFormat};
+    pd.color_formats = gbuffer_formats;
+    pd.fragment_shader = water_gbuffer_fragment_shader_;
+    pd.debug_name = "forward-pbr water+gbuffer";
+    pipeline_water_gbuffer_ = device_.create_graphics_pipeline(pd);
+
+    copy_vertex_shader_ = make_shader(device_,
+                                      rhi::ShaderStage::Vertex,
+                                      fullscreen_vert_spv,
+                                      sizeof(fullscreen_vert_spv),
+                                      "fullscreen.vert");
+    copy_fragment_shader_ = make_shader(device_,
+                                        rhi::ShaderStage::Fragment,
+                                        scene_copy_frag_spv,
+                                        sizeof(scene_copy_frag_spv),
+                                        "scene_copy.frag");
+    const rhi::BindingDesc copy_bindings[] = {
+        {0, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+        {1, rhi::BindingType::CombinedImageSampler, rhi::StageMask::Fragment},
+    };
+    const rhi::Format copy_formats[] = {kHdrFormat, rhi::Format::R32Uint};
+    rhi::GraphicsPipelineDesc cd{};
+    cd.vertex_shader = copy_vertex_shader_;
+    cd.fragment_shader = copy_fragment_shader_;
+    cd.color_formats = copy_formats;
+    cd.cull = rhi::CullMode::None;
+    cd.bindings = copy_bindings;
+    cd.debug_name = "scene-copy";
+    pipeline_scene_copy_ = device_.create_graphics_pipeline(cd);
+
+    rhi::SamplerDesc sd{};
+    sd.mag_filter = rhi::Filter::Linear;
+    sd.min_filter = rhi::Filter::Linear;
+    sd.address_mode = rhi::AddressMode::ClampToEdge;
+    sd.debug_name = "water-scene-linear";
+    water_linear_sampler_ = device_.create_sampler(sd);
+    sd.mag_filter = rhi::Filter::Nearest;
+    sd.min_filter = rhi::Filter::Nearest;
+    sd.debug_name = "water-scene-nearest";
+    water_nearest_sampler_ = device_.create_sampler(sd);
+}
+
+void ForwardPbrPass::add_scene_copy(RenderGraph& graph,
+                                    RGTexture hdr,
+                                    RGTexture depth,
+                                    RGTexture color_copy,
+                                    RGTexture depth_bits_copy) const {
+    ensure_water_pipelines();
+    const RGColorAttachment colors[] = {
+        {color_copy, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}},
+        {depth_bits_copy, rhi::LoadOp::DontCare, rhi::StoreOp::Store, {}}};
+    const RGTexture sampled[] = {hdr, depth};
+    RenderGraph::RasterPassDesc desc{};
+    desc.colors = colors;
+    desc.sampled = sampled;
+    graph.add_raster_pass("scene-copy", desc, [this, &graph, hdr, depth](rhi::CommandBuffer& cmd) {
+        cmd.bind_pipeline(pipeline_scene_copy_);
+        cmd.bind_texture(0, graph.physical(hdr), water_nearest_sampler_);
+        cmd.bind_texture(1, graph.physical(depth), water_nearest_sampler_);
+        cmd.draw(3);
+    });
+}
+
 void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   RGTexture hdr,
                                   RGTexture depth,
@@ -761,7 +876,12 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
                                   const SdfSpecularOcclusionBinding* sdf_occlusion_ptr,
                                   rhi::LoadOp hdr_load,
                                   bool first_person,
-                                  std::string_view label) const {
+                                  std::string_view label,
+                                  RGTexture water_color,
+                                  RGTexture water_depth) const {
+    const bool water = water_color.is_valid() && water_depth.is_valid();
+    if (water)
+        ensure_water_pipelines();
     const SdfSpecularOcclusionBinding sdf_occlusion =
         sdf_occlusion_ptr ? *sdf_occlusion_ptr : SdfSpecularOcclusionBinding{};
     // SSR G-buffer (m10.7a): a valid target becomes a SECOND colour output, cleared to zero (A = 0
@@ -780,11 +900,22 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     const bool write_gbuffer = gbuffer.is_valid() && gbuffer_material.is_valid();
     const RGColorAttachment colors[] = {
         {hdr, hdr_load, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 1.0f}},
-        {gbuffer, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}},
-        {gbuffer_material, rhi::LoadOp::Clear, rhi::StoreOp::Store, {0.0f, 0.0f, 0.0f, 0.0f}}};
+        {gbuffer,
+         water ? rhi::LoadOp::Load : rhi::LoadOp::Clear,
+         rhi::StoreOp::Store,
+         {0.0f, 0.0f, 0.0f, 0.0f}},
+        {gbuffer_material,
+         water ? rhi::LoadOp::Load : rhi::LoadOp::Clear,
+         rhi::StoreOp::Store,
+         {0.0f, 0.0f, 0.0f, 0.0f}}};
     RGDepthAttachment depth_att{};
     depth_att.texture = depth;
-    if (depth_prepassed) {
+    if (water) {
+        // Water tests against the opaque depth and WRITES its own surface into it.
+        depth_att.load = rhi::LoadOp::Load;
+        depth_att.store = rhi::StoreOp::Store;
+        depth_att.read_only = false;
+    } else if (depth_prepassed) {
         depth_att.load = rhi::LoadOp::Load;
         depth_att.store = rhi::StoreOp::DontCare;
         depth_att.read_only = true;
@@ -803,7 +934,7 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     // The prefiltered chain and the DFG table join them (ADR-0078 section 2), always: with the
     // feature off they are the placeholders, already in ShaderRead, and declaring them costs a
     // no-op transition. Conditional declaration would make the graph's edges depend on a flag.
-    const bool use_sdf = sdf_occlusion.is_valid() && !write_gbuffer;
+    const bool use_sdf = sdf_occlusion.is_valid() && !write_gbuffer && !water;
     if (use_sdf)
         ensure_sdf_pipelines();
     if (first_person)
@@ -826,10 +957,15 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     desc.colors = write_gbuffer ? std::span<const RGColorAttachment>{colors, 3}
                                 : std::span<const RGColorAttachment>{colors, 1};
     desc.depth = &depth_att;
+    if (water) {
+        sampled.push_back(water_color);
+        sampled.push_back(water_depth);
+    }
     desc.sampled = sampled;
     desc.buffer_reads = buffers;
     const rhi::PipelineHandle pipe =
-        first_person ? (use_sdf ? pipeline_first_person_sdf_ : pipeline_first_person_)
+        water          ? (write_gbuffer ? pipeline_water_gbuffer_ : pipeline_water_)
+        : first_person ? (use_sdf ? pipeline_first_person_sdf_ : pipeline_first_person_)
         : write_gbuffer
             ? (depth_prepassed ? pipeline_shadowed_gbuffer_after_prepass_
                                : pipeline_shadowed_gbuffer_standalone_)
@@ -839,8 +975,20 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
     graph.add_raster_pass(
         label,
         desc,
-        [pipe, data, shadow, local, clusters, ddgi, sky, use_sdf, sdf_occlusion, &graph](
-            rhi::CommandBuffer& cmd) {
+        [this,
+         pipe,
+         data,
+         shadow,
+         local,
+         clusters,
+         ddgi,
+         sky,
+         use_sdf,
+         sdf_occlusion,
+         water,
+         water_color,
+         water_depth,
+         &graph](rhi::CommandBuffer& cmd) {
             cmd.bind_pipeline(pipe);
             // Bindings 7–20 are attached once (they persist across draws — ADR-0020);
             // record_draws re-binds only per-draw state on top. The resources' physical handles
@@ -875,6 +1023,10 @@ void ForwardPbrPass::add_shadowed(RenderGraph& graph,
             // table has no seam and clamps.
             cmd.bind_texture(19, graph.physical(sky.specular.prefiltered), sky.sampler);
             cmd.bind_texture(20, graph.physical(sky.specular.dfg), sky.specular.dfg_sampler);
+            if (water) {
+                cmd.bind_texture(21, graph.physical(water_color), water_linear_sampler_);
+                cmd.bind_texture(22, graph.physical(water_depth), water_nearest_sampler_);
+            }
             // Two cull partitions, one dynamic-state change each (m16.5). Single-sided first — the
             // overwhelming majority and the byte-identical old path — then the double-sided draws
             // with culling off. Dynamic state rather than a second pipeline: the forward pass

@@ -7,8 +7,9 @@
 #include "rime/render/scene_renderer.hpp"
 
 namespace rime::fluids_render {
-// Opt-in diagnostic appearance. Fixed mesh and mass: this is not geometric ice thickness,
-// transparency or flowing water. Blue frost and darker water distinguish the endpoints.
+// Opt-in cosmetic appearance. Fixed mass/collision: this is not simulated ice growth,
+// transparency or flowing water. The shader distinguishes clear water, ice and frost;
+// creation-time SurfaceGeometry optionally supplies geometric cosmetic waves.
 struct ThermalSurface {
     bool enabled = false;
 };

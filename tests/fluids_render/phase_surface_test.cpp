@@ -319,3 +319,50 @@ TEST_CASE("phase detail: liquid moves, frozen and paused hold, submeshes and nei
                 changed_top,
                 changed_bottom);
 }
+
+TEST_CASE("phase geometry: bounded waves, fixed banks, continuous freezing and analytic normals") {
+    SurfaceGeometry grid;
+    grid.vertex_count = 1089;
+    grid.half_x = grid.half_z = .5f;
+    grid.top = .5f;
+    core::Transform transform;
+    transform.scale = {3, .1f, 3};
+    const auto model = core::to_matrix(transform);
+    const auto frozen = phase_surface_vertices(grid, model, 0, 0, .12f);
+    const auto frozen_later = phase_surface_vertices(grid, model, 0, 20, .12f);
+    REQUIRE(frozen.size() == 1089);
+    float peak = 0, movement = 0;
+    for (const double time : {0., .3, 1.1, 5.}) {
+        const auto water = phase_surface_vertices(grid, model, 1, time, .12f);
+        const auto near_ice = phase_surface_vertices(grid, model, .0001f, time, .12f);
+        for (std::size_t i = 0; i < water.size(); ++i) {
+            CHECK(frozen[i].py == frozen_later[i].py);
+            CHECK(std::abs(near_ice[i].py - frozen[i].py) * .1f < .000003f);
+            const auto& v = water[i];
+            REQUIRE(std::isfinite(v.py));
+            CHECK(v.ny > 0); // no overturned crest, including the envelope derivative
+            peak = std::max(peak, std::abs(v.py - frozen[i].py) * .1f);
+            movement += std::abs(v.py - frozen[i].py);
+            const auto x = i % 33, z = i / 33;
+            if (x == 0 || x == 32 || z == 0 || z == 32) {
+                CHECK(v.px == doctest::Approx(frozen[i].px));
+                CHECK(v.py == doctest::Approx(frozen[i].py));
+                CHECK(v.pz == doctest::Approx(frozen[i].pz));
+            }
+            if (x > 0 && x < 32 && z > 0 && z < 32) {
+                const auto position = [&](std::size_t j) {
+                    const auto q = model * core::Vec4{water[j].px, water[j].py, water[j].pz, 1};
+                    return core::Vec3{q.x, q.y, q.z};
+                };
+                const auto dx = position(i + 1) - position(i - 1);
+                const auto dz = position(i + 33) - position(i - 33);
+                const auto finite_difference = core::normalize(core::cross(dz, dx));
+                const auto analytic = core::normalize(core::Vec3{v.nx / 3, v.ny / .1f, v.nz / 3});
+                CHECK(core::dot(finite_difference, analytic) > .995f);
+            }
+        }
+    }
+    CHECK(peak > .003f);
+    CHECK(peak < .021f);
+    CHECK(movement > 1);
+}

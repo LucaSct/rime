@@ -66,24 +66,17 @@ PhaseSurfaces PhaseDetail::surfaces(ecs::World& world,
     auto result = phase_surfaces(world, preview);
     if (!ready_ || !result.count)
         return result;
-    const auto* field = preview.field();
-    const auto entities = preview.entities();
     for (std::size_t r = 0; r < result.count; ++r) {
         auto& row = result.rows[r];
-        for (std::size_t i = 0; i < entities.size(); ++i) {
-            if (row.entity != entities[i])
-                continue;
-            // The clock commits alongside accepted state. Rebuild restarts the cosmetic loop;
-            // Pause, rejected steps and repeated renders cannot advance it. It also supports
-            // variable dt.
-            const auto pick = detail::select_detail(preview.presentation_seconds(),
-                                                    field->cells()[i].state().liquid_mass_fraction);
-            row.override_detail = true;
-            row.normal_texture = normals_[pick.normal_index];
-            row.normal_scale = 1.f; // strength is baked per liquid level, so no endpoint jump
-            row.base_color_texture = colors_[pick.tint_index];
-            break;
-        }
+        // The clock commits alongside accepted state. Rebuild restarts the cosmetic loop;
+        // Pause, rejected steps and repeated renders cannot advance it. It also supports
+        // variable dt. phase_surfaces already copied that time and fraction into each row.
+        row.override_detail = true;
+        // Dedicated phase shading animates continuous capillary waves and blends the
+        // static frost endpoint in slope space. It avoids the atlas's 1/8-phase steps.
+        row.normal_texture = normals_[0];
+        row.normal_scale = 1.f; // phase strength is applied continuously in the shader
+        row.base_color_texture = colors_[0];
     }
     return result;
 }

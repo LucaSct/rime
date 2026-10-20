@@ -21,6 +21,13 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+// The water pass (screen-space refraction): the same shading, drawn after the opaque scene, reading
+// a copy of it. WATER_PASS_GBUFFER is the SSR-on twin and so also writes the G-buffer.
+#ifdef WATER_PASS_GBUFFER
+#define WATER_PASS
+#define WRITE_GBUFFER
+#endif
+
 #ifdef FIRST_PERSON_SDF_SPECULAR
 #define FIRST_PERSON
 #define SDF_SPECULAR_OCCLUSION
@@ -52,7 +59,9 @@ layout(std140, set = 0, binding = 1) uniform DrawUniforms {
     mat4 normal_matrix;
     vec4 base_color;
     vec4 params;   // x = metallic, y = roughness, z = normal_scale, w = occlusion_strength
-    vec4 emissive; // rgb = emissive factor (linear)
+    vec4 emissive; // ordinary: emissive; phase: seconds, oval bank, frost map present
+    mat4 prev_model;
+    vec4 motion_params; // x deformation velocity; y surface kind, z liquid, w depth metres
 } draw;
 
 layout(set = 0, binding = 2) uniform sampler2D base_color_tex;
@@ -187,6 +196,13 @@ layout(location = 2) out vec4 out_gbuffer_material;
 #endif
 
 #include "brdf.glsl"
+#ifdef WATER_PASS
+// Bindings 21/22 are the SDF variant's slots; the two variants never meet. Colour is a linear
+// sampler; depth travels as raw float bits in an R32_UINT target (the RHI has no R32_SFLOAT).
+layout(set = 0, binding = 21) uniform sampler2D water_scene_color;
+layout(set = 0, binding = 22) uniform usampler2D water_scene_depth;
+#endif
+#include "water_surface.glsl"
 
 // One point light's contribution. Factored out (m10.3) so the uniform-block loop and the clustered
 // loop are provably the same shading maths — only the source of the light data differs. The
@@ -425,6 +441,20 @@ void main() {
     vec2 mr = texture(metallic_roughness_tex, v_uv).gb;
     float metallic = draw.params.x * mr.y;
     float roughness = clamp(draw.params.y * mr.x, 0.045, 1.0);
+    const bool phase_surface = draw.motion_params.y > .5;
+    PhaseOptics optics;
+    if (phase_surface) {
+        optics = phase_optics(v_world_normal, n, v_world_tangent, v_world_pos, v_uv, v,
+                              mix(albedo, draw.base_color.rgb, step(.5, draw.emissive.z)),
+                              base_sample.rgb, roughness,
+                              draw.motion_params, draw.emissive.rgb);
+        n = optics.normal;
+        roughness = optics.roughness;
+        // The metallic endpoint is a pure specular lobe with arbitrary RGB F0. Reusing it
+        // lets direct light and the unchanged SSR resolve share water/ice's true Fresnel.
+        albedo = optics.f0;
+        metallic = 1.0;
+    }
     float alpha = roughness * roughness;
     alpha = filter_specular_alpha(n, alpha); // geometric specular AA, ADR-0078 step 1a
     float ao_sample = texture(occlusion_tex, v_uv).r;
@@ -589,6 +619,17 @@ void main() {
 #endif
     }
 
+#ifndef WRITE_GBUFFER
+    // Phase sheets still need specular when DDGI supplies their diffuse environment.
+    // SSR owns the entire reflection when enabled; never add this sky fallback twice.
+    if (phase_surface && ddgi.enabled_pad.x != 0u && sky_sh_enabled()) {
+        vec3 ray = sky_specular_dominant_direction(n, reflect(-v, n), lobe_roughness);
+        vec3 sky = frame.ambient.w != 0.0 ? sky_specular_prefiltered(ray, lobe_roughness)
+                                        : texture(skyview_lut, skyview_uv_from_direction(ray)).rgb;
+        out_radiance += sky * f_schlick(max(dot(n, v), 0.0), optics.f0);
+    }
+#endif
+
     // The sun (light 0) is the shadow caster; its contribution is scaled by the cascade shadow
     // factor. The remaining directional lights (fill lights) are unshadowed in v1.
     float sun_factor = sun_shadow(v_world_pos, normalize(v_world_normal));
@@ -645,7 +686,28 @@ void main() {
         out_radiance += contrib * spot_shadow(i, v_world_pos, normalize(v_world_normal));
     }
 
-    out_radiance += draw.emissive.rgb * emissive_sample;
+    if (phase_surface) {
+        vec3 incident = frame.ambient.rgb;
+        if (sky_sh_enabled())
+            incident = sky_sh_irradiance(normalize(v_world_normal));
+        for (uint i = 0u; i < frame.light_counts.x && i < 4u; ++i) {
+            float nl = max(dot(normalize(v_world_normal),
+                               normalize(-frame.dir_lights[i].direction.xyz)), 0.0);
+            incident += frame.dir_lights[i].radiance.rgb * nl / kPi * (i == 0u ? sun_factor : 1.0);
+        }
+#ifdef WATER_PASS
+        // Transmitted share = (1 - F): the reflected remainder is added by the SSR resolve with
+        // the same F0, so refraction + reflection conserve energy.
+        out_radiance += water_refracted_radiance(
+                            optics, v_world_pos, normalize(v_world_normal), v, incident,
+                            sun_factor, draw.emissive.x) *
+                        (vec3(1.0) - f_schlick(max(dot(n, v), 0.0), optics.f0));
+#else
+        out_radiance += optics.transmission * incident;
+#endif
+    } else {
+        out_radiance += draw.emissive.rgb * emissive_sample;
+    }
     out_hdr = vec4(out_radiance, 1.0);
 
 #ifdef WRITE_GBUFFER
