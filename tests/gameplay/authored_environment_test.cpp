@@ -50,6 +50,15 @@ bool has(const std::vector<std::string>& names, std::string_view name) {
 }
 } // namespace
 
+// One fire source draws its fixed flame layers (three stable tongues, the fuel cores and the
+// upper tongues) plus a seeded, time-varying number of motes. Assert that envelope rather than
+// a literal, so retuning the fire's look does not silently break the "fire emits" contract.
+[[nodiscard]] static bool one_fire_of_flames(std::size_t count) {
+    using E = rime::vfx_scene::Effects;
+    constexpr std::size_t fixed = 3 + E::core_flames_per_source + E::upper_tongues_per_source;
+    return count >= fixed && count <= fixed + E::max_fire_motes_per_source;
+}
+
 TEST_CASE("city authored environment: inert sources leave legacy ownership and atlas untouched") {
     ecs::World world;
     prepare(world);
@@ -79,7 +88,7 @@ TEST_CASE("city authored environment: accepted fire ticks emit without the scrip
     AuthoredEnvironment environment;
     REQUIRE(environment.tick(world, 10, .25));
     auto first = environment.prepare(world);
-    REQUIRE(first.flame_count == 3);
+    REQUIRE(one_fire_of_flames(first.flame_count));
     REQUIRE(first.light_count == 1);
     REQUIRE(first.smoke_count > 0);
     CHECK(first.enabled_sources == 2);
@@ -126,7 +135,7 @@ TEST_CASE("city authored environment: removal clears fire while residual smoke r
     const auto source = fire(world);
     AuthoredEnvironment environment;
     REQUIRE(environment.tick(world, 10, .25));
-    REQUIRE(environment.prepare(world).flame_count == 3);
+    REQUIRE(one_fire_of_flames(environment.prepare(world).flame_count));
     REQUIRE(world.despawn(source));
     const auto& removed = environment.prepare(world);
     CHECK(removed.flame_count == 0);
@@ -145,7 +154,7 @@ TEST_CASE("city authored environment: removal clears fire while residual smoke r
     CHECK(environment.snapshot().light_count == 0);
     CHECK(environment.effects().field().count() == 0);
     REQUIRE(environment.tick(world, 1, .25));
-    CHECK(environment.prepare(world).flame_count == 3);
+    CHECK(one_fire_of_flames(environment.prepare(world).flame_count));
 }
 
 TEST_CASE(
