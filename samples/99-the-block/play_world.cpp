@@ -129,7 +129,7 @@ physics::Aabb PlayWorld::street_bounds(const assets::ProceduralTerrainConfig& c)
 PlayWorld::CollisionPeer::CollisionPeer(const assets::ProceduralTerrainConfig& config,
                                         const physics::Aabb& block,
                                         physics::PhysicsWorld& physics)
-    : physics(physics), source(terrain_collision::ProceduralTileSource::Options{config, 256}),
+    : physics(physics), source(terrain_collision::ProceduralTileSource::Options{config, 256, true}),
       collision(
           [&] {
               terrain_collision::Config c{};
@@ -324,6 +324,9 @@ bool PlayWorld::recenter(core::Vec3 eye) {
             return false;
         }
         if (dressed_surface_) {
+            // Render-only distant ranges (see assets::procedural_backdrop_rise). The collision
+            // source never sees them: it serves generate_procedural_tile unchanged.
+            assets::apply_procedural_backdrop(config_, *asset);
             PlayEnvironment::paint_terrain(*asset, config_);
         }
         const auto bytes = render::TerrainPass::predicted_tile_bytes(*asset, false);

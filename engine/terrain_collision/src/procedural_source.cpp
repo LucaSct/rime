@@ -8,7 +8,8 @@
 namespace rime::terrain_collision {
 
 ProceduralTileSource::ProceduralTileSource(const Options& options)
-    : config_(options.config), config_valid_(assets::procedural_config_valid(options.config)) {
+    : config_(options.config), config_valid_(assets::procedural_config_valid(options.config)),
+      backdrop_(options.backdrop) {
     const std::uint32_t count = std::min(options.max_slots, kMaxSlotsCeiling);
     slots_.resize(count);
     free_.reserve(count);
@@ -59,6 +60,9 @@ assets::HeightfieldAssetHandle ProceduralTileSource::request(const TileKey& key)
         ++stats_.refused_requests;
         ++stats_.refused_unsupported;
         return {};
+    }
+    if (backdrop_) {
+        assets::apply_procedural_backdrop(config_, *tile);
     }
     const std::uint32_t index = free_.back();
     free_.pop_back();

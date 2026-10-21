@@ -583,8 +583,15 @@ bool PlayEnvironment::build(ecs::World& world,
     ++stats_.ponds;
 
     for (unsigned i = 0; i < terrain_.size(); ++i) {
-        const auto s = i == 0 ? Surface::Grass : i == 1 ? Surface::Dirt : Surface::Concrete;
-        terrain_[i].base_color = {1, 1, 1};
+        // Slots: 0 meadow grass, 1 dirt, 2 exposed rock (the concrete texture, tinted warm grey),
+        // 3 forest (the grass texture tinted dark). 2 and 3 exist for the distant hills only.
+        const auto s = i == 0   ? Surface::Grass
+                       : i == 1 ? Surface::Dirt
+                       : i == 2 ? Surface::Concrete
+                                : Surface::Grass;
+        terrain_[i].base_color = i == 2   ? core::Vec3{.62f, .55f, .47f}
+                                 : i == 3 ? core::Vec3{.42f, .6f, .36f}
+                                          : core::Vec3{1, 1, 1};
         terrain_[i].roughness = .92f;
         terrain_[i].albedo_height = get(s).albedo;
         terrain_[i].uv_scale[0] = 2;
@@ -602,7 +609,12 @@ void PlayEnvironment::paint_terrain(assets::HeightfieldAsset& a,
     a.layers[0] = assets::AssetId{1};
     a.layers[1] = assets::AssetId{2};
     a.layers[2] = assets::AssetId{3};
+    a.layers[3] = assets::AssetId{4};
     a.weights.resize(static_cast<std::size_t>(a.weight_columns) * a.weight_rows * 4);
+    const auto smoothstep = [](float lo, float hi, float v) {
+        const float t = std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
     for (unsigned z = 0; z < a.rows; ++z) {
         for (unsigned x = 0; x < a.columns; ++x) {
             const float wx = a.origin.x + static_cast<float>(x) * a.cell_size_x;
@@ -619,12 +631,56 @@ void PlayEnvironment::paint_terrain(assets::HeightfieldAsset& a,
             const float distance = std::sqrt(dx * dx + dz * dz);
             const float patches = noise(wx * .037f, wz * .037f, 256);
             const float dirt = std::clamp(.55f - distance * .025f + patches * .3f, .08f, .8f);
-            const auto w = byte(dirt);
+
+            // Near ground (the original two-layer look): meadow with dirt patches.
+            float grass = 1.0f - dirt, soil = dirt, rock = 0.0f, forest = 0.0f;
+
+            // HILLS: a slope- and height-driven blend, the way real terrain is coloured. Slope is
+            // the height gradient (central differences, clamped at the tile edge), because rock is
+            // exposed where ground is too steep to hold soil; height decides the treeline and the
+            // dry crest; two macro noises at ~100 m and ~25 m break the result up so no tile of the
+            // map repeats, and the finer one is what reads as a forest canopy.
+            const unsigned xl = x > 0 ? x - 1 : x, xr = x + 1 < a.columns ? x + 1 : x;
+            const unsigned zl = z > 0 ? z - 1 : z, zr = z + 1 < a.rows ? z + 1 : z;
+            const float gx =
+                (a.height(xr, z) - a.height(xl, z)) / (static_cast<float>(xr - xl) * a.cell_size_x);
+            const float gz =
+                (a.height(x, zr) - a.height(x, zl)) / (static_cast<float>(zr - zl) * a.cell_size_z);
+            const float slope = std::sqrt(gx * gx + gz * gz); // rise over run
+            const float elev = a.height(x, z);                // metres above the flat ground
+            const float macro = noise(wx * .0083f, wz * .0083f, 256);
+            const float canopy =
+                .6f * noise(wx * .031f, wz * .031f, 256) + .4f * noise(wx * .11f, wz * .11f, 256);
+            const float far = smoothstep(90.0f, 350.0f, distance);
+            if (far > 0.0f) {
+                const float crest = smoothstep(70.0f, 170.0f, elev) * (.5f + macro);
+                float h_rock = std::clamp(smoothstep(.42f, .85f, slope + (macro - .5f) * .25f) +
+                                              crest * .45f * smoothstep(.2f, .5f, slope),
+                                          0.0f,
+                                          1.0f);
+                const float tree_line =
+                    1.0f - smoothstep(95.0f, 165.0f, elev + (macro - .5f) * 60.0f);
+                float h_forest =
+                    std::clamp((canopy - .42f) * 4.0f, 0.0f, 1.0f) * tree_line * (1.0f - h_rock);
+                const float h_dry = std::clamp(smoothstep(60.0f, 150.0f, elev) * (1.0f - h_rock) *
+                                                   (1.0f - h_forest) * (.4f + macro),
+                                               0.0f,
+                                               1.0f);
+                const float h_grass = std::max(0.0f, 1.0f - h_rock - h_forest - h_dry);
+                grass = std::lerp(grass, h_grass, far);
+                soil = std::lerp(soil, h_dry, far);
+                rock = h_rock * far;
+                forest = h_forest * far;
+            }
+            const float total = std::max(grass + soil + rock + forest, 1e-4f);
             const auto i = (static_cast<std::size_t>(z) * a.columns + x) * 4;
-            a.weights[i] = static_cast<std::uint8_t>(255 - w);
-            a.weights[i + 1] = w;
-            a.weights[i + 2] = 0;
-            a.weights[i + 3] = 0;
+            const auto wr = byte(rock / total), wf = byte(forest / total), ws = byte(soil / total);
+            a.weights[i + 1] = ws;
+            a.weights[i + 2] = wr;
+            a.weights[i + 3] = wf;
+            // Grass takes the remainder so the four weights sum to exactly 255.
+            a.weights[i] = static_cast<std::uint8_t>(std::max(
+                0, 255 - static_cast<int>(ws) - static_cast<int>(wr) - static_cast<int>(wf)));
         }
     }
 }
