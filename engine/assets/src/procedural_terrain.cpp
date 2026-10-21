@@ -156,6 +156,56 @@ constexpr std::uint64_t kBackdropRise = 56000;        // 219 m: keeps ground+hil
     return (r + ((r * r) >> 16)) >> 1; // halfway between the sharp fold and its square
 }
 
+// ── Band-limiting the far field ────────────────────────────────────────────────────────────────
+// A heightfield tile samples the world at one spacing (2 << lod metres: 4 m from 256 m out, 8 m
+// from 512 m, 16 m from 1 km ...). Sampling is only faithful for detail whose wavelength is several
+// samples long; finer detail does not vanish, it ALIASES into spurious bumps of the wrong size that
+// the lighting then reads as a busy ripple. The standard cure is to band-limit: remove an octave
+// where the grid can no longer represent it. Measured (2026-10-21, falsification captures): the
+// ripple on the distant hills was mostly the collision hills' 8 m octave (a 3.5 m swing sampled at
+// 4-8 m spacing, i.e. at or below the Nyquist limit), with the ridged 32/64 m octaves a minor
+// second; deleting only the 8 m octave from the render removed most of it.
+//
+// The fade is a function of the DISTANCE from the street, not of the LOD a tile happens to use.
+// That is deliberate: every LOD must still agree on a vertex they share (otherwise the stitched
+// edge between two rings cracks), and a pure function of the global metre guarantees it, whereas a
+// per-tile filter would not. The LOD rings are a function of distance from the eye, which is within
+// ~100 m of the street, so distance-from-street is the same fade shifted by less than a ring.
+// An octave is fully present out to `on_m` and gone from `off_m`, smoothstep between.
+[[nodiscard]] std::uint64_t
+band_weight(std::uint64_t d, std::uint64_t on_m, std::uint64_t off_m) noexcept {
+    if (d <= on_m * 256u) {
+        return kOne;
+    }
+    if (d >= off_m * 256u) {
+        return 0;
+    }
+    return kOne - smooth((d - on_m * 256u) * kOne / ((off_m - on_m) * 256u));
+}
+
+// Pull `v` toward the octave's neutral value as its weight `w` falls, so a removed octave leaves
+// the mean height where it was instead of dropping the whole range.
+[[nodiscard]] std::uint64_t
+fade_to(std::uint64_t v, std::uint64_t neutral, std::uint64_t w) noexcept {
+    return w >= kOne ? v : lerp(neutral, v, w);
+}
+
+constexpr std::uint64_t kValueNeutral = 32768; // mean of value noise
+constexpr std::uint64_t kRidgeNeutral = 27306; // mean of `ridge` (uniform fold: (1/2 + 1/3) / 2)
+
+// `hills` with its two fine octaves band-limited by street distance `d` (1/256 m). Used only past
+// kBackdropStart, where `d` > the hill blend, so `hills` there is exactly this at full weight.
+[[nodiscard]] std::uint64_t
+hills_banded(std::uint64_t seed, std::int64_t x, std::int64_t z, std::uint64_t d) noexcept {
+    const std::uint64_t w32 = band_weight(d, 300, 600);
+    const std::uint64_t w8 = band_weight(d, 150, 260);
+    const std::uint64_t n = (value_noise(seed, 0, 128, x, z) * 38 +
+                             fade_to(value_noise(seed, 1, 32, x, z), kValueNeutral, w32) * 19 +
+                             fade_to(value_noise(seed, 2, 8, x, z), kValueNeutral, w8) * 7) >>
+                            6;
+    return (n * kHillRange + 32767) / 65535;
+}
+
 [[nodiscard]] std::uint64_t
 backdrop_distance(const ProceduralTerrainConfig& c, std::int64_t x, std::int64_t z) noexcept {
     const std::int64_t dx = std::max<std::int64_t>({c.street_min_x - x, x - c.street_max_x, 0});
@@ -203,12 +253,17 @@ backdrop_eval(const ProceduralTerrainConfig& c, std::int64_t x, std::int64_t z) 
     // Multifractal ridged fBm: each octave is weighted by the previous one, so fine detail lives on
     // the crests and the valleys stay smooth, the look of eroded rather than uniformly bumpy
     // ground.
+    // The three finest octaves are band-limited (see band_weight): their creases are one lattice
+    // cell apart, so they alias into sawtooth facets once the tile spacing nears a quarter of it.
     const std::uint64_t r0 = ridge(c.seed, 19, 1024, wx, wz);
     const std::uint64_t r1 = ridge(c.seed, 20, 512, wx, wz);
     const std::uint64_t r2 = ridge(c.seed, 21, 256, wx, wz);
-    const std::uint64_t r3 = ridge(c.seed, 22, 128, wx, wz);
-    const std::uint64_t r4 = ridge(c.seed, 23, 64, wx, wz);
-    const std::uint64_t r5 = ridge(c.seed, 24, 32, wx, wz);
+    const std::uint64_t r3 =
+        fade_to(ridge(c.seed, 22, 128, wx, wz), kRidgeNeutral, band_weight(d, 1300, 2000));
+    const std::uint64_t r4 =
+        fade_to(ridge(c.seed, 23, 64, wx, wz), kRidgeNeutral, band_weight(d, 700, 1100));
+    const std::uint64_t r5 =
+        fade_to(ridge(c.seed, 24, 32, wx, wz), kRidgeNeutral, band_weight(d, 350, 600));
     const std::uint64_t shape =
         (r0 * 34 + ((r1 * r0) >> 16) * 14 + ((r2 * r1) >> 16) * 8 + ((r3 * r2) >> 16) * 4 +
          ((r4 * r3) >> 16) * 2 + ((r5 * r4) >> 16) * 1) >>
@@ -328,8 +383,14 @@ void apply_procedural_backdrop(const ProceduralTerrainConfig& config, Heightfiel
             // in (weight 1 - env), otherwise their regular 128 m wavelength shows through the
             // ridged shape as exactly the "wavy wall" this replaces. Inside 150 m env is 0 and the
             // sample is untouched, so the walkable ground is bit-identical.
-            const std::uint64_t old = s > kGroundLevel ? s - kGroundLevel : 0;
+            // Past kBackdropStart the sample is exactly ground + hills, so the hills can be
+            // re-evaluated with their fine octaves band-limited; closer in `b.env` is 0 and the
+            // sample is left bit-identical.
             const std::uint64_t base = s > kGroundLevel ? kGroundLevel : s;
+            std::uint64_t old = s > kGroundLevel ? s - kGroundLevel : 0;
+            if (b.env > 0) {
+                old = hills_banded(config.seed, x, z, backdrop_distance(config, x, z));
+            }
             const std::uint64_t sum = base + ((old * (kOne - b.env)) >> 16) + b.rise;
             s = static_cast<std::uint16_t>(std::min<std::uint64_t>(sum, 0xffffu));
             lo = std::min(lo, s);
