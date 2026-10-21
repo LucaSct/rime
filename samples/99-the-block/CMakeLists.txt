@@ -221,6 +221,14 @@ set_tests_properties(the_block_effects_smoke PROPERTIES
     FIXTURES_REQUIRED block_demo_cook
     TIMEOUT 1800)
 
+# The `peers` HUD row's honesty (oct21-desync): 20 rifle hits and an aimed charge on the generated
+# city, every tick classified as the HUD classifies it. GPU-free. Measured 226 s on the faster
+# self-hosted runner (release); the slower runner is 2.2-2.8x that, so 1800 s like its siblings.
+add_test(NAME the_block_desync_check COMMAND the_block --desync-check)
+set_tests_properties(the_block_desync_check PROPERTIES
+    FIXTURES_REQUIRED block_demo_cook
+    TIMEOUT 1800)
+
 # Registered only when the art is here; the binary itself skips the mode rather than failing, so
 # running it by hand on a clean clone is harmless too.
 if(BLOCK_HAVE_VIEWMODEL_ART)
