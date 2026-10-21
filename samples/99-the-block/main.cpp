@@ -5635,7 +5635,9 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         // The reach limiter's own record: frames it shortened a hand path, the smallest share of
         // the authored path kept, and the longest hand travel actually applied (weapon metres).
         int limited = 0;
-        int cut_frames = 0; // frames with a sleeve's open cut end inside the viewport
+        int cut_frames = 0;    // frames with a sleeve's open cut end inside the viewport
+        int elbow_frames = 0;  // frames with either elbow joint inside the viewport
+        float elbow_depth = 0; // deepest elbow joint inside the bottom edge, half-heights
         int contact_frames = 0;
         float contact_gap = 0;
         float retained[2]{1.0f, 1.0f}, hand_travel[2]{};
@@ -5680,6 +5682,19 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
                     cut_visible = cut_visible || (p.z < 0.0f && std::abs(p.x) <= -p.z * tan_x &&
                                                   std::abs(p.y) <= -p.z * tan_y);
                 r.cut_frames += cut_visible ? 1 : 0;
+                bool elbow_visible = false;
+                for (const auto& p : demo.viewmodel->elbows_world())
+                    elbow_visible = elbow_visible || (p.z < 0.0f && std::abs(p.x) <= -p.z * tan_x &&
+                                                      std::abs(p.y) <= -p.z * tan_y);
+                r.elbow_frames += elbow_visible ? 1 : 0;
+                // How far the deepest elbow sits INSIDE the bottom edge, as a share of the frame's
+                // half-height (0 = outside). The frame edge is |y| = tan_y * depth, so the share
+                // is 1 - |y| / (tan_y * depth) for a joint below the centre line.
+                for (const auto& p : demo.viewmodel->elbows_world())
+                    if (p.z < 0.0f && std::abs(p.x) <= -p.z * tan_x &&
+                        std::abs(p.y) <= -p.z * tan_y)
+                        r.elbow_depth =
+                            std::max(r.elbow_depth, 1.0f - std::abs(p.y) / (-p.z * tan_y));
             }
             const auto& reach = demo.viewmodel->reach_stats();
             r.limited += reach.retained[0] < 1.0f || reach.retained[1] < 1.0f ? 1 : 0;
@@ -5753,6 +5768,19 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
               "every reload frame keeps both hands on reachable, valid targets");
         check(control.cut_frames == 0 && reload.cut_frames == 0,
               "no reload frame shows a sleeve's open cut end");
+        // Only forearms and hands may enter from the bottom. At rest no elbow joint is in frame at
+        // all. During a reload or bolt the arms are working and a joint may graze the bottom edge:
+        // the budget is 18 % of the frame's half-height (about 97 px at 1080p). Measured per weapon
+        // and printed below; a tighter bound fails because lowering the shoulders any further
+        // leaves the support hand unable to reach the magazine well (reach-limited, clamped).
+        std::printf("viewmodel-smoke: %s elbow depth inside bottom edge: idle %.3f reload %.3f\n",
+                    weapon_name(weapon),
+                    control.elbow_depth,
+                    reload.elbow_depth);
+        check(control.elbow_frames == 0,
+              "no idle frame shows an elbow: only forearms and hands are in frame");
+        check(reload.elbow_depth <= .18f,
+              "no reload frame lets an elbow more than 18 % of the half-height into the frame");
         std::printf("viewmodel-smoke: %s magazine contact %d frames, max gap %.3f mm\n",
                     weapon_name(weapon),
                     reload.contact_frames,
@@ -5777,6 +5805,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         check(bolt.invalid == 0 && bolt.clamped == 0,
               "every bolt frame keeps both hands on reachable, valid targets");
         check(bolt.cut_frames == 0, "no bolt frame shows a sleeve's open cut end");
+        check(bolt.elbow_depth <= .18f,
+              "no bolt frame lets an elbow more than 18 % into the frame");
         check(bolt.busy >=
                       static_cast<int>(block_play::PlayWeaponMotion::kBoltSeconds * 60.0f) - 1 &&
                   !demo.viewmodel->busy() && bolt.arm_delta > .03f && bolt.hand_travel[1] >= .03f &&
@@ -5911,7 +5941,10 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
             demo.viewmodel->advance(2.0f, {}, false);
             demo.app.run_frames(48);
             const auto with_arms = capture();
-            const auto wrists = demo.viewmodel->wrist_world();
+            const auto wrists = demo.viewmodel->hand_world();
+            const auto elbows_now = demo.viewmodel->elbows_world();
+            const std::size_t elbows_visible = (in_view(elbows_now[0], nullptr) ? 1u : 0u) +
+                                               (in_view(elbows_now[1], nullptr) ? 1u : 0u);
             const std::size_t cuts = demo.viewmodel->sleeve_cuts_world().size();
             const std::size_t cuts_visible = cuts_in_view();
             const std::size_t intrusions = demo.viewmodel->limb_weapon_intrusions(.03f, .07f);
@@ -5938,8 +5971,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
                         fire_wrist.z);
             check(bore_deg <= 8.0f, "the hip bore axis points within 8 degrees of forward");
             check(up_deg <= 8.0f, "the hip weapon's sights are within 8 degrees of camera up");
-            check(fire_wrist.x >= .18f && fire_wrist.x <= .24f && fire_wrist.y >= -.26f &&
-                      fire_wrist.y <= -.20f && fire_wrist.z >= -.40f && fire_wrist.z <= -.32f,
+            check(fire_wrist.x >= .11f && fire_wrist.x <= .18f && fire_wrist.y >= -.26f &&
+                      fire_wrist.y <= -.21f && fire_wrist.z >= -.42f && fire_wrist.z <= -.36f,
                   "the firing wrist sits in the lower-right hip box");
             demo.viewmodel->set_draw_arms(false);
             demo.app.run_frames(48);
@@ -5969,10 +6002,16 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
             }
             // Walking bob and a recoil kick must not lift a sleeve cut into view either.
             std::size_t moving_cut_frames = 0;
+            float moving_elbow_depth = 0.0f; // deepest elbow inside the frame while walking/firing
             for (int frame = 0; frame < 90; ++frame) {
                 demo.viewmodel->advance(1.0f / 60.0f, {4, 0, 2}, frame % 20 == 0);
                 (void)demo.viewmodel->pose(demo.session.client.camera_transform());
                 moving_cut_frames += cuts_in_view() != 0 ? 1u : 0u;
+                for (const auto& e : demo.viewmodel->elbows_world()) {
+                    core::Vec2 ndc{};
+                    if (in_view(e, &ndc))
+                        moving_elbow_depth = std::max(moving_elbow_depth, 1.0f - std::abs(ndc.y));
+                }
             }
             demo.viewmodel->advance(2.0f, {}, false);
             const float frame_pixels = static_cast<float>(kW) * kH;
@@ -6004,9 +6043,17 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
                       model_pixels < static_cast<std::size_t>(frame_pixels * kHipModelCoverage[1]),
                   "hip arms, hands and weapon together cover a bounded band of the frame");
             check(hand_pixels[0] >= 300 && hand_pixels[1] >= 300,
-                  "both hands are visible at their projected wrists at the hip");
+                  "both hands are visible at their projected centres at the hip");
             check(cuts >= 16 && cuts_visible == 0 && moving_cut_frames == 0,
                   "the sleeves' open cut ends stay outside the viewport at the hip");
+            std::printf("viewmodel-smoke: %s hip elbows in view: settled %zu, deepest while "
+                        "walking/firing %.3f of half-height\n",
+                        weapon_name(weapon),
+                        elbows_visible,
+                        moving_elbow_depth);
+            check(elbows_visible == 0 && moving_elbow_depth <= .18f,
+                  "both elbows are outside the viewport at the settled hip and within 18 % of its "
+                  "bottom edge while walking and firing");
             check(intrusions == 0, "no upper arm or forearm passes through the weapon at the hip");
         }
     }

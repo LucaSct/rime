@@ -148,6 +148,17 @@ public:
         return wrist_camera_;
     }
 
+    // Hand centres (a palm's length past each wrist along the forearm) and elbow joints
+    // of the last pose, in world metres through the same squeezed model matrix that draws them.
+    // A hip carry may legitimately put the WRIST just under the bottom edge so that only forearms
+    // and hands enter the frame; the hand centre is what must stay visible and the elbow what
+    // must stay out.
+    [[nodiscard]] const std::array<core::Vec3, 2>& hand_world() const noexcept {
+        return hand_world_;
+    }
+
+    [[nodiscard]] std::array<core::Vec3, 2> elbows_world() const;
+
     [[nodiscard]] std::uint32_t magazine_triangles() const noexcept {
         return models_[static_cast<unsigned>(selected_)].magazine_triangles;
     }
@@ -285,6 +296,7 @@ private:
     ReachStats reach_stats_{};
     std::array<core::Vec3, 2> wrist_world_{};
     std::array<core::Vec3, 2> wrist_camera_{};
+    std::array<core::Vec3, 2> hand_world_{};
     core::Mat4 magazine_world_{};
     core::Vec3
         release_offset_{}; // weapon-local hand-held magazine offset at the last pre-release pose

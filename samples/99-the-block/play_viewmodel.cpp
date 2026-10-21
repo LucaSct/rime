@@ -71,20 +71,24 @@ constexpr std::array<core::Vec3, 3> kAimOffsets{
 // WHY THE GUN READ AS "SIDEWAYS". A perspective camera shows a gun held off to one side as a
 // diagonal even when its bore is dead parallel to the view axis: the butt is near and far out,
 // the muzzle is far and close to the centre, so the receiver slopes toward the vanishing point.
-// The earlier carry (wrist at x .29, z -.47, 11.5 degrees of toe-in) stacked a real yaw on top
-// of that. The carry is now small and close to the axis: the wrist sits at x .20, y -.205,
-// z -.40 and `turn` is a ~7 degree yaw about it (about 4 for the MSR's slight muzzle dip), so
-// the bore stays within 8 degrees of the view direction with just enough toe-in to point at the
-// crosshair, and the sights stay level. The wrist cannot go lower or nearer: the viewmodel
-// projection's bottom edge is |y / z| = tan(27.5 degrees) = .52, and .205 / .40 = .51 is already
-// at that edge, so the hand just stays in frame. `support_slide` moves the support grip forward
-// along the bore: a handguard is a prism about that axis, so the authored finger wrap stays on
-// its surface while the hand moves from the magazine well to mid-handguard (zero for the SCAR,
-// whose support hand holds a vertical foregrip, and for the MSR, whose long fore-end already
-// puts the support hand at the edge of its arm's reach). pose() blends all of it into the
-// shouldered seat with the aim fraction, so ADS geometry -- sight alignment, eye relief, the 5x
-// optic -- is unchanged. Values keep both wrists inside the measured reach (elbows bent, never
-// clamped) and both shoulders, with the rig's open sleeve rings, outside the frame.
+// The first carry (wrist at x .29, z -.47, 11.5 degrees of toe-in) stacked a real yaw on top of
+// that; round two moved the gun toward the centre line, to x .15, y -.235, z -.40, with only ~3.5
+// degrees of toe-in and a hair of pitch, so the eye looks along the top of the receiver from behind
+// and the left flank hardly shows (the stock leaves through the bottom-right corner, as in the
+// shooters this imitates). The bore stays within 8 degrees of the view direction and the sights
+// within 8 degrees of camera up. The wrist sits just under the viewmodel projection's bottom edge
+// (|y / z| = tan 27.5 degrees = .52, here .59): the HAND is in frame, the wrist and the elbows are
+// not, so only forearms and hands enter from the bottom. The elbows cannot be pushed further out
+// by lowering the shoulders: the support arm then runs out of reach for the magazine well.
+//
+// `support_slide` moves the support grip forward along the bore: a handguard is a prism about that
+// axis, so the authored finger wrap stays on its surface while the hand moves from the magazine
+// well to mid-handguard (zero for the SCAR, whose support hand holds a vertical foregrip; slightly
+// negative for the MSR, whose long fore-end already puts the support hand at the edge of its arm's
+// reach). pose() blends all of it into the shouldered seat with the aim fraction, so ADS geometry
+// -- sight alignment, eye relief, the 5x optic -- is unchanged. Values keep both wrists inside the
+// measured reach (elbows bent, never clamped) and both shoulders, with the rig's open sleeve rings,
+// outside the frame.
 struct HipCarry {
     core::Vec3 grip;      // camera-space firing-wrist target, metres
     core::Vec3 turn;      // pitch, yaw, roll about the firing wrist, radians
@@ -93,9 +97,9 @@ struct HipCarry {
 };
 
 constexpr std::array<HipCarry, 3> kHipCarry{{
-    {{.20f, -.205f, -.40f}, {0, .12f, 0}, {0, -.06f, 0}, 0},            // SCAR-H: foregrip
-    {{.20f, -.205f, -.40f}, {0, .12f, 0}, {0, -.06f, 0}, .07f},         // M4A1
-    {{.20f, -.205f, -.40f}, {-.04f, .12f, 0}, {.08f, -.245f, .15f}, 0}, // MSR
+    {{.15f, -.235f, -.40f}, {.03f, .06f, 0}, {0, -.14f, 0}, 0},             // SCAR-H: foregrip
+    {{.15f, -.235f, -.40f}, {.03f, .06f, 0}, {0, -.10f, 0}, .07f},          // M4A1
+    {{.15f, -.235f, -.40f}, {-.02f, .06f, 0}, {.08f, -.245f, .15f}, -.02f}, // MSR
 }};
 
 // Elbow pole points for the shouldered seat, camera-local (left support arm first). At the hip
@@ -1074,6 +1078,17 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     const auto vertices = selected.arms.solve(arms_from_weapon, grips, selected.elbow_poles);
     weapon_from_arms_ = core::inverse(arms_from_weapon);
     arm_model_ = view * selected.camera_from_arms;
+    // The hand continues the forearm: its centre is a palm's length past the wrist along the
+    // elbow-to-wrist line, which is orientation-independent (unlike a guess at the grip frame).
+    {
+        const auto joints = selected.arms.limb_points();
+        for (unsigned side = 0; side < 2; ++side) {
+            const core::Vec3 forearm = joints[side][2] - joints[side][1];
+            const float length = core::length(forearm);
+            const core::Vec3 along = length > 1e-6f ? forearm / length : core::Vec3{0, 0, -1};
+            hand_world_[side] = core::transform_point(arm_model_, joints[side][2] + along * .07f);
+        }
+    }
     for (std::size_t i = 0; i < vertices.size(); ++i) {
         const core::Vec3 current{vertices[i].px, vertices[i].py, vertices[i].pz};
         selected.previous[i] = selected.history ? selected.last[i] : current;
@@ -1118,6 +1133,12 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
         optic_world_ = model * core::mat4_translation(kScarSight);
     }
     return draws_;
+}
+
+std::array<core::Vec3, 2> PlayViewmodel::elbows_world() const {
+    const auto joints = models_[static_cast<unsigned>(selected_)].arms.limb_points();
+    return {core::transform_point(arm_model_, joints[0][1]),
+            core::transform_point(arm_model_, joints[1][1])};
 }
 
 std::vector<core::Vec3> PlayViewmodel::sleeve_cuts_world() const {
