@@ -2158,6 +2158,7 @@ struct Demo {
         std::uint64_t started = 0; // voices started this tick (MixStats::voices_started delta)
         std::uint32_t alive = 0;   // voices still sounding after the render
         float peak = 0.0f;         // largest |sample| of this tick's block
+        std::uint32_t breaks = 0, collapses = 0, settles = 0; // destruction events heard this tick
     };
 
     std::vector<float> audio_capture;
@@ -2170,14 +2171,17 @@ struct Demo {
             return;
         (void)audio::write_wav(g_audio_wav, audio_capture, audio::kSampleRate, 2);
         if (std::FILE* f = std::fopen((g_audio_wav + ".csv").c_str(), "w")) {
-            std::fprintf(f, "tick,started,alive,peak\n");
+            std::fprintf(f, "tick,started,alive,peak,breaks,collapses,settles\n");
             for (std::size_t i = 0; i < audio_rows.size(); ++i)
                 std::fprintf(f,
-                             "%zu,%llu,%u,%.4f\n",
+                             "%zu,%llu,%u,%.4f,%u,%u,%u\n",
                              i,
                              static_cast<unsigned long long>(audio_rows[i].started),
                              audio_rows[i].alive,
-                             static_cast<double>(audio_rows[i].peak));
+                             static_cast<double>(audio_rows[i].peak),
+                             audio_rows[i].breaks,
+                             audio_rows[i].collapses,
+                             audio_rows[i].settles);
             std::fclose(f);
         }
     }
@@ -2656,6 +2660,7 @@ struct Demo {
         listener.orientation = eye.rotation;
         mixer.set_listener(listener);
         using K = destruction::DestructionEventKind;
+        std::uint32_t tick_breaks = 0, tick_collapses = 0, tick_settles = 0;
         for (const destruction::DestructionEvent& e : session.client.destruction.events()) {
             // Events carry a world-space AABB rather than a point — the affected part or island —
             // so the sound is placed at its centre, as 10-destructible-wall does.
@@ -2665,16 +2670,19 @@ struct Demo {
             switch (e.kind) {
                 case K::PartDied:
                     mixer.play(audio::sound::kPartBreak, at, std::min(1.0f, e.magnitude));
+                    ++tick_breaks;
                     ++audio_events;
                     break;
                 case K::IslandDetached:
                     mixer.play(audio::sound::kCollapse, at, 1.0f);
+                    ++tick_collapses;
                     ++audio_events;
                     break;
                 case K::DebrisSettled:
                     // Quiet on purpose: a settle per chunk is dozens of events, and at full gain
                     // they would drown out the break that caused them.
                     mixer.play(audio::sound::kDebrisSettle, at, 0.35f);
+                    ++tick_settles;
                     ++audio_events;
                     break;
                 default:
@@ -2694,6 +2702,9 @@ struct Demo {
             row.started = audio_stats.voices_started - audio_started_before;
             audio_started_before = audio_stats.voices_started;
             row.alive = static_cast<std::uint32_t>(audio_stats.voices_active);
+            row.breaks = tick_breaks;
+            row.collapses = tick_collapses;
+            row.settles = tick_settles;
             for (const float v : scratch)
                 row.peak = std::max(row.peak, std::fabs(v));
             audio_rows.push_back(row);
