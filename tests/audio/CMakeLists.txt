@@ -6,6 +6,7 @@ rime_add_test(rime_audio_tests
     audio_test.cpp
     collapse_test.cpp
     mixer_test.cpp
+    reverb_test.cpp
     sink_test.cpp)
 
 target_link_libraries(rime_audio_tests
