@@ -6420,7 +6420,7 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         ecs::Entity muzzle_light{};
         fx_world.query<ecs::WorldTransform, render::PointLight>().for_each(
             [&](ecs::Entity e, ecs::WorldTransform& at, render::PointLight& light) {
-                if (light.intensity > 0 && core::length(at.value.translation - flash_pos_a) < 1e-4f)
+                if (light.intensity > 0 && core::length(at.value.translation - flash_pos_a) < 1.21f)
                     muzzle_light = e;
             });
         check(muzzle_light.is_valid(), "weapon fx probe: a live light accompanies the flash");
@@ -6441,8 +6441,18 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
               "weapon fx probe: accepted tracer world path is unaffected by the view move");
         check(core::length(impact_pos_b - impact_pos_a) < 1e-4f,
               "weapon fx probe: accepted impact world position is unaffected by the view move");
-        check(core::length(transform_of(muzzle_light) - flash_pos_b) < 1e-4f,
-              "weapon fx probe: the live light follows the current flash pose");
+        // The light is deliberately led down the bore (see PlayWeaponFx::pose): sitting on the
+        // flash it lit the first-person forearms ~50x harder than a wall, which at 1080p read as
+        // orange burnt-through holes in the sleeve. So it must follow the flash along the CURRENT
+        // view direction, by at least 0.5 m (the proof that fails if the lead is removed) and at
+        // most 1.2 m (so a wall in front of the muzzle is still lit from its front side).
+        {
+            const auto lead = transform_of(muzzle_light) - flash_pos_b;
+            const auto bore = core::normalize(view_b.direction);
+            check(core::length(lead) >= 0.5f && core::length(lead) <= 1.21f &&
+                      core::length(core::cross(lead, bore)) < 1e-3f,
+                  "weapon fx probe: the live light follows the flash, led 0.5-1.2 m down the bore");
+        }
         fx.advance(.005f);
         fx.pose(fx_world, &fx_physics, &view_b);
         const auto travelled = transform_of(find_by_material(tracer_mat)) - tracer_pos_b;
