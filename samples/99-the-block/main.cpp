@@ -2279,7 +2279,7 @@ struct Demo {
         audio::MixerConfig c;
         c.master_gain = 1.0f;
         c.limiter = true;
-        c.limiter_ceiling = 0.891f; // -1 dBFS
+        c.limiter_ceiling = 0.891f;    // -1 dBFS
         c.reverb_decay_seconds = 1.1f; // was 1.4 s: a shorter outdoor tail (owner: "too much echo")
         return c;
     }
@@ -5915,6 +5915,32 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
             const std::size_t cuts = demo.viewmodel->sleeve_cuts_world().size();
             const std::size_t cuts_visible = cuts_in_view();
             const std::size_t intrusions = demo.viewmodel->limb_weapon_intrusions(.03f, .07f);
+            // HIP DIRECTION. The owner's second complaint: "too much angle ... holds the weapon
+            // weirdly sideways". Perspective makes any gun held to one side look diagonal, so the
+            // proof measures the weapon itself, in true camera metres: the bore must point within
+            // 8 degrees of the view direction (a few degrees of toe-in toward the crosshair is
+            // allowed), the sights must be within 8 degrees of camera up (no sideways cant), and
+            // the firing wrist must sit in the lower-right box where a hip-held grip belongs.
+            const auto angle_deg = [](core::Vec3 a, core::Vec3 b) {
+                const float c = core::dot(a, b) / (core::length(a) * core::length(b));
+                return std::acos(std::clamp(c, -1.0f, 1.0f)) * 57.29578f;
+            };
+            const float bore_deg = angle_deg(demo.viewmodel->bore_camera(), {0, 0, -1});
+            const float up_deg = angle_deg(demo.viewmodel->up_camera(), {0, 1, 0});
+            const core::Vec3 fire_wrist = demo.viewmodel->wrist_camera()[1];
+            std::printf("viewmodel-smoke: %s hip direction: bore %.2f deg, up %.2f deg, firing "
+                        "wrist camera (%.3f %.3f %.3f)\n",
+                        weapon_name(weapon),
+                        bore_deg,
+                        up_deg,
+                        fire_wrist.x,
+                        fire_wrist.y,
+                        fire_wrist.z);
+            check(bore_deg <= 8.0f, "the hip bore axis points within 8 degrees of forward");
+            check(up_deg <= 8.0f, "the hip weapon's sights are within 8 degrees of camera up");
+            check(fire_wrist.x >= .18f && fire_wrist.x <= .24f && fire_wrist.y >= -.26f &&
+                      fire_wrist.y <= -.20f && fire_wrist.z >= -.40f && fire_wrist.z <= -.32f,
+                  "the firing wrist sits in the lower-right hip box");
             demo.viewmodel->set_draw_arms(false);
             demo.app.run_frames(48);
             const auto without_arms = capture();

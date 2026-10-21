@@ -133,6 +133,21 @@ public:
         return wrist_world_;
     }
 
+    // Last posed weapon orientation and firing wrist in TRUE camera metres (before the viewmodel
+    // FOV squeeze that only scales what is drawn). The weapon's authored axes are the sight
+    // line's: bore along -z, sights toward +y, so these are what the hip proof measures.
+    [[nodiscard]] core::Vec3 bore_camera() const noexcept {
+        return core::transform_vector(weapon_local_, {0, 0, -1});
+    }
+
+    [[nodiscard]] core::Vec3 up_camera() const noexcept {
+        return core::transform_vector(weapon_local_, {0, 1, 0});
+    }
+
+    [[nodiscard]] const std::array<core::Vec3, 2>& wrist_camera() const noexcept {
+        return wrist_camera_;
+    }
+
     [[nodiscard]] std::uint32_t magazine_triangles() const noexcept {
         return models_[static_cast<unsigned>(selected_)].magazine_triangles;
     }
@@ -269,6 +284,7 @@ private:
     std::vector<render::FirstPersonDeformation> deformations_;
     ReachStats reach_stats_{};
     std::array<core::Vec3, 2> wrist_world_{};
+    std::array<core::Vec3, 2> wrist_camera_{};
     core::Mat4 magazine_world_{};
     core::Vec3
         release_offset_{}; // weapon-local hand-held magazine offset at the last pre-release pose
