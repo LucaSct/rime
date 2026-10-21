@@ -2093,11 +2093,14 @@ audio::SoundBank play_sound_bank() {
     }
     // Pitch jitter, retrigger windows and reverb sends for the destruction ids.
     bank.apply_destruction_policy();
-    // A gun report is sent HARD into the reverb: the tail is what makes it an outdoor shot. Rifles
-    // retrigger freely (cyclic rate is ~85 ms apart, far outside any window that matters); +-3 %
-    // pitch keeps back-to-back shots from being one sample repeated.
+    // A gun report is sent into the reverb: the tail is what makes it an outdoor shot. The send is
+    // about -6 dB below the dry report (0.45; the sniper a little more, its crack carries further).
+    // The first tuning sent at 0.9 with a 1.4 s decay and the owner heard "too much echo": past
+    // roughly half the dry level the tail stops reading as distance and starts reading as a hall.
+    // Rifles retrigger freely (cyclic rate is ~85 ms apart, far outside any window that matters);
+    // +-3 % pitch keeps back-to-back shots from being one sample repeated.
     for (unsigned weapon = 0; weapon < 3; ++weapon)
-        bank.set_class(kGunReport + weapon, {0.03f, 0.0f, weapon == 2 ? 1.1f : 0.9f, 1.5f, 0});
+        bank.set_class(kGunReport + weapon, {0.03f, 0.0f, weapon == 2 ? 0.6f : 0.45f, 1.5f, 0});
     // Bullet strikes are short noise transients and stay synthetic (they are not tonal, except the
     // metal ping, which is a 35 ms ring and is meant to ring). A touch of reverb, a little jitter.
     for (unsigned material = 0;
@@ -2277,7 +2280,7 @@ struct Demo {
         c.master_gain = 1.0f;
         c.limiter = true;
         c.limiter_ceiling = 0.891f; // -1 dBFS
-        c.reverb_decay_seconds = 1.4f;
+        c.reverb_decay_seconds = 1.1f; // was 1.4 s: a shorter outdoor tail (owner: "too much echo")
         return c;
     }
 
