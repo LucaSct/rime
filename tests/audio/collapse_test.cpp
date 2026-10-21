@@ -31,6 +31,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <complex>
 #include <cstdint>
@@ -144,6 +145,11 @@ struct CollapseRender {
     std::vector<float> mono;
     MixStats stats;
     std::size_t max_voices_seen = 0;
+    // Wall-clock cost of Mixer::render per 16.7 ms tick (reported, never asserted: CI machines
+    // vary).
+    double render_us_total = 0.0;
+    double render_us_max = 0.0;
+    std::size_t render_calls = 0;
 };
 
 // 300 events in the first second: 120 of them in the very first tick (what a charge does), the rest
@@ -271,7 +277,14 @@ CollapseRender render_collapse_voiced(Mixer& mixer, DestructionVoicer& voicer) {
         }
         voicer.update(mixer, 1.0f / 60.0f);
         out.max_voices_seen = std::max(out.max_voices_seen, mixer.voice_count());
+        const auto t0 = std::chrono::steady_clock::now();
         mixer.render(block);
+        const double us =
+            std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0)
+                .count();
+        out.render_us_total += us;
+        out.render_us_max = std::max(out.render_us_max, us);
+        ++out.render_calls;
         for (std::size_t i = 0; i < kTick; ++i) {
             out.mono.push_back(block[i * 2u] + block[i * 2u + 1u]);
         }
@@ -317,6 +330,9 @@ TEST_CASE("2026-10 voicer: the same collapse, aggregated, is a few transients pl
 
     const double line = strongest_line_share(r.mono);
     const double tick_ac = autocorrelation(r.mono, kTick);
+    MESSAGE("render cost per tick (reverb running): mean "
+            << r.render_us_total / static_cast<double>(r.render_calls) << " us, max "
+            << r.render_us_max << " us of a 16667 us budget");
     MESSAGE("voiced: strongest line " << line << ", tick autocorrelation " << tick_ac);
     CHECK(line < 0.25);
     CHECK(std::fabs(tick_ac) < 0.25);
