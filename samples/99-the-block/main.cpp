@@ -102,6 +102,7 @@
 #include "rime/assets/sdf_asset.hpp"
 #include "rime/audio/mixer.hpp"
 #include "rime/audio/sink.hpp"
+#include "rime/audio/wav.hpp"
 #include "rime/blockkit/block.hpp"
 #include "rime/blockkit/palette.hpp"
 #include "rime/blockkit/role.hpp"
@@ -214,6 +215,14 @@ std::string g_ppm;
 bool g_effects_preview = false;
 bool g_network_impairment = false;
 bool g_mute = false;
+
+// --audio-wav <file>: write the exact stereo mixdown the mixer produced during the run, plus
+// <file>.csv with one row per tick (voices started, voices alive, block peak). CI is deaf and a
+// buzz is a property of the WAVEFORM, so this is how a collapse gets measured and then listened to.
+std::string g_audio_wav;
+// --audio-weapons <dir>: render each weapon firing three times to <dir>/weapon-N.wav and exit. No
+// GPU, no scene, no device: the same bank, mixer and call helper the game uses.
+std::string g_audio_weapons;
 
 // --island-profile: per-island solve TIMING (#311). Off by default because it reads a clock once
 // per active island -- off the per-constraint path and tiny, but not free, so A RUN TAKEN WITH THIS
@@ -2003,6 +2012,12 @@ audio::SoundBank play_sound_bank() {
     return bank;
 }
 
+// The one place a weapon report is started, shared by the game and the --audio-weapons render so
+// the offline WAV and the shot the player hears cannot disagree about what a shot is.
+void play_gun_shot(audio::Mixer& mixer, unsigned weapon, core::Vec3 at) {
+    mixer.play(kGunReport + weapon, at, .85f);
+}
+
 class PlayAudioOutput {
 public:
     static constexpr std::size_t kSamples = (audio::kSampleRate / 60) * 2;
@@ -2137,6 +2152,35 @@ struct Demo {
     audio::Mixer mixer{play_sound_bank(), block_mix()};
     PlayAudioOutput audio_output;
     audio::MixStats audio_stats{};
+
+    // Offline capture for --audio-wav (see g_audio_wav): every rendered block, and a per-tick row.
+    struct AudioTickRow {
+        std::uint64_t started = 0; // voices started this tick (MixStats::voices_started delta)
+        std::uint32_t alive = 0;   // voices still sounding after the render
+        float peak = 0.0f;         // largest |sample| of this tick's block
+    };
+
+    std::vector<float> audio_capture;
+    std::vector<AudioTickRow> audio_rows;
+    std::uint64_t audio_started_before = 0;
+
+    // Write the capture (if --audio-wav asked for one). Called once at the end of a run.
+    void flush_audio_capture() const {
+        if (g_audio_wav.empty() || audio_capture.empty())
+            return;
+        (void)audio::write_wav(g_audio_wav, audio_capture, audio::kSampleRate, 2);
+        if (std::FILE* f = std::fopen((g_audio_wav + ".csv").c_str(), "w")) {
+            std::fprintf(f, "tick,started,alive,peak\n");
+            for (std::size_t i = 0; i < audio_rows.size(); ++i)
+                std::fprintf(f,
+                             "%zu,%llu,%u,%.4f\n",
+                             i,
+                             static_cast<unsigned long long>(audio_rows[i].started),
+                             audio_rows[i].alive,
+                             static_cast<double>(audio_rows[i].peak));
+            std::fclose(f);
+        }
+    }
 
     // Pose the camera from the SCENE rather than from the player.
     //
@@ -2583,7 +2627,7 @@ struct Demo {
                                 &session.server.physics,
                                 surface,
                                 tracer);
-                mixer.play(kGunReport + weapon, shot.origin, .85f);
+                play_gun_shot(mixer, weapon, shot.origin);
                 if (shot.did_hit || water)
                     mixer.play(kBulletImpact + static_cast<unsigned>(surface), hit, .65f);
                 if (!viewmodel || !viewmodel->scoped())
@@ -2645,6 +2689,16 @@ struct Demo {
         mixer.render(scratch);
         audio_output.submit(scratch);
         audio_stats = mixer.stats();
+        if (!g_audio_wav.empty()) {
+            AudioTickRow row;
+            row.started = audio_stats.voices_started - audio_started_before;
+            audio_started_before = audio_stats.voices_started;
+            row.alive = static_cast<std::uint32_t>(audio_stats.voices_active);
+            for (const float v : scratch)
+                row.peak = std::max(row.peak, std::fabs(v));
+            audio_rows.push_back(row);
+            audio_capture.insert(audio_capture.end(), scratch.begin(), scratch.end());
+        }
 
         // DRESS WHATEVER JUST ARRIVED, before the leaves are built from it.
         //
@@ -3024,6 +3078,33 @@ struct Demo {
 };
 
 // ── --headless: M13's "done when", as a CI-gated self-check ─────────────────────────────────────
+// --audio-weapons: each weapon fires three shots, 1.5 s apart, half a metre in front of the
+// listener, i.e. at the muzzle, mixed through the same bank, mixer and call helper as the game.
+// Offline, deterministic, no device.
+int render_weapon_demo(const std::filesystem::path& dir) {
+    std::filesystem::create_directories(dir);
+    const char* names[3] = {"scar", "m4", "sniper"};
+    for (unsigned weapon = 0; weapon < 3; ++weapon) {
+        audio::Mixer mixer{play_sound_bank(), Demo::block_mix()};
+        std::vector<float> all;
+        std::vector<float> block(static_cast<std::size_t>(audio::kSampleRate / 60) * 2u);
+        for (unsigned tick = 0; tick < 60u * 7u; ++tick) {
+            if (tick == 0 || tick == 90 || tick == 180)
+                play_gun_shot(mixer, weapon, {0.0f, 0.0f, -0.5f});
+            mixer.render(block);
+            all.insert(all.end(), block.begin(), block.end());
+        }
+        const auto path = dir / (std::string("weapon-") + names[weapon] + ".wav");
+        if (!audio::write_wav(path, all, audio::kSampleRate, 2))
+            return 1;
+        std::printf("audio-weapons: %s peak %.3f clipped %llu\n",
+                    path.string().c_str(),
+                    static_cast<double>(mixer.stats().peak),
+                    static_cast<unsigned long long>(mixer.stats().clipped_samples));
+    }
+    return 0;
+}
+
 int run_headless(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
     cfg.gpu = true; // a device if there is one; the sim half runs either way
@@ -3031,6 +3112,14 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
     cfg.tick_hz = 60.0;
 
     Demo demo(cfg);
+
+    // Writes the --audio-wav capture however run_headless returns.
+    struct CaptureFlush {
+        Demo& d;
+
+        ~CaptureFlush() { d.flush_audio_capture(); }
+    } capture_flush{demo};
+
     const bool has_device = demo.app.device() != nullptr;
     if (!has_device) {
         std::fprintf(stderr,
@@ -6654,6 +6743,10 @@ int main(int argc, char** argv) {
             g_network_impairment = true;
         } else if (a == "--mute") {
             g_mute = true;
+        } else if (a == "--audio-wav" && i + 1 < argc) {
+            g_audio_wav = argv[++i];
+        } else if (a == "--audio-weapons" && i + 1 < argc) {
+            g_audio_weapons = argv[++i];
         } else if (a == "--effects-preview") {
             g_effects_preview = true;
         } else if (a == "--perf") {
@@ -6704,6 +6797,9 @@ int main(int argc, char** argv) {
             g_island_profile = true;
         }
     }
+
+    if (!g_audio_weapons.empty())
+        return render_weapon_demo(g_audio_weapons);
 
     if (!write_city.empty()) {
         if (std::filesystem::exists(write_city)) {
