@@ -5072,6 +5072,12 @@ int run_world_gpu_smoke(const std::filesystem::path& cooked, std::string_view sc
 int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
     constexpr std::uint32_t kW = 640;
     constexpr std::uint32_t kH = 360;
+    // Hip framing bands, as fractions of the frame (see HIP FRAMING below). Measured on the RTX
+    // 3060 at 2026-10-21: arms 3.2-4.4 %, arms+weapon 11.4-15.9 % (pixels changed by >= 30/765,
+    // which under-counts dark sleeves over dark ground). The old floating-gun framing put the
+    // arms at 0 %; the upper bounds catch a viewmodel that swallows the screen.
+    constexpr std::array<float, 2> kHipArmCoverage{.02f, .12f};
+    constexpr std::array<float, 2> kHipModelCoverage{.08f, .35f};
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kW, kH};
@@ -5626,6 +5632,7 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         // The reach limiter's own record: frames it shortened a hand path, the smallest share of
         // the authored path kept, and the longest hand travel actually applied (weapon metres).
         int limited = 0;
+        int cut_frames = 0; // frames with a sleeve's open cut end inside the viewport
         int contact_frames = 0;
         float contact_gap = 0;
         float retained[2]{1.0f, 1.0f}, hand_travel[2]{};
@@ -5661,6 +5668,16 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
             for (unsigned side = 0; side < 2; ++side)
                 r.wrist_miss[side] = std::max(r.wrist_miss[side], st.wrist_position_error[side]);
             r.min_skin = std::min(r.min_skin, st.max_vertex_displacement);
+            // The identity camera makes world space camera space: project with the parent FOV.
+            {
+                const float tan_y = std::tan(.5f * parent_fov);
+                const float tan_x = tan_y * static_cast<float>(kW) / static_cast<float>(kH);
+                bool cut_visible = false;
+                for (const auto& p : demo.viewmodel->sleeve_cuts_world())
+                    cut_visible = cut_visible || (p.z < 0.0f && std::abs(p.x) <= -p.z * tan_x &&
+                                                  std::abs(p.y) <= -p.z * tan_y);
+                r.cut_frames += cut_visible ? 1 : 0;
+            }
             const auto& reach = demo.viewmodel->reach_stats();
             r.limited += reach.retained[0] < 1.0f || reach.retained[1] < 1.0f ? 1 : 0;
             for (unsigned side = 0; side < 2; ++side) {
@@ -5684,7 +5701,7 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         std::printf("viewmodel-smoke: %s %s sweep %d frames, busy %d, invalid %d, clamped %d "
                     "(first %.3f s), wrist miss L %.2f R %.2f mm, min bind skin %.4f m, arm "
                     "delta %.4f m, muzzle delta %.4f m; reach-limited %d frames, path kept L %.3f "
-                    "R %.3f, hand travel L %.4f R %.4f m\n",
+                    "R %.3f, hand travel L %.4f R %.4f m, sleeve cut in view %d frames\n",
                     weapon_name(w),
                     what,
                     r.frames,
@@ -5701,7 +5718,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
                     r.retained[0],
                     r.retained[1],
                     r.hand_travel[0],
-                    r.hand_travel[1]);
+                    r.hand_travel[1],
+                    r.cut_frames);
     };
     for (const auto weapon : {VmWeapon::Scar, VmWeapon::M4, VmWeapon::Sniper}) {
         demo.viewmodel->select(weapon == VmWeapon::M4 ? VmWeapon::Scar : VmWeapon::M4);
@@ -5730,6 +5748,8 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         report_sweep("reload", weapon, reload);
         check(reload.invalid == 0 && reload.clamped == 0,
               "every reload frame keeps both hands on reachable, valid targets");
+        check(control.cut_frames == 0 && reload.cut_frames == 0,
+              "no reload frame shows a sleeve's open cut end");
         std::printf("viewmodel-smoke: %s magazine contact %d frames, max gap %.3f mm\n",
                     weapon_name(weapon),
                     reload.contact_frames,
@@ -5753,6 +5773,7 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         report_sweep("bolt", VmWeapon::Sniper, bolt);
         check(bolt.invalid == 0 && bolt.clamped == 0,
               "every bolt frame keeps both hands on reachable, valid targets");
+        check(bolt.cut_frames == 0, "no bolt frame shows a sleeve's open cut end");
         check(bolt.busy >=
                       static_cast<int>(block_play::PlayWeaponMotion::kBoltSeconds * 60.0f) - 1 &&
                   !demo.viewmodel->busy() && bolt.arm_delta > .03f && bolt.hand_travel[1] >= .03f &&
@@ -5852,6 +5873,114 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
               demo.viewmodel->resident_materials() == materials &&
               demo.viewmodel->resident_textures() == textures,
           "actions reuse resident resources and valid deformation uploads");
+    // HIP FRAMING. The owner's complaint was a floating gun: at the hip neither hand nor
+    // forearm was in frame. Measure the ARMS' OWN pixels by rendering each settled hip pose twice,
+    // once with the arm draws withheld; the difference is exactly what the arms and hands add
+    // after the weapon occludes them. A frame without any viewmodel bounds the whole model.
+    // Three structural claims ride alongside: each hand is visible where its wrist projects, the
+    // sleeves' open cut ends (the authored arms stop above the elbow) project outside the
+    // viewport, and no upper arm or forearm passes through the weapon.
+    {
+        const auto in_view = [&](core::Vec3 world, core::Vec2* ndc) {
+            const auto& vp = demo.visuals->renderer.view_proj_unjittered();
+            const auto clip = vp * core::Vec4{world.x, world.y, world.z, 1.0f};
+            if (!(clip.w > 0.0f))
+                return false;
+            const float x = clip.x / clip.w, y = clip.y / clip.w;
+            if (ndc)
+                *ndc = {x, y};
+            return std::abs(x) <= 1.0f && std::abs(y) <= 1.0f;
+        };
+        const auto cuts_in_view = [&]() {
+            std::size_t visible = 0;
+            for (const auto& p : demo.viewmodel->sleeve_cuts_world())
+                visible += in_view(p, nullptr) ? 1u : 0u;
+            return visible;
+        };
+        demo.viewmodel_enabled = false;
+        demo.app.run_frames(48);
+        const auto empty = capture();
+        demo.viewmodel_enabled = true;
+        for (const auto weapon : {VmWeapon::Scar, VmWeapon::M4, VmWeapon::Sniper}) {
+            demo.viewmodel->select(weapon == VmWeapon::M4 ? VmWeapon::Scar : VmWeapon::M4);
+            demo.viewmodel->select(weapon);
+            demo.viewmodel->set_aiming(false);
+            demo.viewmodel->advance(2.0f, {}, false);
+            demo.app.run_frames(48);
+            const auto with_arms = capture();
+            const auto wrists = demo.viewmodel->wrist_world();
+            const std::size_t cuts = demo.viewmodel->sleeve_cuts_world().size();
+            const std::size_t cuts_visible = cuts_in_view();
+            const std::size_t intrusions = demo.viewmodel->limb_weapon_intrusions(.03f, .07f);
+            demo.viewmodel->set_draw_arms(false);
+            demo.app.run_frames(48);
+            const auto without_arms = capture();
+            demo.viewmodel->set_draw_arms(true);
+            const auto arm_pixels = changed(without_arms, with_arms);
+            const auto model_pixels = changed(empty, with_arms);
+            // Per-hand visibility: arm pixels within 24 px (at 640x360) of the projected wrist.
+            std::array<std::size_t, 2> hand_pixels{};
+            for (unsigned side = 0; side < 2; ++side) {
+                core::Vec2 ndc{};
+                if (!in_view(wrists[side], &ndc) || with_arms.size() != without_arms.size() ||
+                    with_arms.size() != static_cast<std::size_t>(kW) * kH * 4)
+                    continue;
+                const int cx = static_cast<int>((ndc.x * .5f + .5f) * kW);
+                const int cy = static_cast<int>((ndc.y * .5f + .5f) * kH);
+                for (int y = std::max(0, cy - 24); y < std::min<int>(kH, cy + 24); ++y)
+                    for (int x = std::max(0, cx - 24); x < std::min<int>(kW, cx + 24); ++x) {
+                        if ((x - cx) * (x - cx) + (y - cy) * (y - cy) > 24 * 24)
+                            continue;
+                        const auto q = (static_cast<std::size_t>(y) * kW + x) * 4;
+                        int d = 0;
+                        for (int c = 0; c < 3; ++c)
+                            d += std::abs(int(with_arms[q + c]) - int(without_arms[q + c]));
+                        hand_pixels[side] += d >= 30 ? 1u : 0u;
+                    }
+            }
+            // Walking bob and a recoil kick must not lift a sleeve cut into view either.
+            std::size_t moving_cut_frames = 0;
+            for (int frame = 0; frame < 90; ++frame) {
+                demo.viewmodel->advance(1.0f / 60.0f, {4, 0, 2}, frame % 20 == 0);
+                (void)demo.viewmodel->pose(demo.session.client.camera_transform());
+                moving_cut_frames += cuts_in_view() != 0 ? 1u : 0u;
+            }
+            demo.viewmodel->advance(2.0f, {}, false);
+            const float frame_pixels = static_cast<float>(kW) * kH;
+            std::printf(
+                "viewmodel-smoke: %s hip framing: arms %.1f%% of frame, arms+weapon %.1f%%, "
+                "hand pixels L %zu R %zu, sleeve cut verts in view %zu / %zu (moving "
+                "frames %zu), limb-weapon intrusions %zu\n",
+                weapon_name(weapon),
+                100.0f * static_cast<float>(arm_pixels) / frame_pixels,
+                100.0f * static_cast<float>(model_pixels) / frame_pixels,
+                hand_pixels[0],
+                hand_pixels[1],
+                cuts_visible,
+                cuts,
+                moving_cut_frames,
+                intrusions);
+            if (!g_ppm.empty()) {
+                write_ppm(
+                    (g_ppm + "." + weapon_name(weapon) + "-hip.ppm").c_str(), with_arms, kW, kH);
+                write_ppm((g_ppm + "." + weapon_name(weapon) + "-hip-noarms.ppm").c_str(),
+                          without_arms,
+                          kW,
+                          kH);
+            }
+            check(arm_pixels > static_cast<std::size_t>(frame_pixels * kHipArmCoverage[0]) &&
+                      arm_pixels < static_cast<std::size_t>(frame_pixels * kHipArmCoverage[1]),
+                  "hip arms and hands cover a bounded band of the frame");
+            check(model_pixels > static_cast<std::size_t>(frame_pixels * kHipModelCoverage[0]) &&
+                      model_pixels < static_cast<std::size_t>(frame_pixels * kHipModelCoverage[1]),
+                  "hip arms, hands and weapon together cover a bounded band of the frame");
+            check(hand_pixels[0] >= 300 && hand_pixels[1] >= 300,
+                  "both hands are visible at their projected wrists at the hip");
+            check(cuts >= 16 && cuts_visible == 0 && moving_cut_frames == 0,
+                  "the sleeves' open cut ends stay outside the viewport at the hip");
+            check(intrusions == 0, "no upper arm or forearm passes through the weapon at the hip");
+        }
+    }
     // Use the SAME live tick seam as --play, through its real transport and GameplayServer.
     // A pure WeaponConfig test cannot catch configuring the spawn template while the live
     // avatar keeps its old automatic component. Disable damage only after the visual proofs.
