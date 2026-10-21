@@ -78,6 +78,11 @@ struct SoundClass {
     float retrigger_seconds = 0.0f;
     // How much of the voice goes to the shared reverb (0 = none, 1 = as loud as the dry signal).
     float reverb_send = 0.0f;
+    // Random loudness variation, +- this many dB per play. Two hits of the same size are never
+    // exactly the same loudness in the real world either.
+    float gain_jitter_db = 0.0f;
+    // Voice-budget group (see MixerConfig::group_max_voices). 0 = general, 1 = destruction.
+    std::uint8_t group = 0;
 };
 
 // A bank of sounds addressed by id. Sparse and small: a vector indexed by id with holes is simpler
@@ -105,12 +110,12 @@ public:
 
     void set_class(SoundId id, const SoundClass& cls);
 
-    // Give the engine's destruction ids the behaviour a dense scene needs: pitch jitter, a 40 ms
-    // (collapse: 250 ms, rumble: 1.2 s) retrigger window per recording, and a reverb send. It is
-    // a separate, explicit step -- not baked into `engine_defaults()` -- because the defaults must
-    // stay the plain "every play() sounds" bank that the mixer's own proofs (a deliberately hot
-    // mix, a voice that must retire to silence) are written against. A game with hundreds of
-    // events per second calls this after loading its sounds.
+    // Give the engine's destruction ids the behaviour a dense scene needs: pitch and level jitter,
+    // a voice group, a 40 ms (collapse: 250 ms, rumble: 1.2 s) retrigger window per recording, and
+    // a reverb send. It is a separate, explicit step -- not baked into `engine_defaults()` --
+    // because the defaults must stay the plain "every play() sounds" bank that the mixer's own
+    // proofs (a deliberately hot mix, a voice that must retire to silence) are written against. A
+    // game with hundreds of events per second calls this after loading its sounds.
     void apply_destruction_policy();
     [[nodiscard]] const SoundClass& sound_class(SoundId id) const noexcept;
 

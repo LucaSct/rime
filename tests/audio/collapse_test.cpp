@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "rime/audio/bank.hpp"
+#include "rime/audio/destruction_voicer.hpp"
 #include "rime/audio/mixer.hpp"
 
 using namespace rime;
@@ -235,4 +236,161 @@ TEST_CASE("2026-10: a dense collapse neither clips, nor drones, nor ticks") {
                                              << ", peak " << r.stats.peak);
     CHECK(line < 0.25);
     CHECK(std::fabs(tick_ac) < 0.25);
+}
+
+namespace {
+
+// Same scene as render_collapse, but routed through the DestructionVoicer the game uses.
+CollapseRender render_collapse_voiced(Mixer& mixer, DestructionVoicer& voicer) {
+    std::uint32_t lcg = 12345;
+    const auto rnd = [&lcg]() {
+        lcg = lcg * 1664525u + 1013904223u;
+        return static_cast<float>(lcg >> 8) / 16777216.0f;
+    };
+    CollapseRender out;
+    mixer.set_listener(Listener{});
+    std::vector<float> block(kTick * 2u);
+    for (std::size_t tick = 0; tick < 60u + 150u; ++tick) {
+        std::size_t events = 0;
+        if (tick == 0) {
+            events = 120;
+        } else if (tick < 60) {
+            events = 180 / 59 + (tick % 59 < 180 % 59 ? 1 : 0);
+        }
+        for (std::size_t e = 0; e < events; ++e) {
+            const core::Vec3 at{(rnd() - 0.5f) * 40.0f, rnd() * 6.0f, -(4.0f + rnd() * 30.0f)};
+            const float magnitude = 0.4f + 0.6f * rnd();
+            const std::uint32_t kind = static_cast<std::uint32_t>(rnd() * 100.0f);
+            if (kind < 2) {
+                voicer.add(DestructionKind::IslandDetached, at, 1.0f);
+            } else if (kind < 20) {
+                voicer.add(DestructionKind::DebrisSettled, at, 0.35f);
+            } else {
+                voicer.add(DestructionKind::PartBroken, at, magnitude);
+            }
+        }
+        voicer.update(mixer, 1.0f / 60.0f);
+        out.max_voices_seen = std::max(out.max_voices_seen, mixer.voice_count());
+        mixer.render(block);
+        for (std::size_t i = 0; i < kTick; ++i) {
+            out.mono.push_back(block[i * 2u] + block[i * 2u + 1u]);
+        }
+    }
+    out.stats = mixer.stats();
+    return out;
+}
+
+// Records what the voicer asked for, without a mixer.
+struct RecordingBackend final : AudioBackend {
+    std::vector<SoundId> plays;
+
+    void play(SoundId sound, core::Vec3, float) override { plays.push_back(sound); }
+};
+
+} // namespace
+
+TEST_CASE("2026-10 voicer: the same collapse, aggregated, is a few transients plus a bed") {
+    SoundBank bank = SoundBank::engine_defaults();
+    bank.apply_destruction_policy();
+    MixerConfig cfg;
+    cfg.master_gain = 0.5f;
+    cfg.limiter = true;
+    cfg.limiter_ceiling = 0.891f; // -1 dBFS
+    Mixer mixer(std::move(bank), cfg);
+    DestructionVoicer voicer;
+
+    const CollapseRender r = render_collapse_voiced(mixer, voicer);
+    const auto& st = voicer.stats();
+    MESSAGE("events " << st.events_in << ", transients " << st.transients_played << ", collapses "
+                      << st.collapses_played << ", folded into bed " << st.folded_into_bed
+                      << ", bed starts " << st.bed_starts << ", trickles " << st.trickles
+                      << ", peak " << r.stats.peak);
+
+    CHECK(st.events_in == 300);
+    CHECK(st.transients_played <= 40);     // 12 windows x 3, not 300
+    CHECK(st.transients_played >= 6);      // and it did voice impacts
+    CHECK(st.bed_starts >= 1);             // the roar exists
+    CHECK(st.folded_into_bed > 100);       // most of the events became bed, not clicks
+    CHECK(r.stats.peak <= 0.891f + 1e-3f); // -1 dBFS ceiling holds with master_gain raised to 0.5
+    CHECK(r.stats.clipped_samples == 0);
+    CHECK(r.max_voices_seen <= cfg.max_voices);
+
+    const double line = strongest_line_share(r.mono);
+    const double tick_ac = autocorrelation(r.mono, kTick);
+    MESSAGE("voiced: strongest line " << line << ", tick autocorrelation " << tick_ac);
+    CHECK(line < 0.25);
+    CHECK(std::fabs(tick_ac) < 0.25);
+}
+
+TEST_CASE("2026-10 voicer: debris settling never makes an impact, and quiets the bed") {
+    RecordingBackend backend;
+    DestructionVoicer voicer;
+    // A big burst first, to build bed intensity...
+    for (int i = 0; i < 80; ++i) {
+        voicer.add(
+            DestructionKind::PartBroken, {static_cast<float>(i % 7) * 5.0f, 0, -10.0f}, 0.8f);
+    }
+    for (int t = 0; t < 10; ++t) {
+        voicer.update(backend, 1.0f / 60.0f);
+    }
+    const float before = voicer.bed_intensity();
+    REQUIRE(before > 0.05f);
+    backend.plays.clear();
+    // ...then nothing but settles.
+    for (int i = 0; i < 20; ++i) {
+        voicer.add(DestructionKind::DebrisSettled, {0, 0, -8.0f}, 1.0f);
+    }
+    voicer.update(backend, 1.0f / 60.0f);
+    CHECK(voicer.bed_intensity() < before);
+    for (const SoundId id : backend.plays) {
+        CHECK(id != sound::kPartBreak);
+        CHECK(id != sound::kCollapse);
+        CHECK(id != sound::kImpactConcrete);
+    }
+}
+
+TEST_CASE("2026-10 mixer: voice eviction fades rather than cutting, and destruction has a budget") {
+    SoundBank bank = SoundBank::engine_defaults();
+    bank.apply_destruction_policy();
+    Sound tone;
+    tone.samples.assign(kSampleRate, 0.5f); // a long DC-ish voice: any hard cut would be a step
+    bank.set(sound::kUserBase, tone);       // group 0: gunfire-like
+    MixerConfig cfg;
+    cfg.max_voices = 8;
+    cfg.group_max_voices = {0u, 3u, 0u, 0u};
+    Mixer mixer(std::move(bank), cfg);
+    mixer.set_listener(Listener{});
+    std::vector<float> block(kTick * 2u);
+
+    // Five gun voices, then a flood of destruction: the destruction group is capped at 3 and the
+    // guns are not evicted by it.
+    for (int i = 0; i < 5; ++i) {
+        mixer.play(sound::kUserBase, {0.0f, 0.0f, -1.0f}, 1.0f);
+    }
+    mixer.render(block);
+    for (int i = 0; i < 20; ++i) {
+        mixer.play(sound::kCollapse, {static_cast<float>(i), 0.0f, -3.0f}, 1.0f);
+    }
+    mixer.render(block);
+    CHECK(mixer.voice_count() <= 8);
+
+    // Evict one sounding gun voice and check the output has no step larger than the fade allows.
+    SoundBank b2 = SoundBank::engine_defaults();
+    b2.set(sound::kUserBase, tone);
+    MixerConfig c2;
+    c2.max_voices = 1;
+    Mixer m2(std::move(b2), c2);
+    m2.set_listener(Listener{});
+    m2.play(sound::kUserBase, {0.0f, 0.0f, -1.0f}, 0.5f);
+    m2.render(block);
+    m2.play(sound::kUserBase, {0.0f, 0.0f, -1.0f}, 1.0f); // louder: evicts the first
+    std::vector<float> after(kTick * 2u);
+    m2.render(after);
+    float max_step = 0.0f;
+    for (std::size_t i = 1; i < kTick; ++i) {
+        max_step = std::max(max_step, std::fabs(after[i * 2u] - after[(i - 1) * 2u]));
+    }
+    // The old voice glides 0.5 -> 0 over 800 frames and the new one is constant, so consecutive
+    // samples differ by ~1e-3, not by the ~0.12 a hard cut of the old voice would show.
+    CHECK(max_step < 0.01f);
 }

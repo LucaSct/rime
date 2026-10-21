@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -74,6 +75,12 @@ struct MixerConfig {
     // have).
     float master_gain = 0.35f;
 
+    // Per-GROUP voice budgets (index = SoundClass::group; 0 = no extra limit beyond max_voices).
+    // Group 1 is destruction: a collapsing building may use at most this many of the voices, so
+    // gunfire (group 0) always has the rest. Without a budget, a hundred falling bricks starve the
+    // one sound the player is actually causing.
+    std::array<std::uint32_t, 4> group_max_voices{0u, 20u, 0u, 0u};
+
     // Seed of the mixer's own PRNG, which picks variants and pitch jitter. Deterministic by
     // contract: the same play() sequence with the same seed renders the same samples.
     std::uint32_t seed = 0x5EED'A0D1u;
@@ -136,7 +143,15 @@ public:
 
     void reset_stats() noexcept;
 
-    [[nodiscard]] std::size_t voice_count() const noexcept { return voices_.size(); }
+    // Voices that count against the cap: those not already being faded out by an eviction. (An
+    // evicted voice lingers for one block so it can glide to silence instead of clicking.)
+    [[nodiscard]] std::size_t voice_count() const noexcept {
+        std::size_t n = 0;
+        for (const Voice& v : voices_) {
+            n += v.fading ? 0u : 1u;
+        }
+        return n;
+    }
 
 private:
     struct Voice {
@@ -157,6 +172,8 @@ private:
         // fix.
         float left = 0.0f;
         float right = 0.0f;
+        std::uint8_t group = 0;
+        bool fading = false;  // evicted: gliding to silence, removed after this block
         bool started = false; // false until the first block, so gains start AT target, not from 0
     };
 
@@ -165,6 +182,7 @@ private:
     void channel_gains(const Voice& v, float& left, float& right, float& level) const noexcept;
     [[nodiscard]] std::uint32_t next_random() noexcept;
     void apply_limiter(std::span<float> out, std::size_t frames);
+    void evict(Voice& victim);
 
     SoundBank bank_;
     MixerConfig config_;
@@ -176,7 +194,14 @@ private:
     // The mixer's own clock in frames. Separate from `stats_.frames_rendered`, which
     // reset_stats() zeroes: retrigger windows must not forget what time it is.
     std::int64_t clock_ = 0;
-    std::vector<int> last_variant_;                     // per sound id
+
+    // Shuffle bag per sound id: every variant once, in random order, before any repeats.
+    struct Bag {
+        std::vector<std::uint16_t> order;
+        std::size_t next = 0;
+    };
+
+    std::vector<Bag> bags_;
     std::vector<float> pending_power_;                  // per sound id: energy of refused plays
     std::vector<std::vector<std::int64_t>> last_start_; // per sound id, per variant: clock at start
     Reverb reverb_;

@@ -197,15 +197,17 @@ SoundBank SoundBank::engine_defaults() {
 }
 
 void SoundBank::apply_destruction_policy() {
-    // Impacts jitter in pitch and may not restart one recording inside 40 ms (the buzz guard); a
-    // collapse is a rarer, bigger event, so its window is wider; the rumble bed is one per
-    // episode. Rubble touches the reverb a little, a break more, a collapse a fair amount.
-    set_class(sound::kImpactConcrete, {0.04f, 0.04f, 0.12f});
-    set_class(sound::kPartBreak, {0.04f, 0.04f, 0.18f});
-    set_class(sound::kDebrisSettle, {0.05f, 0.04f, 0.08f});
-    set_class(sound::kCollapse, {0.03f, 0.25f, 0.30f});
-    set_class(sound::kFootstep, {0.05f, 0.10f, 0.0f});
-    set_class(sound::kRumble, {0.02f, 1.2f, 0.25f});
+    // Impacts jitter +-5 % in pitch and +-3 dB in level, and may not restart one recording inside
+    // 40 ms (the buzz guard); a collapse is a rarer, bigger event, so its window is wider; the
+    // rumble bed is one per episode. All of them live in voice group 1 so a collapse cannot starve
+    // gunfire. Reverb sends are deliberately SMALL: the wash is for gunfire (set by the game), and
+    // a wall of masonry through a long reverb is mud.
+    set_class(sound::kImpactConcrete, {0.05f, 0.04f, 0.04f, 3.0f, 1});
+    set_class(sound::kPartBreak, {0.05f, 0.04f, 0.06f, 3.0f, 1});
+    set_class(sound::kDebrisSettle, {0.05f, 0.04f, 0.0f, 3.0f, 1});
+    set_class(sound::kCollapse, {0.05f, 0.25f, 0.10f, 2.0f, 1});
+    set_class(sound::kFootstep, {0.05f, 0.10f, 0.0f, 2.0f, 0});
+    set_class(sound::kRumble, {0.03f, 1.2f, 0.05f, 1.0f, 1});
 }
 
 void SoundBank::set(SoundId id, Sound sound) {

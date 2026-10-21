@@ -89,45 +89,69 @@ void Mixer::play(SoundId sound, core::Vec3 position, float gain) {
     // Two draws per play, unconditionally, so the random stream does not depend on whether this
     // particular play is later refused -- the sequence of picks stays a function of the sequence
     // of calls.
-    const std::uint32_t pick = next_random();
-    const std::uint32_t jitter = next_random();
+    const std::uint32_t pitch_draw = next_random();
+    const std::uint32_t gain_draw = next_random();
 
     if (sound >= last_start_.size()) {
         last_start_.resize(static_cast<std::size_t>(sound) + 1u);
-        last_variant_.resize(static_cast<std::size_t>(sound) + 1u, -1);
+        bags_.resize(static_cast<std::size_t>(sound) + 1u);
     }
     auto& starts = last_start_[sound];
     if (starts.size() < variants) {
         starts.resize(variants, std::numeric_limits<std::int64_t>::min() / 2);
     }
 
-    // RETRIGGER GUARD. Choose a variant, but never one that started inside its class's window; scan
-    // forward from the random pick to the first that is free. With four recordings a burst of a
-    // hundred identical events therefore starts at most four voices per window -- different
-    // recordings, so they add as independent sounds -- instead of a hundred copies of one buffer.
+    // SHUFFLE BAG. A random pick with replacement repeats a recording about one time in N, and a
+    // repeated recording back-to-back is exactly the "machine gun" tell. A bag holds every variant
+    // once in random order; each play takes the next one, and the bag is reshuffled only when it
+    // is empty. Every variant is therefore heard once before any is heard twice, and the same one
+    // can never come up twice running (the reshuffle is nudged if it would).
+    Bag& bag = bags_[sound];
+    if (bag.order.size() != variants || bag.next >= bag.order.size()) {
+        const int previous = bag.order.empty() ? -1 : static_cast<int>(bag.order.back());
+        bag.order.resize(variants);
+        for (std::size_t i = 0; i < variants; ++i) {
+            bag.order[i] = static_cast<std::uint16_t>(i);
+        }
+        for (std::size_t i = variants; i > 1; --i) { // Fisher-Yates
+            std::swap(bag.order[i - 1], bag.order[next_random() % i]);
+        }
+        if (variants > 1 && static_cast<int>(bag.order[0]) == previous) {
+            std::swap(bag.order[0], bag.order[1]);
+        }
+        bag.next = 0;
+    }
+
+    // RETRIGGER GUARD. Take the next variant in the bag that has not started inside its class's
+    // window; if the next is still cooling down, take the first one later in the bag that is not.
+    // With four recordings a burst of a hundred identical events therefore starts at most four
+    // voices per window -- different recordings, so they add as independent sounds -- instead of a
+    // hundred copies of one buffer.
     const auto window =
         static_cast<std::int64_t>(cls.retrigger_seconds * static_cast<float>(config_.sample_rate));
-    std::size_t variant = variants > 1 ? pick % variants : 0;
-    if (variants > 1 && last_variant_[sound] == static_cast<int>(variant)) {
-        variant = (variant + 1u) % variants; // never the same recording twice running
-    }
+    std::size_t variant = 0;
     bool found = false;
-    for (std::size_t tries = 0; tries < variants; ++tries) {
-        if (clock_ - starts[variant] >= window) {
+    for (std::size_t k = bag.next; k < bag.order.size(); ++k) {
+        if (clock_ - starts[bag.order[k]] >= window) {
+            std::swap(bag.order[k], bag.order[bag.next]);
+            variant = bag.order[bag.next];
             found = true;
             break;
         }
-        variant = (variant + 1u) % variants;
     }
-    // Level of this play, computed up front: a refused play still contributes its ENERGY below.
+
     Voice v;
     v.sound = sound;
     v.variant = variant;
     v.position = position;
-    v.gain = gain;
+    v.group = cls.group;
+    // Gain: uniform +-gain_jitter_db around the caller's gain (10^(dB/20)), so two hits of the same
+    // size are not the same loudness either.
+    const float gu = static_cast<float>(gain_draw >> 8) / 16777216.0f;
+    v.gain = gain * std::pow(10.0f, cls.gain_jitter_db * (2.0f * gu - 1.0f) / 20.0f);
     v.send = cls.reverb_send;
-    // Pitch: uniform in [1 - j, 1 + j] from the top 24 bits of the second draw.
-    const float u = static_cast<float>(jitter >> 8) / 16777216.0f;
+    // Pitch: uniform in [1 - j, 1 + j] from the top 24 bits of the first draw.
+    const float u = static_cast<float>(pitch_draw >> 8) / 16777216.0f;
     v.rate = 1.0f + cls.pitch_jitter * (2.0f * u - 1.0f);
     float l = 0.0f;
     float r = 0.0f;
@@ -161,32 +185,76 @@ void Mixer::play(SoundId sound, core::Vec3 position, float gain) {
         return;
     }
 
-    if (voices_.size() >= config_.max_voices) {
-        // The cap is full: the QUIETEST of the voices already playing is the one to lose, ranked by
-        // the level it was given at play() time and refreshed every block -- never by its pan
-        // gains, which are zero for a voice that has not rendered yet. (The original ranked on
-        // those, so within one tick every new play evicted the previous not-yet-rendered one and a
-        // 362-event burst kept only the last 48 plays of whatever came last.) If even the
-        // quietest is louder than the newcomer, the newcomer is the one dropped.
-        // Deterministic on ties by taking the FIRST minimum, which is also the oldest.
-        auto quietest = voices_.begin();
-        for (auto it = voices_.begin(); it != voices_.end(); ++it) {
-            if (it->level < quietest->level) {
-                quietest = it;
+    // THE VOICE CAP, per group and overall. The quietest voice that is still sounding is the one to
+    // lose, ranked by the level it was given at play() time and refreshed every block -- never by
+    // its pan gains, which are zero for a voice that has not rendered yet. (The original ranked on
+    // those, so within one tick every new play evicted the previous not-yet-rendered one and a
+    // 362-event burst kept only the last 48 plays of whatever came last.) If even the quietest is
+    // louder than the newcomer, the newcomer is the one dropped. The destruction group has its own
+    // smaller budget so a collapsing building can never push gunfire out of the mixer.
+    // Deterministic on ties by taking the FIRST minimum, which is also the oldest.
+    const auto quietest_active = [this](int group) -> Voice* {
+        Voice* best = nullptr;
+        for (Voice& other : voices_) {
+            if (other.fading || (group >= 0 && other.group != group)) {
+                continue;
+            }
+            if (best == nullptr || other.level < best->level) {
+                best = &other;
             }
         }
-        if (v.level < quietest->level) {
+        return best;
+    };
+    const auto make_room = [&](Voice* victim) -> bool {
+        if (victim == nullptr) {
+            return true;
+        }
+        if (v.level < victim->level) {
             ++stats_.voices_dropped;
+            return false;
+        }
+        evict(*victim);
+        return true;
+    };
+    std::uint32_t in_group = 0;
+    std::uint32_t active = 0;
+    for (const Voice& other : voices_) {
+        if (!other.fading) {
+            ++active;
+            in_group += other.group == v.group ? 1u : 0u;
+        }
+    }
+    const std::uint32_t group_cap =
+        v.group < config_.group_max_voices.size() ? config_.group_max_voices[v.group] : 0u;
+    if (group_cap != 0 && in_group >= group_cap) {
+        if (!make_room(quietest_active(v.group))) {
             return;
         }
-        voices_.erase(quietest);
-        ++stats_.voices_stolen;
+        --active;
+    }
+    if (active >= config_.max_voices) {
+        if (!make_room(quietest_active(-1))) {
+            return;
+        }
     }
 
+    ++bag.next;
     starts[variant] = clock_;
-    last_variant_[sound] = static_cast<int>(variant);
     voices_.push_back(v);
     ++stats_.voices_started;
+}
+
+void Mixer::evict(Voice& victim) {
+    ++stats_.voices_stolen;
+    if (!victim.started) {
+        // Never rendered, never heard: nothing to click, so remove it outright.
+        voices_.erase(voices_.begin() + (&victim - voices_.data()));
+        return;
+    }
+    // A voice that HAS been sounding must not be cut off: stopping a waveform mid-cycle is a step
+    // in the output, which the ear hears as a click. It is faded to zero over the next block
+    // (~10-17 ms at the game's tick) and removed once the fade has played out.
+    victim.fading = true;
 }
 
 void Mixer::render(std::span<float> out) {
@@ -204,6 +272,10 @@ void Mixer::render(std::span<float> out) {
         float target_right = 0.0f;
         float target_level = 0.0f;
         channel_gains(v, target_left, target_right, target_level);
+        if (v.fading) {
+            // Being evicted: glide to silence across this block (see evict()).
+            target_left = target_right = target_level = 0.0f;
+        }
         if (!v.started) {
             // A brand-new voice starts AT its target, not ramping up from zero — otherwise every
             // impact would fade in over a block and lose exactly the transient that makes it read
@@ -276,8 +348,9 @@ void Mixer::render(std::span<float> out) {
     voices_.erase(std::remove_if(voices_.begin(),
                                  voices_.end(),
                                  [this](const Voice& v) {
-                                     return static_cast<std::size_t>(v.cursor) >=
-                                            bank_.samples(v.sound, v.variant).size();
+                                     return v.fading ||
+                                            static_cast<std::size_t>(v.cursor) >=
+                                                bank_.samples(v.sound, v.variant).size();
                                  }),
                   voices_.end());
 
