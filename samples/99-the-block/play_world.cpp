@@ -90,10 +90,24 @@ PlayWorld::street_config(ecs::World& world, bool& valid, PlateRect* plate) {
             return;
         }
         const auto p = t->value.translation;
-        result.street_min_x = static_cast<std::int32_t>(std::floor(p.x - s.half_x));
-        result.street_max_x = static_cast<std::int32_t>(std::ceil(p.x + s.half_x));
-        result.street_min_z = static_cast<std::int32_t>(std::floor(p.z - s.half_z));
-        result.street_max_z = static_cast<std::int32_t>(std::ceil(p.z + s.half_z));
+        // The terrain's LOW rectangle is the plate shrunk by kPlateSkirt, rounded INWARD (ceil on a
+        // minimum, floor on a maximum), so the terrain's climb back to ground level finishes at or
+        // before the plate edge and never past it -- see PlayEnvironment::kPlateSkirt. A plate
+        // narrower than two skirts collapses to its centre line; the climb then cannot finish
+        // under it, which prove_plate_boundary reports rather than hides.
+        const auto skirt = PlayEnvironment::kPlateSkirt;
+        const auto shrink =
+            [skirt](float lo, float hi, std::int32_t& out_lo, std::int32_t& out_hi) {
+                auto a = static_cast<std::int32_t>(std::ceil(lo)) + skirt;
+                auto b = static_cast<std::int32_t>(std::floor(hi)) - skirt;
+                if (a > b) {
+                    a = b = static_cast<std::int32_t>(std::floor(0.5f * (lo + hi)));
+                }
+                out_lo = a;
+                out_hi = b;
+            };
+        shrink(p.x - s.half_x, p.x + s.half_x, result.street_min_x, result.street_max_x);
+        shrink(p.z - s.half_z, p.z + s.half_z, result.street_min_z, result.street_max_z);
         if (plate != nullptr) {
             *plate = {p.x - s.half_x, p.x + s.half_x, p.z - s.half_z, p.z + s.half_z, p.y};
         }

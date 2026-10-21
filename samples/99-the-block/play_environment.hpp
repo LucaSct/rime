@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <cstdint>
 #include <vector>
 
 #include "rime/assets/procedural_terrain.hpp"
@@ -44,6 +45,24 @@ public:
     [[nodiscard]] const Stats& stats() const noexcept { return stats_; }
 
     [[nodiscard]] render::MaterialId water_material() const noexcept { return water_; }
+
+    // The hidden skirt between the city plate's edge and the terrain's low "street" rectangle.
+    //
+    // THE BUG THIS FIXES (owner: "I cannot jump the vertical gap between the outer and inner
+    // terrain"). The procedural terrain is -1.5 m INSIDE its street rectangle and climbs back to
+    // 0 over the next 12 m. The rectangle used to be the plate's own footprint, so the terrain sat
+    // 1.5 m BELOW the plate top at the plate edge: a player walking in from the flat outer band
+    // descended a bowl and met a 1.5 m wall. The step-up ladder climbs 0.3 m and a jump apex is
+    // ~1.0 m, so the plate could not be entered at all.
+    //
+    // The terrain only has to be below the plate where it is HIDDEN under the plate slab, so the
+    // street rectangle is shrunk by this many metres: the whole 12 m climb then happens under the
+    // plate and the terrain arrives at ground level (= the plate top) exactly at the plate edge,
+    // with the smoothstep's zero slope there. One height function still serves collision and
+    // rendering, so the walkable surface and the drawn surface cannot disagree. It must be >= the
+    // terrain's street->ground blend (kStreetBlendEnd = 12 m in engine/assets/src/
+    // procedural_terrain.cpp); the plate-boundary proof (`--world-smoke`) fails if it is not.
+    static constexpr std::int32_t kPlateSkirt = 12;
 
     // Same global-coordinate weight function at every LOD. Height samples remain untouched:
     // the drawn grass/dirt cannot change what either physics peer collides with.

@@ -63,7 +63,7 @@ public:
 
     // The authored city plate (the one GroundSurface): its exact rectangle and walkable top, in
     // world metres. Kept beside the integer terrain rectangle because the two differ on purpose --
-    // see `street_config` for why the terrain's low rectangle is the plate shrunk by kPlateSkirt.
+    // see PlayEnvironment::kPlateSkirt for why the terrain's low rectangle is the plate shrunk.
     struct PlateRect {
         float min_x = 0.0f;
         float max_x = 0.0f;
@@ -71,12 +71,6 @@ public:
         float max_z = 0.0f;
         float top_y = 0.0f;
     };
-
-    // Width of the hidden skirt: how far inside the plate edge the terrain's street rectangle
-    // starts. It must be >= the terrain function's street->ground blend (12 m in
-    // engine/assets/src/procedural_terrain.cpp, kStreetBlendEnd) so the blend has finished -- the
-    // terrain is exactly at ground level -- by the time it reaches the plate edge.
-    static constexpr std::int32_t kPlateSkirt = 12;
 
     // The result of `prove_plate_boundary`: every number the check judges, so a failing run says
     // which side and by how much, and a passing run can be shown to have looked (non-vacuity).
