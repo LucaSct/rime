@@ -4,6 +4,7 @@
 # sink.hpp makes "no device" an ordinary answer, so it must never redden a deaf runner.
 rime_add_test(rime_audio_tests
     audio_test.cpp
+    collapse_test.cpp
     mixer_test.cpp
     sink_test.cpp)
 

@@ -2,7 +2,9 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <span>
 #include <vector>
 
@@ -10,10 +12,18 @@
 
 // The sound bank (m13.4): what a `SoundId` actually sounds like.
 //
-// WHY THE SOUNDS ARE SYNTHESIZED AND NOT LOADED. There is no cooked audio format — no `.rsnd`, no
-// decoder, no importer — and inventing one is an asset-pipeline brick, not an audio brick. ADR-0035
-// calls this slot "audio v1 … polish, cuttable", so spending it on a file format would buy a
-// pipeline and no sound at all.
+// TWO SOURCES OF SOUND. `engine_defaults()` is procedural and deterministic: CI is deaf, has no
+// asset directory and must still be able to prove the mixer, so the engine always carries a
+// complete synthetic bank. A game that ships recordings loads them OVER those ids with
+// `add_variant_from_wav` -- same ids, same mixer, better sound. (The 2026-10 revision: the
+// original synthetic bank gave most sounds a fixed-pitch sine "body", and hundreds of overlapping
+// copies of one decaying sine are a hum, not a collapse. The defaults now use filtered noise only,
+// in several variants per sound, so even the fallback cannot drone.)
+//
+// WHY THE ORIGINAL SOUNDS WERE SYNTHESIZED AND NOT LOADED. There is no cooked audio format — no
+// `.rsnd`, no decoder, no importer — and inventing one is an asset-pipeline brick, not an audio
+// brick. ADR-0035 calls this slot "audio v1 … polish, cuttable", so spending it on a file format
+// would buy a pipeline and no sound at all.
 //
 // Procedural generation gets the demo audible with no dependency, no asset, and no license entry,
 // and it has a property a loaded sample does not: it is **deterministic by construction**, so the
@@ -41,6 +51,7 @@ inline constexpr SoundId kPartBreak = 2;      // a part dies and detaches
 inline constexpr SoundId kDebrisSettle = 3;   // rubble comes to rest
 inline constexpr SoundId kCollapse = 4;       // a large island detaches — the low one
 inline constexpr SoundId kFootstep = 5;
+inline constexpr SoundId kRumble = 6; // the single low bed under a large collapse
 inline constexpr SoundId kUserBase = 1024;
 } // namespace sound
 
@@ -49,6 +60,24 @@ struct Sound {
     std::vector<float> samples;
 
     [[nodiscard]] bool empty() const noexcept { return samples.empty(); }
+};
+
+// How the mixer treats a whole class of sound, kept next to the sound because it is a property OF
+// the sound ("a gun report is sent hard into the reverb", "a pebble may not retrigger every
+// frame"), not of any call site. The defaults reproduce the original behaviour exactly.
+struct SoundClass {
+    // Each play() picks a random variant (never the one it picked last time, when there is more
+    // than one: back-to-back identical samples are what makes automatic fire sound like a
+    // machine) and plays it at a random speed within +-pitch_jitter (0.03 = +-3 %). A few percent
+    // of speed change is below the threshold of hearing "pitch shifted" but is enough that two
+    // copies of the same recording no longer add coherently into a comb.
+    float pitch_jitter = 0.0f;
+    // Minimum time between two STARTS of the same variant, in seconds. Restarting one short buffer
+    // at tick rate is a 60 Hz comb filter: the buzz this field exists to prevent. Plays inside the
+    // window are discarded and counted (`MixStats::voices_suppressed`).
+    float retrigger_seconds = 0.0f;
+    // How much of the voice goes to the shared reverb (0 = none, 1 = as loud as the dry signal).
+    float reverb_send = 0.0f;
 };
 
 // A bank of sounds addressed by id. Sparse and small: a vector indexed by id with holes is simpler
@@ -60,16 +89,47 @@ public:
     // rather than anything drawn from the platform.
     [[nodiscard]] static SoundBank engine_defaults();
 
+    // Replace everything under `id` with this one sound.
     void set(SoundId id, Sound sound);
 
-    // The samples for `id`, or an empty span if the bank has nothing for it. An unknown id is
-    // SILENCE, never a wrong sound — the same posture the font takes for an unprintable character.
-    [[nodiscard]] std::span<const float> samples(SoundId id) const noexcept;
+    // Add another variant under `id`.
+    void add_variant(SoundId id, Sound sound);
 
-    [[nodiscard]] std::size_t size() const noexcept { return sounds_.size(); }
+    // Decode a mono WAV at kSampleRate and add it as a variant. Returns false (and adds nothing)
+    // if the file is unreadable, not 48 kHz, or not mono: refusing is better than silently
+    // resampling or down-mixing a file whose author meant something else.
+    [[nodiscard]] bool add_variant_from_wav(SoundId id, const std::filesystem::path& path);
+
+    // Forget every variant of `id`, so a loader can start the id afresh with recordings only.
+    void clear(SoundId id);
+
+    void set_class(SoundId id, const SoundClass& cls);
+
+    // Give the engine's destruction ids the behaviour a dense scene needs: pitch jitter, a 40 ms
+    // (collapse: 250 ms, rumble: 1.2 s) retrigger window per recording, and a reverb send. It is
+    // a separate, explicit step -- not baked into `engine_defaults()` -- because the defaults must
+    // stay the plain "every play() sounds" bank that the mixer's own proofs (a deliberately hot
+    // mix, a voice that must retire to silence) are written against. A game with hundreds of
+    // events per second calls this after loading its sounds.
+    void apply_destruction_policy();
+    [[nodiscard]] const SoundClass& sound_class(SoundId id) const noexcept;
+
+    // The samples for variant 0 of `id`, or an empty span if the bank has nothing for it. An
+    // unknown id is SILENCE, never a wrong sound — the same posture the font takes for an
+    // unprintable character.
+    [[nodiscard]] std::span<const float> samples(SoundId id) const noexcept;
+    [[nodiscard]] std::span<const float> samples(SoundId id, std::size_t variant) const noexcept;
+    [[nodiscard]] std::size_t variant_count(SoundId id) const noexcept;
+
+    [[nodiscard]] std::size_t size() const noexcept { return entries_.size(); }
 
 private:
-    std::vector<Sound> sounds_;
+    struct Entry {
+        std::vector<Sound> variants;
+        SoundClass cls;
+    };
+
+    std::vector<Entry> entries_;
 };
 
 // ── The synthesis primitives, exposed because they are the teaching content ──────────────────────

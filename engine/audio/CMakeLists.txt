@@ -13,6 +13,7 @@ add_library(rime_audio STATIC
     src/audio.cpp
     src/bank.cpp
     src/mixer.cpp
+    src/reverb.cpp
     src/wav.cpp)
 
 # Namespaced alias so dependents link `rime::audio`, matching our C++ namespace.
