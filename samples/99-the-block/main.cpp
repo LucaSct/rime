@@ -102,8 +102,10 @@
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/assets/manifest.hpp"
 #include "rime/assets/sdf_asset.hpp"
+#include "rime/audio/destruction_voicer.hpp"
 #include "rime/audio/mixer.hpp"
 #include "rime/audio/sink.hpp"
+#include "rime/audio/wav.hpp"
 #include "rime/blockkit/block.hpp"
 #include "rime/blockkit/palette.hpp"
 #include "rime/blockkit/role.hpp"
@@ -160,11 +162,17 @@
 #ifndef RIME_VIEWMODEL_COOKED_DIR
 #define RIME_VIEWMODEL_COOKED_DIR "viewmodel-cooked"
 #endif
+#ifndef RIME_BLOCK_AUDIO_DIR
+#define RIME_BLOCK_AUDIO_DIR "audio"
+#endif
 
 namespace {
 
 using namespace rime;
 std::filesystem::path g_viewmodel_content = RIME_VIEWMODEL_COOKED_DIR;
+// Recorded sound effects (CC0, see assets/audio/ATTRIBUTION.md). Missing is fine: the bank falls
+// back to the engine's synthetic defaults and says so once.
+std::filesystem::path g_audio_content = RIME_BLOCK_AUDIO_DIR;
 
 // ── The scenario ────────────────────────────────────────────────────────────────────────────────
 
@@ -216,6 +224,14 @@ std::string g_ppm;
 bool g_effects_preview = false;
 bool g_network_impairment = false;
 bool g_mute = false;
+
+// --audio-wav <file>: write the exact stereo mixdown the mixer produced during the run, plus
+// <file>.csv with one row per tick (voices started, voices alive, block peak). CI is deaf and a
+// buzz is a property of the WAVEFORM, so this is how a collapse gets measured and then listened to.
+std::string g_audio_wav;
+// --audio-weapons <dir>: render each weapon firing three times to <dir>/weapon-N.wav and exit. No
+// GPU, no scene, no device: the same bank, mixer and call helper the game uses.
+std::string g_audio_weapons;
 
 // --island-profile: per-island solve TIMING (#311). Off by default because it reads a clock once
 // per active island -- off the per-constraint path and tiny, but not free, so A RUN TAKEN WITH THIS
@@ -2020,32 +2036,100 @@ constexpr audio::SoundId kBulletImpact = kGunReport + 3;
 constexpr audio::SoundId kDryClick =
     kBulletImpact + static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Count);
 
+// Load every `<stem>_<n>.wav` (n = 0,1,2...) in `dir` as variants of `id`, replacing whatever the
+// bank held there. Returns how many loaded; zero leaves the id untouched so a missing or partial
+// asset directory degrades to the synthetic sound rather than to silence.
+std::size_t load_recordings(audio::SoundBank& bank,
+                            audio::SoundId id,
+                            const std::filesystem::path& dir,
+                            const std::string& stem) {
+    audio::SoundBank loaded;
+    std::size_t count = 0;
+    for (unsigned n = 0;; ++n) {
+        const auto path = dir / (stem + "_" + std::to_string(n) + ".wav");
+        if (!std::filesystem::exists(path))
+            break;
+        if (!loaded.add_variant_from_wav(id, path)) {
+            std::fprintf(stderr, "play audio: refused %s (not 48 kHz mono PCM)\n", path.c_str());
+            break;
+        }
+        ++count;
+    }
+    if (count == 0)
+        return 0;
+    bank.clear(id);
+    for (std::size_t v = 0; v < count; ++v) {
+        audio::Sound sound;
+        const auto samples = loaded.samples(id, v);
+        sound.samples.assign(samples.begin(), samples.end());
+        bank.add_variant(id, std::move(sound));
+    }
+    return count;
+}
+
 audio::SoundBank play_sound_bank() {
     auto bank = audio::SoundBank::engine_defaults();
-    // Subtractive transient synthesis: filtered deterministic noise supplies the report's crack,
-    // a short low sine supplies its body, and exponential envelopes prevent discontinuous tails.
-    // Build these mono buffers once; the existing mixer spatializes bounded one-shot voices.
-    for (unsigned weapon = 0; weapon < 3; ++weapon) {
-        auto report = audio::noise_burst(.24f, .72f, weapon == 2 ? 23.0f : 32.0f, 0x706u + weapon);
-        audio::mix_into(report, audio::decaying_sine(.24f, weapon == 2 ? 85.0f : 130.0f, 35), .55f);
-        bank.set(kGunReport + weapon, std::move(report));
+    // RECORDINGS FIRST. Real masonry, real rifles: each id gets several variants (the mixer picks
+    // one at random and jitters its pitch a few percent, so automatic fire and a falling wall are
+    // never one buffer repeated). The synthetic code below stays as the fallback and for the sounds
+    // that are not tonal anyway (bullet impacts, the dry click).
+    std::size_t recorded = 0;
+    recorded += load_recordings(bank, audio::sound::kImpactConcrete, g_audio_content, "impact");
+    recorded += load_recordings(bank, audio::sound::kPartBreak, g_audio_content, "break");
+    recorded += load_recordings(bank, audio::sound::kDebrisSettle, g_audio_content, "settle");
+    recorded += load_recordings(bank, audio::sound::kCollapse, g_audio_content, "collapse");
+    recorded += load_recordings(bank, audio::sound::kRumble, g_audio_content, "rumble");
+    static const char* const kWeaponStem[3] = {"gun_scar", "gun_m4", "gun_sniper"};
+    for (unsigned weapon = 0; weapon < 3; ++weapon)
+        recorded +=
+            load_recordings(bank, kGunReport + weapon, g_audio_content, kWeaponStem[weapon]);
+    static bool announced = false;
+    if (!announced) {
+        announced = true;
+        std::printf("play audio: %zu recordings from %s%s\n",
+                    recorded,
+                    g_audio_content.string().c_str(),
+                    recorded == 0 ? " (none found: synthetic fallback sounds)" : "");
     }
+    // Pitch jitter, retrigger windows and reverb sends for the destruction ids.
+    bank.apply_destruction_policy();
+    // A gun report is sent HARD into the reverb: the tail is what makes it an outdoor shot. Rifles
+    // retrigger freely (cyclic rate is ~85 ms apart, far outside any window that matters); +-3 %
+    // pitch keeps back-to-back shots from being one sample repeated.
+    for (unsigned weapon = 0; weapon < 3; ++weapon)
+        bank.set_class(kGunReport + weapon, {0.03f, 0.0f, weapon == 2 ? 1.1f : 0.9f, 1.5f, 0});
+    // Bullet strikes are short noise transients and stay synthetic (they are not tonal, except the
+    // metal ping, which is a 35 ms ring and is meant to ring). A touch of reverb, a little jitter.
     for (unsigned material = 0;
          material < static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Count);
-         ++material) {
-        const bool metal =
-            material == static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Metal);
-        const bool water =
-            material == static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Water);
-        auto impact = audio::noise_burst(.18f,
-                                         metal   ? .85f
-                                         : water ? .08f
-                                                 : .24f,
-                                         water ? 20.0f : 45.0f,
-                                         0x173u + material);
-        if (metal)
-            audio::mix_into(impact, audio::decaying_sine(.18f, 2300, 28), .35f);
-        bank.set(kBulletImpact + material, std::move(impact));
+         ++material)
+        bank.set_class(kBulletImpact + material, {0.05f, 0.0f, 0.08f, 2.0f, 0});
+    if (recorded == 0) {
+        // Fallback synthesis, only when no recordings were found.
+        for (unsigned weapon = 0; weapon < 3; ++weapon) {
+            auto report =
+                audio::noise_burst(.24f, .72f, weapon == 2 ? 23.0f : 32.0f, 0x706u + weapon);
+            audio::mix_into(
+                report, audio::decaying_sine(.24f, weapon == 2 ? 85.0f : 130.0f, 35), .55f);
+            bank.set(kGunReport + weapon, std::move(report));
+        }
+        for (unsigned material = 0;
+             material < static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Count);
+             ++material) {
+            const bool metal =
+                material == static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Metal);
+            const bool water =
+                material == static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Water);
+            auto impact = audio::noise_burst(.18f,
+                                             metal   ? .85f
+                                             : water ? .08f
+                                                     : .24f,
+                                             water ? 20.0f : 45.0f,
+                                             0x173u + material);
+            if (metal)
+                audio::mix_into(impact, audio::decaying_sine(.18f, 2300, 28), .35f);
+            bank.set(kBulletImpact + material, std::move(impact));
+        }
     }
     // Dry click: a very short bright noise tick plus a high, fast-dying sine -- the hammer
     // falling on an empty chamber. Built once like the other one-shots.
@@ -2053,6 +2137,12 @@ audio::SoundBank play_sound_bank() {
     audio::mix_into(click, audio::decaying_sine(.05f, 1800, 120), .35f);
     bank.set(kDryClick, std::move(click));
     return bank;
+}
+
+// The one place a weapon report is started, shared by the game and the --audio-weapons render so
+// the offline WAV and the shot the player hears cannot disagree about what a shot is.
+void play_gun_shot(audio::Mixer& mixer, unsigned weapon, core::Vec3 at) {
+    mixer.play(kGunReport + weapon, at, .85f);
 }
 
 class PlayAudioOutput {
@@ -2176,19 +2266,58 @@ struct Demo {
     // exactly how that check stops meaning anything.
     static constexpr std::size_t kSettleRounds = 8;
 
-    // m13.4 measured 0.35 against 10-destructible-wall's 43 voices from 18 events. A collapsing
-    // city block is an order of magnitude past that — nearly a thousand events — and at 0.35 the
-    // mixdown peaks at 1.05 and clips. The gain is a property of the SCENE's density, not a
-    // constant of the engine, so it is set here where the density is known.
+    // m13.4 measured 0.35 against 10-destructible-wall's 43 voices from 18 events, and the city
+    // block's thousand-event collapse forced it down to 0.12 -- a hack that made every gunshot
+    // quiet to keep one pile-up from clipping. The pile-up is now handled where it belongs: the
+    // DestructionVoicer thins hundreds of events into a few voices, the destruction group is
+    // capped, and a limiter holds the master at -1 dBFS (0.891). With those in place the gain can
+    // be set for the SOUNDS, not for the worst case.
     static audio::MixerConfig block_mix() {
         audio::MixerConfig c;
-        c.master_gain = 0.12f;
+        c.master_gain = 1.0f;
+        c.limiter = true;
+        c.limiter_ceiling = 0.891f; // -1 dBFS
+        c.reverb_decay_seconds = 1.4f;
         return c;
     }
 
     audio::Mixer mixer{play_sound_bank(), block_mix()};
+    audio::DestructionVoicer destruction_voicer;
     PlayAudioOutput audio_output;
     audio::MixStats audio_stats{};
+
+    // Offline capture for --audio-wav (see g_audio_wav): every rendered block, and a per-tick row.
+    struct AudioTickRow {
+        std::uint64_t started = 0; // voices started this tick (MixStats::voices_started delta)
+        std::uint32_t alive = 0;   // voices still sounding after the render
+        float peak = 0.0f;         // largest |sample| of this tick's block
+        std::uint32_t breaks = 0, collapses = 0, settles = 0; // destruction events heard this tick
+    };
+
+    std::vector<float> audio_capture;
+    std::vector<AudioTickRow> audio_rows;
+    std::uint64_t audio_started_before = 0;
+
+    // Write the capture (if --audio-wav asked for one). Called once at the end of a run.
+    void flush_audio_capture() const {
+        if (g_audio_wav.empty() || audio_capture.empty())
+            return;
+        (void)audio::write_wav(g_audio_wav, audio_capture, audio::kSampleRate, 2);
+        if (std::FILE* f = std::fopen((g_audio_wav + ".csv").c_str(), "w")) {
+            std::fprintf(f, "tick,started,alive,peak,breaks,collapses,settles\n");
+            for (std::size_t i = 0; i < audio_rows.size(); ++i)
+                std::fprintf(f,
+                             "%zu,%llu,%u,%.4f,%u,%u,%u\n",
+                             i,
+                             static_cast<unsigned long long>(audio_rows[i].started),
+                             audio_rows[i].alive,
+                             static_cast<double>(audio_rows[i].peak),
+                             audio_rows[i].breaks,
+                             audio_rows[i].collapses,
+                             audio_rows[i].settles);
+            std::fclose(f);
+        }
+    }
 
     // Pose the camera from the SCENE rather than from the player.
     //
@@ -2635,7 +2764,7 @@ struct Demo {
                                 &session.server.physics,
                                 surface,
                                 tracer);
-                mixer.play(kGunReport + weapon, shot.origin, .85f);
+                play_gun_shot(mixer, weapon, shot.origin);
                 if (shot.did_hit || water)
                     mixer.play(kBulletImpact + static_cast<unsigned>(surface), hit, .65f);
                 if (!viewmodel || !viewmodel->scoped())
@@ -2664,31 +2793,39 @@ struct Demo {
         listener.orientation = eye.rotation;
         mixer.set_listener(listener);
         using K = destruction::DestructionEventKind;
+        std::uint32_t tick_breaks = 0, tick_collapses = 0, tick_settles = 0;
         for (const destruction::DestructionEvent& e : session.client.destruction.events()) {
             // Events carry a world-space AABB rather than a point — the affected part or island —
             // so the sound is placed at its centre, as 10-destructible-wall does.
             const core::Vec3 at{(e.world_bounds.min.x + e.world_bounds.max.x) * 0.5f,
                                 (e.world_bounds.min.y + e.world_bounds.max.y) * 0.5f,
                                 (e.world_bounds.min.z + e.world_bounds.max.z) * 0.5f};
+            // The voicer, not the mixer, decides how many of these become sounds: a charge makes
+            // ~360 events in one tick, which as 360 voices was the "vibrator" buzz (see
+            // audio::DestructionVoicer). Every event still counts toward `audio_events`.
             switch (e.kind) {
                 case K::PartDied:
-                    mixer.play(audio::sound::kPartBreak, at, std::min(1.0f, e.magnitude));
+                    destruction_voicer.add(
+                        audio::DestructionKind::PartBroken, at, std::min(1.0f, e.magnitude));
+                    ++tick_breaks;
                     ++audio_events;
                     break;
                 case K::IslandDetached:
-                    mixer.play(audio::sound::kCollapse, at, 1.0f);
+                    destruction_voicer.add(audio::DestructionKind::IslandDetached, at, 1.0f);
+                    ++tick_collapses;
                     ++audio_events;
                     break;
                 case K::DebrisSettled:
-                    // Quiet on purpose: a settle per chunk is dozens of events, and at full gain
-                    // they would drown out the break that caused them.
-                    mixer.play(audio::sound::kDebrisSettle, at, 0.35f);
+                    // Never an impact: settling only quiets the bed (see the voicer).
+                    destruction_voicer.add(audio::DestructionKind::DebrisSettled, at, 0.35f);
+                    ++tick_settles;
                     ++audio_events;
                     break;
                 default:
                     break;
             }
         }
+        destruction_voicer.update(mixer, kDt);
         // Render one tick's worth of audio so the mixer's voices actually age and retire. CI is
         // deaf, so only interactive play submits to the device — a mixer never rendered reports a
         // voice count that only ever grows, and the "voices retire" claim would be untested here.
@@ -2697,6 +2834,19 @@ struct Demo {
         mixer.render(scratch);
         audio_output.submit(scratch);
         audio_stats = mixer.stats();
+        if (!g_audio_wav.empty()) {
+            AudioTickRow row;
+            row.started = audio_stats.voices_started - audio_started_before;
+            audio_started_before = audio_stats.voices_started;
+            row.alive = static_cast<std::uint32_t>(audio_stats.voices_active);
+            row.breaks = tick_breaks;
+            row.collapses = tick_collapses;
+            row.settles = tick_settles;
+            for (const float v : scratch)
+                row.peak = std::max(row.peak, std::fabs(v));
+            audio_rows.push_back(row);
+            audio_capture.insert(audio_capture.end(), scratch.begin(), scratch.end());
+        }
 
         // DRESS WHATEVER JUST ARRIVED, before the leaves are built from it.
         //
@@ -3087,6 +3237,33 @@ struct Demo {
 };
 
 // ── --headless: M13's "done when", as a CI-gated self-check ─────────────────────────────────────
+// --audio-weapons: each weapon fires three shots, 1.5 s apart, half a metre in front of the
+// listener, i.e. at the muzzle, mixed through the same bank, mixer and call helper as the game.
+// Offline, deterministic, no device.
+int render_weapon_demo(const std::filesystem::path& dir) {
+    std::filesystem::create_directories(dir);
+    const char* names[3] = {"scar", "m4", "sniper"};
+    for (unsigned weapon = 0; weapon < 3; ++weapon) {
+        audio::Mixer mixer{play_sound_bank(), Demo::block_mix()};
+        std::vector<float> all;
+        std::vector<float> block(static_cast<std::size_t>(audio::kSampleRate / 60) * 2u);
+        for (unsigned tick = 0; tick < 60u * 7u; ++tick) {
+            if (tick == 0 || tick == 90 || tick == 180)
+                play_gun_shot(mixer, weapon, {0.0f, 0.0f, -0.5f});
+            mixer.render(block);
+            all.insert(all.end(), block.begin(), block.end());
+        }
+        const auto path = dir / (std::string("weapon-") + names[weapon] + ".wav");
+        if (!audio::write_wav(path, all, audio::kSampleRate, 2))
+            return 1;
+        std::printf("audio-weapons: %s peak %.3f clipped %llu\n",
+                    path.string().c_str(),
+                    static_cast<double>(mixer.stats().peak),
+                    static_cast<unsigned long long>(mixer.stats().clipped_samples));
+    }
+    return 0;
+}
+
 int run_headless(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
     cfg.gpu = true; // a device if there is one; the sim half runs either way
@@ -3094,6 +3271,14 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
     cfg.tick_hz = 60.0;
 
     Demo demo(cfg);
+
+    // Writes the --audio-wav capture however run_headless returns.
+    struct CaptureFlush {
+        Demo& d;
+
+        ~CaptureFlush() { d.flush_audio_capture(); }
+    } capture_flush{demo};
+
     const bool has_device = demo.app.device() != nullptr;
     if (!has_device) {
         std::fprintf(stderr,
@@ -7182,6 +7367,12 @@ int main(int argc, char** argv) {
             g_network_impairment = true;
         } else if (a == "--mute") {
             g_mute = true;
+        } else if (a == "--audio-wav" && i + 1 < argc) {
+            g_audio_wav = argv[++i];
+        } else if (a == "--audio-content" && i + 1 < argc) {
+            g_audio_content = argv[++i];
+        } else if (a == "--audio-weapons" && i + 1 < argc) {
+            g_audio_weapons = argv[++i];
         } else if (a == "--effects-preview") {
             g_effects_preview = true;
         } else if (a == "--perf") {
@@ -7233,6 +7424,9 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!g_audio_weapons.empty())
+        return render_weapon_demo(g_audio_weapons);
+
     if (!write_city.empty()) {
         if (std::filesystem::exists(write_city)) {
             std::fprintf(stderr, "city generator refuses to overwrite %s\n", write_city.c_str());
@@ -7257,6 +7451,8 @@ int main(int argc, char** argv) {
         }
         cooked = root.dir / "block";
         g_viewmodel_content = root.dir / "viewmodels";
+        if (std::filesystem::exists(root.dir / "audio"))
+            g_audio_content = root.dir / "audio";
         if (scene_path.empty())
             scene_path = (root.dir / "city.rscene").string();
         if (!explicit_mode)

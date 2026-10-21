@@ -70,6 +70,19 @@ rime_apply_common_target_options(the_block_host)
 set(BLOCK_DEMO_COOKED "${CMAKE_CURRENT_BINARY_DIR}/cooked")
 target_compile_definitions(the_block PRIVATE RIME_BLOCK_COOKED_DIR="${BLOCK_DEMO_COOKED}")
 
+# ── Recorded sound effects ──────────────────────────────────────────────────────────────────────
+# CC0 recordings (assets/audio/ATTRIBUTION.md): rifles, masonry impacts, collapse and rumble. The
+# in-tree binary reads them straight from the source tree (RIME_BLOCK_AUDIO_DIR); a bundled game
+# finds them in `<content root>/audio`, so they are also copied into the content directory after
+# every build. If the directory is absent the game falls back to the engine's synthetic sounds.
+set(BLOCK_AUDIO_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/assets/audio")
+target_compile_definitions(the_block PRIVATE RIME_BLOCK_AUDIO_DIR="${BLOCK_AUDIO_SOURCE}")
+add_custom_command(TARGET the_block POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${BLOCK_AUDIO_SOURCE}" "${CMAKE_CURRENT_BINARY_DIR}/city-content/audio"
+    COMMENT "Copy recorded sound effects into the bundle content directory"
+    VERBATIM)
+
 # Viewmodel content has its own manifest: the block's fracture/ground cook is deliberately
 # independent, and all non-play modes can keep using it without touching weapon art.
 set(BLOCK_VIEWMODEL_COOKED "${CMAKE_CURRENT_BINARY_DIR}/viewmodel-cooked")

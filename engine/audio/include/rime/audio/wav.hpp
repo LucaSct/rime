@@ -4,7 +4,9 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
+#include <vector>
 
 // Writing a mixdown to a WAV file (m13.4).
 //
@@ -26,5 +28,19 @@ namespace rime::audio {
                              std::span<const float> interleaved,
                              std::uint32_t sample_rate,
                              std::uint32_t channels);
+
+// A decoded WAV: interleaved float samples in [-1, 1].
+struct WavData {
+    std::uint32_t sample_rate = 0;
+    std::uint32_t channels = 0;
+    std::vector<float> samples;
+};
+
+// Read a RIFF/WAVE file: integer PCM (8/16/24/32-bit) or 32-bit float. The reader is the other half
+// of the offline proof AND how recorded sound effects enter the bank, so it treats the file as
+// untrusted: every chunk size is checked against the bytes actually present, and anything it does
+// not understand (compressed formats, a missing chunk, a truncated header) yields `nullopt` rather
+// than a guess. It never reads outside its buffer.
+[[nodiscard]] std::optional<WavData> read_wav(const std::filesystem::path& path);
 
 } // namespace rime::audio
