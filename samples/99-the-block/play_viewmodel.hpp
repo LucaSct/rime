@@ -92,7 +92,11 @@ public:
     static constexpr float kScopeEyeReliefTolerance = 0.06f;
     [[nodiscard]] static float scope_fov_y() noexcept;
 
-    [[nodiscard]] std::span<const render::DrawItem> pose(const core::Transform& camera);
+    // world_fov_y is the parent camera's vertical FOV; the hip viewmodel is drawn as if seen
+    // through kViewmodelFovY instead (see pose()). The play camera keeps the Camera default.
+    static constexpr float kViewmodelFovY = 1.0471975512f; // 60 degrees
+    [[nodiscard]] std::span<const render::DrawItem>
+    pose(const core::Transform& camera, float world_fov_y = render::Camera{}.fov_y);
 
     [[nodiscard]] Weapon selected() const noexcept { return selected_; }
 
@@ -170,7 +174,7 @@ public:
     [[nodiscard]] bool scope_feed_visible(const core::Transform& eye) const noexcept;
 
     [[nodiscard]] core::Vec3 muzzle_world(const core::Transform& camera) const noexcept {
-        return core::transform_point(core::to_matrix(camera) * weapon_local_,
+        return core::transform_point(core::to_matrix(camera) * view_squeeze_ * weapon_local_,
                                      models_[static_cast<unsigned>(selected_)].muzzle);
     }
 
@@ -196,8 +200,17 @@ private:
 
     struct Model {
         core::Vec3 muzzle{}, stock{};
+        // The torso is posed per frame between two anchors (see pose()): the shouldered
+        // aiming seat and the hip carry. camera_from_arms / arms_from_camera / elbow_poles hold
+        // the CURRENT blend; the anchors below are fixed at load.
         core::Mat4 camera_from_arms{}, arms_from_camera{};
         std::array<core::Vec3, 2> elbow_poles{};
+        core::Vec3 right_shoulder{}; // arm-rig space, the torso's rotation pivot
+        core::Vec3 aim_seat{}, hip_seat{};
+        core::Quat aim_torso{}, hip_torso{};
+        core::Vec3 hip_translation{}; // weapon offset that puts the firing grip on its hip target
+        core::Vec3 hip_pivot{};       // firing grip, weapon-local: the hip turn's centre
+        std::array<core::Vec3, 2> bind_elbows{}; // rig space: the hip carry's bend-plane poles
         std::vector<Part> parts;
         PlayArmIk arms;
         render::MeshId arm_mesh = render::kInvalidMeshId;
@@ -235,6 +248,7 @@ private:
     render::DrawItem lens_{};
     core::Mat4 optic_world_{};
     core::Mat4 weapon_local_{};
+    core::Mat4 view_squeeze_{}; // camera-space viewmodel-FOV scale of the last pose()
     std::vector<render::FirstPersonDeformation> deformations_;
     ReachStats reach_stats_{};
     std::array<core::Vec3, 2> wrist_world_{};

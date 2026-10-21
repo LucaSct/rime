@@ -46,7 +46,67 @@ constexpr std::array<RecoilTuning, 3> kRecoil{{
 
 constexpr std::array<core::Vec3, 3> kAimOffsets{
     {{-.14f, .09f, .37f}, {-.137777f, .0947244f, .37f}, {-.14f, .118f, .035f}}};
-constexpr std::array<core::Vec3, 3> kHipOffsets{{{0, 0, .22f}, {0, 0, .22f}, {0, 0, 0}}};
+
+// HIP CARRY: frame the arms the way the eye actually sees them, not where the gun is shouldered.
+//
+// A real eye takes in nearly 180 degrees; a 50-degree game camera sees only its centre. Holding
+// a rifle at the hip a person sees both hands on the weapon and both forearms running down out
+// of view, but a camera that keeps the SHOULDERED geometry (stock in the shoulder, hands 30-60 cm
+// below the eye) frames a floating gun whose hands sit below the bottom edge. The firing hand is
+// about 27 cm below the top of the optic, so for both to fit in a 50-60 degree view the grip has
+// to sit roughly half a metre in front of the eye -- further than an arm hanging from a shoulder
+// beside the head can reach. Every military FPS resolves this the same way, and so does the
+// artist's rig: the weapon is carried higher and further forward than the aimed pose, and the
+// arms come up from shoulders placed below and ahead of the eye, outside the frame. Nothing of
+// the torso is drawn, so that placement is invisible; what IS visible -- hands on the grips,
+// forearms entering from the bottom edge, straight wrists -- is exactly the authored pose.
+//
+// So at the hip the arm rig keeps its AUTHORED orientation and moves rigidly with the weapon:
+// `grip` is the camera-space point for the firing wrist, the weapon translates to put its
+// authored grip there, and the rig translates by the same amount plus `arm_shift`. With zero
+// shift the bind pose is reproduced exactly (fingers on the grips, elbows where the artist put
+// them); the MSR's prepared space seats its arms differently and needs a shift to keep its
+// shoulders out of frame. `turn` is a small pitch/yaw/roll about the firing wrist: yaw toes the
+// muzzle in toward the crosshair and swings the stock out past the right edge, where a real
+// stock sits under the arm. `support_slide` moves the support grip forward along the bore: a
+// handguard is a prism about that axis, so the authored finger wrap stays on its surface while
+// the hand moves from the magazine well to mid-handguard (zero for the SCAR, whose support hand
+// holds a vertical foregrip that does not extend along the bore). pose() blends all of it into the
+// shouldered seat with the aim fraction, so ADS geometry -- sight alignment, eye relief, the 5x
+// optic -- is unchanged. Values keep both wrists inside 40-90 % of the measured reach (elbows bent,
+// never clamped) and both shoulders, with the rig's open sleeve rings, outside the frame.
+struct HipCarry {
+    core::Vec3 grip;      // camera-space firing-wrist target, metres
+    core::Vec3 turn;      // pitch, yaw, roll about the firing wrist, radians
+    core::Vec3 arm_shift; // arm rig offset relative to the weapon's hip offset, metres
+    float support_slide;  // support hand moved forward along the bore, metres
+};
+
+constexpr std::array<HipCarry, 3> kHipCarry{{
+    {{.30f, -.25f, -.50f}, {0, .20f, 0}, {0, 0, 0}, 0},               // SCAR-H: foregrip
+    {{.30f, -.25f, -.50f}, {0, .20f, 0}, {0, 0, 0}, .07f},            // M4A1
+    {{.30f, -.25f, -.50f}, {-.12f, .20f, 0}, {0, -.09f, .23f}, .10f}, // MSR
+}};
+
+// Elbow pole points for the shouldered seat, camera-local (left support arm first). At the hip
+// the poles are the rig's own bind elbows, which is what keeps the authored wrists straight.
+constexpr std::array<core::Vec3, 2> kAimPoles{{{-.4f, -.65f, -.25f}, {.5f, -.65f, -.25f}}};
+
+// VIEWMODEL FOV. Games draw the held weapon through its own, fixed projection so the arms keep
+// their proportions whatever FOV the player picks for the world. A narrower or wider projection
+// for points at the SAME depth is just a camera-space scale of x and y by the ratio of the two
+// half-angle tangents: tan(world/2) / tan(viewmodel/2). Scaling the model matrix that way, rather
+// than adding a second projection, keeps the weapon's depth exactly where the world's depth
+// buffer expects it (so it still occludes and is lit in the real scene), and the renderer's
+// inverse-transpose normal matrix keeps the shading correct under the non-uniform scale. The
+// scale fades to one at full aim: the optic's alignment and 5x calibration are measured with the
+// world projection and must not move.
+float viewmodel_squeeze(float world_fov_y) noexcept {
+    const float world = std::tan(.5f * world_fov_y);
+    const float model = std::tan(.5f * PlayViewmodel::kViewmodelFovY);
+    return std::isfinite(world) && world > 0.0f ? world / model : 1.0f;
+}
+
 constexpr core::Vec3 kScarSight{.14f, -.0848075f, -.473f};
 
 core::Mat4 sight_alignment(unsigned weapon, float aim) {
@@ -533,21 +593,32 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             const auto seat = core::transform_point(
                                   sight_alignment(static_cast<unsigned>(i - 3), 1), model.stock) +
                               kAimOffsets[i - 3];
-            model.camera_from_arms =
-                core::mat4_translation(seat) *
-                core::to_mat4(core::quat_from_axis_angle({0, 1, 0}, -1.0471975512f)) *
+            model.right_shoulder = shoulder;
+            model.aim_seat = seat;
+            model.aim_torso =
+                core::quat_from_axis_angle({0, 1, 0}, -1.0471975512f) *
                 // Shoulder slope: retain the seated firing shoulder while lowering the
                 // support shoulder. The authored sleeves end in open upper-arm rings; a
                 // level, strongly bladed torso projected that cut into the reload view.
                 // Tilting the torso keeps the cut below frame without hiding forearm faces.
-                core::to_mat4(core::quat_from_axis_angle({0, 0, 1}, .25f)) *
-                core::mat4_translation(-shoulder);
+                core::quat_from_axis_angle({0, 0, 1}, .25f);
+            model.camera_from_arms = core::mat4_translation(seat) * core::to_mat4(model.aim_torso) *
+                                     core::mat4_translation(-shoulder);
             model.arms_from_camera = core::inverse(model.camera_from_arms);
-            model.elbow_poles = {
-                {core::transform_point(model.arms_from_camera, {-.4f, -.65f, -.25f}),
-                 core::transform_point(model.arms_from_camera, {.5f, -.65f, -.25f})}};
+            model.elbow_poles = {{core::transform_point(model.arms_from_camera, kAimPoles[0]),
+                                  core::transform_point(model.arms_from_camera, kAimPoles[1])}};
             model.arm_mesh = mesh_id;
             model.grips = model.arms.bind_wrists();
+            model.grips[0] =
+                core::mat4_translation({0, 0, -kHipCarry[i - 3].support_slide}) * model.grips[0];
+            // The authored rig's wrists ARE the weapon-local grips, so the firing wrist's bind
+            // position is where the hand holds this gun; the hip offset carries it to its target.
+            const auto& carry = kHipCarry[i - 3];
+            model.hip_pivot = core::transform_point(model.grips[1], {});
+            model.hip_translation = carry.grip - model.hip_pivot;
+            model.hip_seat = shoulder + model.hip_translation + carry.arm_shift;
+            model.hip_torso = core::Quat{}; // the authored rig orientation
+            model.bind_elbows = model.arms.bind_elbows();
             if (!measure_reach(model.arms, model.elbow_poles, model.reach_near, model.reach_far)) {
                 std::fprintf(
                     stderr, "99-the-block: arm rig %s has no measurable reach\n", kSources[i]);
@@ -829,7 +900,8 @@ void PlayViewmodel::observe_camera(core::Vec3 eye) noexcept {
     have_eye_ = true;
 }
 
-std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& camera) {
+std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& camera,
+                                                      float world_fov_y) {
     draws_.clear();
     const auto motion_pose = motion_.pose();
     core::Transform local{};
@@ -846,20 +918,26 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     // A shouldered stock belongs behind the eye. The old rifle pose exposed its rear cap
     // 23 cm IN FRONT of the camera; matching hip placement keeps the entire transition reachable.
     const auto index = static_cast<unsigned>(selected_);
+    auto& selected = models_[index];
+    const float hip = 1.0f - aim_;
     local.translation =
-        local.translation + kAimOffsets[index] * aim_ + kHipOffsets[index] * (1 - aim_);
+        local.translation + kAimOffsets[index] * aim_ + selected.hip_translation * hip;
     // Rotate about the stock: lifting/translating a shouldered butt across the eye filled the
     // viewport with near-clipped faces even when all projected magazine targets were valid.
     const bool reload = motion_.reloading();
+    // The hip carry already frames the weapon, so the reload only needs a small lift toward the
+    // eye (y) and a pull back (z) that brings the magazine well closer. The earlier 12-18 cm lift
+    // existed to drag a below-frame weapon into view; from the hip carry it threw the butt and
+    // the open sleeve rings of the upper arms into the frame.
     constexpr std::array<core::Vec3, 3> reload_offsets{
-        {{-.06f, .15f, -.04f}, {-.06f, .125f, 0}, {.0f, .18f, -.02f}}};
-    // The MSR's values are retuned (smaller roll/pitch, weapon lifted) because its long receiver
-    // swung the support hand and magazine off the bottom edge mid-reload.
+        {{-.03f, .04f, .05f}, {-.03f, .04f, .05f}, {-.02f, .05f, .04f}}};
+    // The MSR's values are retuned (smaller roll/pitch) because its long receiver swung the
+    // support hand and magazine off the bottom edge mid-reload.
     // Reload pose: the weapon ROLLS about its bore (z) by 24-27 degrees so the magazine well
     // turns toward the support hand and the viewer, and dips its muzzle slightly (negative x
     // pitch). Rolling, rather than pitching the muzzle up as round 1 did, keeps the well and
     // the hand inside the lower frame instead of swinging them out of the bottom.
-    constexpr std::array<float, 3> reload_pitch{.14f, .14f, .10f};
+    constexpr std::array<float, 3> reload_pitch{.06f, .06f, .05f};
     constexpr std::array<float, 3> reload_roll{-.50f, -.50f, -.30f};
     const core::Vec3 action_offset = reload ? reload_offsets[index] : core::Vec3{-.16f, .14f, .04f};
     local.translation = local.translation + action_offset * motion_pose.lower;
@@ -881,11 +959,37 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
                                                          reload_roll[index] * motion_pose.tilt)) *
                      core::mat4_translation(-pivot)
                : core::Mat4{};
+    // The hip turn pivots about the firing grip, so the hand stays on its framed target while
+    // the muzzle toes in. It fades to nothing at full aim, leaving the calibrated sight line.
+    const auto& turn = kHipCarry[index].turn;
+    const core::Mat4 hip_turn =
+        core::mat4_translation(selected.hip_pivot) *
+        core::to_mat4(core::quat_from_euler(turn.x * hip, turn.y * hip, turn.z * hip)) *
+        core::mat4_translation(-selected.hip_pivot);
     const core::Mat4 weapon_local =
-        core::to_matrix(local) * reload_rotation * sight_alignment(index, aim_);
+        core::to_matrix(local) * hip_turn * reload_rotation * sight_alignment(index, aim_);
     weapon_local_ = weapon_local;
-    const core::Mat4 model = camera_matrix * weapon_local;
-    auto& selected = models_[static_cast<unsigned>(selected_)];
+    // 1 - (1 - k) * hip is exactly 1.0f at full aim, so the aimed pose is bit-identical.
+    const float squeeze = 1.0f - (1.0f - viewmodel_squeeze(world_fov_y)) * hip;
+    view_squeeze_ = core::Mat4{};
+    view_squeeze_.at(0, 0) = squeeze;
+    view_squeeze_.at(1, 1) = squeeze;
+    // Everything DRAWN goes through the squeeze; the IK below stays in true metres, so reach,
+    // grips and recoil keep their physical meaning.
+    const core::Mat4 view = camera_matrix * view_squeeze_;
+    const core::Mat4 model = view * weapon_local;
+    // Torso: blend the hip-carry anchor into the shouldered seat with the same aim fraction as
+    // the weapon. Position lerps, orientation slerps, so the frame stays rigid -- the IK and
+    // the skin palette both require a rigid camera_from_arms.
+    selected.camera_from_arms =
+        core::mat4_translation(selected.hip_seat * hip + selected.aim_seat * aim_) *
+        core::to_mat4(core::slerp(selected.hip_torso, selected.aim_torso, aim_)) *
+        core::mat4_translation(-selected.right_shoulder);
+    selected.arms_from_camera = core::inverse(selected.camera_from_arms);
+    for (unsigned side = 0; side < 2; ++side)
+        selected.elbow_poles[side] =
+            selected.bind_elbows[side] * hip +
+            core::transform_point(selected.arms_from_camera, kAimPoles[side]) * aim_;
     auto grips = selected.grips;
     // Slot zero is the support left hand; slot one is the firing right hand. Moving
     // wrist targets leaves the shoulder anchors fixed and uses the existing CPU IK mesh.
@@ -964,8 +1068,8 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
         render::DrawItem draw{};
         draw.mesh = part.mesh;
         draw.material = part.material;
-        draw.model = part.arm ? camera_matrix * selected.camera_from_arms
-                              : (part.magazine ? magazine_world_ : model);
+        draw.model =
+            part.arm ? view * selected.camera_from_arms : (part.magazine ? magazine_world_ : model);
         draw.first_index = part.first_index;
         draw.index_count = part.index_count;
         draws_.push_back(draw);
@@ -978,7 +1082,7 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
                 core::to_mat4(core::quat_from_euler(2.5f * tau, 0, -3.0f * tau));
             const core::Vec3 centre = selected.magazine_contact;
             render::DrawItem spent = draw;
-            spent.model = camera_matrix * core::mat4_translation(fall) * weapon_local *
+            spent.model = view * core::mat4_translation(fall) * weapon_local *
                           core::mat4_translation(release_offset_) * core::mat4_translation(centre) *
                           spin * core::mat4_translation(-centre);
             draws_.push_back(spent);
