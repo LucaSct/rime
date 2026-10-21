@@ -46,6 +46,20 @@ public:
 
     [[nodiscard]] std::span<const rime::core::Mat4> joint_worlds() const noexcept { return world_; }
 
+    // Shoulder, elbow and wrist joint positions of the last solve (rig space), left arm first.
+    [[nodiscard]] std::array<std::array<rime::core::Vec3, 3>, 2> limb_points() const noexcept;
+
+    // Vertices on the mesh's OPEN boundary: the cut ends of the sleeves, where the authored arms
+    // stop above the elbow. Presentation must keep these out of frame; a proof reads them.
+    [[nodiscard]] std::span<const std::uint32_t> open_boundary() const noexcept {
+        return open_boundary_;
+    }
+
+    // Skinned vertices of the last solve (rig space). Same array solve() returned.
+    [[nodiscard]] std::span<const rime::render::MeshVertex> posed() const noexcept {
+        return vertices_;
+    }
+
     // Authored elbow joints, rig space. Presentation uses them as bend-plane poles when it wants
     // the artist's elbow placement back rather than a camera-fixed one.
     [[nodiscard]] std::array<rime::core::Vec3, 2> bind_elbows() const noexcept {
@@ -86,6 +100,7 @@ private:
     std::vector<rime::core::Mat4> bind_world_, local_bind_, world_, palette_;
     std::array<Arm, 2> arms_{};
     std::array<rime::core::Mat4, 2> bind_wrists_{};
+    std::vector<std::uint32_t> open_boundary_;
 };
 
 } // namespace rime::block_play

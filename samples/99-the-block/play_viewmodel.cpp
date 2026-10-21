@@ -83,9 +83,9 @@ struct HipCarry {
 };
 
 constexpr std::array<HipCarry, 3> kHipCarry{{
-    {{.30f, -.25f, -.50f}, {0, .20f, 0}, {0, 0, 0}, 0},               // SCAR-H: foregrip
-    {{.30f, -.25f, -.50f}, {0, .20f, 0}, {0, 0, 0}, .07f},            // M4A1
-    {{.30f, -.25f, -.50f}, {-.12f, .20f, 0}, {0, -.09f, .23f}, .10f}, // MSR
+    {{.29f, -.24f, -.47f}, {0, .20f, 0}, {0, -.06f, 0}, 0},              // SCAR-H: foregrip
+    {{.29f, -.24f, -.47f}, {0, .20f, 0}, {0, -.06f, 0}, .07f},           // M4A1
+    {{.29f, -.24f, -.47f}, {-.12f, .20f, 0}, {.08f, -.21f, .15f}, .10f}, // MSR
 }};
 
 // Elbow pole points for the shouldered seat, camera-local (left support arm first). At the hip
@@ -530,6 +530,11 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
                          kSources[i]);
             return false;
         }
+        if (i < 3) {
+            models_[i].weapon_points.reserve(geometry.vertices.size());
+            for (const auto& v : geometry.vertices)
+                models_[i].weapon_points.push_back({v.px, v.py, v.pz});
+        }
         MagazineSplit magazine;
         if (i < 3) {
             if (!split_magazine(geometry, static_cast<unsigned>(i), magazine)) {
@@ -930,7 +935,7 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     // existed to drag a below-frame weapon into view; from the hip carry it threw the butt and
     // the open sleeve rings of the upper arms into the frame.
     constexpr std::array<core::Vec3, 3> reload_offsets{
-        {{-.03f, .04f, .05f}, {-.03f, .04f, .05f}, {-.02f, .05f, .04f}}};
+        {{-.03f, .04f, .05f}, {-.03f, .04f, .05f}, {-.02f, -.04f, .06f}}};
     // The MSR's values are retuned (smaller roll/pitch) because its long receiver swung the
     // support hand and magazine off the bottom edge mid-reload.
     // Reload pose: the weapon ROLLS about its bore (z) by 24-27 degrees so the magazine well
@@ -1056,6 +1061,8 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     reach_stats_.limited_poses +=
         approach_fraction < 1.0f || pull_fraction < 1.0f || right_fraction < 1.0f ? 1u : 0u;
     const auto vertices = selected.arms.solve(arms_from_weapon, grips, selected.elbow_poles);
+    weapon_from_arms_ = core::inverse(arms_from_weapon);
+    arm_model_ = view * selected.camera_from_arms;
     for (std::size_t i = 0; i < vertices.size(); ++i) {
         const core::Vec3 current{vertices[i].px, vertices[i].py, vertices[i].pz};
         selected.previous[i] = selected.history ? selected.last[i] : current;
@@ -1065,6 +1072,8 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     deformations_.clear();
     deformations_.push_back({selected.arm_mesh, vertices, selected.previous});
     for (const auto& part : selected.parts) {
+        if (part.arm && !draw_arms_)
+            continue;
         render::DrawItem draw{};
         draw.mesh = part.mesh;
         draw.material = part.material;
@@ -1098,6 +1107,51 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
         optic_world_ = model * core::mat4_translation(kScarSight);
     }
     return draws_;
+}
+
+std::vector<core::Vec3> PlayViewmodel::sleeve_cuts_world() const {
+    const auto& arms = models_[static_cast<unsigned>(selected_)].arms;
+    const auto posed = arms.posed();
+    std::vector<core::Vec3> out;
+    out.reserve(arms.open_boundary().size());
+    for (const auto i : arms.open_boundary())
+        if (i < posed.size())
+            out.push_back(
+                core::transform_point(arm_model_, {posed[i].px, posed[i].py, posed[i].pz}));
+    return out;
+}
+
+std::size_t PlayViewmodel::limb_weapon_intrusions(float radius,
+                                                  float wrist_clearance) const noexcept {
+    // A capsule test in WEAPON space: the limb's bone axis is the centre of the sleeve, so a
+    // weapon vertex closer to that axis than the sleeve's radius is inside the arm. Measuring
+    // against the bone rather than the skinned surface keeps the test independent of how the
+    // sleeve mesh is tessellated, and conservative: a radius below the real sleeve radius can
+    // only under-count.
+    const auto& selected = models_[static_cast<unsigned>(selected_)];
+    const auto limbs = selected.arms.limb_points();
+    std::size_t inside = 0;
+    for (const auto& limb : limbs) {
+        const core::Vec3 shoulder = core::transform_point(weapon_from_arms_, limb[0]);
+        const core::Vec3 elbow = core::transform_point(weapon_from_arms_, limb[1]);
+        core::Vec3 wrist = core::transform_point(weapon_from_arms_, limb[2]);
+        const float forearm = core::length(wrist - elbow);
+        if (forearm > wrist_clearance)
+            wrist = elbow + (wrist - elbow) * ((forearm - wrist_clearance) / forearm);
+        else
+            wrist = elbow;
+        for (const auto& [a, b] : {std::pair{shoulder, elbow}, std::pair{elbow, wrist}}) {
+            const core::Vec3 ab = b - a;
+            const float span = core::dot(ab, ab);
+            for (const auto& p : selected.weapon_points) {
+                const float t =
+                    span > 0.0f ? std::clamp(core::dot(p - a, ab) / span, 0.0f, 1.0f) : 0.0f;
+                const core::Vec3 d = p - (a + ab * t);
+                inside += core::dot(d, d) < radius * radius ? 1u : 0u;
+            }
+        }
+    }
+    return inside;
 }
 
 std::size_t PlayViewmodel::selected_draw_count() const noexcept {

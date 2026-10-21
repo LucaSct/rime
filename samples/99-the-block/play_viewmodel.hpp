@@ -94,7 +94,7 @@ public:
 
     // world_fov_y is the parent camera's vertical FOV; the hip viewmodel is drawn as if seen
     // through kViewmodelFovY instead (see pose()). The play camera keeps the Camera default.
-    static constexpr float kViewmodelFovY = 1.0471975512f; // 60 degrees
+    static constexpr float kViewmodelFovY = 0.9599310886f; // 55 degrees
     [[nodiscard]] std::span<const render::DrawItem>
     pose(const core::Transform& camera, float world_fov_y = render::Camera{}.fov_y);
 
@@ -178,6 +178,19 @@ public:
                                      models_[static_cast<unsigned>(selected_)].muzzle);
     }
 
+    // Proof-only: leave the arm draws out of pose() so a frame-pair difference isolates the
+    // pixels the arms and hands themselves occupy, occlusion by the weapon included.
+    void set_draw_arms(bool draw) noexcept { draw_arms_ = draw; }
+
+    // The sleeves' open cut ends after the last pose(), in the same world space as the draws.
+    [[nodiscard]] std::vector<core::Vec3> sleeve_cuts_world() const;
+
+    // Weapon vertices inside a capsule of `radius` around either upper arm or forearm (the last
+    // `wrist_clearance` metres of each forearm excluded: the hand legitimately meets the grip).
+    // Zero means no limb passes through the weapon in the last pose().
+    [[nodiscard]] std::size_t limb_weapon_intrusions(float radius,
+                                                     float wrist_clearance) const noexcept;
+
     [[nodiscard]] std::size_t resident_meshes() const noexcept { return resident_meshes_; }
 
     [[nodiscard]] std::size_t resident_materials() const noexcept { return resident_materials_; }
@@ -211,6 +224,7 @@ private:
         core::Vec3 hip_translation{}; // weapon offset that puts the firing grip on its hip target
         core::Vec3 hip_pivot{};       // firing grip, weapon-local: the hip turn's centre
         std::array<core::Vec3, 2> bind_elbows{}; // rig space: the hip carry's bend-plane poles
+        std::vector<core::Vec3> weapon_points;   // weapon-local positions, for intrusion proofs
         std::vector<Part> parts;
         PlayArmIk arms;
         render::MeshId arm_mesh = render::kInvalidMeshId;
@@ -249,6 +263,9 @@ private:
     core::Mat4 optic_world_{};
     core::Mat4 weapon_local_{};
     core::Mat4 view_squeeze_{}; // camera-space viewmodel-FOV scale of the last pose()
+    core::Mat4 arm_model_{};    // world-from-rig of the last pose()'s arm draw
+    core::Mat4 weapon_from_arms_{};
+    bool draw_arms_ = true;
     std::vector<render::FirstPersonDeformation> deformations_;
     ReachStats reach_stats_{};
     std::array<core::Vec3, 2> wrist_world_{};
