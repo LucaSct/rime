@@ -4333,7 +4333,39 @@ bool plate_boundary_check(Demo& demo, const char* tag) {
     if (!r.ok) {
         std::fprintf(stderr, "%s: FAILED plate boundary is not walkable\n", tag);
     }
-    return r.ok;
+    // Water census. The street looks wet because its asphalt is a glossy, reflective material, NOT
+    // because a water surface covers it; the only water meshes are the 7 authored puddles and one
+    // pond, each a few metres across at a fixed y that no terrain function touches. This pins
+    // that: raising the terrain under the plate edge must not add or grow a water surface.
+    bool water_ok = true;
+    if (demo.environment) {
+        unsigned count = 0;
+        float biggest = 0.0f, area = 0.0f;
+        demo.session.client.world
+            .query<render::SurfaceGeometry, render::MaterialRef, ecs::WorldTransform>()
+            .for_each([&](const render::SurfaceGeometry& g,
+                          const render::MaterialRef& m,
+                          const ecs::WorldTransform&) {
+                if (m.material != demo.environment->water_material())
+                    return;
+                ++count;
+                biggest = std::max({biggest, g.half_x, g.half_z});
+                area += 3.14159265f * g.half_x * g.half_z;
+            });
+        std::printf("%s: water census: %u surfaces, largest half-extent %.2f m, total oval area "
+                    "%.1f m^2 (street plate is %.0f m^2)\n",
+                    tag,
+                    count,
+                    biggest,
+                    area,
+                    (demo.play_world->plate().max_x - demo.play_world->plate().min_x) *
+                        (demo.play_world->plate().max_z - demo.play_world->plate().min_z));
+        water_ok = count == 8 && biggest <= 7.0f && area < 250.0f;
+        if (!water_ok)
+            std::fprintf(
+                stderr, "%s: FAILED a water surface grew beyond the authored puddles\n", tag);
+    }
+    return r.ok && water_ok;
 }
 
 // The streamed-world proof uses the same Demo, Session tick and collision setup as live play.
