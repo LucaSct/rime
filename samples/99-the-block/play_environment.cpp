@@ -375,7 +375,11 @@ void spawn(ecs::World& world,
 }
 
 float ground_y(const assets::ProceduralTerrainConfig& c, int x, int z) {
-    if (x >= c.street_min_x && x <= c.street_max_x && z >= c.street_min_z && z <= c.street_max_z)
+    // `c`'s rectangle is the plate shrunk by kPlateSkirt; anything on the PLATE itself stands at
+    // its walkable top, y = 0, not on the hidden terrain skirt beneath it.
+    const int k = PlayEnvironment::kPlateSkirt;
+    if (x >= c.street_min_x - k && x <= c.street_max_x + k && z >= c.street_min_z - k &&
+        z <= c.street_max_z + k)
         return 0;
     const auto q = assets::procedural_terrain_sample(c, x, z);
     return q ? assets::kProceduralHeightOffset + *q * assets::kProceduralHeightScale : 0;
@@ -603,11 +607,14 @@ void PlayEnvironment::paint_terrain(assets::HeightfieldAsset& a,
         for (unsigned x = 0; x < a.columns; ++x) {
             const float wx = a.origin.x + static_cast<float>(x) * a.cell_size_x;
             const float wz = a.origin.z + static_cast<float>(z) * a.cell_size_z;
-            const float dx = std::max({static_cast<float>(c.street_min_x) - wx,
-                                       wx - static_cast<float>(c.street_max_x),
+            // Distance is measured from the PLATE edge (the street rectangle grown back by the
+            // hidden skirt), so the grass/dirt look is unchanged by the terrain-height fix.
+            const auto skirt = static_cast<float>(kPlateSkirt);
+            const float dx = std::max({static_cast<float>(c.street_min_x) - skirt - wx,
+                                       wx - static_cast<float>(c.street_max_x) - skirt,
                                        0.0f});
-            const float dz = std::max({static_cast<float>(c.street_min_z) - wz,
-                                       wz - static_cast<float>(c.street_max_z),
+            const float dz = std::max({static_cast<float>(c.street_min_z) - skirt - wz,
+                                       wz - static_cast<float>(c.street_max_z) - skirt,
                                        0.0f});
             const float distance = std::sqrt(dx * dx + dz * dz);
             const float patches = noise(wx * .037f, wz * .037f, 256);

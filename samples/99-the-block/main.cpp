@@ -4288,6 +4288,86 @@ int run_perf(const std::filesystem::path& cooked,
     return result.ok() ? 0 : 1;
 }
 
+// The city plate and the streamed terrain around it must be one continuous walkable surface.
+// The proof itself lives in PlayWorld::prove_plate_boundary (play_world.cpp); this only feeds it
+// the server's avatar and prints the numbers. It runs LAST in the smoke that calls it because it
+// drives `collision.plan` with its own ticks, which a ticking session would then have to outrun.
+bool plate_boundary_check(Demo& demo, const char* tag) {
+    if (!demo.play_world || demo.session.server.avatars.empty()) {
+        std::fprintf(stderr, "%s: plate-boundary proof has no play world or avatar\n", tag);
+        return false;
+    }
+    const ecs::Entity avatar = demo.session.server.avatars.front();
+    const auto* character = demo.session.server.world.get<gameplay::CharacterConfig>(avatar);
+    const auto* body = demo.session.server.world.get<physics::RigidBodyHandle>(avatar);
+    if (!character || !body) {
+        std::fprintf(stderr, "%s: plate-boundary proof has no avatar config or body\n", tag);
+        return false;
+    }
+    const bool verbose = std::getenv("RIME_PLATE_REPORT") != nullptr;
+    const auto r = demo.play_world->prove_plate_boundary(
+        *character, body->body, demo.session.tick_index + 1, verbose ? stdout : nullptr);
+    std::printf("%s: plate boundary: %u perimeter samples (%u uncovered, %u no-hit), plate top "
+                "%.3f m, terrain collision gap max %.3f m at (%.1f, %.1f), rendered gap max "
+                "%.3f m, rendered-vs-collision %.4f m, step-up %.2f m; walk-on N/E/S/W "
+                "%d/%d/%d/%d (best approach %.1f/%.1f/%.1f/%.1f of 25 m)\n",
+                tag,
+                r.samples,
+                r.uncovered,
+                r.no_hit,
+                r.plate_top,
+                r.max_collision_gap,
+                r.worst_x,
+                r.worst_z,
+                r.max_render_gap,
+                r.max_render_vs_collision,
+                character->step_height,
+                r.walked[0],
+                r.walked[1],
+                r.walked[2],
+                r.walked[3],
+                r.walk_progress[0],
+                r.walk_progress[1],
+                r.walk_progress[2],
+                r.walk_progress[3]);
+    if (!r.ok) {
+        std::fprintf(stderr, "%s: FAILED plate boundary is not walkable\n", tag);
+    }
+    // Water census. The street looks wet because its asphalt is a glossy, reflective material, NOT
+    // because a water surface covers it; the only water meshes are the 7 authored puddles and one
+    // pond, each a few metres across at a fixed y that no terrain function touches. This pins
+    // that: raising the terrain under the plate edge must not add or grow a water surface.
+    bool water_ok = true;
+    if (demo.environment) {
+        unsigned count = 0;
+        float biggest = 0.0f, area = 0.0f;
+        demo.session.client.world
+            .query<render::SurfaceGeometry, render::MaterialRef, ecs::WorldTransform>()
+            .for_each([&](const render::SurfaceGeometry& g,
+                          const render::MaterialRef& m,
+                          const ecs::WorldTransform&) {
+                if (m.material != demo.environment->water_material())
+                    return;
+                ++count;
+                biggest = std::max({biggest, g.half_x, g.half_z});
+                area += 3.14159265f * g.half_x * g.half_z;
+            });
+        std::printf("%s: water census: %u surfaces, largest half-extent %.2f m, total oval area "
+                    "%.1f m^2 (street plate is %.0f m^2)\n",
+                    tag,
+                    count,
+                    biggest,
+                    area,
+                    (demo.play_world->plate().max_x - demo.play_world->plate().min_x) *
+                        (demo.play_world->plate().max_z - demo.play_world->plate().min_z));
+        water_ok = count == 8 && biggest <= 7.0f && area < 250.0f;
+        if (!water_ok)
+            std::fprintf(
+                stderr, "%s: FAILED a water surface grew beyond the authored puddles\n", tag);
+    }
+    return r.ok && water_ok;
+}
+
 // The streamed-world proof uses the same Demo, Session tick and collision setup as live play.
 // It keeps the charge disabled so the travelling floor, rather than rubble, is what it measures.
 int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
@@ -4533,6 +4613,7 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
                 min_predicted_gap,
                 min_visual_gap,
                 max_visual_offset);
+    okay = plate_boundary_check(demo, "world-smoke") && okay;
     return okay ? 0 : 1;
 }
 
@@ -6116,6 +6197,7 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
                     static_cast<double>(start_height - min_height),
                     static_cast<double>(min_height));
     }
+    okay = plate_boundary_check(demo, "environment-smoke") && okay;
     return okay ? 0 : 1;
 }
 

@@ -9,6 +9,7 @@
 #include "play_environment.hpp"
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/transform.hpp"
+#include "rime/gameplay/character.hpp"
 #include "rime/ground/surface.hpp"
 #include "rime/physics/aabb.hpp"
 #include "rime/physics/components.hpp"
@@ -66,7 +67,8 @@ bool needs_recovery(core::Vec3 p) noexcept {
            std::abs(p.z) > PlayWorld::kPracticalLimit || p.y < PlayWorld::kRecoveryFloor;
 }
 
-assets::ProceduralTerrainConfig PlayWorld::street_config(ecs::World& world, bool& valid) {
+assets::ProceduralTerrainConfig
+PlayWorld::street_config(ecs::World& world, bool& valid, PlateRect* plate) {
     assets::ProceduralTerrainConfig result{};
     valid = false;
     std::size_t count = 0;
@@ -88,10 +90,27 @@ assets::ProceduralTerrainConfig PlayWorld::street_config(ecs::World& world, bool
             return;
         }
         const auto p = t->value.translation;
-        result.street_min_x = static_cast<std::int32_t>(std::floor(p.x - s.half_x));
-        result.street_max_x = static_cast<std::int32_t>(std::ceil(p.x + s.half_x));
-        result.street_min_z = static_cast<std::int32_t>(std::floor(p.z - s.half_z));
-        result.street_max_z = static_cast<std::int32_t>(std::ceil(p.z + s.half_z));
+        // The terrain's LOW rectangle is the plate shrunk by kPlateSkirt, rounded INWARD (ceil on a
+        // minimum, floor on a maximum), so the terrain's climb back to ground level finishes at or
+        // before the plate edge and never past it -- see PlayEnvironment::kPlateSkirt. A plate
+        // narrower than two skirts collapses to its centre line; the climb then cannot finish
+        // under it, which prove_plate_boundary reports rather than hides.
+        const auto skirt = PlayEnvironment::kPlateSkirt;
+        const auto shrink =
+            [skirt](float lo, float hi, std::int32_t& out_lo, std::int32_t& out_hi) {
+                auto a = static_cast<std::int32_t>(std::ceil(lo)) + skirt;
+                auto b = static_cast<std::int32_t>(std::floor(hi)) - skirt;
+                if (a > b) {
+                    a = b = static_cast<std::int32_t>(std::floor(0.5f * (lo + hi)));
+                }
+                out_lo = a;
+                out_hi = b;
+            };
+        shrink(p.x - s.half_x, p.x + s.half_x, result.street_min_x, result.street_max_x);
+        shrink(p.z - s.half_z, p.z + s.half_z, result.street_min_z, result.street_max_z);
+        if (plate != nullptr) {
+            *plate = {p.x - s.half_x, p.x + s.half_x, p.z - s.half_z, p.z + s.half_z, p.y};
+        }
         ++count;
     });
     valid = count == 1 && assets::procedural_config_valid(result);
@@ -196,7 +215,7 @@ PlayWorld::PlayWorld(ecs::World& server_world,
                      physics::PhysicsWorld& server_physics,
                      physics::PhysicsWorld& client_physics,
                      rhi::Device* device)
-    : config_(street_config(server_world, valid_)),
+    : config_(street_config(server_world, valid_, &plate_)),
       server_(config_, street_bounds(config_), server_physics),
       client_(config_, street_bounds(config_), client_physics), device_(device) {
     valid_ = valid_ && server_.block_pin.is_valid() && client_.block_pin.is_valid();
@@ -378,6 +397,229 @@ void PlayWorld::mark_drawn() noexcept {
     for (const Held& h : held_) {
         (void)slots_.mark_read(h.slot, frame_);
     }
+}
+
+// ── The plate-boundary proof ─────────────────────────────────────────────────────────────────
+//
+// WHY A CONTINUITY PROOF AND NOT A "CAN STEP UP" TEST. The failure the owner met is a property of
+// two surfaces that were authored apart: the city plate's walkable top (a physics slab, y = 0) and
+// the streamed terrain beside it (a heightfield that dips to -1.5 m at the street rectangle). A
+// character's step-up ladder climbs 0.3 m; its jump apex is v^2 / 2g = 1.03 m. A 1.5 m lip is
+// therefore a wall, however well the controller works. So the proof reads BOTH surfaces at many
+// points on the real physics world and compares them, and then walks the real controller across
+// as a second, independent witness.
+namespace {
+
+// Height of the drawn heightfield at world (x, z): the SAME asset the renderer uploads, sampled the
+// way its triangles are laid out. Each cell is split along the diagonal from sample (i, j) to
+// (i+1, j+1) (heightfield_asset.hpp), so the height is linear on whichever triangle holds the
+// point. Reading the asset rather than the collision world is what makes "rendered == collision" a
+// measurement instead of an assumption: they share a generator, and this checks that they agree.
+bool rendered_height(const assets::ProceduralTerrainConfig& config, float x, float z, float& out) {
+    const std::int64_t width = assets::procedural_tile_width_metres(0);
+    const std::int32_t tx = tile_at(x, width);
+    const std::int32_t tz = tile_at(z, width);
+    const auto asset = assets::generate_procedural_tile(config, tx, tz, 0);
+    if (!asset) {
+        return false;
+    }
+    const float lx = (x - asset->origin.x) / asset->cell_size_x;
+    const float lz = (z - asset->origin.z) / asset->cell_size_z;
+    const auto i = static_cast<std::uint32_t>(
+        std::clamp(std::floor(lx), 0.0f, static_cast<float>(asset->columns - 2)));
+    const auto j = static_cast<std::uint32_t>(
+        std::clamp(std::floor(lz), 0.0f, static_cast<float>(asset->rows - 2)));
+    const float fx = lx - static_cast<float>(i);
+    const float fz = lz - static_cast<float>(j);
+    const float h00 = asset->height(i, j);
+    const float h10 = asset->height(i + 1, j);
+    const float h01 = asset->height(i, j + 1);
+    const float h11 = asset->height(i + 1, j + 1);
+    out = fx >= fz ? h00 + (h10 - h00) * fx + (h11 - h10) * fz
+                   : h00 + (h11 - h01) * fx + (h01 - h00) * fz;
+    return true;
+}
+
+} // namespace
+
+PlayWorld::PlateProof PlayWorld::prove_plate_boundary(const gameplay::CharacterConfig& character,
+                                                      physics::BodyId self,
+                                                      std::uint64_t tick,
+                                                      std::FILE* report) {
+    PlateProof r;
+    r.plate_top = plate_.top_y;
+    physics::PhysicsWorld& world = server_.physics;
+    physics::QueryFilter statics;
+    statics.dynamics = false;
+
+    // Make the collision tiles under `centre` resident, the way a ticking game does: a demand for
+    // the player's neighbourhood, committed at the barrier. A sample with no tile is COUNTED, never
+    // skipped silently -- a proof that cannot see what it skipped still reads as passing.
+    auto ensure = [&](core::Vec3 centre, float radius) {
+        const std::vector<terrain_collision::Demand> demands{
+            {around(centre, radius), terrain_collision::DemandKind::Body}};
+        const auto plan = server_.collision.plan(++tick, demands);
+        auto status = server_.collision.try_commit(plan);
+        if (status == terrain_collision::CommitStatus::Waiting) {
+            status = server_.collision.try_commit(plan);
+        }
+        server_.collision.clear_journal();
+        return status == terrain_collision::CommitStatus::Ready;
+    };
+    auto height_at = [&](float x, float z, float& y) {
+        physics::RayHit hit;
+        const float top = plate_.top_y + 60.0f;
+        if (!world.raycast(
+                physics::Ray{{x, top, z}, {0.0f, -1.0f, 0.0f}, top + 64.0f}, hit, statics)) {
+            return false;
+        }
+        y = hit.point.y;
+        return true;
+    };
+
+    // ── (1) the perimeter: 16 points a side, 0.25 m inside and 0.25 m outside the edge ──────────
+    constexpr int kPerSide = 16;
+    constexpr float kProbe = 0.25f;
+    const float step = character.step_height;
+    if (report) {
+        std::fprintf(report,
+                     "side  along     plate_top  coll_out  render_out  gap_coll  gap_render\n");
+    }
+
+    // Sides in compass order N (-Z), E (+X), S (+Z), W (-X); `inward` is the unit step onto the
+    // plate.
+    struct Side {
+        char name;
+        float ox, oz; // outward direction
+    };
+
+    const std::array<Side, 4> sides{{{'N', 0, -1}, {'E', 1, 0}, {'S', 0, 1}, {'W', -1, 0}}};
+    auto edge_point = [&](const Side& sd, float t, float out_by, float& x, float& z) {
+        // t in (0,1) runs along the edge; out_by is metres outward (negative = onto the plate).
+        if (sd.oz != 0.0f) {
+            x = plate_.min_x + t * (plate_.max_x - plate_.min_x);
+            z = (sd.oz < 0 ? plate_.min_z : plate_.max_z) + sd.oz * out_by;
+        } else {
+            z = plate_.min_z + t * (plate_.max_z - plate_.min_z);
+            x = (sd.ox < 0 ? plate_.min_x : plate_.max_x) + sd.ox * out_by;
+        }
+    };
+    for (const Side& sd : sides) {
+        for (int k = 0; k < kPerSide; ++k) {
+            const float t = (static_cast<float>(k) + 0.5f) / static_cast<float>(kPerSide);
+            float ix, iz, ox, oz;
+            edge_point(sd, t, -kProbe, ix, iz);
+            edge_point(sd, t, kProbe, ox, oz);
+            if (!ensure({ox, plate_.top_y, oz}, 4.0f) || !ensure({ix, plate_.top_y, iz}, 4.0f)) {
+                ++r.uncovered;
+                continue;
+            }
+            float plate_y, coll_y, rend_y;
+            if (!height_at(ix, iz, plate_y) || !height_at(ox, oz, coll_y) ||
+                !rendered_height(config_, ox, oz, rend_y)) {
+                ++r.no_hit;
+                continue;
+            }
+            ++r.samples;
+            const float gap_c = std::abs(coll_y - plate_y);
+            const float gap_r = std::abs(rend_y - plate_y);
+            r.max_render_vs_collision =
+                std::max(r.max_render_vs_collision, std::abs(rend_y - coll_y));
+            r.max_render_gap = std::max(r.max_render_gap, gap_r);
+            if (gap_c >= r.max_collision_gap) {
+                r.max_collision_gap = gap_c;
+                r.worst_x = ox;
+                r.worst_z = oz;
+            }
+            if (report) {
+                std::fprintf(report,
+                             "%c   %8.2f  %9.3f  %8.3f  %10.3f  %8.3f  %10.3f\n",
+                             sd.name,
+                             sd.oz != 0.0f ? ox : oz,
+                             plate_y,
+                             coll_y,
+                             rend_y,
+                             gap_c,
+                             gap_r);
+            }
+        }
+    }
+
+    // A profile outward from each side's centre: where the terrain sits at 0.25 .. 16 m out.
+    if (report) {
+        std::fprintf(report, "outward profile at each side's centre (collision y, rendered y):\n");
+        for (const Side& sd : sides) {
+            std::fprintf(report, "  %c:", sd.name);
+            for (const float d : {0.25f, 1.0f, 2.0f, 4.0f, 8.0f, 12.0f, 16.0f}) {
+                float x, z, cy = 0, ry = 0;
+                edge_point(sd, 0.5f, d, x, z);
+                (void)ensure({x, plate_.top_y, z}, 4.0f);
+                const bool a = height_at(x, z, cy);
+                const bool b = rendered_height(config_, x, z, ry);
+                std::fprintf(report, "  %.2fm: %.3f/%.3f", d, a ? cy : NAN, b ? ry : NAN);
+            }
+            std::fprintf(report, "\n");
+        }
+    }
+
+    // ── (2) the scripted walk: the real controller, forward only, never the jump bit ────────────
+    // From 20 m outside to 5 m inside, along a line perpendicular to the edge. A building can stand
+    // on the plate where the line ends, and then "blocked" would be the building's doing, not the
+    // terrain's, so each side tries several lateral positions and passes if ANY one gets through.
+    // The sensitivity control is the same call on the unmodified terrain: every line fails there.
+    constexpr float kLateral[] = {0.5f, 0.35f, 0.65f, 0.2f, 0.8f, 0.1f, 0.9f};
+    const float half_total = character.half_height + character.radius;
+    for (std::size_t si = 0; si < sides.size(); ++si) {
+        const Side& sd = sides[si];
+        // yaw: engine forward is -Z at yaw 0 and -X at +pi/2, so forward = (-sin yaw, -cos yaw).
+        const float inward_x = -sd.ox, inward_z = -sd.oz;
+        const float yaw = std::atan2(-inward_x, -inward_z);
+        for (const float t : kLateral) {
+            float sx, sz;
+            edge_point(sd, t, 20.0f, sx, sz);
+            if (!ensure({sx, plate_.top_y, sz}, 6.0f)) {
+                continue;
+            }
+            float ground = 0.0f;
+            if (!height_at(sx, sz, ground)) {
+                continue;
+            }
+            gameplay::CharacterState state;
+            state.position = {sx, ground + half_total + character.skin + 0.05f, sz};
+            gameplay::CharacterInput settle{};
+            settle.yaw = yaw;
+            for (int i = 0; i < 30; ++i) { // land on the terrain before asking it to walk
+                (void)ensure(state.position, 3.0f);
+                state = gameplay::step_character(state, settle, character, world, self, kDt);
+            }
+            gameplay::CharacterInput walk = settle;
+            walk.move_y = 1.0f;
+            float along = 0.0f;
+            bool crossed = false;
+            for (int i = 0; i < 600 && !crossed; ++i) {
+                (void)ensure(state.position, 3.0f + character.max_speed * kDt);
+                state = gameplay::step_character(state, walk, character, world, self, kDt);
+                along = (state.position.x - sx) * inward_x + (state.position.z - sz) * inward_z;
+                // 20 m outside + 5 m inside = 25 m of travel; and the feet must be ON the plate
+                // (y near its top), not tunnelled under it or dropped into a trench.
+                crossed = along >= 25.0f &&
+                          std::abs(state.position.y - half_total - plate_.top_y) < 0.25f;
+                if (!std::isfinite(state.position.y) || state.position.y < plate_.top_y - 6.0f) {
+                    break;
+                }
+            }
+            r.walk_progress[si] = std::max(r.walk_progress[si], along);
+            if (crossed) {
+                r.walked[si] = true;
+                break;
+            }
+        }
+    }
+
+    r.ok = r.uncovered == 0 && r.no_hit == 0 && r.samples >= 64 && r.max_collision_gap <= step &&
+           r.max_render_gap <= step && r.max_render_vs_collision <= 0.02f && r.walked[0] &&
+           r.walked[1] && r.walked[2] && r.walked[3];
+    return r;
 }
 
 } // namespace rime::block_play
