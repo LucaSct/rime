@@ -64,6 +64,7 @@
 // This sample is that demo.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <condition_variable>
 #include <cstdint>
@@ -72,6 +73,7 @@
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -1568,7 +1570,57 @@ struct Session {
         }
         return alive;
     }
+
+    // DAMAGE OPS STILL IN FLIGHT, server -> client: put on the wire by the authority and not yet
+    // RESOLVED by the client. Resolved means one of two things, and both are final: the op was
+    // applied (the client now HOLDS it — `ops_applied` counts at `apply_next_batch`, not at
+    // arrival), or it was dropped as unmapped (it will never be held, and saying "still coming"
+    // about it would be a lie). Arrival alone is neither, which is replication.md's invariant
+    // applied to a debug readout: a decoded op sitting in the client's queue is still in flight.
+    //
+    // Deliberately NOT counted as in flight: ops the server refused to send (backpressure) and ops
+    // it could not address. Those were never on the wire, so they are lost rather than late, and
+    // if they matter the hashes will differ with nothing in flight — which is exactly the case
+    // the HUD must call DIVERGED rather than excuse as "syncing".
+    //
+    // In-process only: it reads both peers' counters, which a real client cannot. So can the
+    // `peers` row it serves, which compares both peers' hashes in the first place.
+    [[nodiscard]] std::uint64_t destruction_ops_in_flight() const {
+        const auto& dc = client.destruction_net_client;
+        const std::uint64_t sent = server.destruction_net_server.ops_sent();
+        const std::uint64_t resolved = dc.ops_applied() + dc.ops_dropped_unmapped();
+        return sent > resolved ? sent - resolved : 0;
+    }
 };
+
+// WHAT THE `peers` HUD ROW MAY CLAIM, and why it has three answers rather than two.
+//
+// The row compares the two in-process peers' `shared_state_hash` on every render frame. That
+// comparison is only meaningful when the client has had the chance to hold everything the server
+// committed. Measured on city-v2 (oct21-desync): during a collapse the authority commits new damage
+// ops on EVERY tick for 10-20 s, the client applies each batch one tick later (zero impairment) or
+// 3-21 ticks later (--network-impairment), and so the hashes differ on every one of those ticks —
+// while agreeing on every tick where nothing was in flight (0 exceptions in ~4,500 ticks). A
+// two-state row printed "DIVERGED" for that whole window: it was comparing peers mid-flight.
+//
+// So "different hashes" splits on whether anything is still in flight. Syncing = the client is
+// behind by a measurable number of ops; DIVERGED = nothing is in flight and the hashes still
+// differ, which no amount of waiting will fix. Kept as one function so the HUD and the headless
+// `--desync-check` cannot disagree about which is which.
+enum class PeerSync { InSync, Syncing, Diverged };
+
+[[nodiscard]] PeerSync classify_peer_sync(const Session& s, std::uint64_t* in_flight = nullptr) {
+    const bool agree = destruction_net::shared_state_hash(
+                           s.client.world, s.client.replicator->map(), s.client.destruction) ==
+                       destruction_net::shared_state_hash(
+                           s.server.world, s.server.replicator->map(), s.server.destruction);
+    const std::uint64_t pending = s.destruction_ops_in_flight();
+    if (in_flight != nullptr)
+        *in_flight = pending;
+    if (agree)
+        return PeerSync::InSync;
+    return pending > 0 ? PeerSync::Syncing : PeerSync::Diverged;
+}
 
 // ── The scripted tape ───────────────────────────────────────────────────────────────────────────
 //
@@ -3010,14 +3062,25 @@ struct Demo {
         row("leaves", buf, st::kText);
         // Compare by wire identity, just like the headless convergence proof. Local instance
         // allocation order can differ as well as BodyIds: dropping handles from a local-order
-        // hash still falsely labels an undamaged city as divergent.
-        const bool agree = destruction_net::shared_state_hash(session.client.world,
-                                                              session.client.replicator->map(),
-                                                              session.client.destruction) ==
-                           destruction_net::shared_state_hash(session.server.world,
-                                                              session.server.replicator->map(),
-                                                              session.server.destruction);
-        row("peers", agree ? "in sync" : "DIVERGED", agree ? st::kText : st::kWarn);
+        // hash still falsely labels an undamaged city as divergent. Differing hashes read
+        // "syncing" while damage ops are still in flight and DIVERGED only once nothing is —
+        // see classify_peer_sync for the measurement that made the two-state row a lie.
+        std::uint64_t in_flight = 0;
+        switch (classify_peer_sync(session, &in_flight)) {
+            case PeerSync::InSync:
+                row("peers", "in sync", st::kText);
+                break;
+            case PeerSync::Syncing:
+                // The count is shown so a number that never drains is visible: "syncing" is a
+                // claim with a cause, not a place for a stuck channel to hide.
+                std::snprintf(
+                    buf, sizeof(buf), "syncing %llu", static_cast<unsigned long long>(in_flight));
+                row("peers", buf, st::kLabel);
+                break;
+            case PeerSync::Diverged:
+                row("peers", "DIVERGED", st::kWarn);
+                break;
+        }
         std::snprintf(buf, sizeof(buf), "%zu", mixer.voice_count());
         row("voices", buf, st::kText);
     }
@@ -6383,6 +6446,383 @@ void run_shimmer_trace(Demo& demo, const char* csv_path) {
     demo.app.finish_gpu();
 }
 
+// ── --desync-check: the `peers` row must not call a replica mid-flight DIVERGED ─────────────────
+//
+// The owner saw the play HUD read "peers DIVERGED" after an aimed charge and after rifle fire. This
+// is the headless form of that session on a city map: 20 rifle hits that reach destructible parts,
+// then an aimed charge, then the sim runs on until the authority has committed no new damage op for
+// 10 s (bounded). Every tick is classified exactly as the HUD classifies it.
+//
+// What it asserts, and why each is there:
+//   - the HUD never says DIVERGED. The peers really are in sync whenever nothing is in flight
+//     (measured: 0 exceptions), so a DIVERGED here is either a false alarm or a real divergence,
+//     and both are failures;
+//   - the HUD DID say "syncing" — the sensitivity half: a run that never had anything in flight
+//     never exercised the case the row exists to get right, and would pass vacuously;
+//   - the peers agree once the authority has gone quiet, within the bound;
+//   - a CONTROL: one damage op committed on the server and never published must then read
+//     DIVERGED. Without it, a classifier that answered "syncing" to everything would pass too.
+//
+// It also prints how many ticks the PRE-FIX row (hashes compared alone) would have shown DIVERGED,
+// which is the number that answers the owner's report.
+struct PeerPartDigest {
+    std::uint32_t parts = 0;
+    std::uint32_t alive = 0;
+    std::uint64_t health = 0;
+    std::uint64_t composition = 0;
+    bool operator==(const PeerPartDigest&) const = default;
+};
+
+// The shared_state_hash, kept apart per destructible so a disagreement can be NAMED: which NetId,
+// and whether it is the alive bits, the healths or the rubble's composition that differ.
+std::map<std::uint64_t, PeerPartDigest> peer_digest(const ecs::World& world,
+                                                    const replication::NetIdMap& map,
+                                                    const destruction::DestructionWorld& d) {
+    std::map<std::uint64_t, PeerPartDigest> out;
+    map.for_each([&](replication::NetId id, ecs::Entity e) {
+        const auto* ref = world.get<destruction::DestructibleInstanceRef>(e);
+        if (ref == nullptr || ref->instance == destruction::kUnboundInstance)
+            return;
+        const destruction::InstanceId inst{ref->instance, 0};
+        PeerPartDigest g;
+        g.parts = d.instance_part_count(inst);
+        for (std::uint32_t p = 0; p < g.parts; ++p) {
+            g.alive += d.part_alive(inst, p) ? 1u : 0u;
+            const float h = d.part_health(inst, p);
+            std::uint32_t b = 0;
+            std::memcpy(&b, &h, sizeof(b));
+            g.health = (g.health ^ b) * 1099511628211ull + p;
+        }
+        g.composition = destruction_net::debris_composition_hash(d, inst);
+        out[(std::uint64_t(id.index) << 32) | id.generation] = g;
+    });
+    return out;
+}
+
+void print_peer_difference(const Session& s) {
+    const auto a = peer_digest(s.server.world, s.server.replicator->map(), s.server.destruction);
+    const auto b = peer_digest(s.client.world, s.client.replicator->map(), s.client.destruction);
+    std::size_t only_server = 0, only_client = 0, differ = 0;
+    for (const auto& [k, g] : a) {
+        const auto it = b.find(k);
+        if (it == b.end()) {
+            ++only_server;
+            continue;
+        }
+        if (it->second == g)
+            continue;
+        if (differ++ == 0)
+            std::printf("  first diff: netid %u/%u parts %u/%u alive %u/%u health %s "
+                        "composition %s (server/client)\n",
+                        unsigned(k >> 32),
+                        unsigned(k & 0xffffffffu),
+                        g.parts,
+                        it->second.parts,
+                        g.alive,
+                        it->second.alive,
+                        g.health == it->second.health ? "same" : "DIFF",
+                        g.composition == it->second.composition ? "same" : "DIFF");
+    }
+    for (const auto& entry : b)
+        only_client += a.count(entry.first) == 0 ? 1u : 0u;
+    std::printf(
+        "  instances : server %zu client %zu, only-server %zu only-client %zu, differ %zu\n",
+        a.size(),
+        b.size(),
+        only_server,
+        only_client,
+        differ);
+}
+
+bool write_city_scene(const std::filesystem::path& cooked, const std::string& path);
+
+int run_desync_check(const std::filesystem::path& cooked, std::string_view scene_arg) {
+    // No --scene: author the city to a scratch file, the same way --write-city does, so CTest
+    // runs this on the playable map without a checked-in scene.
+    std::string scene_path(scene_arg);
+    std::filesystem::path scratch;
+    if (scene_path.empty()) {
+        scratch = std::filesystem::temp_directory_path() /
+                  ("rime-desync-city-" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                   ".rscene");
+        std::filesystem::remove(scratch);
+        if (!write_city_scene(cooked, scratch.string()))
+            return 1;
+        scene_path = scratch.string();
+    }
+
+    struct RemoveScratch {
+        std::filesystem::path path;
+
+        ~RemoveScratch() {
+            std::error_code ignored;
+            if (!path.empty())
+                std::filesystem::remove(path, ignored);
+        }
+    } remove_scratch{scratch};
+
+    app::AppConfig cfg{};
+    cfg.gpu = false; // the sim and both peers only; the HUD's classification is a sim question
+    cfg.tick_hz = 60.0;
+    Demo demo(cfg, g_network_impairment);
+    demo.scripted_charge = false;
+    demo.streamed_world = true;
+    demo.building_support_enabled = true; // --play's collapse source, so its op stream too
+    demo.session.server.weapon.automatic = true;
+    if (!demo.start(cooked, scene_path))
+        return 1;
+    Session& s = demo.session;
+    gameplay::CharacterInput look{};
+    if (s.client.spawn.status == block_play::SpawnStatus::Valid) {
+        look.yaw = s.client.spawn.placement.yaw;
+        look.pitch = s.client.spawn.placement.pitch;
+    }
+    for (int i = 0; i < 30; ++i)
+        demo.step_sim(gameplay_net::to_input_command(look));
+    std::printf("99-the-block --desync-check: impairment %s\n",
+                g_network_impairment ? "ON" : "OFF");
+
+    // Aim at a standing part of a destructible, as seen on the CLIENT replica (what a player
+    // sees). Swept around the spawn; `skip_current` moves on once a line has stopped damaging
+    // anything (its part broke away as rubble, which a bullet only pushes).
+    const auto aim = [&](bool skip_current) {
+        for (int pi = 0; pi < 4; ++pi) {
+            for (int yi = skip_current ? 1 : 0; yi < 48; ++yi) {
+                const float yaw = look.yaw + float(yi) * (6.2831853f / 48.0f);
+                const float pitch = 0.1f - 0.1f * float(pi);
+                s.client.view.yaw = yaw;
+                s.client.view.pitch = pitch;
+                const core::Transform eye = s.client.camera_transform();
+                const core::Vec3 fwd = core::rotate(eye.rotation, core::Vec3{0, 0, -1});
+                physics::QueryFilter f;
+                f.exclude = s.client.local_body();
+                physics::RayHit hit{};
+                if (!s.client.physics.raycast({eye.translation, fwd, 120.0f}, hit, f) ||
+                    hit.distance < 4.0f)
+                    continue;
+                for (std::size_t i = 0; i < s.client.destruction.instance_count(); ++i) {
+                    const destruction::InstanceId id{static_cast<std::uint32_t>(i), 0};
+                    if (s.client.destruction.body_of(id) != hit.body)
+                        continue;
+                    const std::uint32_t part = s.client.destruction.part_from_child(id, hit.child);
+                    if (part == destruction::kInvalidPartIndex ||
+                        !s.client.destruction.part_alive(id, part))
+                        continue;
+                    look.yaw = yaw;
+                    look.pitch = pitch;
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    if (!aim(false)) {
+        std::fprintf(stderr, "desync-check: FAILED no destructible within reach of the spawn\n");
+        return 1;
+    }
+
+    std::uint64_t tick = 0, syncing_ticks = 0, diverged_ticks = 0, hash_differs = 0;
+    std::uint64_t last_sent = s.server.destruction_net_server.ops_sent(), last_sent_change = 0;
+    std::uint64_t peak_in_flight = 0, behind_run = 0, longest_behind_run = 0;
+    const bool trace = std::getenv("RIME_DESYNC_TRACE") != nullptr;
+    const auto step = [&](const gameplay::CharacterInput& in, const char* phase) {
+        demo.step_sim(gameplay_net::to_input_command(in));
+        ++tick;
+        std::uint64_t in_flight = 0;
+        const PeerSync state = classify_peer_sync(s, &in_flight);
+        hash_differs += state != PeerSync::InSync ? 1u : 0u; // what the pre-fix row compared
+        syncing_ticks += state == PeerSync::Syncing ? 1u : 0u;
+        if (std::string_view(phase) != "control")
+            diverged_ticks += state == PeerSync::Diverged ? 1u : 0u;
+        peak_in_flight = std::max(peak_in_flight, in_flight);
+        behind_run = in_flight > 0 ? behind_run + 1 : 0;
+        longest_behind_run = std::max(longest_behind_run, behind_run);
+        const std::uint64_t sent = s.server.destruction_net_server.ops_sent();
+        if (sent != last_sent) {
+            last_sent = sent;
+            last_sent_change = tick;
+        }
+        if (trace)
+            std::printf("T %llu %s state=%d in_flight=%llu sent=%llu\n",
+                        static_cast<unsigned long long>(tick),
+                        phase,
+                        static_cast<int>(state),
+                        static_cast<unsigned long long>(in_flight),
+                        static_cast<unsigned long long>(sent));
+        if (state == PeerSync::Diverged && diverged_ticks == 1 &&
+            std::string_view(phase) != "control") {
+            std::printf("  DIVERGED first at tick %llu (%s):\n",
+                        static_cast<unsigned long long>(tick),
+                        phase);
+            print_peer_difference(s);
+        }
+    };
+
+    // 20 rifle hits that reach a destructible part (not shots, not hits on loose rubble).
+    constexpr std::uint64_t kRifleHits = 20;
+    const std::uint64_t ops0 = s.damage_ops;
+    std::uint64_t last_hit_tick = 0, hits_seen = 0;
+    for (int i = 0; i < 2400 && s.damage_ops - ops0 < kRifleHits; ++i) {
+        gameplay::CharacterInput fire = look;
+        fire.held = gameplay::kActionFire;
+        fire.pressed = (i % 2 == 0) ? gameplay::kActionFire : 0;
+        step(fire, "rifle");
+        if (s.damage_ops - ops0 != hits_seen) {
+            hits_seen = s.damage_ops - ops0;
+            last_hit_tick = tick;
+        } else if (tick - last_hit_tick > 60) {
+            (void)aim(true);
+            last_hit_tick = tick;
+        }
+    }
+    const std::uint64_t rifle_hits = s.damage_ops - ops0;
+
+    // The aimed charge, through the same function F calls in --play.
+    (void)aim(false);
+    for (int i = 0; i < 10; ++i)
+        step(look, "turn");
+    s.client.view.yaw = look.yaw;
+    s.client.view.pitch = look.pitch;
+    const std::uint64_t sent_before_charge = s.server.destruction_net_server.ops_sent();
+    const bool charged = demo.fire_charge_aimed();
+    const std::uint64_t charge_tick = tick;
+
+    // Drain: at least 10 s after the charge AND 10 s after the authority's last damage op, bounded
+    // at 200 s so a collapse that never ends fails rather than hangs.
+    constexpr std::uint64_t kQuiet = 600, kDrainBound = 12000;
+    while (tick - charge_tick < kDrainBound &&
+           (tick - charge_tick < kQuiet || tick - last_sent_change < kQuiet))
+        step(look, "drain");
+    const bool quiet = tick - last_sent_change >= kQuiet;
+    std::uint64_t end_in_flight = 0;
+    const PeerSync end_state = classify_peer_sync(s, &end_in_flight);
+    // The session's numbers, before the control below adds ticks of its own.
+    const std::uint64_t session_ticks = tick, session_last_sent = last_sent_change,
+                        session_syncing = syncing_ticks, session_differs = hash_differs;
+
+    std::printf("  rifle     : %llu hits on destructible parts (%llu shots)\n",
+                static_cast<unsigned long long>(rifle_hits),
+                static_cast<unsigned long long>(s.shots_fired));
+    std::printf("  charge    : %s at tick %llu\n",
+                charged ? "detonated" : "HIT NOTHING",
+                static_cast<unsigned long long>(charge_tick));
+    std::printf("  drain     : authority last sent ops at tick %llu, ran to %llu (%s)\n",
+                static_cast<unsigned long long>(session_last_sent),
+                static_cast<unsigned long long>(session_ticks),
+                quiet ? "quiet" : "BOUND EXHAUSTED");
+    std::printf(
+        "  ops       : sent %llu (%llu before the charge), applied %llu, dropped %llu, "
+        "refused %llu, unaddressable %llu\n",
+        static_cast<unsigned long long>(s.server.destruction_net_server.ops_sent()),
+        static_cast<unsigned long long>(sent_before_charge),
+        static_cast<unsigned long long>(s.client.destruction_net_client.ops_applied()),
+        static_cast<unsigned long long>(s.client.destruction_net_client.ops_dropped_unmapped()),
+        static_cast<unsigned long long>(s.server.destruction_net_server.ops_refused()),
+        static_cast<unsigned long long>(s.server.destruction_net_server.ops_unaddressable()));
+    std::printf("  hud       : %llu ticks — syncing %llu, DIVERGED %llu; the pre-fix row would "
+                "have read DIVERGED on %llu; peak in flight %llu ops, longest run %llu ticks\n",
+                static_cast<unsigned long long>(session_ticks),
+                static_cast<unsigned long long>(session_syncing),
+                static_cast<unsigned long long>(diverged_ticks),
+                static_cast<unsigned long long>(session_differs),
+                static_cast<unsigned long long>(peak_in_flight),
+                static_cast<unsigned long long>(longest_behind_run));
+    if (end_state != PeerSync::InSync)
+        print_peer_difference(s);
+
+    // CONTROL: a real divergence must still read DIVERGED. Kill one standing part on the
+    // authority OUTSIDE the tick: the next tick's update replaces `committed_ops()` before anything
+    // publishes it, so the client can never hold that op. The part is found the way the player
+    // finds one (a ray onto a standing part), so it exists on both peers. Then let the authority go
+    // quiet again — the injected break may set off follow-up damage, which IS published and must
+    // drain first — and classify.
+    std::size_t control_ops = 0;
+    PeerSync control_state = PeerSync::InSync;
+    if (aim(false)) {
+        s.client.view.yaw = look.yaw;
+        s.client.view.pitch = look.pitch;
+        const core::Transform eye = s.client.camera_transform();
+        physics::QueryFilter f;
+        f.exclude = s.client.local_body();
+        physics::RayHit hit{};
+        if (s.client.physics.raycast(
+                {eye.translation, core::rotate(eye.rotation, core::Vec3{0, 0, -1}), 120.0f},
+                hit,
+                f)) {
+            auto& d = s.server.destruction;
+            for (std::size_t i = 0; i < d.instance_count(); ++i)
+                d.apply_damage(destruction::InstanceId{static_cast<std::uint32_t>(i), 0},
+                               hit.point,
+                               0.5f,
+                               50.0f,
+                               {});
+            d.update(s.server.physics);
+            control_ops = d.committed_ops().size();
+        }
+        const std::uint64_t control_start = tick;
+        while (tick - control_start < kDrainBound &&
+               (tick - control_start < 60 || tick - last_sent_change < kQuiet))
+            step(look, "control");
+        control_state = classify_peer_sync(s);
+    }
+    bool okay = true;
+    const auto check = [&](bool condition, const char* label) {
+        std::printf("  [%s] %s\n", condition ? " ok " : "FAIL", label);
+        okay = okay && condition;
+    };
+    check(rifle_hits >= kRifleHits, "20 rifle hits reached destructible parts");
+    check(charged && s.server.destruction_net_server.ops_sent() > sent_before_charge,
+          "the aimed charge detonated and the authority published damage");
+    check(session_syncing > 0, "the HUD showed 'syncing' (ops were in flight; not vacuous)");
+    check(diverged_ticks == 0, "the HUD never showed DIVERGED during the session");
+    check(quiet, "the authority went quiet within the bound");
+    check(end_state == PeerSync::InSync && end_in_flight == 0,
+          "the peers agree once nothing is in flight");
+    std::printf("  control   : %zu op(s) committed and never published -> %s\n",
+                control_ops,
+                control_state == PeerSync::Diverged  ? "DIVERGED"
+                : control_state == PeerSync::Syncing ? "syncing"
+                                                     : "in sync");
+    check(control_ops > 0 && control_state == PeerSync::Diverged,
+          "control: an op the client never receives reads DIVERGED");
+    std::printf("99-the-block --desync-check: %s\n", okay ? "PASSED" : "FAILED");
+    return okay ? 0 : 1;
+}
+
+// The city map, authored and strictly re-loaded: --write-city's body, shared with --desync-check.
+bool write_city_scene(const std::filesystem::path& cooked, const std::string& path) {
+    ecs::World authored;
+    register_all(authored);
+    blockkit::BlockParams params;
+    if (const auto text = platform::read_file(cooked / "manifest.txt")) {
+        if (const auto manifest = assets::Manifest::parse(
+                {reinterpret_cast<const char*>(text->data()), text->size()}))
+            params.ground_material = blockkit::ground_material_id(*manifest);
+    }
+    (void)blockkit::assemble(authored, params);
+    const auto expanded = block_play::city::expand(authored);
+    // A saved city owns its environment. The editor and full runtime both consume this
+    // Sky and authored directional light; no runtime-only preset overwrites the file.
+    render::Sky sky;
+    sky.intensity = .06f; // calibrated scene exposure: physical sky light must not wash out the map
+    (void)authored.spawn_with(sky);
+    if (!scene::save_scene_file(authored, path))
+        return false;
+    ecs::World loaded;
+    register_all(loaded);
+    const auto result = scene::load_scene_file(loaded, path);
+    if (!result.ok || result.skipped_components || loaded.entity_count() != authored.entity_count())
+        return false;
+    std::printf("city authored: %zu entities, %u added buildings, %u lamps, %u barriers; "
+                "strict reload 0 skipped\n",
+                authored.entity_count(),
+                expanded.buildings_added,
+                expanded.lamps,
+                expanded.barriers);
+    return true;
+}
+
 int run_play(const std::filesystem::path& cooked, std::string_view scene_path, unsigned frames) {
     app::AppConfig cfg{};
     cfg.gpu = true;
@@ -6601,7 +7041,8 @@ int main(int argc, char** argv) {
         WorldGpuSmoke,
         ViewmodelSmoke,
         EnvironmentSmoke,
-        EffectsSmoke
+        EffectsSmoke,
+        DesyncCheck
     } mode = Mode::Headless;
     PerfOptions perf{};
     unsigned play_frames = 0;
@@ -6626,7 +7067,7 @@ int main(int argc, char** argv) {
         }
         if (a == "--play" || a == "--headless" || a == "--perf" || a == "--world-smoke" ||
             a == "--world-gpu-smoke" || a == "--viewmodel-smoke" || a == "--environment-smoke" ||
-            a == "--effects-smoke")
+            a == "--effects-smoke" || a == "--desync-check")
             explicit_mode = true;
         if (a == "--scene-info") {
             scene_info = true;
@@ -6650,6 +7091,8 @@ int main(int argc, char** argv) {
             mode = Mode::EnvironmentSmoke;
         } else if (a == "--effects-smoke") {
             mode = Mode::EffectsSmoke;
+        } else if (a == "--desync-check") {
+            mode = Mode::DesyncCheck;
         } else if (a == "--network-impairment") {
             g_network_impairment = true;
         } else if (a == "--mute") {
@@ -6710,37 +7153,7 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "city generator refuses to overwrite %s\n", write_city.c_str());
             return 2;
         }
-        ecs::World authored;
-        register_all(authored);
-        blockkit::BlockParams params;
-        if (const auto text = platform::read_file(cooked / "manifest.txt")) {
-            if (const auto manifest = assets::Manifest::parse(
-                    {reinterpret_cast<const char*>(text->data()), text->size()}))
-                params.ground_material = blockkit::ground_material_id(*manifest);
-        }
-        (void)blockkit::assemble(authored, params);
-        const auto expanded = block_play::city::expand(authored);
-        // A saved city owns its environment. The editor and full runtime both consume this
-        // Sky and authored directional light; no runtime-only preset overwrites the file.
-        render::Sky sky;
-        sky.intensity =
-            .06f; // calibrated scene exposure: physical sky light must not wash out the map
-        (void)authored.spawn_with(sky);
-        if (!scene::save_scene_file(authored, write_city))
-            return 1;
-        ecs::World loaded;
-        register_all(loaded);
-        const auto result = scene::load_scene_file(loaded, write_city);
-        if (!result.ok || result.skipped_components ||
-            loaded.entity_count() != authored.entity_count())
-            return 1;
-        std::printf("city authored: %zu entities, %u added buildings, %u lamps, %u barriers; "
-                    "strict reload 0 skipped\n",
-                    authored.entity_count(),
-                    expanded.buildings_added,
-                    expanded.lamps,
-                    expanded.barriers);
-        return 0;
+        return write_city_scene(cooked, write_city) ? 0 : 1;
     }
     // A moved development binary must find its own content, never silently use the checkout's
     // compiled directories. In-tree tools retain their existing defaults and self-check mode.
@@ -6818,6 +7231,9 @@ int main(int argc, char** argv) {
     }
     if (mode == Mode::EnvironmentSmoke) {
         return run_environment_smoke(cooked, scene_path);
+    }
+    if (mode == Mode::DesyncCheck) {
+        return run_desync_check(cooked, scene_path);
     }
     if (mode == Mode::EffectsSmoke) {
         return run_effects_smoke(cooked, scene_path);
