@@ -32,6 +32,7 @@
 #include "rime/physics/shape.hpp"
 #include "scene_query.hpp"
 #include "solver.hpp"
+#include "wavefront.hpp"
 
 // The M7.1–M7.5 world: a data-oriented body pool, a semi-implicit Euler integrator, a dual
 // dynamic-AABB-tree broadphase (M7.2), a GJK/EPA/clipping narrowphase with a persistent warm-start
@@ -166,6 +167,17 @@ struct PhysicsWorld::Impl {
     // unconditionally. One `resize` cannot drift out of sync with the pool; three mirrored edits
     // can.
     std::vector<SymMat3> inverse_inertia_world;
+    // Wavefront velocity-solve scratch (wavefront.hpp), grown and never shrunk, carrying no value
+    // between steps. Sized in step() before the island dispatch so that concurrent islands each
+    // own a disjoint slice: `wf_body_depth` by dense body, the rest by the island's constraint
+    // range (`wf_level_start` with one extra entry per island).
+    std::vector<std::uint32_t> wf_body_depth;
+    std::vector<std::uint32_t> wf_level;
+    std::vector<std::uint32_t> wf_level_start;
+    std::vector<std::uint32_t> wf_order;
+    std::vector<WideContactBatch> wf_batches;
+    bool wavefront_enabled = kWideVelocitySolveAvailable;
+    std::atomic<std::uint32_t> wavefront_islands_last{0};
     std::vector<std::uint8_t> motion;
     std::vector<float> linear_damping;
     std::vector<float> angular_damping;
@@ -1735,7 +1747,24 @@ void PhysicsWorld::step(float dt) {
             p.island_solve_slots[k].warm_ns = ns_of(lap);
             lap.restart();
         }
-        solve_velocities(bodies, cs, kVelocityIterations);
+        {
+            const std::uint32_t bb = isl.body_offsets[k];
+            const std::uint32_t be = isl.body_offsets[k + 1];
+            const WavefrontScratch scratch{p.wf_body_depth.data(),
+                                           p.wf_level.data() + cb,
+                                           p.wf_level_start.data() + cb + k,
+                                           p.wf_order.data() + cb,
+                                           p.wf_batches.data() + cb};
+            if (solve_island_velocities(
+                    bodies,
+                    cs,
+                    std::span<const std::uint32_t>{isl.bodies.data() + bb, be - bb},
+                    kVelocityIterations,
+                    p.wavefront_enabled,
+                    scratch)) {
+                p.wavefront_islands_last.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         if constexpr (Profile) {
             p.island_solve_slots[k].velocity_ns = ns_of(lap);
             lap.restart();
@@ -1769,6 +1798,22 @@ void PhysicsWorld::step(float dt) {
     const auto solve_island = [&](std::size_t k) {
         solve_island_impl.template operator()<false>(k);
     };
+
+    // Size the wavefront scratch on this thread, before any island can run (see Impl). Growing
+    // only: a vector that already holds enough keeps its storage and costs nothing here.
+    p.wavefront_islands_last.store(0, std::memory_order_relaxed);
+    if (p.wavefront_enabled) {
+        const auto grow = [](auto& v, std::size_t size) {
+            if (v.size() < size) {
+                v.resize(size);
+            }
+        };
+        grow(p.wf_body_depth, p.inv_mass.size());
+        grow(p.wf_level, ordered.size());
+        grow(p.wf_level_start, ordered.size() + isl.island_count);
+        grow(p.wf_order, ordered.size());
+        grow(p.wf_batches, ordered.size());
+    }
 
     const bool profile_islands = p.island_profile_enabled;
     if (profile_islands) {
@@ -2251,6 +2296,20 @@ void PhysicsWorld::set_island_profile_enabled(bool enabled) noexcept {
     if (!enabled) {
         impl_->island_profile.clear();
     }
+}
+
+void PhysicsWorld::set_wavefront_solve_enabled(bool enabled) noexcept {
+    // Requesting it on a build without the wide path is a quiet no-op: the scalar sweep IS the
+    // answer the wide one reproduces, so nothing a caller could observe differs except the cost.
+    impl_->wavefront_enabled = enabled && kWideVelocitySolveAvailable;
+}
+
+bool PhysicsWorld::wavefront_solve_enabled() const noexcept {
+    return impl_->wavefront_enabled;
+}
+
+std::uint32_t PhysicsWorld::wavefront_islands_last() const noexcept {
+    return impl_->wavefront_islands_last.load(std::memory_order_relaxed);
 }
 
 bool PhysicsWorld::island_profile_enabled() const noexcept {

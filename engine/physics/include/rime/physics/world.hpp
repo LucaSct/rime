@@ -448,6 +448,17 @@ public:
     void set_island_profile_enabled(bool enabled) noexcept;
     [[nodiscard]] bool island_profile_enabled() const noexcept;
 
+    // The WAVEFRONT velocity solve (on by default where the build supports it — x86-64 today).
+    // Large islands run their velocity iterations four constraints at a time, in an order that
+    // keeps every Gauss–Seidel dependency (engine/physics/src/wavefront.hpp), so the result is
+    // bit-identical to the scalar sweep: world_hash() is the same with it on or off. The switch
+    // exists so tests can prove exactly that, and so a profile can price the lever; it is not a
+    // quality knob. `wavefront_islands_last()` counts the islands that took the wide path in the
+    // most recent step() — 0 when off or unsupported.
+    void set_wavefront_solve_enabled(bool enabled) noexcept;
+    [[nodiscard]] bool wavefront_solve_enabled() const noexcept;
+    [[nodiscard]] std::uint32_t wavefront_islands_last() const noexcept;
+
     // One entry per active island of the most recent step(), in island-id order; empty when the
     // profile is off. Invalidated by the next step().
     [[nodiscard]] std::span<const IslandSolveCost> island_solve_profile_last() const noexcept;
