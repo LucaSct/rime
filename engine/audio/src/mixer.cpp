@@ -362,6 +362,7 @@ void Mixer::play_with_reflections(SoundId sound,
 
         voices_.push_back(rv);
         ++stats_.voices_started;
+        ++stats_.reflections_started;
     }
 }
 

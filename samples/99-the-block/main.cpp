@@ -2145,18 +2145,32 @@ audio::SoundBank play_sound_bank() {
 // The one place a weapon report is started, shared by the game and the --audio-weapons render so
 // the offline WAV and the shot the player hears cannot disagree about what a shot is.
 //
-// GEOMETRIC EARLY REFLECTIONS (image-source method, ADR-0035 / M13):
-// Up to 6 rays are cast from the shooter (±X, ±Z horizontal, +Y, and the aim direction) up to 40 m.
-// For each hit plane (point p, normal n):
-//   image source = s − 2·dot(s − p, n)·n;
-//   excess delay = (|image − listener| − |s − listener|)/343;
-//   gain = 0.5 · direct_distance/image_distance.
-// Keep only paths with excess delay in [30, 200] ms.
+// That invariant covers the REPORT itself — bank, variant, pitch jitter and gain. Early
+// reflections are not part of the shot, they are part of the room, so they are added only when a
+// physics world is passed. The --audio-weapons render deliberately has no scene (it fires into
+// silence half a metre from the listener), passes no world, and renders the dry report, which is
+// exactly what an offline weapon reference should be.
 //
-// WHY ONE-POLE LOW-PASS: walls and architectural surfaces absorb high frequencies much more
-// strongly than lows, darkening the reflection relative to the direct report.
-// WHY NO REVERB SEND: gunshots already feed the late reverb tail (reverb.cpp); feeding reflections
-// too would double the late tail and muddy the soundscape.
+// GEOMETRIC EARLY REFLECTIONS (image-source method, ADR-0035 / M13):
+// A gunshot in a street is not one sound. The report leaves the muzzle, hits the nearest hard
+// surfaces, and comes back 30-200 ms later as a handful of distinct slaps — which is most of what
+// tells a player whether they are in an alley, a courtyard or an open field. Each boundary is
+// modelled as a VIRTUAL SOURCE: mirror the shooter across the reflecting plane, and the echo is
+// simply that image source heard directly. For a plane through point p with normal n,
+//   image = s - 2*dot(s - p, n)*n,
+// and the echo's extra travel is (|image - listener| - |s - listener|) / 343 m/s.
+//
+// WHY A FAN AND NOT THE WORLD AXES: the first version of this cast six rays along +-X, +-Z, +Y and
+// the aim. Measured in --environment-smoke at the shooter's spawn (-6, 1.3, 0), all six missed on
+// every shot: a 36-direction sweep found 11 usable walls, but the four cardinal azimuths happened
+// to land in the gaps between buildings, because the block is not aligned to the world axes. Six
+// rays in fixed world directions sample a room the way four fence posts sample a field. A fan of
+// kReflectionFan azimuths at 30 degrees, plus straight down, has no preferred direction and finds
+// the same walls whichever way the geometry is turned.
+//
+// WHY SORTED BY DELAY: the mixer admits the first kMaxEarlyReflections and counts the rest as
+// dropped, so the order here decides which echoes survive the cap. Earliest-first keeps the
+// nearest surfaces, which are both the loudest and the ones that localise the space.
 void play_gun_shot(audio::Mixer& mixer,
                    unsigned weapon,
                    core::Vec3 at,
@@ -2166,50 +2180,68 @@ void play_gun_shot(audio::Mixer& mixer,
         mixer.play(kGunReport + weapon, at, .85f);
         return;
     }
+    (void)aim_direction; // the fan has no preferred direction; a room sounds the same either way
+
+    constexpr std::size_t kReflectionFan = 12;   // azimuths, 30 degrees apart
+    constexpr float kMaxReflectionRange = 40.0f; // metres; past this the echo is too late anyway
+    constexpr float kSpeedOfSound = 343.0f;      // m/s, dry air at 20 C
+    constexpr float kMinExcessDelay = 0.030f;    // below this the echo fuses with the direct sound
+    constexpr float kMaxExcessDelay = 0.200f;    // past this it belongs to the late reverb tail
 
     const core::Vec3 s = at;
     const core::Vec3 listener = mixer.listener().position;
     const float direct_distance = core::length(s - listener);
 
-    std::array<audio::EarlyReflection, 6> reflections;
+    // One more than the fan so the straight-down ground bounce always gets a slot. All of these go
+    // to the mixer, which caps at kMaxEarlyReflections and counts the overflow, so the drop is
+    // never silent.
+    std::array<audio::EarlyReflection, kReflectionFan + 1> reflections;
     std::size_t refl_count = 0;
 
-    const float aim_len = core::length(aim_direction);
-    const core::Vec3 norm_aim =
-        aim_len > 1e-4f ? aim_direction * (1.0f / aim_len) : core::Vec3{0.0f, 0.0f, -1.0f};
-
-    const core::Vec3 ray_dirs[6] = {
-        {1.0f, 0.0f, 0.0f},  // +X horizontal
-        {-1.0f, 0.0f, 0.0f}, // -X horizontal
-        {0.0f, 0.0f, 1.0f},  // +Z horizontal
-        {0.0f, 0.0f, -1.0f}, // -Z horizontal
-        {0.0f, 1.0f, 0.0f},  // +Y vertical
-        norm_aim,            // aim direction
+    const auto consider = [&](core::Vec3 dir) {
+        physics::Ray ray{s, dir, kMaxReflectionRange};
+        physics::RayHit hit{};
+        if (!physics->raycast(ray, hit, {}))
+            return;
+        const core::Vec3 image = s - 2.0f * core::dot(s - hit.point, hit.normal) * hit.normal;
+        const float image_distance = core::length(image - listener);
+        if (image_distance <= 1.0e-4f)
+            return;
+        const float excess_delay = (image_distance - direct_distance) / kSpeedOfSound;
+        if (excess_delay < kMinExcessDelay || excess_delay > kMaxExcessDelay)
+            return;
+        // The mixer attenuates every voice by the distance from its own position, and a
+        // reflection's position IS the image source — so the mixer's 1/d law over the MIRRORED
+        // path length already is this echo's path attenuation. Applying distance here too would
+        // square it. What the caller owns is the one thing the mixer cannot know: how much of the
+        // sound the boundary swallowed. 0.5 is a broadband mid-absorptive surface (concrete,
+        // brick) — about half the pressure returns.
+        //
+        // A distance-RATIO law cannot work in a first-person game at all: the player's own report
+        // starts AT the listener (a smoke claim asserts shot.origin equals the camera eye to one
+        // millimetre), so any gain proportional to the direct distance is a gain of zero, and
+        // every echo of your own weapon would be silent.
+        constexpr float kWallAbsorption = 0.5f;
+        if (refl_count < reflections.size())
+            reflections[refl_count++] = audio::EarlyReflection{
+                .position = image,
+                .delay_seconds = excess_delay,
+                .gain = kWallAbsorption,
+            };
     };
 
-    for (const core::Vec3& dir : ray_dirs) {
-        physics::Ray ray{s, dir, 40.0f};
-        physics::RayHit hit{};
-        if (physics->raycast(ray, hit, {})) {
-            const core::Vec3 p = hit.point;
-            const core::Vec3 n = hit.normal;
-            const core::Vec3 image = s - 2.0f * core::dot(s - p, n) * n;
-            const float image_distance = core::length(image - listener);
-            if (image_distance > 1e-4f) {
-                const float excess_delay = (image_distance - direct_distance) / 343.0f;
-                if (excess_delay >= 0.030f && excess_delay <= 0.200f) {
-                    const float gain = 0.5f * (direct_distance / image_distance);
-                    if (refl_count < reflections.size()) {
-                        reflections[refl_count++] = audio::EarlyReflection{
-                            .position = image,
-                            .delay_seconds = excess_delay,
-                            .gain = gain,
-                        };
-                    }
-                }
-            }
-        }
+    for (std::size_t i = 0; i < kReflectionFan; ++i) {
+        const float theta =
+            static_cast<float>(i) * (6.283185307f / static_cast<float>(kReflectionFan));
+        consider({std::cos(theta), 0.0f, std::sin(theta)});
     }
+    consider({0.0f, -1.0f, 0.0f}); // the ground: always there, and the one surface never missed
+
+    std::sort(reflections.begin(),
+              reflections.begin() + static_cast<std::ptrdiff_t>(refl_count),
+              [](const audio::EarlyReflection& a, const audio::EarlyReflection& b) {
+                  return a.delay_seconds < b.delay_seconds;
+              });
 
     mixer.play_with_reflections(
         kGunReport + weapon, at, .85f, std::span{reflections.data(), refl_count});
@@ -6360,6 +6392,22 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         demo.step_sim(gameplay_net::to_input_command(trigger));
     check(demo.session.shots_fired == shots_before + 1 && demo.shot_presented,
           "live transport accepts one shot and refuses the consecutive cooldown input");
+    // EARLY REFLECTIONS (M13.4). The shot above went through the live path, so the image-source
+    // fan in play_gun_shot has run against the real street. Assert the echoes exist, because
+    // every gate this feature had was a mixer unit test: the mixer was provably correct while the
+    // caller handed it nothing at all, and the whole suite stayed green.
+    //
+    // SENSITIVITY CONTROL, measured 2026-10-23 rather than asserted here: the first version cast
+    // six rays along +-X, +-Z, +Y and the aim, and this counter read 0 — all 24 casts over 4
+    // shots missed, because the cardinal azimuths fall in the gaps between these buildings. So a
+    // non-zero reading here is a real signal, not a scene that cannot help passing. The paired
+    // control for the mixer half is the bit-identity case in tests/audio/mixer_test.cpp.
+    const auto mix = demo.mixer.stats();
+    check(mix.reflections_started > 0,
+          "a gunshot in the street produces discrete early reflections");
+    std::printf("environment-smoke: early reflections started %llu dropped %llu\n",
+                static_cast<unsigned long long>(mix.reflections_started),
+                static_cast<unsigned long long>(mix.reflections_dropped));
     demo.app.run_frames(1);
     const auto fired =
         read_rgba8(*demo.app.device(), demo.app.graph()->physical(demo.visuals->last_ldr), kW, kH);

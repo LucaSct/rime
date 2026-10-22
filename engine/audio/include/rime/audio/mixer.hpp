@@ -109,14 +109,15 @@ struct MixStats {
     std::uint64_t frames_rendered = 0;
     std::size_t voices_active = 0; // still sounding at the end of the block
     std::uint64_t voices_started = 0;
-    std::uint64_t voices_stolen = 0;     // evicted by the cap to make room
-    std::uint64_t voices_unknown = 0;    // play() named a sound the bank does not have
-    std::uint64_t voices_suppressed = 0; // refused by the class retrigger window (the buzz guard)
-    std::uint64_t voices_dropped = 0;    // refused because the cap was full of louder voices
-    std::uint64_t voices_inaudible = 0;  // refused because the level was below audibility
-    std::uint64_t limited_samples = 0;   // frames where the limiter reduced the gain
-    std::uint64_t clipped_samples = 0;   // hit the [-1, 1] rail — the mix is too hot
-    float peak = 0.0f;                   // largest absolute sample before clamping
+    std::uint64_t voices_stolen = 0;       // evicted by the cap to make room
+    std::uint64_t voices_unknown = 0;      // play() named a sound the bank does not have
+    std::uint64_t voices_suppressed = 0;   // refused by the class retrigger window (the buzz guard)
+    std::uint64_t voices_dropped = 0;      // refused because the cap was full of louder voices
+    std::uint64_t voices_inaudible = 0;    // refused because the level was below audibility
+    std::uint64_t limited_samples = 0;     // frames where the limiter reduced the gain
+    std::uint64_t clipped_samples = 0;     // hit the [-1, 1] rail — the mix is too hot
+    float peak = 0.0f;                     // largest absolute sample before clamping
+    std::uint64_t reflections_started = 0; // delayed echo voices that actually began playing
     std::uint64_t reflections_dropped =
         0; // refused by cap, inaudible, or past kMaxEarlyReflections
 };
