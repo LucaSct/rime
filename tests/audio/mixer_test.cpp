@@ -297,3 +297,232 @@ TEST_CASE("m13.4: the bank is deterministic and every engine sound is present") 
     // swapped the recipes.
     CHECK(a.samples(sound::kCollapse).size() > a.samples(sound::kFootstep).size() * 8);
 }
+
+// ── Early reflections (ADR-0035 / M13 geometric acoustics) ──────────────────────────────────
+// Discrete echoes modeled via the image-source method:
+// (a) sample-accurate onset timing, including mid-block;
+// (b) 4 kHz one-pole low-pass filtering attenuating highs;
+// (c) delay clamping to [0.030, 0.200] s and dropping extra reflections past 6;
+// (d) sensitivity control: bit-identical output to play() when reflections are empty.
+
+TEST_CASE("m13.4: reflections (a) onset arrives sample-accurately, even mid-block") {
+    SoundBank bank;
+    constexpr SoundId kImpulse = 200;
+    Sound imp;
+    imp.samples.assign(64, 0.0f);
+    imp.samples[0] = 1.0f; // single-sample impulse
+    bank.set(kImpulse, std::move(imp));
+    bank.set_class(kImpulse, SoundClass{.pitch_jitter = 0.0f, .gain_jitter_db = 0.0f});
+
+    Mixer mixer(std::move(bank));
+    mixer.set_listener(origin_listener());
+
+    // 0.050 s at 48 kHz is 2400 frames.
+    // With 512-frame blocks: 2400 = 4 * 512 + 352, which lands 352 frames into block 4 (mid-block).
+    const EarlyReflection refl{
+        .position = {0.0f, 0.0f, -1.0f},
+        .delay_seconds = 0.050f,
+        .gain = 1.0f,
+    };
+    mixer.play_with_reflections(kImpulse, {0.0f, 0.0f, -1.0f}, 1.0f, {&refl, 1});
+
+    std::vector<float> rendered;
+    for (int b = 0; b < 10; ++b) {
+        std::vector<float> buf = block();
+        mixer.render(buf);
+        rendered.insert(rendered.end(), buf.begin(), buf.end());
+    }
+
+    // Direct sound onset is at frame 0.
+    REQUIRE(std::fabs(rendered[0]) > 1e-4f);
+
+    // Search for the first non-zero frame of the reflection (after the direct impulse ends).
+    std::size_t refl_onset = 0;
+    for (std::size_t i = 100; i < rendered.size() / 2u; ++i) {
+        if (std::fabs(rendered[i * 2u]) > 1e-4f) {
+            refl_onset = i;
+            break;
+        }
+    }
+
+    REQUIRE(refl_onset > 0);
+    // Reflection onset must be within +-1 frame of 0.050 * sample_rate (2400).
+    const auto diff = std::abs(static_cast<std::int64_t>(refl_onset) - 2400);
+    CHECK(diff <= 1);
+    // And verify that it landed mid-block (not at a block boundary).
+    CHECK(refl_onset % kBlock != 0);
+}
+
+TEST_CASE("m13.4: reflections (b) low-pass filter (~4 kHz) attenuates high-band energy") {
+    // Generate white noise to test the frequency response across the audible spectrum.
+    SoundBank bank;
+    constexpr SoundId kNoise = 201;
+    Sound noise;
+    noise.samples.resize(2400);
+    std::uint32_t rng = 0xACE1'4829u;
+    for (float& s : noise.samples) {
+        rng ^= rng << 13;
+        rng ^= rng >> 17;
+        rng ^= rng << 5;
+        s = (static_cast<float>(rng & 0xFFFFu) / 32768.0f) - 1.0f;
+    }
+    bank.set(kNoise, std::move(noise));
+    bank.set_class(kNoise, SoundClass{.pitch_jitter = 0.0f, .gain_jitter_db = 0.0f});
+
+    // Simple high-pass difference filter y[n] = x[n] - x[n-1] to measure high-band energy (>8 kHz).
+    const auto high_band_power = [](std::span<const float> interleaved_stereo,
+                                    std::size_t start_frame,
+                                    std::size_t num_frames) {
+        double power = 0.0;
+        for (std::size_t i = start_frame + 1; i < start_frame + num_frames; ++i) {
+            const double s_curr = interleaved_stereo[i * 2u];
+            const double s_prev = interleaved_stereo[(i - 1) * 2u];
+            const double diff = s_curr - s_prev;
+            power += diff * diff;
+        }
+        return power / static_cast<double>(num_frames - 1);
+    };
+
+    // 1. Direct sound alone:
+    Mixer direct_mixer(bank);
+    direct_mixer.set_listener(origin_listener());
+    direct_mixer.play(kNoise, {0.0f, 0.0f, -2.0f}, 1.0f);
+    std::vector<float> direct_out;
+    for (int b = 0; b < 10; ++b) {
+        std::vector<float> buf = block();
+        direct_mixer.render(buf);
+        direct_out.insert(direct_out.end(), buf.begin(), buf.end());
+    }
+    const double direct_high_energy = high_band_power(direct_out, 0, 2400);
+    REQUIRE(direct_high_energy > 1e-4);
+
+    // 2. Sound with reflection at 0.060 s (2880 frames delay, non-overlapping with direct sound):
+    Mixer refl_mixer(bank);
+    refl_mixer.set_listener(origin_listener());
+    const EarlyReflection refl{
+        .position = {0.0f, 0.0f, -2.0f},
+        .delay_seconds = 0.060f,
+        .gain = 1.0f,
+    };
+    refl_mixer.play_with_reflections(kNoise, {0.0f, 0.0f, -2.0f}, 1.0f, {&refl, 1});
+    std::vector<float> refl_out;
+    for (int b = 0; b < 15; ++b) {
+        std::vector<float> buf = block();
+        refl_mixer.render(buf);
+        refl_out.insert(refl_out.end(), buf.begin(), buf.end());
+    }
+    // Reflection is active from frame 2880 to 2880 + 2400 = 5280.
+    const double refl_high_energy = high_band_power(refl_out, 2880, 2400);
+    REQUIRE(refl_high_energy > 1e-4);
+
+    // The reflection's high-band energy must be lower than the direct sound's by a clear margin
+    // (a ~4 kHz low-pass rolls off highs by >6 dB per octave).
+    CHECK(refl_high_energy < direct_high_energy * 0.40);
+}
+
+TEST_CASE("m13.4: reflections (c) delay clamping and reflection dropping past cap") {
+    SoundBank bank;
+    constexpr SoundId kImp = 202;
+    Sound imp;
+    imp.samples.assign(32, 0.0f);
+    imp.samples[0] = 1.0f;
+    bank.set(kImp, std::move(imp));
+    bank.set_class(kImp, SoundClass{.pitch_jitter = 0.0f, .gain_jitter_db = 0.0f});
+
+    SUBCASE("delays outside [0.030, 0.200] are clamped") {
+        Mixer mixer(bank);
+        mixer.set_listener(origin_listener());
+
+        // Under 30 ms (e.g. 10 ms = 480 frames): clamped to 30 ms = 1440 frames.
+        const EarlyReflection too_short{
+            .position = {0.0f, 0.0f, -1.0f},
+            .delay_seconds = 0.010f,
+            .gain = 1.0f,
+        };
+        mixer.play_with_reflections(kImp, {0.0f, 0.0f, -1.0f}, 1.0f, {&too_short, 1});
+
+        std::vector<float> rendered;
+        for (int b = 0; b < 10; ++b) {
+            std::vector<float> buf = block();
+            mixer.render(buf);
+            rendered.insert(rendered.end(), buf.begin(), buf.end());
+        }
+
+        // Must NOT appear at 480 frames:
+        for (std::size_t i = 100; i < 1400; ++i) {
+            CHECK(rendered[i * 2u] == 0.0f);
+        }
+        // Must appear at 1440 frames (+-1 frame):
+        std::size_t onset = 0;
+        for (std::size_t i = 100; i < rendered.size() / 2u; ++i) {
+            if (std::fabs(rendered[i * 2u]) > 1e-4f) {
+                onset = i;
+                break;
+            }
+        }
+        CHECK(std::abs(static_cast<std::int64_t>(onset) - 1440) <= 1);
+    }
+
+    SUBCASE("a 7th reflection increments reflections_dropped") {
+        Mixer mixer(bank);
+        mixer.set_listener(origin_listener());
+
+        std::vector<EarlyReflection> seven(7);
+        for (std::size_t i = 0; i < 7; ++i) {
+            seven[i] = EarlyReflection{
+                .position = {0.0f, 0.0f, -2.0f},
+                .delay_seconds = 0.030f + static_cast<float>(i) * 0.010f,
+                .gain = 0.5f,
+            };
+        }
+
+        mixer.play_with_reflections(kImp, {0.0f, 0.0f, -1.0f}, 1.0f, seven);
+        CHECK(mixer.stats().reflections_dropped == 1);
+
+        // 8 reflections drops 2:
+        seven.push_back(EarlyReflection{
+            .position = {0.0f, 0.0f, -2.0f},
+            .delay_seconds = 0.120f,
+            .gain = 0.5f,
+        });
+        mixer.play_with_reflections(kImp, {0.0f, 0.0f, -1.0f}, 1.0f, seven);
+        CHECK(mixer.stats().reflections_dropped == 3);
+    }
+}
+
+TEST_CASE(
+    "m13.4: reflections (d) sensitivity control: zero reflections is bit-identical to play()") {
+    MixerConfig cfg;
+    cfg.seed = 0x9876'5432u;
+    Mixer m1(SoundBank::engine_defaults(), cfg);
+    Mixer m2(SoundBank::engine_defaults(), cfg);
+    m1.set_listener(origin_listener());
+    m2.set_listener(origin_listener());
+
+    std::vector<float> all1, all2;
+    for (int b = 0; b < 16; ++b) {
+        if (b == 0) {
+            m1.play(sound::kPartBreak, {3.0f, 0.0f, -4.0f}, 0.9f);
+            m2.play_with_reflections(sound::kPartBreak, {3.0f, 0.0f, -4.0f}, 0.9f, {});
+        }
+        if (b == 3) {
+            m1.play(sound::kImpactConcrete, {-2.0f, 1.0f, -3.0f}, 0.8f);
+            m2.play_with_reflections(sound::kImpactConcrete, {-2.0f, 1.0f, -3.0f}, 0.8f, {});
+        }
+        if (b == 7) {
+            m1.play(sound::kDebrisSettle, {0.0f, 0.0f, -5.0f}, 0.7f);
+            m2.play_with_reflections(sound::kDebrisSettle, {0.0f, 0.0f, -5.0f}, 0.7f, {});
+        }
+        std::vector<float> buf1 = block();
+        std::vector<float> buf2 = block();
+        m1.render(buf1);
+        m2.render(buf2);
+        all1.insert(all1.end(), buf1.begin(), buf1.end());
+        all2.insert(all2.end(), buf2.begin(), buf2.end());
+    }
+
+    CHECK(all1 == all2);
+    // Non-vacuity: sound was actually produced.
+    CHECK(rms(all1).left > 1e-4);
+    CHECK(m2.stats().reflections_dropped == 0);
+}
