@@ -621,3 +621,87 @@ TEST_CASE("island profile: per-island solve cost, serial fraction, and a hash th
     CHECK(after.largest_island_membership_changed);
     CHECK(after.largest_island_prev_bodies == before);
 }
+
+// ---- Wavefront velocity sweep: a cost knob that must not be visible in the bits -----------------
+//
+// The wavefront path (engine/physics/src/wavefront.hpp) reorders a large island's Gauss–Seidel
+// sweep into dependency LEVELS — constraints at the same level share no dynamic body — and solves
+// up to four of them at once in SSE2. Reordering is only legal because every constraint still sees
+// exactly the body velocities the scalar sweep would have handed it, and the lanes do the same
+// float operations in the same order. So the claim is not "close": it is the SAME world_hash on
+// every step. A rounding drift would show here as a hash split within a handful of steps, because
+// a collapsing pile amplifies the last bit (the chaotic-cascade argument in CLAUDE.md).
+//
+// The non-vacuousness half matters as much as the equality. Two scalar worlds also agree to the
+// bit, so a hash match proves nothing unless the wide path actually RAN: wavefront_islands_last()
+// counts the islands that took it, and the pile is built to clear the 32-constraint threshold.
+namespace {
+
+// A brick-bonded heap of unit boxes: kSide x kSide per layer, alternate layers shifted half a box
+// so every layer leans on two below it, all touching laterally — ONE island of well over 32
+// contact constraints. A box thrown in from the side knocks it over, so the scene exercises a
+// changing contact graph (new manifolds, broken ones, island churn), not only a resting stack.
+void build_heap(physics::PhysicsWorld& w) {
+    constexpr int kSide = 4;
+    constexpr int kLayers = 4;
+    add_floor(w);
+    for (int l = 0; l < kLayers; ++l) {
+        const float shift = (l % 2 == 0) ? 0.0f : 0.5f;
+        for (int x = 0; x < kSide; ++x) {
+            for (int z = 0; z < kSide; ++z) {
+                add_body(w,
+                         box({0.5f, 0.5f, 0.5f}),
+                         {static_cast<float>(x) * 1.01f + shift,
+                          0.5f + static_cast<float>(l) * 1.02f,
+                          static_cast<float>(z) * 1.01f + shift});
+            }
+        }
+    }
+    physics::BodyDesc ram;
+    ram.motion = physics::MotionType::Dynamic;
+    ram.shape = box({0.6f, 0.6f, 0.6f});
+    ram.position = {-6.0f, 3.0f, 1.5f};
+    ram.linear_velocity = {14.0f, 0.0f, 0.0f};
+    static_cast<void>(w.create_body(ram));
+}
+
+} // namespace
+
+TEST_CASE("wavefront velocity sweep is bit-identical to the scalar sweep, and actually runs") {
+    constexpr int kSteps = 120;
+    physics::PhysicsWorld off;
+    physics::PhysicsWorld on;
+    for (physics::PhysicsWorld* w : {&off, &on}) {
+        w->set_sleeping_enabled(false); // keep the pile solving every step
+        build_heap(*w);
+    }
+    off.set_wavefront_solve_enabled(false);
+    on.set_wavefront_solve_enabled(true);
+    CHECK_FALSE(off.wavefront_solve_enabled());
+
+    int wide_steps = 0;
+    for (int i = 0; i < kSteps; ++i) {
+        off.step(kDt);
+        on.step(kDt);
+        CAPTURE(i);
+        // The scalar world never takes the wide path, whatever the island sizes.
+        CHECK(off.wavefront_islands_last() == 0);
+        wide_steps += on.wavefront_islands_last() > 0 ? 1 : 0;
+        // EVERY step, not just the last: a mid-run divergence that later re-converged (or a
+        // single-step mismatch hidden by a final hash) would otherwise read as passing.
+        REQUIRE(on.world_hash() == off.world_hash());
+    }
+
+    // On x86_64 the wide sweep is compiled in; elsewhere (arm64 keeps the scalar sweep until a
+    // NEON port is checked against that compiler's contraction) the request is refused and the
+    // equality above is a scalar-vs-scalar check, which is all that platform can claim.
+    if (on.wavefront_solve_enabled()) {
+        // The heap is one island of > 32 contact constraints from the first steps the boxes touch,
+        // and sleeping is off, so all but the opening contact-forming steps must go wide. Printed
+        // so a reader sees the coverage, not just a pass.
+        std::printf("[wavefront] wide path ran on %d of %d steps\n", wide_steps, kSteps);
+        CHECK(wide_steps >= kSteps - 10);
+    } else {
+        CHECK(wide_steps == 0);
+    }
+}
