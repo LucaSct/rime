@@ -2144,8 +2144,75 @@ audio::SoundBank play_sound_bank() {
 
 // The one place a weapon report is started, shared by the game and the --audio-weapons render so
 // the offline WAV and the shot the player hears cannot disagree about what a shot is.
-void play_gun_shot(audio::Mixer& mixer, unsigned weapon, core::Vec3 at) {
-    mixer.play(kGunReport + weapon, at, .85f);
+//
+// GEOMETRIC EARLY REFLECTIONS (image-source method, ADR-0035 / M13):
+// Up to 6 rays are cast from the shooter (±X, ±Z horizontal, +Y, and the aim direction) up to 40 m.
+// For each hit plane (point p, normal n):
+//   image source = s − 2·dot(s − p, n)·n;
+//   excess delay = (|image − listener| − |s − listener|)/343;
+//   gain = 0.5 · direct_distance/image_distance.
+// Keep only paths with excess delay in [30, 200] ms.
+//
+// WHY ONE-POLE LOW-PASS: walls and architectural surfaces absorb high frequencies much more
+// strongly than lows, darkening the reflection relative to the direct report.
+// WHY NO REVERB SEND: gunshots already feed the late reverb tail (reverb.cpp); feeding reflections
+// too would double the late tail and muddy the soundscape.
+void play_gun_shot(audio::Mixer& mixer,
+                   unsigned weapon,
+                   core::Vec3 at,
+                   const physics::PhysicsWorld* physics = nullptr,
+                   core::Vec3 aim_direction = {0.0f, 0.0f, -1.0f}) {
+    if (!physics) {
+        mixer.play(kGunReport + weapon, at, .85f);
+        return;
+    }
+
+    const core::Vec3 s = at;
+    const core::Vec3 listener = mixer.listener().position;
+    const float direct_distance = core::length(s - listener);
+
+    std::array<audio::EarlyReflection, 6> reflections;
+    std::size_t refl_count = 0;
+
+    const float aim_len = core::length(aim_direction);
+    const core::Vec3 norm_aim =
+        aim_len > 1e-4f ? aim_direction * (1.0f / aim_len) : core::Vec3{0.0f, 0.0f, -1.0f};
+
+    const core::Vec3 ray_dirs[6] = {
+        {1.0f, 0.0f, 0.0f},  // +X horizontal
+        {-1.0f, 0.0f, 0.0f}, // -X horizontal
+        {0.0f, 0.0f, 1.0f},  // +Z horizontal
+        {0.0f, 0.0f, -1.0f}, // -Z horizontal
+        {0.0f, 1.0f, 0.0f},  // +Y vertical
+        norm_aim,            // aim direction
+    };
+
+    for (const core::Vec3& dir : ray_dirs) {
+        physics::Ray ray{s, dir, 40.0f};
+        physics::RayHit hit{};
+        if (physics->raycast(ray, hit, {})) {
+            const core::Vec3 p = hit.point;
+            const core::Vec3 n = hit.normal;
+            const core::Vec3 image = s - 2.0f * core::dot(s - p, n) * n;
+            const float image_distance = core::length(image - listener);
+            if (image_distance > 1e-4f) {
+                const float excess_delay = (image_distance - direct_distance) / 343.0f;
+                if (excess_delay >= 0.030f && excess_delay <= 0.200f) {
+                    const float gain = 0.5f * (direct_distance / image_distance);
+                    if (refl_count < reflections.size()) {
+                        reflections[refl_count++] = audio::EarlyReflection{
+                            .position = image,
+                            .delay_seconds = excess_delay,
+                            .gain = gain,
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    mixer.play_with_reflections(
+        kGunReport + weapon, at, .85f, std::span{reflections.data(), refl_count});
 }
 
 class PlayAudioOutput {
@@ -2767,7 +2834,7 @@ struct Demo {
                                 &session.server.physics,
                                 surface,
                                 tracer);
-                play_gun_shot(mixer, weapon, shot.origin);
+                play_gun_shot(mixer, weapon, shot.origin, &session.server.physics, shot.direction);
                 if (shot.did_hit || water)
                     mixer.play(kBulletImpact + static_cast<unsigned>(surface), hit, .65f);
                 if (!viewmodel || !viewmodel->scoped())
