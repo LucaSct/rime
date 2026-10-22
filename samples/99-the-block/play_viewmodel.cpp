@@ -94,12 +94,41 @@ struct HipCarry {
     core::Vec3 turn;      // pitch, yaw, roll about the firing wrist, radians
     core::Vec3 arm_shift; // arm rig offset relative to the weapon's hip offset, metres
     float support_slide;  // support hand moved forward along the bore, metres
+    // RESTING-ONLY seat, rig space, metres: extra rig offset and elbow-pole pushes (left, right)
+    // that fade out as a reload or bolt cycle lowers the weapon, so the actions keep the reach
+    // that was validated without them. This is what lets the support arm come from the left.
+    core::Vec3 rest_shift;
+    core::Vec3 rest_pole_left, rest_pole_right;
 };
 
 constexpr std::array<HipCarry, 3> kHipCarry{{
-    {{.15f, -.235f, -.40f}, {.03f, .06f, 0}, {0, -.14f, 0}, 0},             // SCAR-H: foregrip
-    {{.15f, -.235f, -.40f}, {.03f, .06f, 0}, {0, -.10f, 0}, .07f},          // M4A1
-    {{.15f, -.235f, -.40f}, {-.02f, .06f, 0}, {.08f, -.245f, .15f}, -.02f}, // MSR
+    {{.15f, -.30f, -.50f},
+     {.03f, .06f, 0},
+     {0, -.14f, 0},
+     -.08f,
+     {0, -.03f, 0},
+     {-3.0f, 1.0f, 0},
+     {}}, // SCAR-H: foregrip
+    {{.15f, -.30f, -.50f},
+     {.03f, .06f, 0},
+     {0, -.10f, 0},
+     -.06f,
+     {0, -.07f, 0},
+     {-3.0f, 1.0f, 0},
+     {}}, // M4A1
+    // MSR: the long fore-end puts its support hand at the edge of the left arm's reach, so a
+    // nearly straight arm projects its elbow INTO the frame. The hand slides 8.5 cm back along
+    // the bore (slack in the arm), the resting seat drops and pulls the rig back (elbow below the
+    // bottom edge) and the whole carry sits 4 cm nearer the eye (which spreads the elbow and the
+    // forearm entry outward in ndc). Measured trade-off: more slide hides the left hand behind the
+    // receiver, a lower/further-back seat over-reaches it during bob and recoil.
+    {{.15f, -.30f, -.46f},
+     {-.02f, .06f, 0},
+     {.08f, -.245f, .15f},
+     -.085f,
+     {-.02f, -.03f, .04f},
+     {-3.0f, 0, 0},
+     {}}, // MSR
 }};
 
 // Elbow pole points for the shouldered seat, camera-local (left support arm first). At the hip
@@ -122,6 +151,11 @@ float viewmodel_squeeze(float world_fov_y) noexcept {
 }
 
 constexpr core::Vec3 kScarSight{.14f, -.0848075f, -.473f};
+
+// The point a player aims through, weapon-local metres: the SCAR's holographic window, the M4's
+// rear peep and the PM II's ocular. The hip proof projects it to say how high the gun sits.
+constexpr std::array<core::Vec3, 3> kSightLocal{
+    {kScarSight, {.137777f, -.094724381f, -.46498038f}, {.14f, -.118f, -.085f}}};
 
 core::Mat4 sight_alignment(unsigned weapon, float aim) {
     if (weapon != 1)
@@ -635,6 +669,8 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             model.hip_pivot = core::transform_point(model.grips[1], {});
             model.hip_translation = carry.grip - model.hip_pivot;
             model.hip_seat = shoulder + model.hip_translation + carry.arm_shift;
+            model.rest_shift = carry.rest_shift;
+            model.rest_pole = {{carry.rest_pole_left, carry.rest_pole_right}};
             model.hip_torso = core::Quat{}; // the authored rig orientation
             model.bind_elbows = model.arms.bind_elbows();
             if (!measure_reach(model.arms, model.elbow_poles, model.reach_near, model.reach_far)) {
@@ -996,17 +1032,30 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     // grips and recoil keep their physical meaning.
     const core::Mat4 view = camera_matrix * view_squeeze_;
     const core::Mat4 model = view * weapon_local;
+    sight_world_ = core::transform_point(model, kSightLocal[index]);
     // Torso: blend the hip-carry anchor into the shouldered seat with the same aim fraction as
     // the weapon. Position lerps, orientation slerps, so the frame stays rigid -- the IK and
     // the skin palette both require a rigid camera_from_arms.
+    // The resting-only arm seat (see HipCarry::rest_shift) fades out as a reload or bolt cycle
+    // works the action. It must be GONE early in the sweep, not merely at its bottom: the seat
+    // tilts the arms for the resting framing, and the action then swings the weapon and hands
+    // through poses that were validated without it -- a half-faded seat lets the MSR's upper-arm
+    // sleeve cut sweep into view mid-reload. So the seat fades over the first kRestFade of the
+    // action envelope with a smoothstep: continuous in value and slope (no pop at either end),
+    // and fully off for the rest of the sweep.
+    constexpr float kRestFade = .25f;
+    const float action =
+        std::clamp(std::max(motion_pose.lower, motion_pose.right_bolt) / kRestFade, 0.0f, 1.0f);
+    const float rest = 1.0f - action * action * (3.0f - 2.0f * action);
     selected.camera_from_arms =
-        core::mat4_translation(selected.hip_seat * hip + selected.aim_seat * aim_) *
+        core::mat4_translation((selected.hip_seat + selected.rest_shift * rest) * hip +
+                               selected.aim_seat * aim_) *
         core::to_mat4(core::slerp(selected.hip_torso, selected.aim_torso, aim_)) *
         core::mat4_translation(-selected.right_shoulder);
     selected.arms_from_camera = core::inverse(selected.camera_from_arms);
     for (unsigned side = 0; side < 2; ++side)
         selected.elbow_poles[side] =
-            selected.bind_elbows[side] * hip +
+            (selected.bind_elbows[side] + selected.rest_pole[side] * rest) * hip +
             core::transform_point(selected.arms_from_camera, kAimPoles[side]) * aim_;
     auto grips = selected.grips;
     // Slot zero is the support left hand; slot one is the firing right hand. Moving
