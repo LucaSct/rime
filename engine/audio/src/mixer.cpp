@@ -193,29 +193,6 @@ void Mixer::play(SoundId sound, core::Vec3 position, float gain) {
     // louder than the newcomer, the newcomer is the one dropped. The destruction group has its own
     // smaller budget so a collapsing building can never push gunfire out of the mixer.
     // Deterministic on ties by taking the FIRST minimum, which is also the oldest.
-    const auto quietest_active = [this](int group) -> Voice* {
-        Voice* best = nullptr;
-        for (Voice& other : voices_) {
-            if (other.fading || (group >= 0 && other.group != group)) {
-                continue;
-            }
-            if (best == nullptr || other.level < best->level) {
-                best = &other;
-            }
-        }
-        return best;
-    };
-    const auto make_room = [&](Voice* victim) -> bool {
-        if (victim == nullptr) {
-            return true;
-        }
-        if (v.level < victim->level) {
-            ++stats_.voices_dropped;
-            return false;
-        }
-        evict(*victim);
-        return true;
-    };
     std::uint32_t in_group = 0;
     std::uint32_t active = 0;
     for (const Voice& other : voices_) {
@@ -227,13 +204,13 @@ void Mixer::play(SoundId sound, core::Vec3 position, float gain) {
     const std::uint32_t group_cap =
         v.group < config_.group_max_voices.size() ? config_.group_max_voices[v.group] : 0u;
     if (group_cap != 0 && in_group >= group_cap) {
-        if (!make_room(quietest_active(v.group))) {
+        if (!make_room(quietest_active(v.group), /*newcomer_is_reflection=*/false, v.level)) {
             return;
         }
         --active;
     }
     if (active >= config_.max_voices) {
-        if (!make_room(quietest_active(-1))) {
+        if (!make_room(quietest_active(-1), /*newcomer_is_reflection=*/false, v.level)) {
             return;
         }
     }
@@ -242,6 +219,150 @@ void Mixer::play(SoundId sound, core::Vec3 position, float gain) {
     starts[variant] = clock_;
     voices_.push_back(v);
     ++stats_.voices_started;
+}
+
+Mixer::Voice* Mixer::quietest_active(int group) noexcept {
+    Voice* best = nullptr;
+    for (Voice& other : voices_) {
+        if (other.fading || (group >= 0 && other.group != group)) {
+            continue;
+        }
+        if (best == nullptr) {
+            best = &other;
+            continue;
+        }
+        // Delayed voices count against the existing voice cap and are the first stolen:
+        // prefer victim if it is an early reflection.
+        if (other.is_reflection != best->is_reflection) {
+            if (other.is_reflection) {
+                best = &other;
+            }
+        } else if (other.level < best->level) {
+            best = &other;
+        }
+    }
+    return best;
+}
+
+bool Mixer::make_room(Voice* victim, bool newcomer_is_reflection, float newcomer_level) {
+    if (victim == nullptr) {
+        return true;
+    }
+    // Direct sounds always take precedence over early reflections
+    if (victim->is_reflection && !newcomer_is_reflection) {
+        evict(*victim);
+        return true;
+    }
+    // When cap is filled with direct sounds, an early reflection cannot evict a direct sound
+    if (!victim->is_reflection && newcomer_is_reflection) {
+        ++stats_.voices_dropped;
+        ++stats_.reflections_dropped;
+        return false;
+    }
+    // Both are reflections, or both are direct sounds
+    if (newcomer_level < victim->level) {
+        ++stats_.voices_dropped;
+        if (newcomer_is_reflection) {
+            ++stats_.reflections_dropped;
+        }
+        return false;
+    }
+    evict(*victim);
+    return true;
+}
+
+void Mixer::play_with_reflections(SoundId sound,
+                                  core::Vec3 position,
+                                  float gain,
+                                  std::span<const EarlyReflection> reflections) {
+    // IMAGE-SOURCE METHOD for discrete early reflections:
+    // With zero reflections, behaves exactly as play() today (bit-identical sensitivity control).
+    if (reflections.empty()) {
+        play(sound, position, gain);
+        return;
+    }
+
+    // At most kMaxEarlyReflections = 6 are used. Extra ones are ignored and counted in
+    // reflections_dropped (every skip path gets a counter).
+    std::size_t admitted_count = reflections.size();
+    if (admitted_count > kMaxEarlyReflections) {
+        stats_.reflections_dropped += (admitted_count - kMaxEarlyReflections);
+        admitted_count = kMaxEarlyReflections;
+    }
+
+    const std::size_t voices_before = stats_.voices_started;
+    play(sound, position, gain);
+    // If the direct sound failed to start (unknown sound, buzzing suppression, inaudible,
+    // or dropped by voice cap), reflections cannot exist without the direct sound.
+    if (stats_.voices_started == voices_before) {
+        stats_.reflections_dropped += admitted_count;
+        return;
+    }
+
+    // The direct voice was successfully started and is at voices_.back().
+    const Voice direct_voice = voices_.back();
+
+    for (std::size_t i = 0; i < admitted_count; ++i) {
+        const EarlyReflection& refl = reflections[i];
+
+        Voice rv;
+        rv.sound = sound;
+        rv.variant = direct_voice.variant; // the same sample / recording
+        rv.rate = direct_voice.rate;       // same pitch jitter
+        rv.position = refl.position;       // image source position
+        rv.gain = refl.gain; // linear, already includes wall absorption; mixer adds nothing else
+        // WHY NO REVERB SEND: the late tail already exists; sending reflections too would double
+        // it.
+        rv.send = 0.0f;
+        rv.group = direct_voice.group;
+        rv.is_reflection = true;
+        // WHY LOW-PASS: walls and obstacles absorb high frequencies much more than lows.
+        rv.lp_state = 0.0f;
+        rv.started = false;
+        rv.fading = false;
+        rv.cursor = 0.0;
+
+        // Excess delay clamped by the mixer to [0.030, 0.200] seconds.
+        const float clamped_delay = std::clamp(refl.delay_seconds, 0.030f, 0.200f);
+        rv.delay_frames = static_cast<std::int64_t>(
+            std::llround(clamped_delay * static_cast<float>(config_.sample_rate)));
+
+        float l = 0.0f;
+        float r = 0.0f;
+        channel_gains(rv, l, r, rv.level);
+        rv.att = rv.level;
+        if (rv.level < 1.0e-4f) {
+            ++stats_.voices_inaudible;
+            ++stats_.reflections_dropped;
+            continue;
+        }
+
+        // Delayed voices count against the existing voice cap and are the first stolen.
+        std::uint32_t in_group = 0;
+        std::uint32_t active = 0;
+        for (const Voice& other : voices_) {
+            if (!other.fading) {
+                ++active;
+                in_group += other.group == rv.group ? 1u : 0u;
+            }
+        }
+        const std::uint32_t group_cap =
+            rv.group < config_.group_max_voices.size() ? config_.group_max_voices[rv.group] : 0u;
+        if (group_cap != 0 && in_group >= group_cap) {
+            if (!make_room(quietest_active(rv.group), /*newcomer_is_reflection=*/true, rv.level)) {
+                continue;
+            }
+            --active;
+        }
+        if (active >= config_.max_voices) {
+            if (!make_room(quietest_active(-1), /*newcomer_is_reflection=*/true, rv.level)) {
+                continue;
+            }
+        }
+
+        voices_.push_back(rv);
+        ++stats_.voices_started;
+    }
 }
 
 void Mixer::evict(Voice& victim) {
@@ -266,7 +387,22 @@ void Mixer::render(std::span<float> out) {
     bus_.assign(frames, 0.0f);
     bool bus_used = false;
 
+    // One-pole low-pass filter coefficient for early reflections (cutoff ~4 kHz: walls absorb
+    // highs). y[n] = (1 - d) * x[n] + d * y[n-1], where d = exp(-2*pi*fc / sample_rate).
+    const float lp_d = std::exp(-2.0f * kPi * 4000.0f / static_cast<float>(config_.sample_rate));
+
     for (Voice& v : voices_) {
+        // If this voice is still delayed beyond the current block:
+        if (v.delay_frames >= static_cast<std::int64_t>(frames)) {
+            v.delay_frames -= static_cast<std::int64_t>(frames);
+            continue;
+        }
+
+        // Mid-block onset: skip frames where the voice has not yet started.
+        const std::size_t skip = v.delay_frames > 0 ? static_cast<std::size_t>(v.delay_frames) : 0u;
+        v.delay_frames = 0;
+        const std::size_t active_frames = frames - skip;
+
         const std::span<const float> src = bank_.samples(v.sound, v.variant);
         float target_left = 0.0f;
         float target_right = 0.0f;
@@ -288,9 +424,9 @@ void Mixer::render(std::span<float> out) {
         const float dl = (target_left - v.left) / static_cast<float>(frames);
         const float dr = (target_right - v.right) / static_cast<float>(frames);
         const float da = (target_level - v.att) / static_cast<float>(frames);
-        float gl = v.left;
-        float gr = v.right;
-        float ga = v.att;
+        float gl = v.left + dl * static_cast<float>(skip);
+        float gr = v.right + dr * static_cast<float>(skip);
+        float ga = v.att + da * static_cast<float>(skip);
         const bool sends = v.send > 0.0f;
         bus_used = bus_used || sends;
 
@@ -298,17 +434,35 @@ void Mixer::render(std::span<float> out) {
             // Whole-sample path: bit-identical to the original mixer for an unjittered voice.
             const auto at = static_cast<std::size_t>(v.cursor);
             const std::size_t available = src.size() - std::min(src.size(), at);
-            const std::size_t n = std::min(frames, available);
-            for (std::size_t i = 0; i < n; ++i) {
-                const float s = src[at + i];
-                out[i * 2u] += s * gl;
-                out[i * 2u + 1u] += s * gr;
-                if (sends) {
-                    bus_[i] += s * ga * v.send;
+            const std::size_t n = std::min(active_frames, available);
+            if (v.is_reflection) {
+                for (std::size_t j = 0; j < n; ++j) {
+                    const std::size_t i = skip + j;
+                    const float s_raw = src[at + j];
+                    v.lp_state = s_raw * (1.0f - lp_d) + v.lp_state * lp_d;
+                    const float s = v.lp_state;
+                    out[i * 2u] += s * gl;
+                    out[i * 2u + 1u] += s * gr;
+                    if (sends) {
+                        bus_[i] += s * ga * v.send;
+                    }
+                    gl += dl;
+                    gr += dr;
+                    ga += da;
                 }
-                gl += dl;
-                gr += dr;
-                ga += da;
+            } else {
+                for (std::size_t j = 0; j < n; ++j) {
+                    const std::size_t i = skip + j;
+                    const float s = src[at + j];
+                    out[i * 2u] += s * gl;
+                    out[i * 2u + 1u] += s * gr;
+                    if (sends) {
+                        bus_[i] += s * ga * v.send;
+                    }
+                    gl += dl;
+                    gr += dr;
+                    ga += da;
+                }
             }
             v.cursor += static_cast<double>(n);
         } else {
@@ -316,7 +470,8 @@ void Mixer::render(std::span<float> out) {
             // interpolating between neighbours. Linear interpolation is the cheapest resampler and
             // its small high-frequency droop is inaudible for a +-3-5 % change on impact sounds.
             double pos = v.cursor;
-            for (std::size_t i = 0; i < frames; ++i) {
+            for (std::size_t j = 0; j < active_frames; ++j) {
+                const std::size_t i = skip + j;
                 const auto idx = static_cast<std::size_t>(pos);
                 if (idx >= src.size()) {
                     break;
@@ -324,7 +479,11 @@ void Mixer::render(std::span<float> out) {
                 const float frac = static_cast<float>(pos - static_cast<double>(idx));
                 const float s0 = src[idx];
                 const float s1 = idx + 1u < src.size() ? src[idx + 1u] : 0.0f;
-                const float s = s0 + (s1 - s0) * frac;
+                float s = s0 + (s1 - s0) * frac;
+                if (v.is_reflection) {
+                    v.lp_state = s * (1.0f - lp_d) + v.lp_state * lp_d;
+                    s = v.lp_state;
+                }
                 out[i * 2u] += s * gl;
                 out[i * 2u + 1u] += s * gr;
                 if (sends) {
@@ -349,8 +508,9 @@ void Mixer::render(std::span<float> out) {
                                  voices_.end(),
                                  [this](const Voice& v) {
                                      return v.fading ||
-                                            static_cast<std::size_t>(v.cursor) >=
-                                                bank_.samples(v.sound, v.variant).size();
+                                            (v.delay_frames == 0 &&
+                                             static_cast<std::size_t>(v.cursor) >=
+                                                 bank_.samples(v.sound, v.variant).size());
                                  }),
                   voices_.end());
 

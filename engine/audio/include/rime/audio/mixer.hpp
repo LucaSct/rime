@@ -117,6 +117,29 @@ struct MixStats {
     std::uint64_t limited_samples = 0;   // frames where the limiter reduced the gain
     std::uint64_t clipped_samples = 0;   // hit the [-1, 1] rail — the mix is too hot
     float peak = 0.0f;                   // largest absolute sample before clamping
+    std::uint64_t reflections_dropped =
+        0; // refused by cap, inaudible, or past kMaxEarlyReflections
+};
+
+inline constexpr std::size_t kMaxEarlyReflections = 6;
+
+// Discrete early reflection for geometric acoustics (ADR-0035 / M13).
+//
+// The IMAGE-SOURCE METHOD: acoustic reflections from planar boundaries (walls, ground, ceiling)
+// are represented as virtual sound sources placed at the mirrored position across each plane.
+//
+// WHY ONE-POLE LOW-PASS: real boundary materials (concrete, brick, glass) absorb high frequencies
+// much more strongly than lows, and air damping increases with frequency. Filtering each delayed
+// voice (~4 kHz cutoff) darkens the echo so it sounds like a bounce rather than duplicate gunfire.
+//
+// WHY NO REVERB SEND: the direct gunshot already feeds the mixer's shared late reverb tank
+// (reverb.cpp). Sending the discrete reflections into the tank too would recirculate the sound
+// twice, unnaturally doubling the late diffuse energy and muddying the space.
+struct EarlyReflection {
+    core::Vec3 position; // IMAGE SOURCE position (the mirrored shooter), world metres
+    float delay_seconds; // EXCESS path delay over the direct sound, clamped by the mixer to [0.030,
+                         // 0.200]
+    float gain;          // linear, already includes wall absorption; the mixer adds nothing else
 };
 
 class Mixer final : public AudioBackend {
@@ -129,6 +152,14 @@ public:
     // AudioBackend. Starts a voice at the next block boundary. Cheap and allocation-free in the
     // steady state — safe to call from a simulation tick, which is where destruction events arrive.
     void play(SoundId sound, core::Vec3 position, float gain) override;
+
+    // Play a sound with up to kMaxEarlyReflections discrete echoes. The direct sound is played at
+    // `position` with `gain`, and each reflection becomes a delayed voice originating from its
+    // image-source position, sample-accurately delayed and low-pass filtered.
+    void play_with_reflections(SoundId sound,
+                               core::Vec3 position,
+                               float gain,
+                               std::span<const EarlyReflection> reflections);
 
     void set_listener(const Listener& listener) noexcept { listener_ = listener; }
 
@@ -175,6 +206,9 @@ private:
         std::uint8_t group = 0;
         bool fading = false;  // evicted: gliding to silence, removed after this block
         bool started = false; // false until the first block, so gains start AT target, not from 0
+        bool is_reflection = false;
+        std::int64_t delay_frames = 0; // remaining frames to delay before playback onset
+        float lp_state = 0.0f;         // one-pole low-pass filter state (~4 kHz)
     };
 
     [[nodiscard]] float attenuation(float distance) const noexcept;
@@ -183,6 +217,8 @@ private:
     [[nodiscard]] std::uint32_t next_random() noexcept;
     void apply_limiter(std::span<float> out, std::size_t frames);
     void evict(Voice& victim);
+    [[nodiscard]] Voice* quietest_active(int group) noexcept;
+    bool make_room(Voice* victim, bool newcomer_is_reflection, float newcomer_level);
 
     SoundBank bank_;
     MixerConfig config_;
