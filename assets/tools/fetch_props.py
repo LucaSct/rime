@@ -72,6 +72,52 @@ PINNED_HASHES: dict[str, dict[str, str]] = {
         "textures/painted_wooden_bench_nor_gl_1k.exr": "14e5b0d83bfa8ed7f07f8f39b3bc508473efba66b8a12d9ff175e774ee4cd848",
         "textures/painted_wooden_bench_rough_1k.exr": "52cb94cb127fe4cf59f9144bcdb35eb883eb843c9f6d4f2a347b78f8a5d4155d",
     },
+    # ── Large assets (m16.10). Same CC0 source and the same 1k budget as the props above;
+    # these are here to exercise the cook and the renderer on vehicle- and machine-scale
+    # geometry rather than tabletop props. The ship is the stress case: 13 source files and
+    # the highest triangle count Poly Haven publishes under CC0.
+    "covered_car": {
+        "covered_car_1k.blend": "86a505c9fb8216d1542336906a0c7964d121af86bad7f6c8ff58e9e78b7f316c",
+        "textures/covered_car_metal_1k.exr": "77e5bf87d307c2ed8896c068b924c8a991c4233d7d00324d3711eae98697749b",
+        "textures/covered_car_nor_gl_1k.exr": "18df4570385edb95edba7f53da172ec704f4e4e9a81d9aecae63588288cabbfe",
+        "textures/covered_car_rough_1k.exr": "e87d218a9ed739d71ca9af8d0b180279d8947a8783f7d581360bc158bec3b677",
+        "textures/covered_car_diff_1k.jpg": "c4616a5c7c1327e4bc127b600e59d9dcb2123f8926f1570a1ca4a068d97f4d34",
+    },
+    "overhead_crane": {
+        "overhead_crane_1k.blend": "c19878339c2232b042147b2cae8f233b5ead348a416fd9853c5b4c23d2899bbe",
+        "textures/overhead_crane_diff_1k.jpg": "2eadaa0c07a8543ca4ac33133260b1ed315cdff7fb88d7367f60f702937b8423",
+        "textures/overhead_crane_metal_1k.exr": "05ca4f838ef3f63345e677db6fd007062321f68abd3f1cec4171ba6933ee779b",
+        "textures/overhead_crane_nor_gl_1k.exr": "c8fd48b0d2ab0acd65f7f26826c7a4328b3777103ee92812f8831de2a8f92a4e",
+        "textures/overhead_crane_rough_1k.exr": "ee616625c22675f54439c26c8991b2ff1133da275b467fcb509d05790dfe1e64",
+        "textures/overhead_crane_trim_diff_1k.png": "cd5743ef41ea646c65774e55d270e2f5d349b664e665dddbd9647fe95f02c1ef",
+        "textures/overhead_crane_trim_mask_1k.png": "fbb8982a8bc437aa84ed6e8e8dcf2ba78a4890e005862af1648aed69ab6a96ad",
+        "textures/overhead_crane_trim_metal_1k.png": "f5c3878b8b97b94738ce461b2becaf8fd66e547c08bdf8a9421c379fd9017419",
+        "textures/overhead_crane_trim_nor_gl_1k.png": "93f822c76f601212455bcff236b5c9a58dc9cefbdd2cb98b02c6aac99b3bad0d",
+        "textures/overhead_crane_trim_rough_1k.png": "663c087d60b9bbfa3ce6357912ac6eb3ab796e9747287cb920cd528f10fe9d89",
+    },
+    "old_military_compressor": {
+        "old_military_compressor_1k.blend": "05d0dec67edbcb64eca1d10aad43d9465c155d24e5cf80d6aabcb35e8a5cc83a",
+        "textures/old_military_compressor_alpha_1k.png": "2f1bed1eb907b2ddcdc7a96b6f9e1564b87f31812bb04d15109220d0cd511734",
+        "textures/old_military_compressor_diff_1k.jpg": "cb02b7b02cee27c7f04187be26b9a9079a58725353c56726c939b051178424a4",
+        "textures/old_military_compressor_metal_1k.exr": "e0988393b197102c13816674803d78570f5eddfde2c10568d87e0061c4c856a1",
+        "textures/old_military_compressor_nor_gl_1k.exr": "385e13910a12397641a5cbc606b96a0d078c92951f6f593047215fd359f43f68",
+        "textures/old_military_compressor_rough_1k.exr": "78e0ec208c8958461facf546bf60f0e13cc0195cf8fbc118685d2c999680cbd8",
+    },
+    "dutch_ship_large_01": {
+        "dutch_ship_large_01_1k.blend": "210129684246c2b4cc00c74303b600b451cedaa32fe7dc1806cf2e4a99d1c2f6",
+        "textures/dutch_ship_large_01_hull_metal_1k.png": "c62ae45a1cb45d089d95c3259fe042ebfaedb7535d6ad2faddfb2ebeea32a18a",
+        "textures/dutch_ship_large_01_sails_alpha_1k.png": "b319c5b5815bb1538061d377fdd0d4b753023188edd1fd6a43ce67ccf51a84ab",
+        "textures/dutch_ship_large_01_rigging_nor_gl_1k.png": "bd54d2015a3610a0186cc61f9386371cef55ffffe598524f96363938ff7b7c6e",
+        "textures/dutch_ship_large_01_rigging_rough_1k.png": "09a0cad278bef2f015c89a48f4fc21e222d1aadcb2d770dad94ee0d4881b2f0d",
+        "textures/dutch_ship_large_01_hull_nor_gl_1k.png": "85ad87045d7bd173d259e1d4a20bc924c80a28bc01ff047f2ad537da4446cde0",
+        "textures/dutch_ship_large_01_sails_rough_1k.png": "11d1d17b5f2c8bca418c23beee0b96edbd126a89e4388f12a681d5361e68a11e",
+        "textures/dutch_ship_large_01_hull_rough_1k.png": "31e8985c0ec1fa8a397ffb9341e1a0ff566b70d050c5f15042bb52da7860b51f",
+        "textures/dutch_ship_large_01_sails_nor_gl_1k.png": "48ba032df7f2b375c6c186fa6b8914d4d370076d3bf9e6b5139ae19c5fd85d4d",
+        "textures/dutch_ship_large_01_sails_diff_1k.png": "db44109ce3e23da574e92b9d53a203063aa06702a975845e65a51536c1448594",
+        "textures/dutch_ship_large_01_rigging_diff_1k.png": "63b74fa8568cff687168f3fcd423416dafdaf2cac1e243e44af68c316badfed3",
+        "textures/dutch_ship_large_01_hull_diff_1k.png": "07479266c2172ff66c86b5a5fe935d6b3ebcb278ea087732f439d33979777e61",
+        "textures/dutch_ship_large_01_rigging_metal_1k.png": "e90ab8c2a3fe5a99b285069418a093942efad36af2548da2bade43958e878f7d",
+    },
 }
 
 

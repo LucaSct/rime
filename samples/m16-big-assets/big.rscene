@@ -1,0 +1,150 @@
+# Rime scene v1 (.rscene) — reflection-serialized world. Human-diffable; hand-edit or regenerate.
+# m16.10 big-asset proof: four CC0 Poly Haven assets at vehicle and machine scale, with the
+# three m16.9 props in the foreground as a size reference.
+#
+# WHERE THE VIEWPOINT COMES FROM, because it is not obvious and cost three renders to pin
+# down: 99-the-block REQUIRES a Camera entity (it exits 1 with "the block's scene carries no
+# camera"), but it does NOT look through it -- the player controller owns the view and spawns
+# at roughly (-6, 1.6, 0) facing +X, which puts +Z on the viewer's RIGHT. So everything here
+# is laid out along +X and spread in depth; a layout down -Z renders perfectly, off-screen.
+#
+# Y offsets are each GLB's measured POSITION bounds, so nothing floats or sinks: the ship's
+# hull sits 1.92 m low in its own model space and the crane's gantry legs 3.91 m.
+# overhead_crane IS fetched, exported and cooked, but is deliberately NOT placed here: its
+# 'overhead_crane_trim' material binds image 1 -- overhead_crane_trim_MASK -- as baseColorTexture,
+# because Poly Haven builds that trim sheet from a mask-driven procedural node graph rather than a
+# texture-to-PBR-slot chain, and the glTF exporter has no colour map to pick. It renders as
+# saturated mask noise. See docs/authoring-blender.md; evidence crane-mask-bug.png.
+rime_scene 1
+
+entity 0 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 1.7 z 0 }
+      rotation { x 0.0000000 y 0.7071068 z 0.0000000 w 0.7071068 }
+      scale { x 1.0 y 1.0 z 1.0 }
+    }
+  }
+  rime::render::Camera 0x42cdb0b7ddc97dbc {
+    fov_y 0.87266
+    z_near 0.1
+    z_far 1000
+    active true
+  }
+}
+
+entity 1 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x -0.4537702 y 0.1108723 z 0.0570186 w 0.8823542 }
+      scale { x 1.0 y 1.0 z 1.0 }
+    }
+  }
+  rime::render::DirectionalLight 0x0279ad2e8762ff9a {
+    color_r 1
+    color_g 0.97
+    color_b 0.92
+    intensity 3.4
+  }
+}
+
+entity 2 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x 0.0000000 y 0.0000000 z 0.0000000 w 1.0000000 }
+      scale { x 1.0 y 1.0 z 1.0 }
+    }
+  }
+  rime::render::MaterialAsset 0x6031d5a8e12eb6b5 {
+    asset 15518493838741827451
+  }
+  rime::ground::GroundSurface 0xd6ea82acd7add462 {
+    half_x 90
+    half_z 90
+    cells_x 45
+    cells_z 45
+    tile_metres 4
+    thickness 1
+  }
+}
+
+entity 3 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0.0 y 0.0 z -2.2 }
+      rotation { x 0.0000000 y 0.7660444 z 0.0000000 w 0.6427876 }
+      scale { x 1.0 y 1.0 z 1.0 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 14111670415297445338
+  }
+}
+
+entity 4 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0.4 y 0.0 z 0.6 }
+      rotation { x 0.0000000 y 0.1736482 z 0.0000000 w 0.9848078 }
+      scale { x 1.0 y 1.0 z 1.0 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 17259774636830964481
+  }
+}
+
+entity 5 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -0.2 y 0.0 z 1.9 }
+      rotation { x 0.0000000 y 0.0000000 z 0.0000000 w 1.0000000 }
+      scale { x 1.0 y 1.0 z 1.0 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 13649199587725015797
+  }
+}
+
+entity 6 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10.0 y 0.0 z -5.0 }
+      rotation { x 0.0000000 y 0.5446390 z 0.0000000 w 0.8386706 }
+      scale { x 1.0 y 1.0 z 1.0 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 10025121775508006987
+  }
+}
+
+entity 7 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 12.0 y 0.0 z 5.0 }
+      rotation { x 0.0000000 y 0.8870108 z 0.0000000 w 0.4617486 }
+      scale { x 1.0 y 1.0 z 1.0 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 7635103594863918334
+  }
+}
+
+entity 8 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 69.0 y 1.92 z 6.0 }
+      rotation { x 0.0000000 y 0.0000000 z 0.0000000 w 1.0000000 }
+      scale { x 1.0 y 1.0 z 1.0 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 6144099702825885865
+  }
+}
+

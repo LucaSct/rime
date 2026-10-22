@@ -287,3 +287,34 @@ A **trim sheet** for one building kit: one 2048² sheet with window frames, sill
 and vents as horizontal strips, and a couple of 1024² tiling wall surfaces. It is the highest-leverage
 texture in this whole document — one sheet textures a town — and it exercises every part of the
 contract above: density, ORM packing, +Y normals, one UV set, and clamped sampling on the sheet.
+
+---
+
+## 9. What does not survive the export: mask-driven procedural materials (m16.10)
+
+The contract above assumes a material whose maps are **bound to PBR slots**: an image in
+`baseColorTexture`, an image in `metallicRoughnessTexture`, and so on. Blender lets you build a
+material that computes its colour instead — a **trim sheet** where a mask selects between tinted
+layers inside the node graph, with no single image that *is* the base colour. glTF has no way to
+express that, so the exporter picks whichever image is nearest the base-colour slot and the result
+is wrong in a way that looks like a renderer bug.
+
+**Measured on Poly Haven's `overhead_crane` (2026-10-23).** Its `overhead_crane_trim` material
+exports with `baseColorTexture` → image 1, which is `overhead_crane_trim_mask`. The mask is a
+selection map, not an albedo, so the crane renders as saturated mask noise. Nothing in the chain
+reports an error: the fetch verifies, Blender exits 0, `rime cook` cooks six textures and two
+materials, the mesh resolves, and the renderer draws exactly what it was given. Evidence:
+`reports/rime-oct23-big-assets/crane-mask-bug.png`.
+
+**How to spot it before you cook.** Open the `.blend` and look at the material's Base Color input.
+If it is a texture node, you are fine. If it is a Mix / ColorRamp / Map Range fed by a `*_mask`
+image, the asset needs baking first.
+
+**The fix is to bake, not to patch the exporter.** In Blender, bake the node graph down to a flat
+base-colour image (Cycles → Bake → Diffuse, colour only), bind that to Base Color, and export. A
+heuristic in `export_gltf.py` that rejected images named `*_mask` would only move the failure: the
+asset would then export with *no* base colour at all, which is not better.
+
+The three m16.9 props and the three m16.10 assets that do work (`covered_car`,
+`old_military_compressor`, `dutch_ship_large_01`) all use straight texture-to-slot chains. A trim
+sheet is the first thing in this repo that does not.
