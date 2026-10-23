@@ -2465,6 +2465,14 @@ struct Demo {
                 // Settle now, before any measured frame: the chain is asynchronous and the cost of
                 // waiting for it belongs to start-up, not to the frame-time distribution.
                 const std::size_t rounds = bridge->settle(session.client.world, kSettleRounds);
+                // Hand the renderer the bridge's per-submesh material sets, as the editor host
+                // does. A cooked MESH carries its own material table (one material per submesh,
+                // ADR-0039 ruling 1); without the registry the renderer has no way to look those
+                // up, so an imported prop's geometry draws but every submesh falls back to the
+                // palette's flat white (measured on the M16 Blender props, 2026-10-22). The
+                // pointer is to a bridge member, stable for the bridge's lifetime, so setting it
+                // once is enough — the registry fills in as later settles resolve more meshes.
+                visuals->renderer.set_material_sets(bridge->material_sets());
                 const auto& st = bridge->material_asset_stats();
 
                 // THE ORDER OF THESE THREE CHECKS MATTERS, and it was wrong. A device without BC
