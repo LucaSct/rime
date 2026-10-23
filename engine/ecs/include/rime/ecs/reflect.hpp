@@ -33,31 +33,13 @@ inline void register_transform_components(World& world) {
 
 } // namespace rime::ecs
 
-// Reflection blocks (outside the namespace — the macros open rime::core themselves). Order matters:
-// the nested type must be registered before its container. Entity (a handle) and core::Transform
-// (via math/reflect.hpp) come first; the wrapper components reference them.
-RIME_REFLECT_BEGIN(rime::ecs::Entity)
-RIME_REFLECT_FIELD(index)
-RIME_REFLECT_FIELD(generation)
-RIME_REFLECT_END()
-
-RIME_REFLECT_BEGIN(rime::ecs::LocalTransform)
-RIME_REFLECT_FIELD(value)
-RIME_REFLECT_END()
-
-// WorldTransform is deliberately NOT reflected — do not add a RIME_REFLECT block for it. It is
-// DERIVED state (propagate_transforms recomputes it from the LocalTransform chain every tick), so
-// it is never persisted to a scene, never rides an editor snapshot, and never enters
-// world_content_hash — exactly like physics::RigidBodyHandle. Register it as a live component where
-// a renderer needs to query it; it simply won't be serialized. Keeping it unreflected is what makes
-// the snapshot carry exactly the one editable placement.
+// The reflection blocks for Entity, LocalTransform and Parent used to live here. They now sit with
+// their declarations — ecs/entity.hpp and ecs/transform.hpp — because a COMPONENT's reflection
+// cannot safely be optional: World::add_component registers implicitly, through a template, so a
+// TU that sees the component without its ReflectionTraits specialization silently produces an
+// unreflected duplicate of the same weak symbol. The full argument, and the binary it broke, are
+// in the note at the bottom of ecs/transform.hpp.
 //
-// This used to carry a second reason: WorldTransform is structurally identical to LocalTransform
-// (`{ core::Transform value; }`), and compute_type_hash folded only the FIELDS, so the two collided
-// on one type_hash and an entity carrying both would serialize two indistinguishable records. That
-// collision is gone — the hash folds the type name now (ADR-0033 amendment A2, type_info.hpp) — but
-// the derived-state reason above stands on its own, so this stays unreflected.
-
-RIME_REFLECT_BEGIN(rime::ecs::Parent)
-RIME_REFLECT_FIELD(value)
-RIME_REFLECT_END()
+// What stays here is the POLICY above: which of the transform components a scene is expected to
+// store. That is a decision, not a description, and a caller that wants a different set simply
+// calls register_component itself.

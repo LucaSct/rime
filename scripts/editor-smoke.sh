@@ -136,7 +136,12 @@ say "run editor --smoke --scene block.rscene through the GAME's host (expect 0 s
 blockhost_bin="$repo_root/$build_dir/bin/the-block-host"
 [ -x "$blockhost_bin" ] || { echo "editor-smoke.sh: missing $blockhost_bin" >&2; exit 1; }
 run_capture game_out "$editor_bin" --smoke --engine "$blockhost_bin" --scene "$block_scene"
-echo "$game_out" | grep -E "0 skipped|editor <-> engine OK" || true
+# The pattern is "skipped", not "0 skipped", and that is not a cosmetic choice: the narrower
+# pattern matched the GOOD case only, so when this host DID skip something its own warning naming
+# the type was captured and never printed. Four PRs (#344-#347) reported this failure as nothing
+# but `exit code 101`. A check that hides the evidence for the case it exists to catch is worse
+# than no check.
+echo "$game_out" | grep -E "skipped|editor <-> engine OK" || true
 echo "$game_out" | grep -q "component(s) skipped" && {
     echo "editor-smoke.sh: the game's own host skipped components of its own scene" >&2; exit 1; }
 echo "$game_out" | grep -q ", 0 skipped" || {
