@@ -7437,6 +7437,17 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path, u
     cfg.vsync = false;
 
     Demo demo(cfg, g_network_impairment);
+
+    // Writes the --audio-wav capture however run_play returns, exactly as run_headless does.
+    // Without this the flag parses, the per-tick rows accumulate, and nothing is ever written:
+    // the ONLY mode that flushed the capture was --headless, which fires no weapon at all, so
+    // there was no way to hear a gunshot -- or its early reflections -- outside the engine.
+    struct PlayCaptureFlush {
+        Demo& d;
+
+        ~PlayCaptureFlush() { d.flush_audio_capture(); }
+    } play_capture_flush{demo};
+
     std::printf("play network: impairment %s (one-way %u ms, loss %.0f%%)\n",
                 g_network_impairment ? "ON" : "OFF",
                 g_network_impairment ? kOneWayMs : 0,
