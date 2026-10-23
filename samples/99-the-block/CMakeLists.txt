@@ -237,10 +237,34 @@ set_tests_properties(the_block_effects_smoke PROPERTIES
 # The `peers` HUD row's honesty (oct21-desync): 20 rifle hits and an aimed charge on the generated
 # city, every tick classified as the HUD classifies it. GPU-free. Measured 226 s on the faster
 # self-hosted runner (release); the slower runner is 2.2-2.8x that, so 1800 s like its siblings.
-add_test(NAME the_block_desync_check COMMAND the_block --desync-check)
-set_tests_properties(the_block_desync_check PROPERTIES
-    FIXTURES_REQUIRED block_demo_cook
-    TIMEOUT 1800)
+#
+# NOT REGISTERED UNDER A SANITIZER, and the reason is a measurement rather than a preference. The
+# sibling timeouts above budget for "the sanitizer build on the slow runner" at roughly 3x the
+# release figure. That factor is far too small for THIS test: on PR #348 it hit the 1800 s wall on
+# the FASTER runner under ASan+UBSan, so the real factor is >8x, not ~3x -- a Debug build of a
+# CPU-bound per-tick classification loop, times ASan's own 2-3x. Raising the timeout is the wrong
+# lever, because the ASan job's own budget is timeout-minutes: 120 and it had already spent 66
+# minutes reaching this test: a 3600 s test would blow the JOB instead of the test, which is
+# strictly worse (a cancelled job reports no logs at all).
+#
+# What the exclusion costs, stated so it is not mistaken for free: this path loses ASan coverage.
+# What it does NOT cost is any claim -- the test still runs in every non-sanitizer job (both
+# self-hosted build & test jobs plus hosted Linux, macOS and Windows), so its determinism and
+# HUD-honesty assertions are fully gated. ASan's value is memory errors, and the engine code this
+# mode drives (physics step, gameplay classification, the net predictor) is exercised by the other
+# 92 tests under ASan. The number to replace this with is a measured ASan runtime; nobody has one.
+if(RIME_SANITIZER STREQUAL "off")
+    add_test(NAME the_block_desync_check COMMAND the_block --desync-check)
+    set_tests_properties(the_block_desync_check PROPERTIES
+        FIXTURES_REQUIRED block_demo_cook
+        TIMEOUT 1800)
+else()
+    # Visible at configure time rather than silently absent -- a dropped test that announces
+    # nothing is the CMake version of a skip path without a counter.
+    message(STATUS
+        "the_block_desync_check: NOT registered (RIME_SANITIZER=${RIME_SANITIZER}); "
+        "it exceeds 1800 s under instrumentation -- see the note in samples/99-the-block/CMakeLists.txt")
+endif()
 
 # Registered only when the art is here; the binary itself skips the mode rather than failing, so
 # running it by hand on a clean clone is harmless too.

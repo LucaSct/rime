@@ -2050,7 +2050,10 @@ std::size_t load_recordings(audio::SoundBank& bank,
         if (!std::filesystem::exists(path))
             break;
         if (!loaded.add_variant_from_wav(id, path)) {
-            std::fprintf(stderr, "play audio: refused %s (not 48 kHz mono PCM)\n", path.c_str());
+            // path::c_str() is wchar_t* on Windows, so passing it to a "%s" is a real format
+            // mismatch there (C4477) and prints garbage even where it compiles. Narrow it first.
+            const std::string shown = path.string();
+            std::fprintf(stderr, "play audio: refused %s (not 48 kHz mono PCM)\n", shown.c_str());
             break;
         }
         ++count;

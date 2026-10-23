@@ -95,17 +95,20 @@ PlayWorld::street_config(ecs::World& world, bool& valid, PlateRect* plate) {
         // before the plate edge and never past it -- see PlayEnvironment::kPlateSkirt. A plate
         // narrower than two skirts collapses to its centre line; the climb then cannot finish
         // under it, which prove_plate_boundary reports rather than hides.
-        const auto skirt = PlayEnvironment::kPlateSkirt;
-        const auto shrink =
-            [skirt](float lo, float hi, std::int32_t& out_lo, std::int32_t& out_hi) {
-                auto a = static_cast<std::int32_t>(std::ceil(lo)) + skirt;
-                auto b = static_cast<std::int32_t>(std::floor(hi)) - skirt;
-                if (a > b) {
-                    a = b = static_cast<std::int32_t>(std::floor(0.5f * (lo + hi)));
-                }
-                out_lo = a;
-                out_hi = b;
-            };
+        // constexpr, and captured by NOBODY on purpose: kPlateSkirt is a static constexpr
+        // std::int32_t, so every use below is a constant expression and the lambda does not need
+        // it captured. Apple Clang says so as an error under -Werror
+        // (-Wunused-lambda-capture), which a GCC-only build never reports.
+        constexpr auto skirt = PlayEnvironment::kPlateSkirt;
+        const auto shrink = [](float lo, float hi, std::int32_t& out_lo, std::int32_t& out_hi) {
+            auto a = static_cast<std::int32_t>(std::ceil(lo)) + skirt;
+            auto b = static_cast<std::int32_t>(std::floor(hi)) - skirt;
+            if (a > b) {
+                a = b = static_cast<std::int32_t>(std::floor(0.5f * (lo + hi)));
+            }
+            out_lo = a;
+            out_hi = b;
+        };
         shrink(p.x - s.half_x, p.x + s.half_x, result.street_min_x, result.street_max_x);
         shrink(p.z - s.half_z, p.z + s.half_z, result.street_min_z, result.street_max_z);
         if (plate != nullptr) {

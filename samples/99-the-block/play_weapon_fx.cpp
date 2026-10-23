@@ -605,34 +605,35 @@ void PlayWeaponFx::pose(ecs::World& world,
             // should drop its light, not take the frame down with it.
             if (!light || !transform)
                 continue;
-            const bool muzzle = part == 3;
-            // The muzzle light is a one-frame flicker (~16 ms); a longer one floods the whole wall.
-            const float life = muzzle ? .016f : kSparkLifetime;
-            const float fade = 1 - std::min(shot.age / life, 1.0f);
+            const bool is_muzzle = part == 3;
+            // The is_muzzle light is a one-frame flicker (~16 ms); a longer one floods the whole
+            // wall.
+            const float life = is_muzzle ? .016f : kSparkLifetime;
+            const float light_fade = 1 - std::min(shot.age / life, 1.0f);
             // LEAD THE LIGHT AHEAD OF THE MUZZLE. The first-person forearms are ~0.4-0.6 m from
             // the flash, and an inverse-square light that close is ~50x brighter on the sleeve
             // than on a wall 3 m away. The arm cloth is near-black with a normal-mapped wrinkle
             // relief, so only the wrinkle crests facing the light clear the tone-mapper's knee:
             // hard orange islands on black cloth that read as burnt-through holes (measured at
-            // 1080p on the 3060: the islands appear with the muzzle light and vanish without it).
-            // Moving the light 1.2 m down the bore (less when a wall is nearer, so a close wall
-            // is still lit from in front of it) cuts the sleeve's share ~18x. The intensity is
+            // 1080p on the 3060: the islands appear with the is_muzzle light and vanish without
+            // it). Moving the light 1.2 m down the bore (less when a wall is nearer, so a close
+            // wall is still lit from in front of it) cuts the sleeve's share ~18x. The intensity is
             // rescaled by (new/old distance to the hit)^2 so the lit wall keeps its brightness.
             const float to_hit =
                 shot.hit_surface ? core::length(shot.hit - flash.translation) : 0.0f;
             const float lead =
-                muzzle ? (shot.hit_surface ? std::min(1.2f, .4f * to_hit) : 1.2f) : 0.0f;
-            const float rescale = muzzle && shot.hit_surface && to_hit > 1e-3f
+                is_muzzle ? (shot.hit_surface ? std::min(1.2f, .4f * to_hit) : 1.2f) : 0.0f;
+            const float rescale = is_muzzle && shot.hit_surface && to_hit > 1e-3f
                                       ? (to_hit - lead) * (to_hit - lead) / (to_hit * to_hit)
                                       : 1.0f;
-            transform->value.translation = muzzle ? flash.translation + muzzle_dir * lead
-                                                  : shot.spark + (-shot.direction) * .08f;
+            transform->value.translation = is_muzzle ? flash.translation + muzzle_dir * lead
+                                                     : shot.spark + (-shot.direction) * .08f;
             light->color_r = 1;
             light->color_g = .14f;
             light->color_b = .018f;
-            light->radius = muzzle ? 3.0f - lead : 1.0f;
-            light->intensity = (muzzle || (shot.hit_surface && metal))
-                                   ? (muzzle ? 12.0f * rescale : 1.5f) * fade
+            light->radius = is_muzzle ? 3.0f - lead : 1.0f;
+            light->intensity = (is_muzzle || (shot.hit_surface && metal))
+                                   ? (is_muzzle ? 12.0f * rescale : 1.5f) * light_fade
                                    : 0;
             world.mark_changed<ecs::WorldTransform>(shot.entities[part]);
             world.mark_changed<render::PointLight>(shot.entities[part]);
