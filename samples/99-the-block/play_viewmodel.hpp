@@ -159,6 +159,9 @@ public:
 
     [[nodiscard]] std::array<core::Vec3, 2> elbows_world() const;
 
+    // The aimed-through sight point of the last pose, world metres (squeezed like the drawn model).
+    [[nodiscard]] core::Vec3 sight_world() const noexcept { return sight_world_; }
+
     [[nodiscard]] std::uint32_t magazine_triangles() const noexcept {
         return models_[static_cast<unsigned>(selected_)].magazine_triangles;
     }
@@ -248,7 +251,9 @@ private:
         core::Vec3 aim_seat{}, hip_seat{};
         core::Quat aim_torso{}, hip_torso{};
         core::Vec3 hip_translation{}; // weapon offset that puts the firing grip on its hip target
-        core::Vec3 hip_pivot{};       // firing grip, weapon-local: the hip turn's centre
+        core::Vec3 rest_shift{};      // resting-only rig offset, fades with a reload/bolt lowering
+        std::array<core::Vec3, 2> rest_pole{};   // resting-only elbow-pole pushes, left then right
+        core::Vec3 hip_pivot{};                  // firing grip, weapon-local: the hip turn's centre
         std::array<core::Vec3, 2> bind_elbows{}; // rig space: the hip carry's bend-plane poles
         std::vector<core::Vec3> weapon_points;   // weapon-local positions, for intrusion proofs
         std::vector<Part> parts;
@@ -297,6 +302,7 @@ private:
     std::array<core::Vec3, 2> wrist_world_{};
     std::array<core::Vec3, 2> wrist_camera_{};
     std::array<core::Vec3, 2> hand_world_{};
+    core::Vec3 sight_world_{};
     core::Mat4 magazine_world_{};
     core::Vec3
         release_offset_{}; // weapon-local hand-held magazine offset at the last pre-release pose

@@ -5971,9 +5971,70 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
                         fire_wrist.z);
             check(bore_deg <= 8.0f, "the hip bore axis points within 8 degrees of forward");
             check(up_deg <= 8.0f, "the hip weapon's sights are within 8 degrees of camera up");
-            check(fire_wrist.x >= .11f && fire_wrist.x <= .18f && fire_wrist.y >= -.26f &&
-                      fire_wrist.y <= -.21f && fire_wrist.z >= -.42f && fire_wrist.z <= -.36f,
-                  "the firing wrist sits in the lower-right hip box");
+            // The box is each weapon's MEASURED firing wrist +/- 2 cm per axis (camera metres),
+            // not one loose box around all three: the MSR's carry sits 4 cm nearer the eye.
+            {
+                constexpr std::array<core::Vec3, 3> kFireWrist{
+                    {{.15f, -.30f, -.50f}, {.15f, -.30f, -.50f}, {.15f, -.30f, -.46f}}};
+                const auto& want = kFireWrist[weapon == VmWeapon::Scar ? 0
+                                              : weapon == VmWeapon::M4 ? 1
+                                                                       : 2];
+                check(std::abs(fire_wrist.x - want.x) <= .02f &&
+                          std::abs(fire_wrist.y - want.y) <= .02f &&
+                          std::abs(fire_wrist.z - want.z) <= .02f,
+                      "the firing wrist sits in the lower-right hip box");
+            }
+            // HIP SIGHT LINE AND SUPPORT ARM. Three framing claims measured on THIS settled pose
+            // (elbows, hands and sight all read before any later frame moves the rig):
+            //  - the sights sit at or below the frame's middle, so the hip gun reads as carried
+            //    low rather than shouldered (y measured from the top, as a share of the height;
+            //    the MSR's tall scope may ride higher);
+            //  - the support forearm enters from the LEFT of the bottom edge: the line elbow ->
+            //    hand, extended in ndc to y = +1 (a projected line is a line), crosses at x <=
+            //    -0.14. A forearm entering mid-frame means the arm comes from under the gun, not
+            //    the side;
+            //  - the support elbow joint itself is outside the viewport.
+            {
+                const auto project = [&](core::Vec3 world) {
+                    const auto clip = demo.visuals->renderer.view_proj_unjittered() *
+                                      core::Vec4{world.x, world.y, world.z, 1.0f};
+                    // Behind the eye counts as off-screen (never a false "inside").
+                    if (!(clip.w > 0.0f))
+                        return core::Vec2{2.0f, 2.0f};
+                    return core::Vec2{clip.x / clip.w, clip.y / clip.w};
+                };
+                const auto entry_x = [&](core::Vec3 elbow, core::Vec3 hand) {
+                    const auto e = project(elbow), h = project(hand);
+                    const float t = std::abs(e.y - h.y) > 1e-6f ? (1.0f - h.y) / (e.y - h.y) : 0.0f;
+                    return h.x + (e.x - h.x) * t;
+                };
+                const float sight_from_top =
+                    .5f * (project(demo.viewmodel->sight_world()).y + 1.0f);
+                const float entry_left = entry_x(elbows_now[0], wrists[0]);
+                const float entry_right = entry_x(elbows_now[1], wrists[1]);
+                const auto elbow_left = project(elbows_now[0]);
+                const auto elbow_right = project(elbows_now[1]);
+                const float sight_floor = weapon == VmWeapon::Sniper ? .44f : .54f;
+                std::printf("viewmodel-smoke: %s hip sight %.3f of the height from the top (floor "
+                            "%.2f), forearm entry x L %.3f R %.3f, elbow ndc L (%.3f %.3f) R "
+                            "(%.3f %.3f)\n",
+                            weapon_name(weapon),
+                            sight_from_top,
+                            sight_floor,
+                            entry_left,
+                            entry_right,
+                            elbow_left.x,
+                            elbow_left.y,
+                            elbow_right.x,
+                            elbow_right.y);
+                check(sight_from_top >= sight_floor,
+                      "the hip sights sit low in the frame (SCAR-H/M4A1 >= 0.54, MSR >= 0.44 of "
+                      "the height from the top)");
+                check(entry_left <= -.14f,
+                      "the support forearm enters the bottom edge left of centre (ndc x <= -0.14)");
+                check(std::abs(elbow_left.x) > 1.0f || elbow_left.y > 1.0f,
+                      "the support elbow is outside the viewport at the settled hip");
+            }
             demo.viewmodel->set_draw_arms(false);
             demo.app.run_frames(48);
             const auto without_arms = capture();
