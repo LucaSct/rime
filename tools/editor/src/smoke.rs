@@ -184,20 +184,28 @@ mod imp {
                 *x += 1.0;
                 Some(*x)
             }
+            // WRAPPING, not `+= 1`, and the reason is a real scene rather than pedantry: the
+            // generated block scene carries components whose first scalar leaf is a SENTINEL id
+            // at the top of its range (0xFFFFFFFF and friends). A debug build checks integer
+            // overflow, so `*x += 1` on such a field panics, and because editor-smoke.sh captures
+            // this run inside `game_out="$(...)"` under `set -e`, the panic message is swallowed
+            // and the whole job reports only "exit code 101". Wrapping keeps the edit what this
+            // function promises -- deterministic and obviously different from the old value --
+            // without caring where in the range the field started.
             Value::I32(x) => {
-                *x += 1;
+                *x = x.wrapping_add(1);
                 Some(*x as f64)
             }
             Value::U32(x) => {
-                *x += 1;
+                *x = x.wrapping_add(1);
                 Some(*x as f64)
             }
             Value::I64(x) => {
-                *x += 1;
+                *x = x.wrapping_add(1);
                 Some(*x as f64)
             }
             Value::U64(x) => {
-                *x += 1;
+                *x = x.wrapping_add(1);
                 Some(*x as f64)
             }
             Value::Struct(fields) => fields.iter_mut().find_map(|(_, v)| bump_first_scalar(v)),
