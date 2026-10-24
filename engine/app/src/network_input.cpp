@@ -197,6 +197,7 @@ struct NetworkInputServer::Impl {
         : link(std::move(supplied_link)), driver(link, driver_config()), profile(profile),
           neutral_after_ticks(static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz * 0.1)))) {
         driver.listen();
+        schema_hash = input_schema_identity(profile, remote_play);
         if (remote_play) {
             owner = remote_play->owned_player(world);
             hooks = remote_play->prediction_hooks(world, owner);
@@ -328,9 +329,7 @@ struct NetworkInputServer::Impl {
                         continue;
                     }
                     const auto reply = select_input_codec(
-                        hello,
-                        input_schema_hash(profile.profile_id, profile.profile_version),
-                        admitted.has_value() && id != *admitted);
+                        hello, schema_hash, admitted.has_value() && id != *admitted);
                     if (reply.refusal == InputHelloRefusal::Version)
                         ++totals.hello_version;
                     if (reply.refusal == InputHelloRefusal::Schema)
@@ -400,6 +399,7 @@ struct NetworkInputServer::Impl {
     ListenerLink link;
     net::NetDriver driver;
     GameDefinition::NetworkInputProfile profile;
+    std::uint64_t schema_hash = 0;
     std::uint32_t neutral_after_ticks = 6;
     std::optional<net::SessionId> admitted;
     std::optional<std::pair<net::SessionId, std::uint64_t>> refused_close;

@@ -11,11 +11,12 @@
 
 #include <fmt/core.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
-#include <deque>
 #include <memory>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -25,6 +26,7 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/net/link.hpp"
 #include "rime/net/net_driver.hpp"
+#include "rime/platform/socket.hpp"
 #include "rime/render/material.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
@@ -43,34 +45,86 @@ std::uint64_t now_ms() {
             .count());
 }
 
-class ImpairedLink final : public net::Link {
+class ClientLink final : public net::Link {
 public:
-    ImpairedLink(net::Link& inner, std::uint32_t delay, double loss, std::uint64_t seed)
-        : inner_(inner), delay_(delay), loss_(loss), rng_(seed ? seed : 1) {}
+    explicit ClientLink(platform::UdpSocket socket) : socket_(std::move(socket)) {}
 
     bool send(const platform::Endpoint& to, std::span<const std::byte> bytes) override {
-        if (drop())
+        return socket_.send_to(to, bytes).has_value();
+    }
+
+    std::size_t receive(std::vector<net::Datagram>& out) override {
+        std::array<std::byte, 65536> buffer{};
+        std::size_t seen = 0;
+        while (seen < 64) {
+            platform::Endpoint from{};
+            const auto size = socket_.recv_from(from, buffer);
+            if (!size)
+                break;
+            ++seen;
+            // Read the whole datagram: truncating an oversized state packet into a plausible
+            // transport packet would hide the refusal this counter is meant to prove.
+            if (*size > 1200) {
+                ++oversized_;
+                continue;
+            }
+            if (*size < 8) {
+                ++malformed_;
+                continue;
+            }
+            out.push_back({from, {buffer.begin(), buffer.begin() + *size}});
+        }
+        return seen;
+    }
+
+    [[nodiscard]] std::uint64_t oversized() const { return oversized_; }
+
+    [[nodiscard]] std::uint64_t malformed() const { return malformed_; }
+
+private:
+    platform::UdpSocket socket_;
+    std::uint64_t oversized_ = 0, malformed_ = 0;
+};
+
+class ImpairedLink final : public net::Link {
+public:
+    ImpairedLink(net::Link& inner, const LaunchOptions& options)
+        : inner_(inner), delay_(options.net_delay_ms), jitter_(options.net_jitter_ms),
+          loss_(options.net_loss), blackout_ms_(options.net_blackout_ms),
+          blackout_tick_(options.net_blackout_tick), rng_(options.net_seed ? options.net_seed : 1) {
+    }
+
+    void client_tick(std::uint64_t tick) {
+        if (blackout_ms_ && tick == blackout_tick_) {
+            blackout_until_ = now_ms() + blackout_ms_;
+            outbound_.clear();
+            inbound_.clear();
+        }
+    }
+
+    bool send(const platform::Endpoint& to, std::span<const std::byte> bytes) override {
+        if (blacked_out() || drop())
             return true;
-        outbound_.push_back({now_ms() + delay_, to, {bytes.begin(), bytes.end()}});
+        outbound_.push_back(
+            {now_ms() + delay_ + random_jitter(), to, {bytes.begin(), bytes.end()}});
         return true;
     }
 
     std::size_t receive(std::vector<net::Datagram>& out) override {
         const auto now = now_ms();
-        while (!outbound_.empty() && outbound_.front().due <= now) {
-            auto packet = std::move(outbound_.front());
-            outbound_.pop_front();
+        while (!blacked_out() && deliverable(outbound_, now)) {
+            auto packet = take_due(outbound_);
             (void)inner_.send(packet.peer, packet.bytes);
         }
         std::vector<net::Datagram> received;
         inner_.receive(received);
         for (auto& packet : received)
-            if (!drop())
-                inbound_.push_back({now + delay_, packet.from, std::move(packet.bytes)});
+            if (!blacked_out() && !drop())
+                inbound_.push_back(
+                    {now + delay_ + random_jitter(), packet.from, std::move(packet.bytes)});
         const auto before = out.size();
-        while (!inbound_.empty() && inbound_.front().due <= now) {
-            auto packet = std::move(inbound_.front());
-            inbound_.pop_front();
+        while (!blacked_out() && deliverable(inbound_, now)) {
+            auto packet = take_due(inbound_);
             out.push_back({packet.peer, std::move(packet.bytes)});
         }
         return out.size() - before;
@@ -83,19 +137,45 @@ private:
         std::vector<std::byte> bytes;
     };
 
-    bool drop() {
+    [[nodiscard]] bool blacked_out() const { return now_ms() < blackout_until_; }
+
+    std::uint64_t sample() {
         rng_ ^= rng_ >> 12;
         rng_ ^= rng_ << 25;
         rng_ ^= rng_ >> 27;
-        const auto sample = rng_ * 0x2545F4914F6CDD1Dull;
-        return static_cast<double>(sample >> 11) * (1.0 / 9007199254740992.0) < loss_;
+        return rng_ * 0x2545F4914F6CDD1Dull;
+    }
+
+    bool drop() { return static_cast<double>(sample() >> 11) * (1.0 / 9007199254740992.0) < loss_; }
+
+    std::uint32_t random_jitter() {
+        return jitter_ ? static_cast<std::uint32_t>(sample() % (jitter_ + 1ull)) : 0;
+    }
+
+    static bool deliverable(const std::vector<Pending>& queue, std::uint64_t now) {
+        return std::any_of(
+            queue.begin(), queue.end(), [now](const Pending& packet) { return packet.due <= now; });
+    }
+
+    static Pending take_due(std::vector<Pending>& queue) {
+        const auto first =
+            std::min_element(queue.begin(), queue.end(), [](const Pending& a, const Pending& b) {
+                return a.due < b.due;
+            });
+        Pending packet = std::move(*first);
+        queue.erase(first);
+        return packet;
     }
 
     net::Link& inner_;
     std::uint32_t delay_;
+    std::uint32_t jitter_;
     double loss_;
+    std::uint32_t blackout_ms_;
+    std::uint64_t blackout_tick_;
+    std::uint64_t blackout_until_ = 0;
     std::uint64_t rng_;
-    std::deque<Pending> outbound_, inbound_;
+    std::vector<Pending> outbound_, inbound_;
 };
 
 RunReport fail(RunReport report, std::string_view reason) {
@@ -117,20 +197,22 @@ RunReport run_network_client(const LaunchOptions& options,
     if (!definition.network_input || !definition.remote_play || !definition.create ||
         !definition.remote_play->register_replicated || !definition.remote_play->prediction_hooks ||
         !definition.remote_play->to_command || !definition.remote_play->seed_prediction ||
-        !definition.remote_play->digest || definition.remote_play->fixed_dt <= 0 ||
+        !definition.remote_play->digest || !definition.remote_play->player_pose ||
+        definition.remote_play->fixed_dt <= 0 ||
         definition.remote_play->fixed_dt != 1.0 / definition.tick_hz)
         return fail(report, "invalid remote play profile or fixed timestep");
 
     const auto endpoint =
         platform::Endpoint::from_string(options.connect_host, options.connect_port);
-    auto udp = net::UdpLink::bind(0);
+    const auto bind_host = options.connect_host == "127.0.0.1" ? "127.0.0.1" : "0.0.0.0";
+    auto udp = platform::UdpSocket::bind(options.client_port, bind_host, false);
     if (!endpoint || !udp)
         return fail(report, "UDP endpoint unavailable");
+    ClientLink socket_link{std::move(*udp)};
     std::unique_ptr<ImpairedLink> impaired;
-    net::Link* link = &*udp;
+    net::Link* link = &socket_link;
     if (options.net_impair) {
-        impaired = std::make_unique<ImpairedLink>(
-            *link, options.net_delay_ms, options.net_loss, options.net_seed);
+        impaired = std::make_unique<ImpairedLink>(*link, options);
         link = impaired.get();
     }
     net::NetDriver driver{*link, net::NetDriver::Config{}};
@@ -159,7 +241,8 @@ RunReport run_network_client(const LaunchOptions& options,
     ecs::World prediction_world;
     definition.remote_play->register_replicated(prediction_world);
     auto game = definition.create();
-    if (!game || (options.autopilot && !game->has_autopilot()))
+    if (!game || (options.autopilot && !game->has_autopilot()) ||
+        (options.input_tape && !definition.remote_play->diagnostic_input_tape))
         return fail(report, "game or autopilot unavailable");
 
     replication::InputWindow window;
@@ -170,12 +253,31 @@ RunReport run_network_client(const LaunchOptions& options,
     std::uint32_t epoch = 0;
     bool has_epoch = false, accepted = false, disconnected = false, graceful = false;
     std::string failure_reason;
-    std::uint64_t checkpoints = 0, replayed = 0;
+    std::uint64_t checkpoints = 0, replayed = 0, max_replay = 0;
+    std::uint64_t response_ticks = 0, snaps_over_bound = 0;
+    double max_snap = 0.0;
+    std::optional<std::uint64_t> first_input_tick;
+    std::optional<core::Vec3> first_input_position;
+    bool responded = false;
     std::uint32_t sequence = 0;
     ecs::Entity mirror_player = ecs::kNullEntity;
     ecs::Entity predicted_player = ecs::kNullEntity;
+    const auto presented_position = [&] {
+        const bool predicted = !options.no_prediction;
+        return definition.remote_play
+            ->player_pose(predicted ? prediction_world : mirror_world,
+                          predicted ? predicted_player : mirror_player)
+            .translation;
+    };
+    const auto record_snap = [&](core::Vec3 before) {
+        const auto distance = static_cast<double>(core::length(presented_position() - before));
+        max_snap = std::max(max_snap, distance);
+        if (options.has_snap_bound && distance > options.snap_bound)
+            ++snaps_over_bound;
+    };
 
     const auto pump = [&] {
+        const auto before_mirror = reconciler ? std::optional{presented_position()} : std::nullopt;
         events.clear();
         driver.update(now_ms(), events);
         for (const auto& event : events) {
@@ -184,7 +286,12 @@ RunReport run_network_client(const LaunchOptions& options,
                     2,
                     2,
                     replication::input_schema_hash(definition.network_input->profile_id,
-                                                   definition.network_input->profile_version)};
+                                                   options.has_profile_version_override
+                                                       ? options.profile_version_override
+                                                       : definition.network_input->profile_version,
+                                                   options.has_fixed_dt_override
+                                                       ? options.fixed_dt_override
+                                                       : definition.remote_play->fixed_dt)};
                 std::array<std::byte, replication::kInputHelloBytes> bytes{};
                 const auto size = replication::encode_input_hello(hello, bytes);
                 if (auto* session = driver.session(*session_id))
@@ -195,7 +302,7 @@ RunReport run_network_client(const LaunchOptions& options,
                 graceful = event.kind == net::SessionEvent::Kind::Disconnected &&
                            event.reason == net::DisconnectReason::Graceful;
                 failure_reason = event.kind == net::SessionEvent::Kind::ConnectFailed
-                                     ? "transport connection failed"
+                                     ? "unreachable"
                                      : "server disconnected before initial world";
             }
         }
@@ -209,11 +316,10 @@ RunReport run_network_client(const LaunchOptions& options,
                 accepted = reply.refusal == replication::InputHelloRefusal::None;
                 if (!accepted) {
                     disconnected = true;
-                    failure_reason = reply.refusal == replication::InputHelloRefusal::Schema
-                                         ? "input schema mismatch"
-                                     : reply.refusal == replication::InputHelloRefusal::Version
-                                         ? "input codec mismatch"
-                                         : "server full";
+                    failure_reason =
+                        reply.refusal == replication::InputHelloRefusal::Schema    ? "schema"
+                        : reply.refusal == replication::InputHelloRefusal::Version ? "version"
+                                                                                   : "full";
                 }
                 continue;
             }
@@ -239,15 +345,20 @@ RunReport run_network_client(const LaunchOptions& options,
                     reconciler->set_membership(epoch, {id});
                     has_epoch = true;
                 }
+                const auto before = presented_position();
                 const auto result = reconciler->apply_checkpoint(checkpoint);
                 if (result.applied) {
+                    record_snap(before);
                     ++checkpoints;
                     replayed += result.replayed;
+                    max_replay = std::max<std::uint64_t>(max_replay, result.replayed);
                     window.apply_result(checkpoint.result);
                 }
             }
             pending.clear();
         }
+        if (before_mirror && options.no_prediction && checkpoints > 0)
+            record_snap(*before_mirror);
         mirror.send_ack(driver, now_ms());
     };
 
@@ -321,20 +432,35 @@ RunReport run_network_client(const LaunchOptions& options,
            (options.frames == 0 || report.frames < static_cast<std::uint64_t>(options.frames))) {
         deadline += period;
         std::this_thread::sleep_until(deadline);
+        if (impaired)
+            impaired->client_tick(report.ticks + 1);
         pump();
         if (disconnected)
             break;
         ActionState actions{};
-        if (options.autopilot)
+        if (options.input_tape)
+            actions = definition.remote_play->diagnostic_input_tape(report.ticks + 1);
+        else if (options.autopilot)
             actions = game->autopilot();
         else if (app.windowed()) {
             mapper.update(app.frame_input());
             actions = mapper.take();
         }
         auto command = definition.remote_play->to_command(actions);
+        const bool non_neutral =
+            command.move_x != 0 || command.move_y != 0 || command.held != 0 || command.pressed != 0;
+        if (non_neutral && !first_input_tick) {
+            first_input_tick = report.ticks + 1;
+            first_input_position = presented_position();
+        }
         command.sequence = ++sequence;
         window.push(command);
         reconciler->predict(command);
+        if (first_input_tick && !responded &&
+            core::length(presented_position() - *first_input_position) > 1e-5f) {
+            response_ticks = report.ticks + 1 - *first_input_tick;
+            responded = true;
+        }
         std::array<std::byte,
                    replication::kInputV2HeaderBytes +
                        replication::kInputV2MaxCommands * replication::kInputV2CommandBytes>
@@ -357,13 +483,23 @@ RunReport run_network_client(const LaunchOptions& options,
     report.state_digest = definition.remote_play->digest(mirror_world);
     report.finished = disconnected;
     fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
-               "\"corrections\":{},\"reseeds\":{},\"replayed\":{},\"checkpoints\":{}}}\n",
+               "\"response_ticks\":{},\"max_snap\":{:.6f},\"snaps_over_bound\":{},"
+               "\"corrections\":{},\"reseeds\":{},\"replayed\":{},\"max_replay\":{},"
+               "\"stale_checkpoints\":{},\"checkpoints\":{},"
+               "\"malformed_datagrams\":{},\"oversized_datagrams\":{}}}\n",
                report.ticks,
                report.state_digest,
+               responded ? response_ticks : report.ticks,
+               max_snap,
+               snaps_over_bound,
                reconciler->corrections(),
                reconciler->reseeds(),
                replayed,
-               checkpoints);
+               max_replay,
+               reconciler->stale_checkpoints(),
+               checkpoints,
+               socket_link.malformed(),
+               socket_link.oversized());
     std::fflush(stdout);
     return report;
 }

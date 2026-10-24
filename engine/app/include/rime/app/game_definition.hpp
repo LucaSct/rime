@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "rime/core/jobs/job_system.hpp"
+#include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/platform/event.hpp"
 #include "rime/platform/keyboard.hpp"
@@ -322,6 +323,11 @@ struct GameDefinition {
         std::uint64_t (*digest)(const ecs::World&) = nullptr;
         replication::InputCommand (*to_command)(const ActionState&) = nullptr;
         ecs::Entity (*seed_prediction)(ecs::World&, ecs::World&, ecs::Entity) = nullptr;
+        // The same local pose the renderer presents, queried without a GPU for response and snap
+        // diagnostics. Games may keep controller position outside their transform component.
+        core::Transform (*player_pose)(const ecs::World&, ecs::Entity) = nullptr;
+        // A fixed command tape keeps the process proof independent of replicated-state timing.
+        ActionState (*diagnostic_input_tape)(std::uint64_t) = nullptr;
     };
 
     std::optional<RemotePlayProfile> remote_play;
@@ -329,5 +335,15 @@ struct GameDefinition {
     // Make a fresh game. Required.
     std::function<std::unique_ptr<Game>()> create;
 };
+
+// The input identity a client and a server must agree on before any command flows (ADR-0103 §1,
+// ADR-0104). ONE function, used by the server pump and by every client, because the identity was
+// once spelled out in three places and the proof client drifted from the other two the moment
+// the rule changed. A remote-playable game's identity includes its fixed timestep: a client
+// predicting at 1/30 s against a 1/60 s server would replay every command at the wrong dt and
+// read as a stream of corrections, so it is refused at the hello as a schema mismatch instead.
+[[nodiscard]] std::uint64_t
+input_schema_identity(const GameDefinition::NetworkInputProfile& input,
+                      const GameDefinition::RemotePlayProfile* remote_play);
 
 } // namespace rime::app

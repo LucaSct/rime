@@ -139,6 +139,12 @@ TEST_CASE("hello, reply, selection, and schema hash are deterministic") {
     CHECK(hash != input_schema_hash("Move", 0x01020304u));
     // Independently calculated FNV-1a 64 for ASCII 'a' then version bytes 04 03 02 01.
     CHECK(input_schema_hash("a", 0x01020304u) == 0x08025DDD07B099A8ull);
+    const auto remote_hash = input_schema_hash("move", 0x01020304u, 1.0 / 60.0);
+    CHECK(remote_hash == input_schema_hash("move", 0x01020304u, 1.0 / 60.0));
+    CHECK(remote_hash != input_schema_hash("move", 0x01020304u, 1.0 / 30.0));
+    CHECK(remote_hash != hash);
+    // Independently calculated from ASCII 'a', 04 03 02 01, then the LE bits of 1/60.
+    CHECK(input_schema_hash("a", 0x01020304u, 1.0 / 60.0) == 0x953BE3A916F55B6Aull);
 
     const InputHello hello{1, 3, hash};
     std::array<std::byte, kInputHelloBytes> bytes{};

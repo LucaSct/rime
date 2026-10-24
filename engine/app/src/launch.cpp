@@ -109,7 +109,12 @@ std::string launch_usage(std::string_view program) {
         "  --connect HOST[:PORT]  play on a remote server (default port 7463)\n"
         "  --no-gpu     connected play without a device or window\n"
         "  --no-prediction  display the authoritative local player\n"
-        "  --net-impair delay_ms=D,loss=P,seed=S  connected diagnostics\n"
+        "  --net-impair delay_ms=D,loss=P,jitter_ms=J,seed=S,blackout_ms=B@tick=T\n"
+        "  --snap-bound M  count connected corrections larger than M metres\n"
+        "  --profile-version-override N  connected schema refusal diagnostic\n"
+        "  --fixed-dt-override S  advertise a different connected timestep\n"
+        "  --client-port N  connected local UDP port diagnostic\n"
+        "  --input-tape  connected fixed input for process diagnostics\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
         "  --listen ADDR:PORT  dedicated: bind IPv4 address and port (0 = OS chosen)\n"
@@ -156,6 +161,38 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             result.options.no_gpu = true;
         } else if (arg == "--no-prediction") {
             result.options.no_prediction = true;
+        } else if (arg == "--input-tape") {
+            result.options.input_tape = true;
+        } else if (arg == "--snap-bound") {
+            if (!has_value || result.options.has_snap_bound)
+                return fail("--snap-bound needs a non-negative finite number once");
+            const auto value = args[++i];
+            const auto [end, ec] = std::from_chars(
+                value.data(), value.data() + value.size(), result.options.snap_bound);
+            if (ec != std::errc{} || end != value.data() + value.size() ||
+                !std::isfinite(result.options.snap_bound) || result.options.snap_bound < 0)
+                return fail("--snap-bound needs a non-negative finite number");
+            result.options.has_snap_bound = true;
+        } else if (arg == "--profile-version-override") {
+            if (!has_value || result.options.has_profile_version_override ||
+                !parse_uint(args[++i], result.options.profile_version_override))
+                return fail("--profile-version-override needs an integer once");
+            result.options.has_profile_version_override = true;
+        } else if (arg == "--fixed-dt-override") {
+            if (!has_value || result.options.has_fixed_dt_override)
+                return fail("--fixed-dt-override needs a positive finite number once");
+            const auto value = args[++i];
+            const auto [end, ec] = std::from_chars(
+                value.data(), value.data() + value.size(), result.options.fixed_dt_override);
+            if (ec != std::errc{} || end != value.data() + value.size() ||
+                !std::isfinite(result.options.fixed_dt_override) ||
+                result.options.fixed_dt_override <= 0)
+                return fail("--fixed-dt-override needs a positive finite number");
+            result.options.has_fixed_dt_override = true;
+        } else if (arg == "--client-port") {
+            if (!has_value || !parse_uint(args[++i], result.options.client_port) ||
+                result.options.client_port == 0)
+                return fail("--client-port needs a port in 1..65535");
         } else if (arg == "--linger-ms") {
             if (!has_value || linger_given || !parse_uint(args[++i], result.options.linger_ms))
                 return fail("--linger-ms needs a non-negative integer");
@@ -180,24 +217,44 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
                 return fail("--connect needs a numeric IPv4 address or localhost");
         } else if (arg == "--net-impair") {
             if (!has_value || result.options.net_impair)
-                return fail("--net-impair needs delay_ms=D,loss=P,seed=S once");
+                return fail("--net-impair may be given once");
             const auto value = args[++i];
-            const auto a = value.find(',');
-            const auto b = a == std::string_view::npos ? a : value.find(',', a + 1);
-            if (a == std::string_view::npos || b == std::string_view::npos ||
-                !value.substr(0, 9).starts_with("delay_ms=") || value.substr(a + 1, 5) != "loss=" ||
-                value.substr(b + 1, 5) != "seed=" ||
-                !parse_uint(value.substr(9, a - 9), result.options.net_delay_ms) ||
-                !parse_uint(value.substr(b + 6), result.options.net_seed))
-                return fail("--net-impair needs delay_ms=D,loss=P,seed=S");
-            const auto loss_text = value.substr(a + 6, b - a - 6);
-            const auto* begin = loss_text.data();
-            const auto [end, ec] =
-                std::from_chars(begin, begin + loss_text.size(), result.options.net_loss);
-            if (ec != std::errc{} || end != begin + loss_text.size() ||
-                !std::isfinite(result.options.net_loss) || result.options.net_loss < 0.0 ||
-                result.options.net_loss >= 1.0)
-                return fail("--net-impair loss must be in [0,1)");
+            bool delay = false, loss = false, seed = false, jitter = false, blackout = false;
+            for (std::size_t start = 0; start < value.size();) {
+                const auto comma = value.find(',', start);
+                const auto part =
+                    value.substr(start, comma == std::string_view::npos ? comma : comma - start);
+                if (part.starts_with("delay_ms=") && !delay)
+                    delay = parse_uint(part.substr(9), result.options.net_delay_ms);
+                else if (part.starts_with("seed=") && !seed)
+                    seed = parse_uint(part.substr(5), result.options.net_seed);
+                else if (part.starts_with("jitter_ms=") && !jitter)
+                    jitter = parse_uint(part.substr(10), result.options.net_jitter_ms);
+                else if (part.starts_with("loss=") && !loss) {
+                    const auto number = part.substr(5);
+                    const auto [end, ec] = std::from_chars(
+                        number.data(), number.data() + number.size(), result.options.net_loss);
+                    loss = ec == std::errc{} && end == number.data() + number.size() &&
+                           std::isfinite(result.options.net_loss) && result.options.net_loss >= 0 &&
+                           result.options.net_loss < 1;
+                } else if (part.starts_with("blackout_ms=") && !blackout) {
+                    const auto at = part.find("@tick=");
+                    blackout =
+                        at != std::string_view::npos &&
+                        parse_uint(part.substr(12, at - 12), result.options.net_blackout_ms) &&
+                        parse_uint(part.substr(at + 6), result.options.net_blackout_tick) &&
+                        result.options.net_blackout_ms > 0;
+                } else {
+                    return fail("invalid --net-impair field");
+                }
+                if (comma == std::string_view::npos)
+                    break;
+                start = comma + 1;
+            }
+            if (!delay || !seed || (value.find("loss=") != std::string_view::npos && !loss) ||
+                (value.find("jitter_ms=") != std::string_view::npos && !jitter) ||
+                (value.find("blackout_ms=") != std::string_view::npos && !blackout))
+                return fail("--net-impair needs delay_ms=D,seed=S and valid optional fields");
             result.options.net_impair = true;
         } else if (arg == "--ticks") {
             if (!has_value || !parse_uint(args[++i], result.options.ticks) ||
@@ -288,7 +345,10 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
     if (!result.options.connect_host.empty() &&
         (result.options.ticks > 0 || port_given || !result.options.content_dir.empty()))
         return fail("connected play does not use --ticks, --port or --content");
-    if ((result.options.no_gpu || result.options.no_prediction || result.options.net_impair) &&
+    if ((result.options.no_gpu || result.options.no_prediction || result.options.input_tape ||
+         result.options.net_impair || result.options.has_snap_bound ||
+         result.options.has_profile_version_override || result.options.has_fixed_dt_override ||
+         result.options.client_port != 0) &&
         result.options.connect_host.empty())
         return fail("--no-gpu, --no-prediction and --net-impair require --connect");
     if (linger_given && (result.options.mode != LaunchMode::Dedicated || result.options.offline ||

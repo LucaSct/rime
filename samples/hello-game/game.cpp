@@ -701,6 +701,19 @@ app::GameDefinition definition() {
             // The controller state lives on a separate entity in the authoritative world. Place
             // its prediction copy on the player so this world still contains exactly one entity.
             return prediction.spawn_with(wt ? *wt : ecs::WorldTransform{}, initial);
+        },
+        [](const ecs::World& world, ecs::Entity player) {
+            core::Transform pose{};
+            if (const auto* wt = world.get<ecs::WorldTransform>(player))
+                pose = wt->value;
+            return pose;
+        },
+        [](std::uint64_t tick) {
+            app::ActionState actions{};
+            // Two ticks right, one left: each missed command is visible quickly, and the
+            // resulting net drift stays inside the arena for this 300-tick proof.
+            actions.axes[kAxisMoveX] = ((tick - 1) % 3) < 2 ? 1.0f : -1.0f;
+            return actions;
         }};
     def.entry_scene = std::string{kEntryScene};
 #if defined(RIME_GAME_CONTENT_DIR) && defined(RIME_GAME_BINARY_DIR)

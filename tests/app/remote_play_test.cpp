@@ -154,7 +154,9 @@ TEST_CASE("hello-game publishes a convergent mirror and a leading predicted play
     const replication::InputHello hello{
         2,
         2,
-        replication::input_schema_hash(input_profile.profile_id, input_profile.profile_version)};
+        replication::input_schema_hash(input_profile.profile_id,
+                                       input_profile.profile_version,
+                                       definition.remote_play->fixed_dt)};
     std::array<std::byte, replication::kInputHelloBytes> hello_bytes{};
     const auto hello_size = replication::encode_input_hello(hello, hello_bytes);
     REQUIRE(client.session(*client_id)
@@ -188,6 +190,7 @@ TEST_CASE("hello-game publishes a convergent mirror and a leading predicted play
     bool predicted_lead = false;
     std::uint64_t checkpoints = 0;
     std::uint64_t refused_epoch = 0;
+    std::uint64_t refused_stale_incarnation = 0;
     std::uint64_t refused_truncated = 0;
     std::uint64_t standalone_results = 0;
     std::vector<float> authoritative_x;
@@ -234,6 +237,14 @@ TEST_CASE("hello-game publishes a convergent mirror and a leading predicted play
                 ++wrong.result.server_tick;
                 CHECK_FALSE(reconciler.apply_checkpoint(wrong).applied);
                 refused_epoch = reconciler.epoch_mismatch();
+                auto stale_incarnation = checkpoint;
+                ++stale_incarnation.entities.front().id.generation;
+                ++stale_incarnation.server_tick;
+                ++stale_incarnation.result.server_tick;
+                // A reused network index belongs to a different entity. Restoring its bytes
+                // would teleport the owner even though the entity count and epoch still match.
+                CHECK_FALSE(reconciler.apply_checkpoint(stale_incarnation).applied);
+                refused_stale_incarnation = reconciler.incomplete_checkpoints();
                 std::array<std::byte, replication::kCheckpointMaxMessageBytes> encoded_bytes{};
                 const auto encoded =
                     replication::encode_owner_checkpoint(checkpoint, encoded_bytes);
@@ -317,6 +328,7 @@ TEST_CASE("hello-game publishes a convergent mirror and a leading predicted play
     CHECK(checkpoint_has_player);
     CHECK(predicted_lead);
     CHECK(refused_epoch == 1);
+    CHECK(refused_stale_incarnation == 1);
     CHECK(refused_truncated == 1);
     CHECK(definition.remote_play->digest(mirror_world) ==
           definition.remote_play->digest(server_world));

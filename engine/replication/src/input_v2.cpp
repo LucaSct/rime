@@ -225,6 +225,17 @@ std::uint64_t input_schema_hash(std::string_view profile_id,
     return hash;
 }
 
+std::uint64_t input_schema_hash(std::string_view profile_id,
+                                std::uint32_t profile_version,
+                                double fixed_dt) noexcept {
+    constexpr std::uint64_t kPrime = 1099511628211ull;
+    auto hash = input_schema_hash(profile_id, profile_version);
+    const auto bits = std::bit_cast<std::uint64_t>(fixed_dt);
+    for (unsigned i = 0; i < 8; ++i)
+        hash = (hash ^ ((bits >> (8 * i)) & 0xFFu)) * kPrime;
+    return hash;
+}
+
 std::size_t encode_input_result(const InputResult& result, std::span<std::byte> out) {
     if (out.size() < kInputResultBytes) {
         return 0;
