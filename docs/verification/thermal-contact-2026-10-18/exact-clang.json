@@ -1,0 +1,17 @@
+{
+  "cases": 1225,
+  "status_counts": {
+    "1": 170,
+    "0": 1042,
+    "4": 5,
+    "6": 3,
+    "2": 4,
+    "3": 1
+  },
+  "nonzero_stored_energy_residuals": 954,
+  "first_residual_witness_case": 1,
+  "input_sha256": "e2f4b227a479ee75792f8537d11cb9e1cfd1423c41f8da8a4018f02d8dea7746",
+  "output_sha256": "2e735109d82bbf4f2baa0d2fe36126f4642ee0e2aff95b629cb6d2fc2c4b45b6",
+  "compiler": "clang++",
+  "library_sha256": "28c705009e1b45f9e08c8d7c16c0c1148425a0d63b6cdc1cfdbf14f5e0bc06a5"
+}

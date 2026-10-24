@@ -2,6 +2,7 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -9,16 +10,27 @@
 
 #include "rime/audio/audio.hpp"
 #include "rime/audio/bank.hpp"
+#include "rime/audio/reverb.hpp"
 #include "rime/core/math/quat.hpp"
 #include "rime/core/math/vec.hpp"
 
 // The engine mixer (m13.4, ADR-0035's audio v1): the real backend behind M8.4's `AudioBackend`
 // seam, which has stood since M8.4 with nothing but a logger behind it.
 //
-// WHAT IT IS. Voices, distance attenuation, constant-power stereo panning, and a deterministic
-// float mixdown. What it is NOT, deliberately: no occlusion, no reverb, no HRTF, no doppler, no
-// streaming, no voice handles you can stop or re-aim. Every one of those is a real feature and none
-// of them is what "the block should make a noise when it falls over" needs.
+// WHAT IT IS. Voices, distance attenuation, constant-power stereo panning, a shared reverb send,
+// and a deterministic float mixdown. What it is NOT, deliberately: no occlusion, no HRTF, no
+// doppler, no streaming, no voice handles you can stop or re-aim. Every one of those is a real
+// feature and none of them is what "the block should make a noise when it falls over" needs.
+//
+// WHAT KEEPS A COLLAPSE FROM BUZZING (2026-10, measured on the city collapse): the original mixer
+// started every play() it was handed. One charge produced 362 plays in a single tick, all the same
+// short buffer starting on the same sample -- 48 coherent copies of one waveform, which sum into
+// one loud pitch -- and then a play every tick or two, each restarting that buffer on the 60 Hz
+// tick grid. Both are periodic, and periodic is what the ear calls a tone. So now: a sound class
+// can forbid restarting the same buffer inside a window, plays pick among several recordings and
+// jitter their speed a few percent, the voice cap evicts the quietest voice (by its real level,
+// not the zero a not-yet-rendered voice happens to hold), and an optional limiter keeps a dense
+// pile-up under full scale without the hard-clip crackle.
 //
 // DETERMINISM IS THE PROOF SURFACE, and it is why this is testable at all. CI is deaf: no runner
 // has a sound device, and a test that opened one would be a test that skipped. So the mixer's
@@ -62,6 +74,32 @@ struct MixerConfig {
     // lower this (or, when a scene really needs it, to add the limiter v1 deliberately does not
     // have).
     float master_gain = 0.35f;
+
+    // Per-GROUP voice budgets (index = SoundClass::group; 0 = no extra limit beyond max_voices).
+    // Group 1 is destruction: a collapsing building may use at most this many of the voices, so
+    // gunfire (group 0) always has the rest. Without a budget, a hundred falling bricks starve the
+    // one sound the player is actually causing.
+    std::array<std::uint32_t, 4> group_max_voices{0u, 20u, 0u, 0u};
+
+    // Seed of the mixer's own PRNG, which picks variants and pitch jitter. Deterministic by
+    // contract: the same play() sequence with the same seed renders the same samples.
+    std::uint32_t seed = 0x5EED'A0D1u;
+
+    // The shared reverb (see reverb.hpp). Sound classes choose how much of each voice enters it
+    // via `SoundClass::reverb_send`; a class with no send costs nothing and a mixer that never
+    // sees a send never runs the reverb at all.
+    float reverb_decay_seconds = 1.5f;
+    float reverb_damping = 0.35f;
+    float reverb_wet = 1.0f; // master level of the wet signal
+
+    // A peak limiter on the final stereo sum. Off by default so the clip counter keeps meaning
+    // "the mix is too hot" in the tests that exist to catch that; a game with unbounded event
+    // density turns it on. Mechanism: a short LOOKAHEAD ramps the gain down before a peak rather
+    // than clamping it after the fact, because a clamp flat-tops the waveform and flat-topping is
+    // the crackle you hear on a clipped explosion. The gain then releases slowly.
+    bool limiter = false;
+    float limiter_ceiling = 0.95f;
+    float limiter_release_seconds = 0.20f;
 };
 
 // What a render did. As everywhere else in this engine, each counter exists because the failure it
@@ -71,10 +109,38 @@ struct MixStats {
     std::uint64_t frames_rendered = 0;
     std::size_t voices_active = 0; // still sounding at the end of the block
     std::uint64_t voices_started = 0;
-    std::uint64_t voices_stolen = 0;   // evicted by the cap to make room
-    std::uint64_t voices_unknown = 0;  // play() named a sound the bank does not have
-    std::uint64_t clipped_samples = 0; // hit the [-1, 1] rail — the mix is too hot
-    float peak = 0.0f;                 // largest absolute sample before clamping
+    std::uint64_t voices_stolen = 0;       // evicted by the cap to make room
+    std::uint64_t voices_unknown = 0;      // play() named a sound the bank does not have
+    std::uint64_t voices_suppressed = 0;   // refused by the class retrigger window (the buzz guard)
+    std::uint64_t voices_dropped = 0;      // refused because the cap was full of louder voices
+    std::uint64_t voices_inaudible = 0;    // refused because the level was below audibility
+    std::uint64_t limited_samples = 0;     // frames where the limiter reduced the gain
+    std::uint64_t clipped_samples = 0;     // hit the [-1, 1] rail — the mix is too hot
+    float peak = 0.0f;                     // largest absolute sample before clamping
+    std::uint64_t reflections_started = 0; // delayed echo voices that actually began playing
+    std::uint64_t reflections_dropped =
+        0; // refused by cap, inaudible, or past kMaxEarlyReflections
+};
+
+inline constexpr std::size_t kMaxEarlyReflections = 6;
+
+// Discrete early reflection for geometric acoustics (ADR-0035 / M13).
+//
+// The IMAGE-SOURCE METHOD: acoustic reflections from planar boundaries (walls, ground, ceiling)
+// are represented as virtual sound sources placed at the mirrored position across each plane.
+//
+// WHY ONE-POLE LOW-PASS: real boundary materials (concrete, brick, glass) absorb high frequencies
+// much more strongly than lows, and air damping increases with frequency. Filtering each delayed
+// voice (~4 kHz cutoff) darkens the echo so it sounds like a bounce rather than duplicate gunfire.
+//
+// WHY NO REVERB SEND: the direct gunshot already feeds the mixer's shared late reverb tank
+// (reverb.cpp). Sending the discrete reflections into the tank too would recirculate the sound
+// twice, unnaturally doubling the late diffuse energy and muddying the space.
+struct EarlyReflection {
+    core::Vec3 position; // IMAGE SOURCE position (the mirrored shooter), world metres
+    float delay_seconds; // EXCESS path delay over the direct sound, clamped by the mixer to [0.030,
+                         // 0.200]
+    float gain;          // linear, already includes wall absorption; the mixer adds nothing else
 };
 
 class Mixer final : public AudioBackend {
@@ -87,6 +153,14 @@ public:
     // AudioBackend. Starts a voice at the next block boundary. Cheap and allocation-free in the
     // steady state — safe to call from a simulation tick, which is where destruction events arrive.
     void play(SoundId sound, core::Vec3 position, float gain) override;
+
+    // Play a sound with up to kMaxEarlyReflections discrete echoes. The direct sound is played at
+    // `position` with `gain`, and each reflection becomes a delayed voice originating from its
+    // image-source position, sample-accurately delayed and low-pass filtered.
+    void play_with_reflections(SoundId sound,
+                               core::Vec3 position,
+                               float gain,
+                               std::span<const EarlyReflection> reflections);
 
     void set_listener(const Listener& listener) noexcept { listener_ = listener; }
 
@@ -101,12 +175,27 @@ public:
 
     void reset_stats() noexcept;
 
-    [[nodiscard]] std::size_t voice_count() const noexcept { return voices_.size(); }
+    // Voices that count against the cap: those not already being faded out by an eviction. (An
+    // evicted voice lingers for one block so it can glide to silence instead of clicking.)
+    [[nodiscard]] std::size_t voice_count() const noexcept {
+        std::size_t n = 0;
+        for (const Voice& v : voices_) {
+            n += v.fading ? 0u : 1u;
+        }
+        return n;
+    }
 
 private:
     struct Voice {
         SoundId sound = 0;
-        std::size_t cursor = 0; // next sample index into the bank buffer
+        std::size_t variant = 0;
+        // Playback position in SAMPLES, fractional so a pitch-jittered voice (rate != 1) can read
+        // between samples. A voice at rate exactly 1 only ever holds whole numbers here.
+        double cursor = 0.0;
+        float rate = 1.0f;
+        float send = 0.0f;  // reverb send of this voice's class
+        float level = 0.0f; // attenuation * gain * master: what the voice-cap ranks on
+        float att = 0.0f;   // level before the per-voice gain, ramped for the reverb bus
         core::Vec3 position{0.0f, 0.0f, 0.0f};
         float gain = 1.0f;
         // Per-channel gains are held across blocks and RAMPED to their new targets inside each
@@ -115,17 +204,48 @@ private:
         // fix.
         float left = 0.0f;
         float right = 0.0f;
+        std::uint8_t group = 0;
+        bool fading = false;  // evicted: gliding to silence, removed after this block
         bool started = false; // false until the first block, so gains start AT target, not from 0
+        bool is_reflection = false;
+        std::int64_t delay_frames = 0; // remaining frames to delay before playback onset
+        float lp_state = 0.0f;         // one-pole low-pass filter state (~4 kHz)
     };
 
     [[nodiscard]] float attenuation(float distance) const noexcept;
-    void channel_gains(const Voice& v, float& left, float& right) const noexcept;
+    // Per-channel gains for `v`, and the scalar level they share (before panning).
+    void channel_gains(const Voice& v, float& left, float& right, float& level) const noexcept;
+    [[nodiscard]] std::uint32_t next_random() noexcept;
+    void apply_limiter(std::span<float> out, std::size_t frames);
+    void evict(Voice& victim);
+    [[nodiscard]] Voice* quietest_active(int group) noexcept;
+    bool make_room(Voice* victim, bool newcomer_is_reflection, float newcomer_level);
 
     SoundBank bank_;
     MixerConfig config_;
     Listener listener_;
     std::vector<Voice> voices_;
     MixStats stats_;
+
+    std::uint32_t rng_ = 1;
+    // The mixer's own clock in frames. Separate from `stats_.frames_rendered`, which
+    // reset_stats() zeroes: retrigger windows must not forget what time it is.
+    std::int64_t clock_ = 0;
+
+    // Shuffle bag per sound id: every variant once, in random order, before any repeats.
+    struct Bag {
+        std::vector<std::uint16_t> order;
+        std::size_t next = 0;
+    };
+
+    std::vector<Bag> bags_;
+    std::vector<float> pending_power_;                  // per sound id: energy of refused plays
+    std::vector<std::vector<std::int64_t>> last_start_; // per sound id, per variant: clock at start
+    Reverb reverb_;
+    std::vector<float> bus_, wet_left_, wet_right_;
+    std::int64_t tail_frames_left_ = 0;
+    float limiter_gain_ = 1.0f;
+    std::vector<float> limit_curve_;
 };
 
 } // namespace rime::audio

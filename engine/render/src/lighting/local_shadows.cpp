@@ -70,6 +70,7 @@ bool light_changed(const SpotLightData& a, const SpotLightData& b) {
     const float eps = 1e-4f;
     return core::length(a.position - b.position) > eps ||
            core::length(a.direction - b.direction) > eps || std::fabs(a.range - b.range) > eps ||
+           std::fabs(a.outer_angle - b.outer_angle) > eps ||
            std::fabs(a.cos_inner - b.cos_inner) > eps || std::fabs(a.cos_outer - b.cos_outer) > eps;
 }
 
@@ -238,6 +239,11 @@ void LocalShadowMap::invalidate(const WorldAabb& region) {
         if (s.rendered && s.bounds.overlaps(region))
             s.dirty = true;
     }
+}
+
+void LocalShadowMap::invalidate_all() {
+    for (Slot& slot : slots_)
+        slot.dirty = true;
 }
 
 } // namespace rime::render

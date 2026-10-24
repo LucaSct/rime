@@ -1,0 +1,316 @@
+Test project /home/next/projects/rime/build/release
+      Start  1: physics_playground_headless
+ 1/87 Test  #1: physics_playground_headless .........   Passed    0.03 sec
+      Start  2: networked_destruction_cook
+ 2/87 Test  #2: networked_destruction_cook ..........   Passed    0.61 sec
+      Start  3: networked_destruction_headless
+ 3/87 Test  #3: networked_destruction_headless ......   Passed    1.50 sec
+      Start  4: networked_destruction_udp
+ 4/87 Test  #4: networked_destruction_udp ...........   Passed    0.75 sec
+      Start  5: networked_player_cook
+ 5/87 Test  #5: networked_player_cook ...............   Passed    0.09 sec
+      Start  6: networked_player_headless
+ 6/87 Test  #6: networked_player_headless ...........   Passed    0.09 sec
+      Start  7: remote_view_window_smoke
+ 7/87 Test  #7: remote_view_window_smoke ............   Passed    0.56 sec
+      Start  8: render_graph_sample_smoke
+ 8/87 Test  #8: render_graph_sample_smoke ...........   Passed    0.13 sec
+      Start  9: first_light_headless
+ 9/87 Test  #9: first_light_headless ................   Passed    0.22 sec
+      Start 10: first_light_windowed_input
+10/87 Test #10: first_light_windowed_input ..........   Passed    0.76 sec
+      Start 11: gltf_zoo_cook
+11/87 Test #11: gltf_zoo_cook .......................   Passed    0.08 sec
+      Start 12: gltf_zoo_headless
+12/87 Test #12: gltf_zoo_headless ...................   Passed    0.19 sec
+      Start 13: destructible_wall_cook
+13/87 Test #13: destructible_wall_cook ..............   Passed    0.10 sec
+      Start 14: destructible_wall_headless
+14/87 Test #14: destructible_wall_headless ..........   Passed    0.56 sec
+      Start 15: lit_rooms_headless
+15/87 Test #15: lit_rooms_headless ..................   Passed    0.46 sec
+      Start 16: hello_game_selftest
+16/87 Test #16: hello_game_selftest .................   Passed    0.00 sec
+      Start 17: hello_game_headless
+17/87 Test #17: hello_game_headless .................   Passed    0.18 sec
+      Start 18: hello_game_dedicated_proof
+18/87 Test #18: hello_game_dedicated_proof ..........   Passed    0.75 sec
+      Start 19: hello_game_cli_dedicated
+19/87 Test #19: hello_game_cli_dedicated ............   Passed    0.00 sec
+      Start 20: hello_game_cli_browser_not_yet
+20/87 Test #20: hello_game_cli_browser_not_yet ......   Passed    0.00 sec
+      Start 21: hello_game_cli_content_missing
+21/87 Test #21: hello_game_cli_content_missing ......   Passed    0.00 sec
+      Start 22: target_range_selftest
+22/87 Test #22: target_range_selftest ...............   Passed    0.00 sec
+      Start 23: target_range_headless
+23/87 Test #23: target_range_headless ...............   Passed    0.17 sec
+      Start 24: target_range_authoring_round_trip
+24/87 Test #24: target_range_authoring_round_trip ...   Passed    0.00 sec
+      Start 25: block_demo_cook_wall_bg
+25/87 Test #25: block_demo_cook_wall_bg .............   Passed    0.08 sec
+      Start 26: block_demo_cook_wall_hero
+26/87 Test #26: block_demo_cook_wall_hero ...........   Passed    0.09 sec
+      Start 27: block_demo_cook_side_bg
+27/87 Test #27: block_demo_cook_side_bg .............   Passed    0.08 sec
+      Start 28: block_demo_cook_side_hero
+28/87 Test #28: block_demo_cook_side_hero ...........   Passed    0.08 sec
+      Start 29: block_demo_cook_floor_bg
+29/87 Test #29: block_demo_cook_floor_bg ............   Passed    0.08 sec
+      Start 30: block_demo_cook_floor_hero
+30/87 Test #30: block_demo_cook_floor_hero ..........   Passed    0.08 sec
+      Start 31: block_demo_cook_half_bg
+31/87 Test #31: block_demo_cook_half_bg .............   Passed    0.08 sec
+      Start 32: block_demo_cook_half_hero
+32/87 Test #32: block_demo_cook_half_hero ...........   Passed    0.08 sec
+      Start 33: block_demo_cook_crate
+33/87 Test #33: block_demo_cook_crate ...............   Passed    0.08 sec
+      Start 34: block_demo_cook_ground
+34/87 Test #34: block_demo_cook_ground ..............   Passed    2.47 sec
+      Start 35: the_block_headless
+35/87 Test #35: the_block_headless ..................   Passed    3.86 sec
+      Start 36: the_block_world_smoke
+36/87 Test #36: the_block_world_smoke ...............   Passed    0.39 sec
+      Start 37: the_block_world_gpu_smoke
+37/87 Test #37: the_block_world_gpu_smoke ...........   Passed    5.31 sec
+      Start 38: the_block_environment_smoke
+38/87 Test #38: the_block_environment_smoke .........   Passed  188.81 sec
+      Start 40: block_demo_cook_viewmodel
+39/87 Test #40: block_demo_cook_viewmodel ...........   Passed    0.01 sec
+      Start 39: the_block_viewmodel_smoke
+40/87 Test #39: the_block_viewmodel_smoke ...........   Passed  223.64 sec
+      Start 41: rime_core_tests
+41/87 Test #41: rime_core_tests .....................   Passed    0.07 sec
+      Start 42: rime_ecs_tests
+42/87 Test #42: rime_ecs_tests ......................   Passed    0.05 sec
+      Start 43: rime_physics_tests
+43/87 Test #43: rime_physics_tests ..................   Passed    0.55 sec
+      Start 44: rime_destruction_tests
+44/87 Test #44: rime_destruction_tests ..............   Passed    0.95 sec
+      Start 45: rime_audio_tests
+45/87 Test #45: rime_audio_tests ....................   Passed    0.31 sec
+      Start 46: rime_vfx_tests
+46/87 Test #46: rime_vfx_tests ......................   Passed    0.00 sec
+      Start 47: rime_platform_tests
+47/87 Test #47: rime_platform_tests .................   Passed    0.01 sec
+      Start 48: rime_assets_tests
+48/87 Test #48: rime_assets_tests ...................   Passed    0.01 sec
+      Start 49: rime_viewer_tests
+49/87 Test #49: rime_viewer_tests ...................   Passed    0.00 sec
+      Start 50: rime_stream_codec_tests
+50/87 Test #50: rime_stream_codec_tests .............   Passed    0.00 sec
+      Start 51: rime_stream_video_tests
+51/87 Test #51: rime_stream_video_tests .............   Passed    0.05 sec
+      Start 52: rime_stream_latency_tests
+52/87 Test #52: rime_stream_latency_tests ...........   Passed    0.00 sec
+      Start 53: rime_stream_protocol_tests
+53/87 Test #53: rime_stream_protocol_tests ..........   Passed    0.00 sec
+      Start 54: rime_protocol_fixtures_tests
+54/87 Test #54: rime_protocol_fixtures_tests ........   Passed    0.00 sec
+      Start 55: rime_stream_tests
+55/87 Test #55: rime_stream_tests ...................   Passed    0.06 sec
+      Start 56: rime_stream_loopback_tests
+56/87 Test #56: rime_stream_loopback_tests ..........   Passed    0.01 sec
+      Start 57: rime_editorhost_tests
+57/87 Test #57: rime_editorhost_tests ...............   Passed    0.00 sec
+      Start 58: rime_scene_tests
+58/87 Test #58: rime_scene_tests ....................   Passed    0.00 sec
+      Start 59: rime_app_tests
+59/87 Test #59: rime_app_tests ......................   Passed    0.05 sec
+      Start 60: rime_net_tests
+60/87 Test #60: rime_net_tests ......................   Passed    0.01 sec
+      Start 61: rime_net_session_tests
+61/87 Test #61: rime_net_session_tests ..............   Passed    0.31 sec
+      Start 62: rime_net_smoke
+62/87 Test #62: rime_net_smoke ......................   Passed    1.02 sec
+      Start 63: rime_replication_tests
+63/87 Test #63: rime_replication_tests ..............   Passed    0.05 sec
+      Start 64: rime_replication_input_tests
+64/87 Test #64: rime_replication_input_tests ........   Passed    0.00 sec
+      Start 65: rime_destruction_net_tests
+65/87 Test #65: rime_destruction_net_tests ..........   Passed    0.08 sec
+      Start 66: rime_gameplay_tests
+66/87 Test #66: rime_gameplay_tests .................   Passed    1.43 sec
+      Start 67: rime_gameplay_net_tests
+67/87 Test #67: rime_gameplay_net_tests .............   Passed    0.10 sec
+      Start 68: rime_destruction_render_tests
+68/87 Test #68: rime_destruction_render_tests .......   Passed    0.03 sec
+      Start 69: blockkit_test
+69/87 Test #69: blockkit_test .......................   Passed    0.00 sec
+      Start 71: block_cook_wall_bg
+70/87 Test #71: block_cook_wall_bg ..................   Passed    0.20 sec
+      Start 72: block_cook_wall_hero
+71/87 Test #72: block_cook_wall_hero ................   Passed    0.08 sec
+      Start 73: block_cook_side_bg
+72/87 Test #73: block_cook_side_bg ..................   Passed    0.08 sec
+      Start 74: block_cook_side_hero
+73/87 Test #74: block_cook_side_hero ................   Passed    0.08 sec
+      Start 75: block_cook_floor_bg
+74/87 Test #75: block_cook_floor_bg .................   Passed    0.08 sec
+      Start 76: block_cook_floor_hero
+75/87 Test #76: block_cook_floor_hero ...............   Passed    0.08 sec
+      Start 77: block_cook_half_bg
+76/87 Test #77: block_cook_half_bg ..................   Passed    0.08 sec
+      Start 78: block_cook_half_hero
+77/87 Test #78: block_cook_half_hero ................   Passed    0.08 sec
+      Start 79: block_cook_crate
+78/87 Test #79: block_cook_crate ....................   Passed    0.08 sec
+      Start 70: block_standup_test
+79/87 Test #70: block_standup_test ..................   Passed    0.38 sec
+      Start 80: block_render_test
+80/87 Test #80: block_render_test ...................   Passed    0.33 sec
+      Start 81: ground_test
+81/87 Test #81: ground_test .........................   Passed    0.00 sec
+      Start 82: rime_terrain_collision_tests
+82/87 Test #82: rime_terrain_collision_tests ........   Passed    0.56 sec
+      Start 83: rime_worldkit_tests
+83/87 Test #83: rime_worldkit_tests .................   Passed    0.00 sec
+      Start 84: rime_capi_tests
+84/87 Test #84: rime_capi_tests .....................   Passed    0.00 sec
+      Start 85: rime_rhi_tests
+85/87 Test #85: rime_rhi_tests ......................***Failed    0.77 sec
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[ERROR] rhi: copy_buffer_regions region [250 -> 0, 16 bytes] exceeds the source (256) or destination (256); nothing recorded (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:1077)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354), validation on (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: descriptor cache OFF (RIME_VK_DESCRIPTOR_CACHE=0) — one set per draw (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:120)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354), validation on (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi test: device on 'llvmpipe (LLVM 23.1.1, 256 bits)' (api_version=0x404162) (/home/next/projects/rime/tests/rhi/device_test.cpp:39)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[ERROR] rhi: create_texture('m10.1a-bad-cube'): a cube needs array_layers a positive multiple of 6 (got 4) (/home/next/projects/rime/engine/rhi/src/vulkan/resources_vulkan.cpp:85)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/rhi/block_format_test.cpp:58:
+TEST CASE:  m16.1: the device reports whether it can sample block-compressed textures
+
+/home/next/projects/rime/tests/rhi/block_format_test.cpp:71: MESSAGE: adapter 'llvmpipe (LLVM 23.1.1, 256 bits)' (driver 'llvmpipe') block_compression = YES
+
+===============================================================================
+/home/next/projects/rime/tests/rhi/descriptor_cache_test.cpp:595:
+TEST CASE:  vulkan descriptor cache: pixels identical with the cache on and off
+
+/home/next/projects/rime/tests/rhi/descriptor_cache_test.cpp:532: ERROR: CHECK( stat(line, "pools") >= 2 ) is NOT correct!
+  values: CHECK( 1 >= 2 )
+  logged: cache_on := true
+          more distinct sets than the cache holds: evictions never corrupt recorded draws
+
+/home/next/projects/rime/tests/rhi/descriptor_cache_test.cpp:532: ERROR: CHECK( stat(line, "pools") >= 2 ) is NOT correct!
+  values: CHECK( 1 >= 2 )
+  logged: cache_on := false
+          more distinct sets than the cache holds: evictions never corrupt recorded draws
+
+===============================================================================
+[doctest] test cases:   49 |   48 passed | 1 failed | 0 skipped
+[doctest] assertions: 5852 | 5850 passed | 2 failed |
+[doctest] Status: FAILURE!
+
+      Start 86: rime_render_tests
+86/87 Test #86: rime_render_tests ...................   Passed   30.93 sec
+      Start 87: rime_terrain_render_tests
+87/87 Test #87: rime_terrain_render_tests ...........   Passed    8.62 sec
+
+99% tests passed, 1 tests failed out of 87
+
+Total Test time (real) = 480.09 sec
+
+The following tests FAILED:
+	 85 - rime_rhi_tests (Failed)
+Errors while running CTest

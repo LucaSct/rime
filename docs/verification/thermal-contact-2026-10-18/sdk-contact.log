@@ -1,0 +1,49 @@
+-- Using Conan toolchain: /home/next/projects/rime/build/release/conan_toolchain.cmake
+-- Conan toolchain: Defining architecture flag: -m64
+-- Conan toolchain: C++ Standard 20 with extensions OFF
+-- The CXX compiler identification is GNU 16.2.1
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Conan: Component target declared 'fmt::fmt'
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Conan: Component target declared 'libjpeg-turbo::jpeg-static'
+-- Conan: Component target declared 'libjpeg-turbo::turbojpeg-static'
+-- Conan: Target declared 'libjpeg-turbo::libjpeg-turbo'
+-- Conan: Target declared 'LZ4::lz4_static'
+-- Conan: Component target declared 'Vulkan::Headers'
+-- Conan: Component target declared 'Vulkan::Registry'
+-- Conan: Target declared 'vulkan-headers::vulkan-headers'
+-- Conan: Component target declared 'volk::volk'
+-- Conan: Component target declared 'volk::volk_headers'
+-- Conan: Target declared 'GPUOpen::VulkanMemoryAllocator'
+-- Found X11: /usr/include
+-- Looking for XOpenDisplay in /usr/lib/libX11.so;/usr/lib/libXext.so
+-- Looking for XOpenDisplay in /usr/lib/libX11.so;/usr/lib/libXext.so - found
+-- Looking for gethostbyname
+-- Looking for gethostbyname - found
+-- Looking for connect
+-- Looking for connect - found
+-- Looking for remove
+-- Looking for remove - found
+-- Looking for shmat
+-- Looking for shmat - found
+-- Looking for IceConnectionNumber in ICE
+-- Looking for IceConnectionNumber in ICE - found
+-- Found PkgConfig: /usr/bin/pkg-config (found version "3.0.7")
+-- Checking for module 'wayland-client'
+--   Found wayland-client, version 1.26.0
+-- Checking for module 'wayland-cursor'
+--   Found wayland-cursor, version 1.26.0
+-- Checking for module 'xkbcommon'
+--   Found xkbcommon, version 1.13.2
+-- Configuring done (0.4s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/next/reports/rime-thermal-exchange-2026-10-18/sdk-contact/build
+[1/2] Building CXX object CMakeFiles/thermal_contact_sdk.dir/main.cpp.o
+[2/2] Linking CXX executable thermal_contact_sdk
+Installed fluids consumer: PASS, trials=38

@@ -128,3 +128,14 @@ mesh" as separate components is the honest seam — they must never be conflated
 - **Resolving a placed `MeshAsset` to a rendered mesh** (mesh asset-loading + GPU upload), **asset
   thumbnails**, **drag-out placement**, and **cook-staleness indicators** — the browser is
   browse + click-to-place (meshes) in v1.
+
+## Optional thermal runtime readout (ADR-0094)
+
+The thermal preview panel reads separate bounded diagnostics, showing the selected
+cell's validated temperature, liquid mass percentage and energy. It emits no
+commands and never changes undo/save bytes. Settings continue through the generic
+reflected inspector. Relevant settings edits rebuild all cells from initial
+conditions even while paused; invalid descriptions clear rows, while numerical
+refusal visibly retains the last committed state. See [module usage](../../engine/fluids_scene/README.md)
+and the [optional wire contract](thermal-preview-wire.md). A dedicated graph
+canvas/reference picker and clicked thermal creation/save/reopen proof remain open.

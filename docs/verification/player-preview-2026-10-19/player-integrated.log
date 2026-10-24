@@ -1,0 +1,20 @@
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 1 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 2 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 8 static bodies, 5 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 1 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 2 at (0, 1, 0), 1 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (0, 1, 0), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (-10, 1, 2), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[INFO] player-preview: admitted session 1 at (-10, 1, 2), 0 static bodies, 0 source hulls; query-only, no weapons (/home/next/projects/rime/samples/99-the-block/editor_preview_player.cpp:328)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:  17 |  17 passed | 0 failed | 96 skipped
+[doctest] assertions: 177 | 177 passed | 0 failed |
+[doctest] Status: SUCCESS!

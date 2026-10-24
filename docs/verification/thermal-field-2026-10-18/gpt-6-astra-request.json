@@ -1,0 +1,15 @@
+{
+  "model": "gpt-6-astra",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Independent read-only architectural consultation; no tools/files. Give your OWN smallest defensible next-brick proposal, <=650 words. C++20 CPU-only water/ice sample: immutable mass/config, total enthalpy E, piecewise T(E) and liquid MASS fraction; explicit latent plateau, apply_heat(Q) transactional with binary64 nearest/gradual-underflow guards. Receipt exact identity as real values of doubles: requested = stored_delta_hi + stored_delta_lo + update_roundoff. Pure pair exchange_heat(a,b,G W/K,dt) already implemented: backward Euler scalar sign bracket on cached rounded T, \u2264128 trials relative heat width2^-36, no realized hot/cold reversal, copies then atomic two-sided commit; requests exactly opposite, both receipts balance exact energy delta (stored sum alone not exact). ZeroG/dt/equalT no flow. Range/domain failures refuse, no clipping. Some tiny/huge scales refuse; unsupported FP mode refuses.\nNext requested: bounded thermal FIELD before editor preview. Need fixed cells, explicit canonical contact topology, immutable source power descriptions, fixed work/receipt budgets, no per-step allocations, whole-tick rollback, observable failures, zero-step invariance, retained unrounded per-operation receipts for exact whole-field ledger. No moving water/mass/advection/render/network authority. We own all implementation and verify locally. Propose field state/API/clock/limits and numerical stepping contract. Is sorted sequential pair backward-Euler with source-first substeps a useful honestly first-order graph reference? Identify traps for N-body maximum principle, operation/receipt caps, tick retries, zero sources, different limits, source roundoff. Propose decisive tests: multi-hop freezing/melting, disconnected/zero-contact control, exact journal telescope and late rollback, temporal order, and a defensible spatial-refinement witness on an insulated 1D finite-volume cosine rod (mass=rho*A*dx, G=k*A/dx). Choose a timestep scaling that avoids ordered-pair splitting error overwhelming spatial convergence; do not claim pair BE equals global BE. No generic sparse solver or new rational runtime unless necessary."
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "reasoning_effort": "low",
+  "max_tokens": 8000
+}

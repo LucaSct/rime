@@ -1,0 +1,32 @@
+{
+  "command": [
+    "/home/next/reports/rime-player-performance-2026-10-19/native-binding-proof/the-block-binding-proof",
+    "--perf",
+    "--frames",
+    "3",
+    "--warmup",
+    "0",
+    "--width",
+    "1280",
+    "--height",
+    "720",
+    "--content",
+    "/home/next/reports/rime-player-performance-2026-10-19/native-binding-proof/content",
+    "--scene",
+    "/home/next/projects/rime/samples/99-the-block/city-v2.rscene",
+    "--out",
+    "/home/next/reports/rime-player-performance-2026-10-19/native-binding-proof/unqualified-perf-3-frames.json"
+  ],
+  "environment": {
+    "VK_DRIVER_FILES": "/usr/share/vulkan/icd.d/nvidia_icd.json",
+    "RIME_REQUIRE_VULKAN": "1"
+  },
+  "content_links": {
+    "city.rscene": "/home/next/projects/rime/samples/99-the-block/city-v2.rscene",
+    "block": "/home/next/projects/rime/build/release/samples/99-the-block/cooked",
+    "viewmodels": "/home/next/projects/rime/build/release/samples/99-the-block/viewmodel-cooked"
+  },
+  "exit": 1,
+  "purpose": "instrumented count witness only, not FPS/native speedup/gate qualification",
+  "scene_sha256": "6a19ca80d4fbf9796d0261069501cd3ea0e7b98915645729323269ce0bd20b6d"
+}

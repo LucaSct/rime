@@ -23,6 +23,10 @@
 
 layout(location = 0) in vec3 v_world;
 layout(location = 1) in vec2 v_local; // tile-local xz, metres
+// Smooth heightfield normal from terrain.vert. The ONE deliberate departure from the frozen m19.5
+// shader: item 3 of the 2026-10-20 lighting job replaced the per-facet normal below with it, and
+// this reference tracks that change so the m19.6 sky-off proof still isolates the SKY terms.
+layout(location = 3) in vec3 v_normal;
 
 // m19.4: the splat weights (RGBA8_UNORM, one texel = the four layer weights) and the per-tile
 // constants. The push block is not the place for per-layer data, so these live in a small uniform buffer made at
@@ -98,10 +102,7 @@ void main() {
     const float alpha = roughness * roughness;
     const vec3 v = normalize(pc.eye.xyz - v_world);
 
-    vec3 n = normalize(cross(dFdx(v_world), dFdy(v_world)));
-    if (n.y < 0.0) {
-        n = -n; // see the header: a heightfield's surface normal is never downward
-    }
+    const vec3 n = normalize(v_normal);
 
     // `sun.xyz` is the direction the light travels, so the vector TOWARD the light is its negation
     // — the same convention `DirectionalLight` extraction pins in components.hpp. shade_light

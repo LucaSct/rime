@@ -1,0 +1,12 @@
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+phase pixel proof: ice 0.354570 vs liquid 0.063166 radiance; neighbor, Stop/empty and stale generation exact
+phase detail pixel sensitivity: 305 upper / 308 lower changed pixels; frozen, pause/refusal and shared neighbor exact
+===============================================================================
+[doctest] test cases:     11 |     11 passed | 0 failed | 0 skipped
+[doctest] assertions: 613435 | 613435 passed | 0 failed |
+[doctest] Status: SUCCESS!

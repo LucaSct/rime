@@ -1,0 +1,10 @@
+Traceback (most recent call last):
+  File "/home/next/projects/rime/tests/fluids/verify_thermal_field.py", line 243, in <module>
+    main()
+    ~~~~^^
+  File "/home/next/projects/rime/tests/fluids/verify_thermal_field.py", line 235, in main
+    summary = verify(inputs, result.stdout)
+  File "/home/next/projects/rime/tests/fluids/verify_thermal_field.py", line 162, in verify
+    assert allocations == 0, 'advance allocated memory'
+           ^^^^^^^^^^^^^^^^
+AssertionError: advance allocated memory

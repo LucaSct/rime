@@ -62,7 +62,12 @@ fn print_usage() {
         "  editor [--engine <rime-engine>] [--scene <file.rscene>] [--assets <manifest>]\n\
          \x20                              launch the docking shell (needs --features gui)"
     );
+    eprintln!("         [--game <runtime> --game-arg <one argument> ...] enables save-before-run");
     eprintln!("  editor --smoke [--frames N] [--engine <rime-engine>] [--scene <file.rscene>]");
+    eprintln!("      --courtyard-preview  verify the saved three-station thermal city demo");
+    eprintln!("      --thermal-sources  verify thermal authoring and bounded live preview");
+    eprintln!("      --thermal-reload   verify a saved thermal graph and its live preview");
+    eprintln!("      --effect-sources  verify smoke/fire defaults and typed edit/undo/redo");
     eprintln!(
         "      --frames N   receive+decode N streamed viewport frames (else the editor channel)"
     );

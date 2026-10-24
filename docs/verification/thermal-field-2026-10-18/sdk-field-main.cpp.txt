@@ -1,0 +1,18 @@
+#include <rime/fluids/thermal_field.hpp>
+#include <array>
+#include <iostream>
+int main() {
+    using namespace rime::fluids;
+    auto hot=ThermalSample::create(100.,{283.15,1.});
+    auto ice=ThermalSample::create(.01,{273.15,0.});
+    if(!hot || !ice) return 1;
+    std::array cells{*hot,*ice,*ice};
+    std::array links{ThermalLink{0,1,100.},ThermalLink{1,2,100.}};
+    std::array sources{ThermalPowerSource{0,100.}};
+    auto field=ThermalField::create(cells,links,sources,{.1});
+    if(!field) return 2;
+    for(unsigned i=0;i<160;++i)
+        if(field->advance(.1).status!=ThermalFieldStatus::Accepted) return 3;
+    if(field->tick()!=160 || field->cells()[2].state().liquid_mass_fraction<.5 || field->journal().size()!=3) return 4;
+    std::cout << "Installed thermal field consumer: PASS, 160 ticks, multi-hop melting\n";
+}

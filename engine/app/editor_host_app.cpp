@@ -28,6 +28,7 @@
 
 #include <fmt/core.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -60,6 +61,10 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/editorhost/editor_host.hpp"
+#include "rime/editorhost/play_control.hpp"
+#include "rime/editorhost/thermal_preview.hpp"
+#include "rime/fluids_render/phase_surface.hpp"
+#include "rime/fluids_scene/preview.hpp"
 #include "rime/ground/bind.hpp"
 #include "rime/physics/physics.hpp" // umbrella: body/shape/world/components/sync (m9.7 Play)
 #include "rime/platform/event.hpp"
@@ -78,6 +83,7 @@
 #include "rime/stream/frame_streamer.hpp"
 #include "rime/stream/protocol.hpp"
 #include "rime/stream/video_codec.hpp"
+#include "rime/vfx_scene/effects.hpp"
 
 namespace {
 
@@ -419,7 +425,8 @@ int serve_viewport(std::string_view socket_path,
                    std::string_view assets_path,
                    const app::ComponentRegistrar& registrar,
                    const app::ScenePreparer& prepare,
-                   const app::PlayTick& play_tick) {
+                   const app::PlayTick& play_tick,
+                   const app::EditorPlayHooks& player_hooks) {
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kViewportWidth, kViewportHeight};
@@ -453,6 +460,7 @@ int serve_viewport(std::string_view socket_path,
     // still reference mesh buffers, and its destructor drains that first).
     render::MeshRegistry meshes(*app.device());
     render::MaterialRegistry materials;
+    fluids_render::PhaseDetail phase_detail(*app.device());
     render::SceneRenderer renderer(*app.device(), meshes, materials);
     // Size the renderer's uniform ring to this backend's actual frame depth rather than leaving it
     // on the safe default. Same rule Application applies to its own per-frame command buffers.
@@ -463,6 +471,7 @@ int serve_viewport(std::string_view socket_path,
     // demo). Either way the registries above are populated so MeshRef/MaterialRef indices resolve.
     editorhost::HostedScene hosted;
     if (scene_path.empty()) {
+        registrar(app.world());
         build_viewport_scene(app.world(), meshes, materials);
     } else {
         load_viewport_scene(app.world(), meshes, materials, scene_path, hosted, registrar);
@@ -527,6 +536,10 @@ int serve_viewport(std::string_view socket_path,
     // applied where a user opens arbitrary content rather than only where we author it.
     render::LightingSettings lighting;
     lighting.clustered_enabled = true;
+    // Preview must show authored cast shadows too. Clustering alone lights the scene but
+    // leaves both shadow gates at their baseline-off defaults, unlike the playable city.
+    lighting.shadows_enabled = true;
+    lighting.local_shadows_enabled = true;
     renderer.set_lighting(lighting);
     renderer.set_ambient(0.03f, 0.03f, 0.04f);
 
@@ -554,6 +567,15 @@ int serve_viewport(std::string_view socket_path,
     std::uint64_t gizmo_editor_id = editorhost::kNoEditorId;
     std::unique_ptr<physics::PhysicsWorld> physics_world;
     physics::PhysicsSync physics_sync;
+    vfx_scene::Effects effects;
+    fluids_scene::ThermalPreview thermal;
+    std::uint64_t thermal_session = 0;
+    bool thermal_sent_active = false;
+    std::uint64_t effects_tick = 0;
+    std::vector<render::GpuParticle> effect_particles;
+    effect_particles.reserve(vfx_scene::Effects::max_particles);
+    std::vector<render::GpuParticle> flame_particles;
+    flame_particles.reserve(vfx_scene::Effects::max_flames);
 
     // ── Client input (m18 Track H, ADR-0054) ─────────────────────────────────────────────────
     // The browser page sends `stream::InputEvent`s over the same connection the editor band uses,
@@ -569,6 +591,89 @@ int serve_viewport(std::string_view socket_path,
     std::vector<platform::Event> input_events; // reused per drain; cleared, never reallocated
     std::uint64_t input_malformed = 0;         // an Input payload that did not decode
     bool input_released = false;               // release_all has run for this (single) connection
+
+    editorhost::PlayControlStateMsg play_control;
+    play_control.supported_modes = player_hooks.supported() ? 3 : 1;
+    bool player_admitted = false;
+    std::uint64_t uncaptured_inputs = 0;
+    const auto player_context = [&] {
+        return app::EditorPlayContext{
+            app.world(), *physics_world, play_control.session_id, play_session.tick_count()};
+    };
+    const auto notify_player = [&](app::EditorPlayTransition transition) {
+        if (player_admitted && physics_world && player_hooks.transition) {
+            auto context = player_context();
+            player_hooks.transition(context, transition);
+        }
+    };
+    const auto release_player_input = [&] {
+        // Inspect has its own persistent fly-camera input owner. Do not consume that
+        // owner's synthetic key-ups through this Player-only lifecycle.
+        if (play_control.mode != 1 && !player_admitted)
+            return;
+        play_control.captured = false;
+        notify_player(app::EditorPlayTransition::ReleaseInput);
+        // The next capture starts a new pointer baseline. Delivering accumulated absolute
+        // positions from the previous capture would turn a focus change into a sudden look.
+        input_translator.release_all(input_events);
+        input_events.clear();
+    };
+    const auto begin_session = [&](bool paused) {
+        const auto before = play_session.phase();
+        if (paused)
+            play_session.pause(app.world());
+        else
+            play_session.play(app.world());
+        if (before == editorhost::PlayPhase::Edit) {
+            effects.reset();
+            thermal.reset();
+            ++thermal_session;
+            effects_tick = 0;
+            physics_world = std::make_unique<physics::PhysicsWorld>();
+            physics_sync = physics::PhysicsSync{};
+            ++play_control.session_id;
+            play_control.status = 1;
+            play_control.reason.clear();
+            play_control.captured = false;
+            if (play_control.mode == 1) {
+                release_player_input();
+                // A final transform edit can share this drain batch with Play. Bind collision
+                // from that edited pose, not from the previous render's derived transforms.
+                scene::derive_world_transforms(app.world(), app.jobs());
+                (void)ground::bind_ground(app.world(), *physics_world);
+                physics_sync.reconcile(app.world(), *physics_world);
+                auto context = player_context();
+                const auto admission = player_hooks.begin(context);
+                if (!admission.ok) {
+                    // Begin may have admitted a prefix of transient collision. Give the owner
+                    // its cleanup opportunity while the collision world is still alive.
+                    if (player_hooks.transition)
+                        player_hooks.transition(context, app::EditorPlayTransition::Stop);
+                    (void)play_session.stop(app.world());
+                    scene::derive_world_transforms(app.world(), app.jobs());
+                    physics_world.reset();
+                    physics_sync = physics::PhysicsSync{};
+                    play_control.status = 2;
+                    play_control.reason = admission.reason.substr(0, 1024);
+                    RIME_WARN("editor-host: Walk Preview refused: {}", play_control.reason);
+                    app.timestep().reset();
+                    return false;
+                }
+                player_admitted = true;
+                RIME_INFO("editor-host: Walk Preview admitted, session {}",
+                          play_control.session_id);
+            }
+        } else if (!paused && before == editorhost::PlayPhase::Paused) {
+            notify_player(app::EditorPlayTransition::Resume);
+        }
+        if (paused) {
+            notify_player(app::EditorPlayTransition::Pause);
+            if (play_control.mode == 1)
+                release_player_input();
+        }
+        app.timestep().reset();
+        return true;
+    };
 
     // The one place a fixed tick advances physics: Application's per-tick hook (ADR-0023), which
     // runs on the main thread between the Schedule and the render — exactly where PhysicsSync's
@@ -588,9 +693,19 @@ int serve_viewport(std::string_view socket_path,
         // already swapped in by `Application::step` before it runs any tick, so the span is the
         // events this frame's drain posted — and the render that follows the tick sees whatever
         // the game did with them.
-        if (play_tick) {
+        if (player_admitted) {
+            const bool single_step = play_session.phase() == editorhost::PlayPhase::Paused;
+            if (single_step)
+                notify_player(app::EditorPlayTransition::Resume);
+            auto context = player_context();
+            player_hooks.tick(context, app.frame_input(), dt);
+            if (single_step)
+                notify_player(app::EditorPlayTransition::Pause);
+        } else if (play_tick) {
             play_tick(w, app.frame_input(), dt);
         }
+        (void)effects.tick(w, ++effects_tick, static_cast<float>(dt));
+        (void)thermal.tick(w, play_session.tick_count(), dt);
     });
 
     render::RGTexture last_ldr{};
@@ -609,6 +724,48 @@ int serve_viewport(std::string_view socket_path,
             // it, and never be given the `MaterialRef` that makes it draw.
             (void)bridge.resolve_material_assets(ctx.world);
         }
+        // Authoring state is reflected; presentation is a disposable side table. In particular,
+        // never create PointLight components for fire: saving during Play would bake those lights
+        // into the level and resurrect them after extinguish. Paused removals reconcile too.
+        if (play_session.phase() != editorhost::PlayPhase::Edit)
+            effects.reconcile(ctx.world);
+        if (play_session.phase() != editorhost::PlayPhase::Edit)
+            thermal.reconcile(ctx.world);
+        const auto phase_surfaces = phase_detail.surfaces(ctx.world, thermal);
+        (void)renderer.set_surface_appearances(phase_surfaces.span());
+        effect_particles.clear();
+        for (const auto& p : effects.field().particles()) {
+            const auto appearance = vfx_scene::smoke_appearance(p, effects.lights());
+            effect_particles.push_back(
+                {{p.position.x, p.position.y, p.position.z, p.size},
+                 {appearance.color.x, appearance.color.y, appearance.color.z, appearance.opacity}});
+        }
+        render::FxSettings fx{};
+        fx.enabled = !effect_particles.empty();
+        fx.max_particles = vfx_scene::Effects::max_particles;
+        renderer.set_smoke_particles(effect_particles, fx);
+        flame_particles.clear();
+        for (const auto& flame : effects.flames())
+            flame_particles.push_back(
+                {{flame.position.x, flame.position.y, flame.position.z, flame.half_size},
+                 {flame.color.x, flame.color.y, flame.color.z, flame.opacity}});
+        render::FxSettings flame_fx{};
+        flame_fx.enabled = !flame_particles.empty();
+        flame_fx.max_particles = vfx_scene::Effects::max_flames;
+        renderer.set_flame_particles(flame_particles, flame_fx);
+        std::array<render::GpuPointLight, vfx_scene::Effects::max_sources> fire_lights{};
+        std::size_t fire_light_count = 0;
+        for (const auto& light : effects.lights()) {
+            auto& row = fire_lights[fire_light_count++];
+            row.position[0] = light.position.x;
+            row.position[1] = light.position.y;
+            row.position[2] = light.position.z;
+            row.position[3] = light.radius;
+            row.radiance[0] = light.color.x * light.intensity;
+            row.radiance[1] = light.color.y * light.intensity;
+            row.radiance[2] = light.color.z * light.intensity;
+        }
+        renderer.set_transient_point_lights({fire_lights.data(), fire_light_count});
         last_ldr = renderer.render(*ctx.graph, ctx.world, ctx.extent, true).ldr;
         // One lens per frame, shared by the gizmo pass and the ViewportCamera message — computed
         // AFTER the tick (the callback runs post-tick), so it sees the same WorldTransforms the
@@ -744,6 +901,7 @@ int serve_viewport(std::string_view socket_path,
             first_frame; // always render the very first frame (the viewport is blank)
         first_frame = false;
         bool snapshot_requested = false;
+        bool derive_after_edits = false;
         // Armed by a Step message below, consumed once by frame_dt right after this drain — exactly
         // one extra fixed tick THIS iteration (m9.7's "step = exactly one tick").
         bool pending_step = false;
@@ -808,6 +966,12 @@ int serve_viewport(std::string_view socket_path,
                 // Deliberately NOT frame-affecting: input moves the world through the tick, and a
                 // Playing session already renders every iteration, so forcing a render here would
                 // only defeat m10.0-perf's idle skip for a mouse moving over a paused editor.
+                if (e.type == stream::MessageType::Input && play_control.mode == 1 &&
+                    (!play_control.captured ||
+                     play_session.phase() != editorhost::PlayPhase::Playing)) {
+                    ++uncaptured_inputs;
+                    continue;
+                }
                 const app::InputDispatch input_disp =
                     app::dispatch_input_message(e.type, e.payload, input_translator, input_events);
                 if (input_disp != app::InputDispatch::NotInput) {
@@ -844,8 +1008,14 @@ int serve_viewport(std::string_view socket_path,
                     // runs on the thread that owns the world.
                     std::string save_path;
                     if (editorhost::parse_save_scene(e.payload, save_path)) {
-                        const editorhost::SceneSaveOutcome outcome =
-                            editorhost::save_hosted_scene(app.world(), hosted, save_path);
+                        editorhost::SceneSaveOutcome outcome;
+                        if (play_control.mode == 1 &&
+                            play_session.phase() != editorhost::PlayPhase::Edit) {
+                            outcome.path = save_path;
+                            outcome.error = "Stop Walk Preview before saving the editing state";
+                        } else {
+                            outcome = editorhost::save_hosted_scene(app.world(), hosted, save_path);
+                        }
                         if (outcome.ok) {
                             RIME_INFO("editor-host: saved {} entities to {} ({} bytes)",
                                       outcome.entities,
@@ -881,30 +1051,45 @@ int serve_viewport(std::string_view socket_path,
                                 : static_cast<render::GizmoMode>(gs.mode <= 3 ? gs.mode : 0);
                         gizmo_sel.axis = static_cast<render::GizmoAxis>(gs.axis <= 3 ? gs.axis : 0);
                     }
+                } else if (msg == editorhost::EditorMessage::PlayControl) {
+                    editorhost::PlayControlMsg control;
+                    if (!editorhost::parse_play_control(e.payload, control) ||
+                        control.session_id != play_control.session_id)
+                        continue;
+                    using Action = editorhost::PlayControlAction;
+                    if (control.action == Action::Release) {
+                        release_player_input();
+                    } else if (control.action == Action::Capture) {
+                        if (player_admitted &&
+                            play_session.phase() == editorhost::PlayPhase::Playing) {
+                            release_player_input();
+                            play_control.captured = true;
+                        }
+                    } else if (play_session.phase() == editorhost::PlayPhase::Edit) {
+                        const bool player = control.action == Action::SelectPlayer;
+                        if (player && !player_hooks.supported()) {
+                            play_control.status = 2;
+                            play_control.reason = "This host does not provide Walk Preview";
+                        } else {
+                            play_control.mode = player ? 1 : 0;
+                            play_control.status = 0;
+                            play_control.reason.clear();
+                        }
+                    }
                 } else if (msg == editorhost::EditorMessage::Play) {
                     // Begin (Edit) or resume (Paused) — play() snapshots only on the FIRST call out
                     // of Edit, so a resume after Pause keeps restoring the true pre-play state, not
                     // whatever the world looked like when Pause was pressed.
-                    const bool was_edit = play_session.phase() == editorhost::PlayPhase::Edit;
-                    play_session.play(app.world());
-                    if (was_edit) {
-                        physics_world = std::make_unique<physics::PhysicsWorld>();
-                        physics_sync = physics::PhysicsSync{};
-                    }
-                    app.timestep().reset(); // m9.7: no leftover accumulator across a state change
+                    (void)begin_session(false);
                 } else if (msg == editorhost::EditorMessage::Pause) {
-                    play_session.pause(app.world());
-                    app.timestep().reset();
+                    (void)begin_session(true);
                 } else if (msg == editorhost::EditorMessage::Step) {
-                    const bool was_edit = play_session.phase() == editorhost::PlayPhase::Edit;
-                    play_session.pause(app.world()); // ensure a snapshot + a Paused steady state
-                    if (was_edit) {
-                        physics_world = std::make_unique<physics::PhysicsWorld>();
-                        physics_sync = physics::PhysicsSync{};
-                    }
-                    app.timestep().reset();
-                    pending_step = true;
+                    pending_step = begin_session(true);
                 } else if (msg == editorhost::EditorMessage::Stop) {
+                    release_player_input();
+                    notify_player(app::EditorPlayTransition::Stop);
+                    player_admitted = false;
+                    pending_step = false;
                     if (play_session.stop(app.world())) {
                         // The restore only reconstructed reflected components (LocalTransform among
                         // them); WorldTransform is derived and must be recomputed, exactly like a
@@ -916,14 +1101,36 @@ int serve_viewport(std::string_view socket_path,
                         // whatever the old roster remembered.
                         physics_world.reset();
                         physics_sync = physics::PhysicsSync{};
+                        effects.reset();
+                        thermal.reset();
+                        effects_tick = 0;
                     }
+                    play_control.status = 0;
+                    play_control.reason.clear();
                     app.timestep().reset();
                 } else {
                     // A world edit, through the same dispatcher the GPU-free host uses — and the
                     // structural ones answered in order, which is what the editor's undo history
                     // waits on before it commits a step.
-                    const editorhost::EditOutcome outcome =
-                        editorhost::apply_editor_edit(app.world(), editor_ids, msg, e.payload);
+                    editorhost::EditOutcome outcome;
+                    if (player_admitted) {
+                        // Collision in a walking preview is a snapshot of the authored static
+                        // geometry. Refuse edits on the server too: moving only the picture would
+                        // create invisible walls. Inspect Preview retains its live-edit route.
+                        const bool structural = msg == editorhost::EditorMessage::Spawn ||
+                                                msg == editorhost::EditorMessage::SpawnEntity ||
+                                                msg == editorhost::EditorMessage::Despawn ||
+                                                msg == editorhost::EditorMessage::AddComponent ||
+                                                msg == editorhost::EditorMessage::RemoveComponent;
+                        outcome.reply = structural;
+                        core::ByteReader reader(e.payload);
+                        (void)reader.u64(outcome.editor_id);
+                        play_control.reason = "Stop Walk Preview before editing the scene";
+                    } else {
+                        outcome =
+                            editorhost::apply_editor_edit(app.world(), editor_ids, msg, e.payload);
+                    }
+                    derive_after_edits = derive_after_edits || outcome.ok;
                     if (outcome.reply &&
                         !conn.send_message(
                             static_cast<stream::MessageType>(editorhost::EditorMessage::EditResult),
@@ -936,6 +1143,12 @@ int serve_viewport(std::string_view socket_path,
             pending.clear();
         }
 
+        // A newly authored source has LocalTransform but no derived WorldTransform yet. The
+        // usual propagation only updates existing pairs, so derive missing poses after edits,
+        // before either a Play tick or a paused render tries to consume the new entity.
+        if (derive_after_edits)
+            scene::derive_world_transforms(app.world(), app.jobs());
+
         // A key held when the relay stops must not stay stuck (the brick's own rule). The receiver
         // thread sets `stop` on a `Bye` or a dead socket, and this is the first place the main
         // thread can see it — still inside the iteration, so the releases below reach the SAME
@@ -945,6 +1158,8 @@ int serve_viewport(std::string_view socket_path,
         if (!input_released && stop.load(std::memory_order_relaxed)) {
             input_released = true;
             input_translator.release_all(input_events);
+            if (player_admitted)
+                release_player_input();
         }
         // One place feeds the engine, so a queued event cannot be applied twice or skipped: the
         // drain above only APPENDS to input_events, and this drains it into the frame snapshot.
@@ -1004,6 +1219,58 @@ int serve_viewport(std::string_view socket_path,
                         editorhost::serialize_play_state(pstate))) {
                     break; // client disconnected
                 }
+            }
+
+            // Optional capability + session acknowledgement. An older client ignores this
+            // message; a new client never guesses that an arbitrary host can possess a player.
+            play_control.phase = static_cast<std::uint8_t>(play_session.phase());
+            play_control.tick_count = play_session.tick_count();
+            if (!conn.send_message(
+                    static_cast<stream::MessageType>(editorhost::EditorMessage::PlayControlState),
+                    editorhost::serialize_play_control_state(play_control)))
+                break;
+
+            // Optional readonly diagnostics follow the same frame's PlayState. Simulation
+            // samples never become ECS components, so Save during Play cannot bake them in.
+            if (thermal.active() || thermal_sent_active) {
+                (void)editor_ids.assign_missing(app.world());
+                editorhost::ThermalPreviewMsg diagnostic;
+                diagnostic.status = static_cast<std::uint8_t>(thermal.status());
+                diagnostic.phase = static_cast<std::uint8_t>(play_session.phase());
+                diagnostic.session_id = thermal_session;
+                diagnostic.revision = thermal.revision();
+                diagnostic.host_tick = play_session.tick_count();
+                diagnostic.accepted_host_tick = thermal.accepted_host_tick();
+                const auto& result = thermal.last_result();
+                diagnostic.field_status = static_cast<std::uint8_t>(result.status);
+                diagnostic.heat_status = static_cast<std::uint8_t>(result.heat_status);
+                diagnostic.contact_status = static_cast<std::uint8_t>(result.contact_status);
+                diagnostic.failed_substep = static_cast<std::uint32_t>(result.failed_substep);
+                diagnostic.failed_descriptor = static_cast<std::uint32_t>(result.failed_descriptor);
+                if (const auto* id =
+                        app.world().get<editorhost::EditorId>(thermal.problem_entity()))
+                    diagnostic.problem_editor_id = id->value;
+                if (const auto* field = thermal.field()) {
+                    diagnostic.field_tick = field->tick();
+                    const auto entities = thermal.entities();
+                    for (std::size_t i = 0; i < entities.size(); ++i) {
+                        const auto* id = app.world().get<editorhost::EditorId>(entities[i]);
+                        if (!id)
+                            continue;
+                        const auto& cell = field->cells()[i];
+                        diagnostic.cells.push_back({id->value,
+                                                    cell.state().temperature_kelvin,
+                                                    cell.state().liquid_mass_fraction,
+                                                    cell.energy_joules()});
+                    }
+                }
+                const auto bytes = editorhost::serialize_thermal_preview(diagnostic);
+                if (bytes.empty() ||
+                    !conn.send_message(
+                        static_cast<stream::MessageType>(editorhost::EditorMessage::ThermalPreview),
+                        bytes))
+                    break;
+                thermal_sent_active = thermal.active();
             }
 
             // Ship the frame's exact lens (m9.6b): the editor's gizmo hover/drag math unprojects
@@ -1151,17 +1418,43 @@ int serve_viewport(std::string_view socket_path,
     // exited between the drain and the release check, which is harmless here (the process is
     // ending) and would not be in a host that served a second client.
     RIME_INFO("editor-host: input closed — {} malformed, {} unknown key usage(s), {} unknown "
-              "button(s), {} still held",
+              "button(s), {} still held, {} uncaptured player inputs ignored",
               input_malformed,
               input_translator.unknown_usages(),
               input_translator.unknown_buttons(),
-              input_translator.held_count());
+              input_translator.held_count(),
+              uncaptured_inputs);
+    RIME_INFO("editor-host: effects closed — {} ticks, {} lit ticks, {} spawned, {} cleared, "
+              "{} source-cap visits dropped, {} invalid source visits, {} emission-budget "
+              "particles dropped, {} pool particles dropped",
+              effects.stats().accepted_ticks,
+              effects.stats().lit_ticks,
+              effects.field().stats().spawned_particles,
+              effects.field().stats().cleared_particles,
+              effects.stats().source_cap_drops,
+              effects.stats().invalid_sources,
+              effects.stats().emission_budget_dropped_particles,
+              effects.field().stats().dropped_capacity);
+
+    RIME_INFO("editor-host: thermal closed — {} accepted ticks, {} refused ticks, {} invalid "
+              "builds, {} capacity refusals, revision {}",
+              thermal.stats().accepted_ticks,
+              thermal.stats().refused_ticks,
+              thermal.stats().invalid_builds,
+              thermal.stats().capacity_refusals,
+              thermal.revision());
 
     stop.store(true, std::memory_order_relaxed);
     receiver.join();
+    // The controller owns transient bodies in this PhysicsWorld. Disconnect and early frame
+    // failures still tear those down while the world is alive, just like an explicit Stop.
+    if (player_admitted) {
+        release_player_input();
+        notify_player(app::EditorPlayTransition::Stop);
+        player_admitted = false;
+    }
     // Synchronous capture() completes each frame before returning, so nothing is in flight to
-    // drain; the streamer (and its readback buffers) release cleanly ahead of the device at scope
-    // exit.
+    // drain; the streamer/readback buffers release before the device at scope exit.
     fmt::print("editor-host: viewport session closed after {} frames ({} entities)\n",
                sequence,
                app.world().entity_count());
@@ -1176,14 +1469,17 @@ int serve(std::string_view socket_path,
           bool viewport,
           const app::ComponentRegistrar& registrar,
           const app::ScenePreparer& prepare,
-          const app::PlayTick& play_tick) {
+          const app::PlayTick& play_tick,
+          const app::EditorPlayHooks& player_hooks) {
     if (viewport) {
-        return serve_viewport(socket_path, scene_path, assets_path, registrar, prepare, play_tick);
+        return serve_viewport(
+            socket_path, scene_path, assets_path, registrar, prepare, play_tick, player_hooks);
     }
     // The GPU-free channel host below has no play session and no frame loop, so it has no tick to
     // hand a game and no client input to hand it with — `play_tick` is deliberately unused there
     // rather than silently half-wired.
     (void)play_tick;
+    (void)player_hooks;
     ecs::World world;
     editorhost::HostedScene hosted;
     register_and_populate(world, scene_path, hosted, registrar);
@@ -1218,7 +1514,8 @@ int run_editor_host(int argc,
                     const ComponentRegistrar& registrar,
                     const char* usage_name,
                     const ScenePreparer& prepare,
-                    const PlayTick& play_tick) {
+                    const PlayTick& play_tick,
+                    const EditorPlayHooks& player_hooks) {
     std::string_view socket_path;
     std::string_view scene_path;
     std::string_view assets_path;
@@ -1243,7 +1540,14 @@ int run_editor_host(int argc,
                    usage_name);
         return 2;
     }
-    return serve(socket_path, scene_path, assets_path, viewport, registrar, prepare, play_tick);
+    return serve(socket_path,
+                 scene_path,
+                 assets_path,
+                 viewport,
+                 registrar,
+                 prepare,
+                 play_tick,
+                 player_hooks);
 }
 
 } // namespace rime::app

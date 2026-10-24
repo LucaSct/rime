@@ -7,6 +7,7 @@
 // needs and what lets the proof run on a software GPU (lavapipe) in CI. Presentation is added in
 // M3.4 by creating a swapchain from a platform::NativeWindow.
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -109,6 +110,14 @@ std::unique_ptr<VulkanDevice> VulkanDevice::create(const DeviceDesc& desc) {
 
     auto dev = std::unique_ptr<VulkanDevice>(new VulkanDevice());
     dev->validation_ = desc.enable_validation;
+    // Descriptor-cache A/B switches, read exactly once here (never per draw): the pipelines'
+    // set layouts and every encoder's flush path must agree for the device's whole life.
+    if (const char* env = std::getenv("RIME_VK_DESCRIPTOR_CACHE"); env != nullptr)
+        dev->descriptor_cache_enabled_ = std::strcmp(env, "0") != 0;
+    if (const char* env = std::getenv("RIME_VK_DESCRIPTOR_STATS"); env != nullptr)
+        dev->descriptor_stats_enabled_ = std::strcmp(env, "1") == 0;
+    if (!dev->descriptor_cache_enabled_)
+        RIME_INFO("rhi: descriptor cache OFF (RIME_VK_DESCRIPTOR_CACHE=0) — one set per draw");
 
     if (!dev->create_instance(desc))
         return nullptr;
@@ -538,6 +547,13 @@ bool VulkanDevice::create_logical_device() {
     max_anisotropy_limit_ = props.limits.maxSamplerAnisotropy;
     timestamp_period_ns_ = props.limits.timestampPeriod;
     adapter_.max_push_constant_bytes = props.limits.maxPushConstantsSize;
+    // Dynamic-UBO promotion (descriptor cache): honour the device's per-layout dynamic limit
+    // rather than assuming the spec floor, and remember the alignment every dynamic offset needs.
+    max_dynamic_uniforms_ =
+        descriptor_cache_enabled_
+            ? std::min(kMaxDynamicUniforms, props.limits.maxDescriptorSetUniformBuffersDynamic)
+            : 0u;
+    min_uniform_offset_alignment_ = props.limits.minUniformBufferOffsetAlignment;
 
     std::uint32_t family_count = 0;
     vkGetPhysicalDeviceQueueFamilyProperties(physical_, &family_count, nullptr);
@@ -613,15 +629,22 @@ VkDescriptorPool VulkanDevice::acquire_descriptor_pool() {
     // with per-type counts covering the binding kinds ADR-0020 declares (storage counts are for
     // M5.2's compute). An encoder that outgrows this simply chains another pool — capacity is a
     // performance knob, never a correctness cap (the M3.5 16-set ceiling is gone).
+    //
+    // UNIFORM_BUFFER_DYNAMIC is its own pool budget: a pool without it cannot allocate a set whose
+    // layout has a promoted UBO at all (OUT_OF_POOL_MEMORY on a FRESH pool, i.e. a hard failure).
+    // 512 = kMaxDynamicUniforms per set x 256 sets. It is listed last and only when the cache is
+    // on, so the cache-off path creates byte-for-byte the pools it always did.
     const VkDescriptorPoolSize sizes[] = {
         {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 512},
         {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 512},
         {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 128},
         {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 128},
+        {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 256 * kMaxDynamicUniforms},
     };
     VkDescriptorPoolCreateInfo ci{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     ci.maxSets = 256;
-    ci.poolSizeCount = static_cast<std::uint32_t>(std::size(sizes));
+    ci.poolSizeCount =
+        static_cast<std::uint32_t>(std::size(sizes)) - (max_dynamic_uniforms_ > 0 ? 0u : 1u);
     ci.pPoolSizes = sizes;
     VkDescriptorPool pool = VK_NULL_HANDLE;
     const VkResult r = vkCreateDescriptorPool(device_, &ci, nullptr, &pool);
@@ -639,6 +662,26 @@ void VulkanDevice::recycle_descriptor_pool(VkDescriptorPool pool) noexcept {
     // sets are never individually freed — and why recycling must wait for the submission's fence.
     vkResetDescriptorPool(device_, pool, 0);
     descriptor_pool_free_list_.push_back(pool);
+}
+
+std::unique_ptr<VulkanDescriptorCache> VulkanDevice::acquire_descriptor_cache() {
+    std::unique_ptr<VulkanDescriptorCache> cache;
+    if (!descriptor_cache_free_list_.empty()) {
+        cache = std::move(descriptor_cache_free_list_.back());
+        descriptor_cache_free_list_.pop_back();
+    } else {
+        cache = std::make_unique<VulkanDescriptorCache>(); // once per concurrent encoder, ever
+    }
+    // Empty it by moving the goalposts: every entry's generation is now stale, so no set from a
+    // previous owner (whose pools may already be reset and reissued) can ever be returned.
+    ++cache->generation;
+    cache->clock = 0;
+    return cache;
+}
+
+void VulkanDevice::recycle_descriptor_cache(std::unique_ptr<VulkanDescriptorCache> cache) noexcept {
+    if (cache)
+        descriptor_cache_free_list_.push_back(std::move(cache));
 }
 
 void VulkanDevice::set_debug_name(VkObjectType type,

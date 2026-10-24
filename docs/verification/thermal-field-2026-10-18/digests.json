@@ -1,0 +1,19 @@
+{
+  "implementation_commit": "0f8df6d40ab78291375bfe3a6ed3be59fd96ff40",
+  "source_sha256": {
+    "engine/fluids/include/rime/fluids/thermal_field.hpp": "73c3d8357fb80da38f30cb04b90c7b630983116b384adf46d4b8b45be04ba50a",
+    "engine/fluids/src/thermal_field.cpp": "a2de3f17628f7b79475e8d7e5bd44deeffe69a87b525e3d89030721fedcc6426",
+    "tests/fluids/thermal_field_test.cpp": "c5eec6a08fc973d3b29e51215cf1f23adbb85b321bc724b0596e0bd4252b5028",
+    "tests/fluids/verify_thermal_field.py": "e6138077af4185b0594f2a5c84f51d74c30a4022f819cf1e000d940e02c9457a",
+    "engine/fluids/src/thermal_contact.cpp": "a72a3ae63b0945e995e57031038f97c7e0d9a8e8e139fe1f3f94318ed549d2a5",
+    "engine/fluids/src/phase_change.cpp": "1aa5ef75a0cf9940d3b61b47a3eb01b7eef88964b78613aee623121b1628baeb",
+    "tests/fluids/thermal_contact_test.cpp": "8f14a837915d7736431c0a01dda12d1bbc73dd6c744a8a136dcc4260f94e3222"
+  },
+  "artifact_sha256": {
+    "/home/next/projects/rime/build/release/lib/librime_fluids.a": "bafa41801d41e17883ab010c483d8338df2bcdeecd89872383d708b5dd0e69b3",
+    "/home/next/projects/rime/build/release/bin/rime_fluids_tests": "fd39c1e4d72b6f9d78de0e93631589ca41bf487076b969e14f9143b6f629ffca",
+    "/home/next/reports/rime-thermal-field-2026-10-18/asan-tests": "7e009e284dd30021aa3a15f9faed5a1885433e93d54bc5c8edab8c041142a784",
+    "/home/next/reports/rime-thermal-field-2026-10-18/libthermal-clang.a": "5337f959aed14caa861d4fc9e32f507b75ed298ea9bacfcb0dd04d14e7b40eb8",
+    "/home/next/reports/rime-thermal-field-2026-10-18/sdk-field/build/thermal_field_sdk": "d5bd54543e8e15d06db7ad3de70e5d9a2de807fc66ce556e407ddaf40fa10414"
+  }
+}

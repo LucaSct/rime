@@ -1,0 +1,306 @@
+# From a scene to a playable game
+
+Rime is pre-alpha. This guide describes the working editor paths, explains the
+production workflow they are growing toward, and names the missing pieces.
+Start with a tiny complete interaction, then grow the map around it.
+
+## Open Frost Yard
+
+From the repository root, run:
+
+```sh
+./scripts/thermal-courtyard.sh --editor
+```
+
+This builds the C++ sample and Rust GUI and supplies the courtyard-specific host
+and scene. The first build can take time; keep the terminal open for errors.
+If the window shows the courtyard and Play/Pause work, the launcher succeeded.
+An existing window keeps its old binary: close it and rerun after an update.
+For a simple standalone demonstration, omit `--editor`.
+
+## Open the city with weapons and run the game
+
+```sh
+./scripts/city-editor.sh
+```
+
+This opens the expanded city in the native editor. Its persistent map is
+`build/release/city-editor.rscene`; subsequent launches preserve your edits.
+Use `./scripts/city-editor.sh --scene /absolute/path/map.rscene` to open an
+existing map. The launcher supplies the game's component/preview host and cooks.
+
+For the V2 showcase, run `./scripts/city-v2.sh`. It creates an editable
+`build/release/city-v2.rscene` copy on first launch, with a player spawn, fire,
+smoke, a rippling water sheet and a blue frost sheet in low timber basins. Later
+launches keep your edits. Use **Walk → ▶** for walking, looking and jumping inside
+the editor, or **Run game** for weapons and the authored player position. Frost Yard remains the freezing/melting demo.
+
+Press **Run game** in the top toolbar. The editor saves the current document,
+waits for success, then opens the full city game in a separate window. A save
+refusal never launches an older copy. Stop editor Preview first if Run is disabled.
+The bottom status shows launch/exit information; hover for the game's output log.
+Closing the editor leaves the launched game running; Escape closes that game.
+
+In the game: **WASD** moves, mouse looks, **left mouse** shoots, **Q/right mouse**
+aims, **R** reloads, **1/2/3** selects SCAR-H/M4A1/MSR, and **F** detonates the
+sample charge. The game's player spawn/camera policy is sample-owned. The editor
+camera position is not a player spawn authoring tool. To author a spawn, use
+**+ spawn → Inspector → + add component → PlayerSpawn**, set LocalTransform and
+check `enabled`. Position is the **capsule centre**, not the feet or eye; rotation
+sets initial yaw/pitch and scale does not size the player. Outliner → Filter →
+Gameplay finds these markers. Exactly one may be enabled; invalid or duplicate
+spawns refuse startup with a reason. With none, the original default remains.
+Initial position, look and out-of-bounds recovery use the saved marker. Teams
+and dynamic selection are future work. The full weapon player remains in
+Run game. Walk Preview performs its own bounded static-collision admission check.
+
+Enabled smoke/fire/thermal descriptions now also run in the full city, without
+the separate scripted `--effects-preview` flag. Main and scope views share the
+same presentation. These effects are client-local cosmetics: thermal phase does
+not change collision or damage, and the city's current environment transforms
+remain flat. An invalid thermal graph reports refusal while valid fire can keep
+running. Maps without enabled descriptions allocate no phase-detail atlas or FX pass.
+
+Export the saved city to a new folder outside the checkout:
+
+```sh
+./scripts/export-city.sh "$HOME/rime-exports/my-city"
+"$HOME/rime-exports/my-city/the_block"
+```
+
+Add `--scene /absolute/path/map.rscene` to export another saved map. Save your
+editor document before exporting: the exporter reads the file on disk. Keep the
+binary beside its `content/` directory, notices and manifest. The copied binary
+starts Play with no arguments. This Linux x86_64 development profile includes the
+cooked city and prepared weapons/arms, verifies payload hashes and records host
+requirements. Production installation, clean second-machine compatibility and
+performance qualification remain open. There is no GUI Export button yet.
+
+## Move the editor camera
+
+Point into the viewport. **Keep the right mouse button held** while pressing
+W/S forward/back, A/D sideways, Q/E down/up. Right-drag looks around; Shift
+makes movement five times faster. Releasing right mouse ends navigation.
+W/E/R then select Move/Rotate/Scale for the selected object; Q/Escape hides the
+gizmo. The viewport displays the navigation reminder.
+
+Scroll the wheel over the viewport to move closer/farther along the sight line.
+This is a camera dolly, not image magnification or a lens change. Navigation is
+not an object undo operation. Today the editor navigates the scene's camera,
+so saving the scene also saves that camera position; independent editor/game
+cameras and focus-selection/orbit controls are future work.
+
+The editor stream is currently **960×540**, fitted inside its dock panel with
+letterboxing to preserve its aspect. Picking, gizmos and navigation use the
+displayed image; the bars do not start scene gestures. Making that panel huge
+cannot create more pixels. Dolly reveals closer geometry, but textures and mesh detail
+still have finite resolution. Mipmaps reduce distant texture shimmer; temporal
+antialiasing can soften moving details. Native standalone rendering uses the
+actual window framebuffer, independently of this fixed editor stream. Adaptive
+viewport resolution remains future work. Inspect camera navigation works during
+Preview and Pause; Stop restores the authored camera, and the next movement starts there.
+
+## Walk inside the editor
+
+With the city host, check **Walk** in the toolbar, then press **▶**. Click inside
+the viewport to capture the mouse. **WASD** walks, mouse motion looks and **Space**
+jumps. **Esc** releases the mouse and stops held movement. Pause, focus loss and
+Ctrl/Alt/Command shortcuts also release it. Resume keeps the current player pose;
+click the viewport again to regain control. **Stop** restores the complete pre-Play
+scene, including its original camera. Stop before editing or saving.
+
+Walk uses exactly one enabled `PlayerSpawn` and one active root camera. It checks
+the real GroundSurface floor, supported city shapes and explicit physics bodies;
+a missing floor lets the player fall. Timber surrounds are solid. The showcase's
+water and ice use the explicit **Phase sheet** role, which is cosmetic unless an
+explicit collider is authored; adding thermal appearance to a wall does not make
+that wall passable. Older edited showcase copies may still have those sheets
+marked **Kerb**: change just those two water/ice SlabRole `kind` fields to `13`
+if they obstruct walking. The launcher preserves existing documents.
+
+This first preview controller is query-only: no weapons, pushing dynamic bodies,
+swimming, skating or gameplay freezing. Unsupported mesh collision, parented
+geometry/camera, negative scales and ambiguous spawns refuse entry with a reason.
+It does not invent a floor. Other hosts retain Inspect Preview until they provide
+player hooks; the Walk checkbox appears only with that capability.
+
+## Shadows while walking
+
+Preview now enables authored sun and spotlight shadows. Buildings and ordinary
+world meshes share a stable sun-shadow grid; terrain uses the same cascade-edge
+transition. Moving or removing a world caster refreshes nearby spotlight maps,
+while moving only the camera preserves cached static maps. Cutout foliage keeps
+its transparent holes in shadow depth and filters normal detail before discard.
+The fixed 960×540 stream and authored shadow-map resolutions are unchanged.
+
+Sun specular and reflection roughness use the existing shared shading paths.
+Screen-space reflections still have screen-coverage/hit limits; point lights and
+cosmetic particles do not acquire new shadow-casting features. A first-person
+weapon/arms overlay is separate from a world-space full-body actor.
+
+Run game additionally uses local indirect lighting and screen-space reflections;
+its lighting is not identical to Preview. Diffuse GI now queries the receiving
+side of a surface to avoid sharp floor bands at probe planes. The game's sun
+maps cover the nearby 160 units independently of its 3072-unit terrain view.
+
+## Find smoke, fire, water and ice
+
+Use **View → Outliner**, **View → Inspector**, or **View → Assets** if a panel
+was closed. The three panels do different jobs:
+
+| Place | Contains | What you do there |
+| --- | --- | --- |
+| Outliner | Entities already in this scene, including invisible emitters | Select a source; use Filter → Effects (smoke / fire) or Thermal (water / ice); choose All entities to restore the list |
+| Inspector | Components attached to the selected entity | Edit fields; add/remove registered components |
+| Assets | Cooked files from a supplied asset manifest | Browse/filter assets and place cooked meshes |
+
+An engine **brick** is a module of code. It does not automatically become a
+prefab in an asset library. Frost Yard uses built-in generated meshes, so its
+Assets panel is empty by design. A reusable prefab/preset library is not built
+yet. For imported art, use the existing [Blender → glTF → cook workflow](authoring-blender.md)
+and supply the cooked manifest through `--assets`.
+
+Smoke particles and fire light have no solid body. Select their **emitter entity
+in the Outliner**, not a particle or the nearby chimney/brazier mesh. The emitter
+has a LocalTransform: edit its position or press W and drag its move gizmo.
+Use the Effects filter to find it among city geometry. Display → List shows
+20-pixel type icons beside readable roles; Display → Tiles uses 32-pixel icons
+in a compact grid. Click either the icon or label to select. Hover for the stable
+editor identity and full component list. These are crisp vector type icons, not
+rendered asset thumbnails. Roles take precedence over generic MeshRef/MaterialRef. There are no dedicated
+clickable emitter icons or volume outlines yet.
+
+To add a source: select All entities, click **+ spawn**, select the new row,
+then **Inspector → + add component** and choose
+`rime::vfx_scene::SmokeEmitter` or `rime::vfx_scene::FireEmitter`. New entities
+already have a LocalTransform. Set position, extents, emission rate and intensity,
+then check `enabled` and press Play/Step. Stop restores the authored world.
+Defaults are disabled so adding a component does not silently start an effect.
+
+A thermal surface uses **ThermalCell + ThermalSurface** on a rendered entity;
+heating/cooling is an explicit **ThermalSource** referencing that cell.
+Temperature, mass and latent heat determine its phase. The inspector shows the
+accepted runtime values separately from authored initial values. Relevant thermal
+edits rebuild the whole graph from its initial conditions, even when paused.
+Source/contact references offer readable ThermalCell choices with stable editor
+ids, plus None to clear. Missing/external references stay visible until explicitly
+changed. The exact numeric field remains available; the engine validates the
+chosen live reference. These choices use the ordinary undo and save paths.
+
+Frost Yard demonstrates cooling/freezing, heating/melting and an unheated control.
+Its V2 ice has branching blue frost veins and polished variation; liquid has
+directional swell, chop and finer ripples. Immutable maps blend these slopes in
+eight liquid steps, so nearly frozen water approaches the static frost endpoint
+without a final abrupt normal switch. Pause/refusal hold the last accepted appearance,
+and graph rebuild restarts its cosmetic clock. These details do not create flowing
+water, ice thickness, collision, or transparent/refraction optics. Fire VFX and its
+thermal power source remain separate, explicitly authored things. Fire now has
+animated tapered flames as well as light and smoke; smoke has procedural density,
+soft lifetime fades and approximate local fire illumination. Pause freezes their
+accepted presentation clock; extinguish removes flame/light while old smoke
+ages out. These additions do not implement combustion or flowing water.
+
+## What professional teams build
+
+The following is a suggested production loop, not a claim that every studio uses
+identical tools:
+
+1. **Choose one playable loop.** For example: reach a frozen courtyard, turn on a
+   heater, wait for a barrier to melt, cross, and reach an exit. Define success,
+   failure and restart before building a large city.
+2. **Block out the map.** Place simple walls, paths, doors, spawn/exit positions and
+   collision. Test distances and sight lines. Replace placeholder art gradually.
+3. **Create reusable objects.** A heater combines a mesh, interaction, sound, VFX
+   and heat source; make instances from a prefab rather than rebuilding each one.
+4. **Connect gameplay.** Player input produces actions. Triggers/interactions send
+   events. Rules change game state; animation, audio and VFX present that state.
+   For the heater: Interact → heater on → thermal source enabled. Melting crossing
+   a defined gameplay threshold → barrier unlocked. Shading alone must not unlock it.
+5. **Animate deliberately.** Keyframed clips move authored properties; animation
+   state machines choose/blend character clips; timelines sequence scripted moments.
+   Physical simulation and cosmetic particle motion are different sources of motion.
+6. **Play repeatedly.** Test startup, Pause/Stop/restart, late events, missing assets,
+   save/load and failure paths. Artists/designers iterate in the editor while
+   programmers extend the underlying behaviors.
+7. **Build the runtime.** Package executable, cooked content, startup scene, settings
+   and dependencies for a target platform. Test on a clean machine without the editor.
+   Profile CPU/GPU/memory on the target; a nice screenshot is not a frame-budget proof.
+
+```mermaid
+flowchart LR
+  Art[Art / audio / animation sources] --> Cook[Import and cook]
+  Cook --> Library[Reusable assets and prefabs]
+  Library --> Map[Map / placements / lighting]
+  Rules[Input / events / game rules] --> Play[Playtest]
+  Map --> Play
+  Play --> Iterate[Review and refine]
+  Iterate --> Map
+  Iterate --> Rules
+  Play --> Build[Package and test runtime]
+```
+
+## Unity example
+
+Unity organizes scene content as GameObjects with components; scripts add game
+behavior. A typical small game places environment/player/camera objects in a
+scene, attaches rendering/physics and C# gameplay components, and tests in Play
+mode. See [Unity's object/component model](https://docs.unity3d.com/6000.0/Documentation/Manual/GameObjects.html).
+Reusable configured object hierarchies become [prefabs](https://docs.unity3d.com/6000.0/Documentation/Manual/Prefabs.html).
+
+For an area event, a trigger collider and the required physics setup invoke
+[`OnTriggerEnter`](https://docs.unity3d.com/6000.0/Documentation/ScriptReference/Collider.OnTriggerEnter.html);
+a gameplay script decides what happens next. An
+[Animator Controller](https://docs.unity3d.com/6000.0/Documentation/Manual/class-AnimatorController.html)
+connects clips and transitions in a state machine. These tools author behavior;
+they do not invent the game's rules. Finally,
+[File → Build Profiles](https://docs.unity3d.com/6000.0/Documentation/Manual/build-profiles.html)
+selects platform/build configurations and scenes for a standalone application.
+
+## Frostbite example
+
+Public EA talks support the same broad separation of creator tools and optimized
+runtime data, but they are not current private Frostbite editor documentation.
+EA's **GDC 2018** [three-data-schemas talk](https://www.ea.com/frostbite/amp/news/a-tale-of-three-data-schemas)
+distinguishes the creator-facing representation, on-disk representation and runtime
+representation. Its **GDC 2018** [Emitter Graph talk](https://www.ea.com/frostbite/amp/news/frostbite-gpu-emitter-graph-system)
+describes graph-based particle authoring, shader generation and the VFX art process
+for Star Wars Battlefront II.
+
+The useful lesson for Rime is an inference from those published systems: provide
+friendly authoring objects and reusable data, compile/cook them for runtime needs,
+and preserve one clear path from authored rules to runtime behavior. We should not
+pretend to know today's internal Frostbite menu sequence or reproduce a node graph
+before the underlying event/lifetime model works.
+
+## A complete playable example already exists
+
+The [hello-game](../samples/hello-game/README.md) sample is a complete small game:
+walk an arena, touch five markers, push a crate and win. Its GameDefinition/InputMap
+and sensor TriggerEvents are existing engine foundations to reuse for editor play,
+not systems we need to invent again. With the release build available:
+
+```sh
+build/release/bin/hello_game play
+```
+
+For the currently supported Linux development export, follow
+[getting started: verified export](getting-started.md#4-export-a-verified-linux-development-build).
+It packages the audited hello_game profile, verifies notices/content/provenance and
+runs a proof with the repository and Vulkan hidden. The city development folder is described above.
+There is no GUI Export button; clean-machine release compatibility remains open.
+
+## Rime's next playable slice
+
+| Capability | Working today | Missing authoring step |
+| --- | --- | --- |
+| Map | Saved scenes, placement/transforms, imported mesh assets, lights, terrain/destruction foundations | Persistent custom names, prefabs/presets, better search and map editing tools |
+| Effects | Reflected smoke/fire, thermal cell/source preview, live phase appearance | Preset library, viewport emitter icons, entity reference picker |
+| Player | City Walk Preview with mouse capture, walking/jump/static collision and Stop restoration; Run game launches the full weapon runtime | General action/spawn authoring, dynamic-body interaction and terrain walking |
+| Events | Sensor TriggerEvents and example gameplay rules work in C++ | Inspector wiring from sensors to actions/objectives and event debugging |
+| Animation | Sample-specific procedural motion; asset formats/cooking contain animation-related data | General clip playback, skeletal runtime, Animator-style editor and timeline workflow |
+| Export | Verified Linux hello_game profile and city development folder with cooked weapons, notices and integrity checks | GUI Export and clean-machine release validation |
+
+The next useful **playable** brick is one authored heater interaction and an exit
+objective, using the new Walk Preview focus/restart path. Follow that with reusable
+heater/pool presets, then a small property-animation clip. The thermal demo is today's
+working example; these rows are planned work, not hidden menus you need to find.

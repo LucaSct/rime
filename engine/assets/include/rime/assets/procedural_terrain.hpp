@@ -79,6 +79,20 @@ procedural_terrain_sample(const ProceduralTerrainConfig& config,
                           std::int64_t x,
                           std::int64_t z) noexcept;
 
+// THE VISUAL BACKDROP. Distant ridged mountain ranges for the renderer, deliberately NOT part of
+// `procedural_terrain_sample`: that is the collision truth (and carries a pinned golden hash and a
+// 32 m ceiling), whereas the backdrop is far-field relief the play area does not reach. Zero
+// within 150 m of the street rectangle, growing to up to ~219 m of extra rise by 800 m. Pure
+// integer, a function of the global metre like everything else, so every LOD agrees on it.
+[[nodiscard]] std::uint32_t procedural_backdrop_rise(const ProceduralTerrainConfig& config,
+                                                     std::int64_t x,
+                                                     std::int64_t z) noexcept;
+
+// Add `procedural_backdrop_rise` to every sample of a tile made by generate_procedural_tile
+// (adjusts min/max_sample; clamps at the u16 ceiling). Collision tiles call this only when
+// ProceduralTileSource::Options::backdrop is set.
+void apply_procedural_backdrop(const ProceduralTerrainConfig& config, HeightfieldAsset& tile);
+
 // Tile (tile_x, tile_z) at `lod`: 33 x 33 samples, spacing 2 << lod metres, origin
 // (tile_x * width, 0, tile_z * width). nullopt — never an empty or flat tile — for an invalid
 // config, an lod above kProceduralMaxLod, or a tile outside the supported world.

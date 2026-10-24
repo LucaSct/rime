@@ -45,7 +45,9 @@ layout(std140, set = 0, binding = 1) uniform DrawUniforms {
     mat4 normal_matrix;
     vec4 base_color;
     vec4 params;   // x = metallic, y = roughness, z = normal_scale, w = occlusion_strength
-    vec4 emissive; // rgb = emissive factor (linear)
+    vec4 emissive; // ordinary: emissive; phase: seconds, oval bank, frost map present
+    mat4 prev_model;
+    vec4 motion_params; // x deformation velocity; y surface kind, z liquid, w depth metres
 } draw;
 
 // The five material maps (M6.4), each multiplied with / driving its factor. Every material binds all
@@ -68,6 +70,7 @@ layout(location = 4) in float v_tangent_w;    // handedness sign for the bitange
 layout(location = 0) out vec4 out_hdr;
 
 #include "brdf.glsl"
+#include "water_surface.glsl"
 
 // Reconstruct the world-space TBN from the interpolated tangent basis and rotate the tangent-space
 // normal out of the map. Interpolation leaves the tangent slightly off-perpendicular to the normal,
@@ -89,13 +92,11 @@ void main() {
     vec3 v = normalize(frame.camera_pos.xyz - v_world_pos);
     // ALPHA MASK (m15.6). Sample once, mask, then use the rgb. `draw.emissive.w` is the cutoff and
     // zero means "no masking" — so an opaque or blended material takes the false branch on a
-    // comparison that can never be true, and needs no shader variant. The discard is FIRST because
-    // a discarded fragment must not have written depth or run the BRDF.
+    // comparison that can never be true, and needs no shader variant. Derivative-dependent
+    // texture reads and normal filtering precede discard: a cutout must not remove helper
+    // lanes before its neighbours measure their pixel footprint. No lighting/depth writes yet.
     vec4 base_sample = texture(base_color_tex, v_uv);
     float base_alpha = draw.base_color.a * base_sample.a;
-    if (draw.emissive.w > 0.0 && base_alpha < draw.emissive.w) {
-        discard;
-    }
     vec3 albedo = draw.base_color.rgb * base_sample.rgb;
 
     // Metallic-roughness map: glTF packs roughness in G and metallic in B; each multiplies its
@@ -104,18 +105,38 @@ void main() {
     vec2 mr = texture(metallic_roughness_tex, v_uv).gb;
     float metallic = draw.params.x * mr.y;
     float roughness = clamp(draw.params.y * mr.x, 0.045, 1.0);
+    const bool phase_surface = draw.motion_params.y > .5;
+    PhaseOptics optics;
+    if (phase_surface) {
+        optics = phase_optics(v_world_normal, n, v_world_tangent, v_world_pos, v_uv, v,
+                              mix(albedo, draw.base_color.rgb, step(.5, draw.emissive.z)),
+                              base_sample.rgb, roughness,
+                              draw.motion_params, draw.emissive.rgb);
+        n = optics.normal;
+        roughness = optics.roughness;
+        // The metallic endpoint is a pure specular lobe with arbitrary RGB F0. Reusing it
+        // lets direct light and the unchanged SSR resolve share water/ice's true Fresnel.
+        albedo = optics.f0;
+        metallic = 1.0;
+    }
     float alpha = roughness * roughness;
     alpha = filter_specular_alpha(n, alpha); // geometric specular AA, ADR-0078 step 1a
+    float ao_sample = texture(occlusion_tex, v_uv).r;
+    vec3 emissive_sample = texture(emissive_tex, v_uv).rgb;
+    if (draw.emissive.w > 0.0 && base_alpha < draw.emissive.w) {
+        discard;
+    }
 
     // Ambient occlusion scales the AMBIENT term ONLY — never the direct lights, which cast their own
     // real shadows; multiplying direct light by a baked AO map double-counts and greys out lit
     // contact edges (docs/math/pbr.md). occlusion_strength (params.w) lerps the map toward 1.
-    float ao = mix(1.0, texture(occlusion_tex, v_uv).r, draw.params.w);
+    float ao = mix(1.0, ao_sample, draw.params.w);
 
     // Constant ambient: a deliberately crude stand-in for global illumination (M10) — treat
     // `ambient` as isotropic irradiance and reflect it diffusely, occluded by AO. Enough to keep
     // unlit sides from going pitch black, honest about being a hack (docs/math/pbr.md §ambient).
-    vec3 out_radiance = albedo * frame.ambient.rgb * ao;
+    vec3 out_radiance = phase_surface ? frame.ambient.rgb *
+        f_schlick(max(dot(n, v), 0.0), optics.f0) : albedo * frame.ambient.rgb * ao;
 
     for (uint i = 0u; i < frame.light_counts.x && i < 4u; ++i) {
         vec3 l = normalize(-frame.dir_lights[i].direction.xyz); // travel direction → toward-light
@@ -144,7 +165,17 @@ void main() {
     // Emissive: the surface's own light, added AFTER the BRDF so it shows even with no light present
     // (glowing screens, lava). Factor × map; the default-black factor with the white fallback is 0,
     // so a non-emissive material pays nothing.
-    out_radiance += draw.emissive.rgb * texture(emissive_tex, v_uv).rgb;
+    if (phase_surface) {
+        vec3 incident = frame.ambient.rgb;
+        for (uint i = 0u; i < frame.light_counts.x && i < 4u; ++i) {
+            float nl = max(dot(normalize(v_world_normal),
+                               normalize(-frame.dir_lights[i].direction.xyz)), 0.0);
+            incident += frame.dir_lights[i].radiance.rgb * nl / kPi;
+        }
+        out_radiance += optics.transmission * incident;
+    } else {
+        out_radiance += draw.emissive.rgb * emissive_sample;
+    }
 
     out_hdr = vec4(out_radiance, 1.0);
 }

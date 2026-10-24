@@ -1,0 +1,14 @@
+[
+  {
+    "path": "/home/next/projects/rime/samples/99-the-block/city-v2.rscene",
+    "surfaces": 2,
+    "added_boards": 32,
+    "existing_entities_preserved": true
+  },
+  {
+    "path": "/home/next/projects/rime/build/release/city-v2.rscene",
+    "surfaces": 2,
+    "added_boards": 32,
+    "existing_entities_preserved": true
+  }
+]

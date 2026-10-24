@@ -1,0 +1,6 @@
+    Checking rime-protocol v0.0.1 (/home/next/projects/rime/tools/rime-protocol)
+    Checking rime-gateway v0.0.1 (/home/next/projects/rime/tools/rime-gateway)
+    Checking editor v0.0.1 (/home/next/projects/rime/tools/editor)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.65s
+warning: the following packages contain code that will be rejected by a future version of Rust: nalgebra v0.26.2
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`

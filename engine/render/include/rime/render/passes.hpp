@@ -4,11 +4,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
 
 #include "rime/core/math/mat.hpp"
+#include "rime/render/culling.hpp"
 #include "rime/render/lighting/sky.hpp"
 #include "rime/render/material.hpp"
 #include "rime/render/mesh.hpp"
@@ -173,6 +176,9 @@ struct DrawItem {
         AlphaMasked = 1u << 0, // needs the alpha-testing depth variant (m16.4)
         DoubleSided = 1u << 1, // needs cull-mode off (m16.5)
         ClampUv = 1u << 2,     // sample with ClampToEdge rather than Repeat (m16.5)
+        // Transparent water/ice sheet: left out of the opaque passes and drawn by the water pass,
+        // which refracts the finished opaque scene through it.
+        Water = 1u << 3,
     };
 
     std::uint32_t flags = None;
@@ -238,6 +244,13 @@ struct SceneDrawData {
     // than a per-material one: address mode is the only axis any material has asked to vary, and a
     // sampler per material would be a descriptor per material for one boolean.
     rhi::SamplerHandle clamp_sampler;
+
+    // Pass-level partition of the draw list by DrawItem::Flags, applied by every geometry pass on
+    // top of its own cull/mask partitions. A draw is skipped when it has any `skip_flags` bit or,
+    // if `only_flags` is non-zero, lacks any `only_flags` bit. Two views of one list, no copying:
+    // the opaque passes skip Water; the water passes take only Water.
+    std::uint32_t skip_flags = 0;
+    std::uint32_t only_flags = 0;
 };
 
 // m10.1: what the shadowed forward pass samples — the cascade depth array (a sampler2DArrayShadow
@@ -318,7 +331,9 @@ public:
              RGTexture depth,
              const SceneDrawData& data,
              std::uint32_t layer = 0,
-             std::string_view label = "depth-prepass") const;
+             std::string_view label = "depth-prepass",
+             std::optional<Frustum> caster_frustum = std::nullopt,
+             std::shared_ptr<CullStats> caster_stats = {}) const;
 
 private:
     rhi::Device& device_;
@@ -491,7 +506,22 @@ public:
                       const SdfSpecularOcclusionBinding* sdf_occlusion = nullptr,
                       rhi::LoadOp hdr_load = rhi::LoadOp::Clear,
                       bool first_person = false,
-                      std::string_view label = "forward-pbr shadowed") const;
+                      std::string_view label = "forward-pbr shadowed",
+                      // The water pass: BOTH valid selects the water pipelines (screen-space
+                      // refraction). `water_color` is a copy of the opaque scene colour and
+                      // `water_depth` a copy of its depth bits, both made by add_scene_copy().
+                      // The pass then LOADS colour, G-buffer and depth, tests Less and writes
+                      // depth, so the water becomes part of the scene for SSR, TAA and fog.
+                      RGTexture water_color = {},
+                      RGTexture water_depth = {}) const;
+
+    // Snapshot the opaque scene for the water pass: copies `hdr` into `color_copy` (kHdrFormat)
+    // and `depth` into `depth_bits_copy` (R32Uint holding the float bits). See scene_copy.frag.
+    void add_scene_copy(RenderGraph& graph,
+                        RGTexture hdr,
+                        RGTexture depth,
+                        RGTexture color_copy,
+                        RGTexture depth_bits_copy) const;
 
 private:
     rhi::Device& device_;
@@ -516,6 +546,18 @@ private:
     // attachment (kGbufferFormat). Bound only when a caller passes a valid gbuffer target.
     rhi::PipelineHandle pipeline_shadowed_gbuffer_after_prepass_;
     rhi::PipelineHandle pipeline_shadowed_gbuffer_standalone_;
+    // Water pass (screen-space refraction), built on first use so a world without water pays for
+    // neither the shader modules nor the descriptor layouts.
+    void ensure_water_pipelines() const;
+    mutable rhi::ShaderHandle water_fragment_shader_;
+    mutable rhi::ShaderHandle water_gbuffer_fragment_shader_;
+    mutable rhi::PipelineHandle pipeline_water_;
+    mutable rhi::PipelineHandle pipeline_water_gbuffer_;
+    mutable rhi::ShaderHandle copy_vertex_shader_;
+    mutable rhi::ShaderHandle copy_fragment_shader_;
+    mutable rhi::PipelineHandle pipeline_scene_copy_;
+    mutable rhi::SamplerHandle water_linear_sampler_;
+    mutable rhi::SamplerHandle water_nearest_sampler_;
 };
 
 // ── Tonemap pass ──────────────────────────────────────────────────────────────────────────────

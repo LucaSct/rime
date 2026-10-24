@@ -1,0 +1,146 @@
+{
+  "physics.client.ccd_sweep": {
+    "samples": 360,
+    "p50_ms": 0.00057,
+    "p99_ms": 0.00113,
+    "total_ms": 0.218661
+  },
+  "physics.client.commit": {
+    "samples": 360,
+    "p50_ms": 0.1314755,
+    "p99_ms": 0.356641,
+    "total_ms": 51.138782
+  },
+  "physics.client.constraints": {
+    "samples": 360,
+    "p50_ms": 0.124886,
+    "p99_ms": 0.252942,
+    "total_ms": 47.520107
+  },
+  "physics.client.contacts": {
+    "samples": 360,
+    "p50_ms": 4.04214,
+    "p99_ms": 7.20091,
+    "total_ms": 1512.03239
+  },
+  "physics.client.events": {
+    "samples": 360,
+    "p50_ms": 0.0233305,
+    "p99_ms": 0.0454,
+    "total_ms": 9.030784
+  },
+  "physics.client.integrate_velocity": {
+    "samples": 360,
+    "p50_ms": 0.002215,
+    "p99_ms": 0.00701,
+    "total_ms": 0.860966
+  },
+  "physics.client.islands": {
+    "samples": 360,
+    "p50_ms": 0.027375,
+    "p99_ms": 0.07562,
+    "total_ms": 10.942854
+  },
+  "physics.client.sleep": {
+    "samples": 360,
+    "p50_ms": 0.010435,
+    "p99_ms": 0.01723,
+    "total_ms": 3.538149
+  },
+  "physics.client.solve": {
+    "samples": 360,
+    "p50_ms": 1.782705,
+    "p99_ms": 3.29864,
+    "total_ms": 633.913909
+  },
+  "physics.client.stats": {
+    "samples": 360,
+    "p50_ms": 0.005305,
+    "p99_ms": 0.01062,
+    "total_ms": 2.048814
+  },
+  "physics.client.step": {
+    "samples": 360,
+    "p50_ms": 6.143415,
+    "p99_ms": 10.4805,
+    "total_ms": 2280.845721
+  },
+  "physics.client.wake": {
+    "samples": 360,
+    "p50_ms": 0.00055,
+    "p99_ms": 0.00115,
+    "total_ms": 0.19987
+  },
+  "physics.server.ccd_sweep": {
+    "samples": 360,
+    "p50_ms": 0.00057,
+    "p99_ms": 0.00113,
+    "total_ms": 0.227471
+  },
+  "physics.server.commit": {
+    "samples": 360,
+    "p50_ms": 0.138966,
+    "p99_ms": 0.340312,
+    "total_ms": 54.692679
+  },
+  "physics.server.constraints": {
+    "samples": 360,
+    "p50_ms": 0.142151,
+    "p99_ms": 0.305352,
+    "total_ms": 54.262525
+  },
+  "physics.server.contacts": {
+    "samples": 360,
+    "p50_ms": 4.34873,
+    "p99_ms": 7.48817,
+    "total_ms": 1587.74814
+  },
+  "physics.server.events": {
+    "samples": 360,
+    "p50_ms": 0.023530000000000002,
+    "p99_ms": 0.047381,
+    "total_ms": 9.275423
+  },
+  "physics.server.integrate_velocity": {
+    "samples": 360,
+    "p50_ms": 0.0026049999999999997,
+    "p99_ms": 0.00985,
+    "total_ms": 1.315827
+  },
+  "physics.server.islands": {
+    "samples": 360,
+    "p50_ms": 0.06527,
+    "p99_ms": 0.217981,
+    "total_ms": 25.294857
+  },
+  "physics.server.sleep": {
+    "samples": 360,
+    "p50_ms": 0.010445,
+    "p99_ms": 0.01909,
+    "total_ms": 3.537127
+  },
+  "physics.server.solve": {
+    "samples": 360,
+    "p50_ms": 1.43894,
+    "p99_ms": 2.39455,
+    "total_ms": 544.125265
+  },
+  "physics.server.stats": {
+    "samples": 360,
+    "p50_ms": 0.00546,
+    "p99_ms": 0.010481,
+    "total_ms": 2.063857
+  },
+  "physics.server.step": {
+    "samples": 360,
+    "p50_ms": 6.114269999999999,
+    "p99_ms": 10.3762,
+    "total_ms": 2292.74354
+  },
+  "physics.server.wake": {
+    "samples": 360,
+    "p50_ms": 0.00059,
+    "p99_ms": 0.00132,
+    "total_ms": 0.221621
+  }
+}

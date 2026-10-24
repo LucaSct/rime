@@ -3,10 +3,12 @@
 #include "play_arm_ik.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <string_view>
+#include <unordered_map>
 
 #include "rime/core/hash.hpp"
 
@@ -204,6 +206,43 @@ bool PlayArmIk::initialize(const assets::MeshAsset& mesh, const assets::Skeleton
         }
     }
     bind_mesh_ = render::mesh_from_cooked(mesh);
+    // OPEN BOUNDARY: an edge used by exactly one triangle lies on a hole in the surface. Exported
+    // meshes split vertices along UV seams and hard normals, so weld by exact position first;
+    // otherwise every seam would read as a hole. What remains are the two sleeve cuts.
+    {
+        std::unordered_map<std::uint64_t, std::uint32_t> weld;
+        std::vector<std::uint32_t> welded(bind_mesh_.vertices.size());
+        for (std::size_t i = 0; i < bind_mesh_.vertices.size(); ++i) {
+            const auto& v = bind_mesh_.vertices[i];
+            std::uint64_t key = 14695981039346656037ull;
+            for (float f : {v.px, v.py, v.pz}) {
+                key ^= std::bit_cast<std::uint32_t>(f);
+                key *= 1099511628211ull;
+            }
+            welded[i] = weld.emplace(key, static_cast<std::uint32_t>(weld.size())).first->second;
+        }
+        std::unordered_map<std::uint64_t, std::uint32_t> edges;
+        const auto& idx = bind_mesh_.indices;
+        for (std::size_t t = 0; t + 2 < idx.size(); t += 3) {
+            for (int k = 0; k < 3; ++k) {
+                const auto a = welded[idx[t + k]], b = welded[idx[t + (k + 1) % 3]];
+                ++edges[(std::uint64_t{std::min(a, b)} << 32) | std::max(a, b)];
+            }
+        }
+        std::vector<bool> open(weld.size(), false);
+        for (const auto& [edge, uses] : edges) {
+            if (uses == 1) {
+                open[static_cast<std::uint32_t>(edge >> 32)] = true;
+                open[static_cast<std::uint32_t>(edge & 0xffffffffu)] = true;
+            }
+        }
+        open_boundary_.clear();
+        for (std::size_t i = 0; i < welded.size(); ++i) {
+            if (open[welded[i]]) {
+                open_boundary_.push_back(static_cast<std::uint32_t>(i));
+            }
+        }
+    }
     for (const auto& v : bind_mesh_.vertices) {
         if (!finite(core::Vec3{v.px, v.py, v.pz}) || !finite(core::Vec3{v.nx, v.ny, v.nz}) ||
             !finite(core::Vec3{v.tx, v.ty, v.tz}) || !std::isfinite(v.u) || !std::isfinite(v.v) ||
@@ -216,6 +255,19 @@ bool PlayArmIk::initialize(const assets::MeshAsset& mesh, const assets::Skeleton
     world_ = bind_world_;
     initialized_ = true;
     return true;
+}
+
+std::array<std::array<core::Vec3, 3>, 2> PlayArmIk::limb_points() const noexcept {
+    std::array<std::array<core::Vec3, 3>, 2> out{};
+    if (!initialized_) {
+        return out;
+    }
+    for (std::size_t side = 0; side < 2; ++side) {
+        for (std::size_t k = 0; k < 3; ++k) {
+            out[side][k] = head(world_[arms_[side].joints[k]]);
+        }
+    }
+    return out;
 }
 
 std::span<const render::MeshVertex>

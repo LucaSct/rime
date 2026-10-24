@@ -166,6 +166,42 @@ core::Vec3 cpu_surface_normal(const std::vector<std::uint16_t>& s, float x, floa
     return core::normalize(core::Vec3{-sx, 1.0f, -sz});
 }
 
+// The SMOOTH shading normal terrain.vert emits (2026-10-20): per-vertex central differences of
+// the heights (one-sided at the tile border), barycentrically interpolated across the triangle of
+// ADR-0060's diagonal. The face normal above is still what physics reports and what the shader
+// uses for shadow bias; shading uses this.
+core::Vec3 cpu_vertex_normal(const std::vector<std::uint16_t>& s, int i, int j) {
+    const int last = static_cast<int>(kColumns) - 1;
+    auto h = [&](int a, int b) {
+        return sample_height(s,
+                             static_cast<std::uint32_t>(std::clamp(a, 0, last)),
+                             static_cast<std::uint32_t>(std::clamp(b, 0, last)));
+    };
+    const float dx = (h(i + 1, j) - h(i - 1, j)) /
+                     (static_cast<float>(std::min(i + 1, last) - std::max(i - 1, 0)) * kCell);
+    const float dz = (h(i, j + 1) - h(i, j - 1)) /
+                     (static_cast<float>(std::min(j + 1, last) - std::max(j - 1, 0)) * kCell);
+    return core::normalize(core::Vec3{-dx, 1.0f, -dz});
+}
+
+core::Vec3 cpu_smooth_normal(const std::vector<std::uint16_t>& s, float x, float z) {
+    const int ci = static_cast<int>(std::floor(x / kCell));
+    const int cj = static_cast<int>(std::floor(z / kCell));
+    const float u = x / kCell - static_cast<float>(ci);
+    const float v = z / kCell - static_cast<float>(cj);
+    const core::Vec3 n00 = cpu_vertex_normal(s, ci, cj);
+    const core::Vec3 n10 = cpu_vertex_normal(s, ci + 1, cj);
+    const core::Vec3 n01 = cpu_vertex_normal(s, ci, cj + 1);
+    const core::Vec3 n11 = cpu_vertex_normal(s, ci + 1, cj + 1);
+    core::Vec3 sum;
+    if (u >= v) { // triangle (v00, v10, v11)
+        sum = n00 * (1.0f - u) + n10 * (u - v) + n11 * v;
+    } else { // triangle (v00, v11, v01)
+        sum = n00 * (1.0f - v) + n11 * u + n01 * (v - u);
+    }
+    return core::normalize(sum);
+}
+
 assets::HeightfieldAsset make_asset(const std::vector<std::uint16_t>& s) {
     assets::HeightfieldAsset a;
     a.columns = kColumns;
@@ -599,7 +635,7 @@ std::array<double, 3> cpu_terrain_shade(const core::Vec3& n,
     return out;
 }
 
-TEST_CASE("m19.3: TerrainPass draws the tile, lit by its own faceted triangle normals") {
+TEST_CASE("m19.3: TerrainPass draws the tile, lit by its smooth heightfield normals") {
     auto device = rhi::create_device({});
     if (!device) {
         if (vulkan_required()) {
@@ -678,13 +714,15 @@ TEST_CASE("m19.3: TerrainPass draws the tile, lit by its own faceted triangle no
     const std::vector<std::uint8_t> raw = read_texture(*device, graph.physical(hdr), 8);
     const auto* halves = reinterpret_cast<const std::uint16_t*>(raw.data());
 
-    // ── The shading check: analytic, from the CPU's own faceted normals ──────────────────────
+    // ── The shading check: analytic, from the CPU's own SMOOTH normals ───────────────────────
     //
-    // terrain.frag's normal is the DRAWN triangle's plane normal (recovered from dFdx/dFdy of the
-    // interpolated world position), which is the same faceted normal physics reports. So the
+    // 2026-10-20: terrain.frag shades with the heightfield's smooth normal (terrain.vert's
+    // per-vertex central differences, interpolated); this test previously demanded the faceted
+    // face normal and named a smooth one as its failure case. That assertion is superseded by
+    // design -- the faceting was the owner's complaint -- and the proof is otherwise unchanged: the
     // expected radiance at a probe is computable: cpu_terrain_shade's GGX model (the m19.5 shader).
     // Checking against that — rather than against a stored image — is what makes this a structural
-    // proof: it would fail for a smooth (central-difference) normal, for a dropped 1/π, and for a
+    // proof: it would fail for a faceted face normal, for a dropped 1/π, and for a
     // light pointing the wrong way.
     const core::Vec3 to_light = core::normalize(
         core::Vec3{-light.sun_direction.x, -light.sun_direction.y, -light.sun_direction.z});
@@ -692,6 +730,7 @@ TEST_CASE("m19.3: TerrainPass draws the tile, lit by its own faceted triangle no
     float brightest = 0.0f;
     float dimmest = std::numeric_limits<float>::max();
     float worst_rel = 0.0f;
+    float smooth_vs_face = 0.0f; // sensitivity control: the two normals must actually differ here
     for (const std::uint32_t px : kProbeAxis) {
         for (const std::uint32_t py : kProbeAxis) {
             const std::size_t p = (std::size_t{py} * kSize + px) * 4;
@@ -701,7 +740,9 @@ TEST_CASE("m19.3: TerrainPass draws the tile, lit by its own faceted triangle no
             REQUIRE(r > 0.0f); // terrain covered this pixel (the background is pure black)
 
             const core::Vec3 local = pixel_to_local(px, py);
-            const core::Vec3 n = cpu_surface_normal(samples, local.x, local.z);
+            const core::Vec3 n = cpu_smooth_normal(samples, local.x, local.z);
+            const core::Vec3 face = cpu_surface_normal(samples, local.x, local.z);
+            smooth_vs_face = std::max(smooth_vs_face, core::length(n - face));
             const float h = cpu_surface_height(samples, local.x, local.z, true);
             const core::Vec3 world{kOrigin.x + local.x, kOrigin.y + h, kOrigin.z + local.z};
             const core::Vec3 eye = top_down_eye();
@@ -726,6 +767,7 @@ TEST_CASE("m19.3: TerrainPass draws the tile, lit by its own faceted triangle no
         }
     }
     REQUIRE(shaded == 36);
+    CHECK(smooth_vs_face > 0.01f); // else the fixture could not tell smooth from faceted shading
     // The light is doing work: a tile shaded by a constant would satisfy the per-probe check only
     // if the analytic value were constant too, but stating the contrast makes a degenerate light
     // (or a flattened normal) a visible failure rather than a quiet one.

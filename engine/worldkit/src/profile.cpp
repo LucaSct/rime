@@ -9,11 +9,14 @@
 #include "rime/ecs/render_transform.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/fluids_render/phase_surface.hpp"
+#include "rime/fluids_scene/components.hpp"
 #include "rime/gameplay/components.hpp"
 #include "rime/gameplay_net/components.hpp"
 #include "rime/ground/surface.hpp"
 #include "rime/physics/components.hpp"
 #include "rime/render/components.hpp"
+#include "rime/vfx_scene/components.hpp"
 
 namespace rime::worldkit {
 
@@ -43,6 +46,9 @@ std::size_t register_engine_components(ecs::World& world) {
     gameplay::register_gameplay_components(world);
     gameplay_net::register_gameplay_net_components(world);
     ground::register_ground_components(world);
+    vfx_scene::register_vfx_scene_components(world);
+    fluids_scene::register_fluids_scene_components(world);
+    fluids_render::register_fluids_render_components(world);
 
     return world.registered_component_count();
 }

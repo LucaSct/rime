@@ -1,0 +1,3 @@
+rime_add_test(rime_fluids_render_tests phase_surface_test.cpp)
+target_sources(rime_fluids_render_tests PRIVATE phase_maps_test.cpp)
+target_link_libraries(rime_fluids_render_tests PRIVATE rime::fluids_render rime::scene)

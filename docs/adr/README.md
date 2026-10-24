@@ -114,3 +114,18 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0085](0085-multiplayer-development-and-shipment.md) — multiplayer-first development and shipment, native target artifacts, dedicated/browser profiles, and gated creator-enabled player authoring.
 - [ADR-0086](0086-play-sight-calibration-and-render-graph-scale.md) — right-eye rifle calibration, transparent collimated sights, exit-pupil rendering support, scalable pass-name indexing and complete streamed-view timing.
 - [ADR-0087](0087-verified-linux-development-bundle.md) — verified Linux development exports, build provenance, reviewed notices, isolated execution and retained CI artifacts.
+
+- [ADR-0088](0088-environment-effects-as-separate-milestones.md) — separate smoke, destruction smoke, water/buoyancy and fire milestones; initial CPU seams may start before M18, while enabled workloads retain their budget gates.
+- [ADR-0089](0089-conservative-plain-contact-midphase.md) — proposed conservative plain-contact bounds, per-build cache lifetime, unchanged CCD and frozen-contact/world-hash proofs.
+- [ADR-0090](0090-environment-source-authoring.md) — reflected smoke/fire source authoring with disposable Play presentation; temperature-driven ice starts as a separate energy/phase milestone.
+- [ADR-0091](0091-fixed-mass-thermal-phase-reference.md) — provisional fixed-mass water/ice energy reference, explicit liquid mass fraction, transactional heat accounting and exact-arithmetic verification.
+- [ADR-0096](0096-committed-phase-detail-and-editor-discovery.md) — immutable cosmetic water ripples, static frost veins, committed presentation clock, wheel dolly and source discovery.
+- [ADR-0097](0097-city-editor-run-and-development-bundle.md) — confirmed save before launching the full city runtime, derived preview exclusion and a separate Linux city development bundle.
+- [ADR-0098](0098-editor-navigation-and-environment-presentation-v2.md) — reconciled Preview camera ownership, aspect-preserving viewport interaction, thermal entity pickers and bounded flame/smoke/water/ice presentation V2.
+- [ADR-0099](0099-authored-city-spawns-and-runtime-environment.md) — sample-owned player spawn markers and bounded authored environment presentation shared by the city runtime and editor.
+
+- [ADR-0100](0100-editor-player-preview-and-input-lease.md) — optional city Walk Preview, acknowledged input capture and exact Stop restoration
+
+- [ADR-0101](0101-walking-shadow-stability.md) — stable sun cascades, continuous shared receivers and moving-caster cache invalidation
+
+- [ADR-0102](0102-runtime-floor-lighting.md) — receiving-side diffuse GI queries and city shadow coverage independent of terrain range

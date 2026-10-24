@@ -106,6 +106,23 @@ paragraph over a cryptic one-liner. Do not delete explanatory comments to "clean
    give every skip/drop/defer path a counter — a proof that cannot see what it skipped still reads
    as passing.
 
+6. **A component's reflection belongs in the header that DECLARES it, never in a separate
+   `reflect.hpp`.** `World::add_component` registers a component implicitly
+   (`add_component_raw(e, register_component<T>())`, `ecs/world.hpp`), and `register_component<T>`
+   is a template. So a translation unit that can see the component type but *not* its
+   `ReflectionTraits` specialization instantiates that same weak symbol against the **primary,
+   unreflected** template; the linker folds the two definitions and keeps either one. The binary
+   that loses the toss has a component with no reflection, which the scene loader then reports as
+   "this build does not register: <type>". It is an ODR violation, so **nothing diagnoses it** —
+   not GCC, not the sanitizers, not a green local build. The split that `core/math/reflect.hpp`
+   argues for is correct for math *value* types precisely because they are never implicitly
+   registered; components are. Measured on PR #348: `play_city.cpp` spawned a `LocalTransform`
+   without including `ecs/reflect.hpp`, and because it links into `the-block-host` but not the
+   engine's own host, **the two hosts disagreed about the same scene** — and the game's host, which
+   registers strictly *more*, reported one *fewer* schema type. The tell is a host failing on a
+   type it demonstrably registers; the fix is to move the `RIME_REFLECT` block next to the
+   `struct`, which makes the broken state unreachable.
+
 ## Decisions & docs
 
 - A meaningful technical decision gets an **ADR** in [`docs/adr/`](docs/adr/) (copy the

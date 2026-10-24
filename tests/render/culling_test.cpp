@@ -4,7 +4,9 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <numbers>
+#include <utility>
 #include <vector>
 
 #include "render_test_support.hpp"
@@ -104,6 +106,26 @@ TEST_CASE("m13.2a: a transformed box is bounded conservatively") {
     CHECK(mx.x == doctest::Approx(std::sqrt(2.0f)).epsilon(0.001));
     CHECK(mx.y == doctest::Approx(std::sqrt(2.0f)).epsilon(0.001));
     CHECK(mx.z == doctest::Approx(1.0f)); // untouched by a Z rotation
+}
+
+TEST_CASE("shadow caster bounds fail open at edges and on invalid input") {
+    const Frustum f = standard_frustum();
+    const auto model = core::mat4_translation({0.0f, 0.0f, -5.0f});
+    CHECK(shadow_caster_aabb_in_frustum(f, model, {-1, -1, -1}, {1, 1, 1}));
+    CHECK_FALSE(shadow_caster_aabb_in_frustum(
+        f, core::mat4_translation({100.0f, 0.0f, -5.0f}), {-1, -1, -1}, {1, 1, 1}));
+    // The near plane clips the box, but part of it still survives.
+    CHECK(shadow_caster_aabb_in_frustum(
+        f, core::mat4_translation({0.0f, 0.0f, -0.1f}), {-0.2f, -0.2f, -0.2f}, {0.2f, 0.2f, 0.2f}));
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    CHECK(shadow_caster_aabb_in_frustum(f, model, {nan, -1, -1}, {1, 1, 1}));
+    CHECK(shadow_caster_aabb_in_frustum(f, model, {2, -1, -1}, {1, 1, 1}));
+    Frustum invalid = f;
+    invalid.planes[0].x = nan;
+    CHECK(shadow_caster_aabb_in_frustum(invalid, model, {-1, -1, -1}, {1, 1, 1}));
+    core::Mat4 invalid_model = model;
+    invalid_model.at(0, 0) = nan;
+    CHECK(shadow_caster_aabb_in_frustum(f, invalid_model, {-1, -1, -1}, {1, 1, 1}));
 }
 
 TEST_CASE("an out-of-range MeshRef is dropped and counted, not used to index the registry") {
@@ -277,6 +299,12 @@ TEST_CASE("m13.2a: a shadow caster outside the view still casts into it") {
         core::Transform floor_tf{};
         (void)world.spawn_with(ecs::WorldTransform{floor_tf}, MeshRef{floor}, MaterialRef{mat});
 
+        // Outside the cascade XY footprint and deliberately between floor and blocker in the
+        // shared draw list. A compacted-list implementation would shift the blocker's UBO index.
+        core::Transform outside_tf{};
+        outside_tf.translation = {100000.0f, 0.0f, 0.0f};
+        (void)world.spawn_with(ecs::WorldTransform{outside_tf}, MeshRef{blocker}, MaterialRef{mat});
+
         if (with_blocker) {
             core::Transform blocker_tf{};
             blocker_tf.translation = {0.0f, 9.0f, 0.0f}; // far above; the camera never sees it
@@ -300,10 +328,12 @@ TEST_CASE("m13.2a: a shadow caster outside the view still casts into it") {
     LightingSettings ls;
     ls.shadows_enabled = true;
     ls.cascade_count = 1;
-    renderer.set_lighting(ls);
     renderer.set_culling_enabled(true);
+    render::test::disable_temporal_aa(renderer);
 
-    const auto floor_luminance = [&](ecs::World& world) {
+    const auto frame = [&](ecs::World& world, bool caster_culling) {
+        ls.shadow_caster_culling = caster_culling;
+        renderer.set_lighting(ls);
         RenderGraph graph(*device);
         const SceneRenderer::Output out = renderer.render(graph, world, {kSize, kSize}, true);
         REQUIRE(out.hdr.is_valid());
@@ -311,10 +341,8 @@ TEST_CASE("m13.2a: a shadow caster outside the view still casts into it") {
         auto cmd = device->begin_commands();
         graph.execute(*cmd);
         device->submit_blocking(*cmd);
-        const HdrImage img = decode_hdr(
-            read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8), kSize, kSize);
-        // The floor directly under the blocker, at the centre of the view.
-        return img.luminance(kSize / 2, kSize * 3 / 4);
+        auto pixels = read_texture(*device, graph.physical(out.hdr), kSize, kSize, 8);
+        return std::pair{std::move(pixels), renderer.csm_caster_stats()[0]};
     };
 
     ecs::World lit;
@@ -322,9 +350,20 @@ TEST_CASE("m13.2a: a shadow caster outside the view still casts into it") {
     ecs::World shadowed;
     build(shadowed, /*with_blocker=*/true);
 
-    const float open = floor_luminance(lit);
-    const float under = floor_luminance(shadowed);
+    const auto [unculled_pixels, unculled_stats] = frame(shadowed, false);
+    const auto [culled_pixels, culled_stats] = frame(shadowed, true);
+    const CullStats camera_stats = renderer.cull_stats();
+    const auto [lit_pixels, lit_stats] = frame(lit, true);
+    const float open = decode_hdr(lit_pixels, kSize, kSize).luminance(kSize / 2, kSize * 3 / 4);
+    const float under = decode_hdr(culled_pixels, kSize, kSize).luminance(kSize / 2, kSize * 3 / 4);
     MESSAGE("m13.2a shadow caster out of view: floor lit " << open << ", shadowed " << under);
+
+    CHECK(culled_pixels == unculled_pixels); // exact HDR, including the off-camera blocker
+    CHECK(unculled_stats.culled == 0);
+    CHECK(culled_stats.culled >= 1);    // the far XY caster was actually rejected
+    CHECK(culled_stats.submitted >= 2); // floor and off-camera blocker retain original indices
+    CHECK(culled_stats.considered() == unculled_stats.considered());
+    CHECK(lit_stats.culled >= 1);
 
     // Non-vacuity first: the floor really is lit without the blocker.
     CHECK(open > 0.05f);
@@ -334,5 +373,5 @@ TEST_CASE("m13.2a: a shadow caster outside the view still casts into it") {
 
     // And the blocker really was culled from the CAMERA's view — otherwise this case would be
     // proving nothing about culling at all, just that shadows work.
-    CHECK(renderer.cull_stats().culled > 0);
+    CHECK(camera_stats.culled > 0);
 }

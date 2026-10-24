@@ -1,0 +1,5 @@
+--- original
++++ partial-commit
+@@ -108 +108 @@
+-            cold = next_cold;
++            // Deliberately missing second commit.

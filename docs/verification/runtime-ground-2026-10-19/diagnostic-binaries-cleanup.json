@@ -1,0 +1,22 @@
+[
+  {
+    "path": "/home/next/reports/rime-runtime-ground-2026-10-19/floor-diagnostic",
+    "bytes": 64767056,
+    "sha256": "da5294e781b8aa0fd4d12cd081797c6943783ea49846db8af82c1e10722a5ee0"
+  },
+  {
+    "path": "/home/next/reports/rime-runtime-ground-2026-10-19/floor-diagnostic.o",
+    "bytes": 9191224,
+    "sha256": "455cf57e1ae8fb43b6cbc6828c65cf67aafb29002b6960fdc481cf82ffa26a7e"
+  },
+  {
+    "path": "/home/next/reports/rime-runtime-ground-2026-10-19/old-diffuse/old-diffuse-test",
+    "bytes": 78148216,
+    "sha256": "5e71b5666bf636d8688fd5e06d306ecb4e4096ba97e48321c7dba27e67d2eac9"
+  },
+  {
+    "path": "/home/next/reports/rime-runtime-ground-2026-10-19/old-diffuse/old-passes.o",
+    "bytes": 952440,
+    "sha256": "02263d08939fab678dc65d81503084dadc77c3e5f8ad6052bc397d527e38b7fc"
+  }
+]

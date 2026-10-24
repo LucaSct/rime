@@ -1,0 +1,4 @@
+[1/4] Building CXX object engine/fluids/CMakeFiles/rime_fluids.dir/src/thermal_field.cpp.o
+[2/4] Linking CXX static library lib/librime_fluids.a
+[3/4] Building CXX object tests/fluids/CMakeFiles/rime_fluids_tests.dir/thermal_field_test.cpp.o
+[4/4] Linking CXX executable bin/rime_fluids_tests

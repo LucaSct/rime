@@ -1,0 +1,15 @@
+Traceback (most recent call last):
+  File "/home/next/projects/rime/tests/fluids/verify_phase_change.py", line 147, in main
+    assert 0.0 < fraction < 1.0
+           ^^^^^^^^^^^^^^^^^^^^
+AssertionError
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/next/projects/rime/tests/fluids/verify_phase_change.py", line 173, in <module>
+    main()
+    ~~~~^^
+  File "/home/next/projects/rime/tests/fluids/verify_phase_change.py", line 160, in main
+    raise AssertionError(f"case {index}, input={case}, probe={row}: {error}") from error
+AssertionError: case 703, input=(1.375, 273.15, 0.0, 5e-324), probe=1 0 0 1 1 1 9223372036854775808 0 4643512921809643110 0:

@@ -104,7 +104,8 @@ struct RGColorAttachment {
 // The declared depth(-stencil) attachment. `read_only` says the pass tests against depth but
 // never writes it (a forward pass running against a pre-pass's depth): that turns the hazard
 // from write-after-write into read-after-write, which lets the compiler keep more passes
-// unordered relative to each other.
+// unordered relative to each other. It also selects the shared read-only attachment/sampled
+// state when this texture appears in the pass's sampled list.
 struct RGDepthAttachment {
     RGTexture texture;
     rhi::LoadOp load = rhi::LoadOp::Clear;

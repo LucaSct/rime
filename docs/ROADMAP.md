@@ -14,11 +14,169 @@ shipment; its unfinished gates still block editing releases. See the
 [step-by-step plan and target evidence](design/multiplayer-shipping.md).
 The historical progress below remains evidence of what actually landed.
 
+**Current position (2026-10-17):** M19's terrain series has merged, and Linux export
+packaging (#329) and the automatic-fire repair (#330) are on `main`. The expanded
+city (#331) remains a draft: native ADS measurements exposed substantial CPU draw
+submission cost. Renderer submission has improved in native 720p captures; single-charge
+and three-building collapse diagnostics still expose a separate physics bottleneck
+and do not prove settled peer convergence. The complete performance gate remains open. The current
+playable repairs include weapon timing/presentation and city readability; these do
+not close M18's outstanding performance gate. The dated October 5 snapshot below
+is historical, including its then-unmerged M19 stack and older post-M19 ordering.
+
+**Editor/demo checkpoint (2026-10-19, unmerged stack):** Frost Yard previews
+fixed-mass freezing/melting, smoke/fire, static frost veins and cosmetic liquid
+ripples. Native editor navigation adds wheel dolly and hold-RMB guidance; Outliner
+has readable roles and compact List/Tiles type icons. The city editor can save and
+launch the existing weapon runtime in a separate window. A separate Linux city
+development export packages the saved map, cooked weapons and notices, with
+checkout-hidden functional execution. This does not close M18, collapse locality,
+production packaging or browser authoring gates. See [creator workflow](creator-workflow.md)
+and [ADR-0097](adr/0097-city-editor-run-and-development-bundle.md).
+
+**Collision follow-up (2026-10-18, isolated candidate):** the two saved
+separated-hull contacts reproduce as false GJK tetrahedron containment caused by
+float cancellation. A scale-aware degeneracy guard removes both contacts, with
+separation/overlap controls and compiler/sanitizer proofs. This deliberately changes
+contact semantics; the chaotic block's locality thresholds are red, and no safe
+filter or collapse speedup is claimed. [Evidence and remaining gates](perf/gjk-flat-tetrahedron-2026-10-18/README.md).
+The subsequent [frozen contact oracle](perf/contact-oracle-2026-10-18/README.md)
+replays 166,374 queries exactly. Tight bounds still discard 11 reference contacts;
+the existing child margin plus outward rounding passes the corpus and an external
+cached-filter variant preserves all 900 world hashes. This is measured groundwork
+for a runtime optimization. The subsequent
+[runtime bounds cache](perf/plain-contact-bounds-2026-10-18/README.md), isolated on
+`perf/plain-contact-bounds`, preserves those 900 hashes while removing 1,159,765
+exact calls. Controlled frozen CPU replay costs about 21% less with the actual
+cache. The new 1080p attempt remains unqualified and sim.block p99 is 8.074 ms
+against 6.000; M18 and city convergence remain open. See
+[ADR-0089](adr/0089-conservative-plain-contact-midphase.md).
+
+Water, fire and smoke are planned simulation work, not completed by the present
+reflective pond or muzzle effects. [ADR-0042](adr/0042-fluids-track-reopened.md)
+orders destruction smoke/particle capacity (fx1b), heightfield water with two-way
+buoyancy (fl1a), then ignition, fire-driven lighting and smoke (fx1c), after the M18
+performance gate. [ADR-0085](adr/0085-multiplayer-development-and-shipment.md)
+also requires exported multiplayer and measured capacity in the shipment path.
+[ADR-0088](adr/0088-environment-effects-as-separate-milestones.md), following the
+owner's newer request, now separates these into four milestones and permits
+research, CPU oracles and default-off seams to start before M18 closes. The
+[small-brick plan](design/environment-effects-milestones.md) gives each a useful
+first release and independent exits. Enabled GPU workloads and completed
+simulation features still require the performance/authority proofs; there is no
+supported calendar date while those gates remain open.
+
 **How we use this roadmap.** These are *milestones* — the map, not the turn-by-turn
 directions. Each milestone is decomposed into small **bricks**, and every brick is
 planned again before it's built. A milestone is **"done" only when its proof runs** (a
 `samples/` demo and/or CI gate) — never when it merely compiles. We re-plan at each
 milestone boundary; time estimates come at brick-decomposition, not here.
+
+**Environment/editor continuation (2026-10-18):** the next integration brick adds
+reflected, disabled-by-default smoke/fire sources to the existing inspector,
+undo/save/reload and bounded Play preview path. Temperature-driven freezing and
+melting is now a separate M-FL2 track at the owner's request: the next CPU brick
+is an energy/phase oracle, then water coupling, visible state and editor controls.
+The [ordered bricks](design/environment-effects-milestones.md#environment-and-editor-sequence-2026-10-18)
+and [ADR-0090](adr/0090-environment-source-authoring.md) distinguish implemented
+authoring seams from outstanding clicked, hardware, numerical and network proofs.
+
+**Thermal continuation (2026-10-18):** M-FL2 now has a bounded fixed-mass CPU
+energy/phase reference with explicit latent heat and transactional heat accounting.
+Fable 5.1 and GPT-6 Astra supplied independent proposals; locally reproduced
+numerical edge cases informed the final guards. This is not spatial freezing or
+visible ice. Next are conservative sample-to-sample heat exchange and the separate
+water displacement/coupling brick, followed by field/authoring/surface consumers.
+See [ADR-0091](adr/0091-fixed-mass-thermal-phase-reference.md).
+
+**Thermal contact continuation (2026-10-18):** the next isolated CPU brick now
+exchanges conductive heat between fixed-mass samples, with backward-Euler sign
+brackets, transactional two-sided commit and explicit rounding receipts. Tests
+cover latent plateaus, different melting points, no temperature reversal, zero
+exchange and bounded numerical/range refusal. This remains a draft reference;
+the next thermal consumer is a bounded spatial field, then temperature/heat-source
+editor authoring and visible phase. Water displacement/body feedback remains a
+separate open brick. See [ADR-0092](adr/0092-transactional-thermal-contact.md).
+
+**Bounded thermal field (2026-10-18):** fixed-mass samples now have a CPU graph
+consumer with canonical explicit contacts, signed power sources, preallocated
+tick buffers, bounded substeps/work and atomic publication of state plus the
+complete energy journal. Multi-hop phase changes, exact source/rounding accounting
+and temporal/spatial refinement are tested. It is an ordered first-order
+reference, not global implicit diffusion, rendered ice or moving-water freezing.
+Next: reflected thermal descriptions and editor Play/Stop reconstruction, then
+validated visible phase. [ADR-0093](adr/0093-bounded-journaled-thermal-field.md).
+
+**Thermal editor preview (2026-10-18):** reflected fixed cells, contacts and signed
+power sources now feed a bounded disposable Play/Step preview. The read-only
+inspector shows validated temperature, liquid mass fraction and energy; Pause,
+relevant edits, invalid settings, numerical refusal, Stop and save/reload have
+explicit semantics and real-host checks. Defaults stay disabled. Next: visible
+fixed-cell phase presentation and clicked thermal authoring proof, with water
+mass/energy transport, ice geometry/collision and combustion authority separate.
+See [ADR-0094](adr/0094-thermal-editor-preview.md). No M18 or shipment gate closes.
+
+**Frost Yard demo checkpoint (2026-10-18):** a saved, runnable city courtyard now
+shows actual fixed-mass cooling/freezing, heating/melting and an unheated control,
+with separate smoke/fire effects. The standalone 36-second demo and editor host
+share validated thermal state and an opt-in transient RGB/roughness presentation;
+scene materials and geometry stay authored. Run `./scripts/thermal-courtyard.sh`
+or add `--editor`. See [demo/controls](../samples/thermal-courtyard/README.md) and
+[ADR-0095](adr/0095-transient-phase-surfaces-and-courtyard.md). This is a working
+day-end example; moving water, ice geometry/collision, combustion authority,
+performance qualification and multiplayer shipment remain separate open work.
+
+**Phase detail and creator workflow (2026-10-19):** Frost Yard now uses blue frost
+veins and cosmetic water normal animation driven only by committed thermal time;
+water ripples settle with freezing and hold on Pause/refusal. Editor wheel dolly,
+held-navigation help and Outliner Effects/Thermal filters improve discovery.
+[Creator workflow](creator-workflow.md) maps scene → input/events → animation →
+packaging to Unity/EA public references and current Rime capabilities. Next useful
+playable slice: possessed player + editor action/focus/restart, then one authored
+heater interaction/exit objective; prefab library, emitter icons, animation and
+adaptive viewport resolution remain explicit follow-ups. See
+[ADR-0096](adr/0096-committed-phase-detail-and-editor-discovery.md). No open gate closes.
+
+**Editor/environment V2 (2026-10-19):** live Preview camera ownership and post-Stop
+navigation now reconcile, and streamed viewports preserve aspect and picking
+coordinates. Thermal references have readable entity pickers. Water/ice detail
+adds multiscale ripples and branching frost with a stable frozen endpoint; fire
+has bounded animated flames and smoke has procedural density, lifetime fades and
+local fire illumination. Saved city maps now consume these authored descriptions
+in the full runtime, including scopes, and can author one PlayerSpawn for position,
+look and recovery. See [ADR-0098](adr/0098-editor-navigation-and-environment-presentation-v2.md)
+and [ADR-0099](adr/0099-authored-city-spawns-and-runtime-environment.md). Possession,
+sensor/action wiring, prefabs, adaptive resolution, animation, moving water and
+gameplay ice remain later bricks. Existing release/performance gates stay open.
+
+**Walk Preview and bounded renderer work (2026-10-19):** the city host now offers
+an optional Walk mode with acknowledged mouse capture, WASD/look/jump, actual
+static city collision and an exact pre-Play Stop restore. Esc/focus loss/Pause
+release held input; Resume requires a new viewport click. Server and GUI refuse
+editing/saving during Walk. Inspect and older hosts retain their original path.
+This is a query-only preview controller, not the full weapon/network player.
+The next creator brick is a heater interaction and exit objective, then presets.
+See [ADR-0100](adr/0100-editor-player-preview-and-input-lease.md).
+Pass-local material binding reuse removes redundant CPU attachment calls while
+preserving draw state; [evidence](perf/material-bindings-2026-10-19/README.md)
+separates deterministic controls from rejected clock qualification. No frame-rate,
+collapse, terrain walking, gameplay ice or shipment gate closes.
+
+**Walking shadow stability (2026-10-19):** sun cascade scale and light basis now
+stay fixed while the camera walks/turns; mesh and terrain share continuous cascade
+transitions. Local spotlight caches track depth-affecting caster edits, motion and
+removal while preserving static/camera-only reuse. Alpha-masked materials filter
+normals before discard; missing cameras reset temporal history. Editor Preview
+now enables sun/local shadows. See [ADR-0101](adr/0101-walking-shadow-stability.md).
+Sun/reflection routing was audited; this does not close SSR/disocclusion, general
+actor/terrain shadow coverage or inherited performance/shipment gates.
+
+**Run-game floor follow-up (2026-10-19):** real RTX 3060 turning/walking videos
+exposed a sharp floor GI band absent from the editor. Receiving-side diffuse
+queries remove that band with GI/reflections still enabled; runtime sun coverage
+is now independent of the kilometre-scale terrain view. See
+[ADR-0102](adr/0102-runtime-floor-lighting.md) and its recorded controls. This is
+acceptance of the captured case, not a claim that all lighting artifacts are gone.
 
 > **Where things stand (2026-10-05, added by the roadmap refresh).** M0–M15 are done (M13 ⚠️ on its
 > frame-rate clause). **M16** is ⚠️ — m16.0–m16.8 landed, the Blender-authored proof asset has not

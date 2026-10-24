@@ -264,6 +264,47 @@ struct IslandSolveCost {
     std::uint64_t position_ns = 0; // pose integration loop + solve_positions (the position half)
 };
 
+// Optional, per-world diagnostic for the most recent contact build. Counts describe work; times
+// are summed task wall-clock samples (not elapsed parallel time) and must never enter simulation
+// state or world_hash(). The time buckets
+// are disjoint: compound_midphase_ns is whole compound child-loop time less the separately timed
+// exact, speculative, and cache regions. Its remainder includes AABB testing, loop overhead,
+// manifold setup, feature folding, and output append. heightfield_ns includes terrain's cache
+// lookups and speculative routine, while warmcache_ns covers only plain and compound contacts.
+// Exact calls count collide_shapes;
+// speculative calls count both convex and terrain attempts. Posed children include the one
+// surrogate child of a plain side of a compound pair. Gaps are dispatch and clock overhead.
+struct ContactProfile {
+    std::uint64_t raw_candidate_keys = 0;
+    std::uint64_t unique_pairs = 0;
+    std::uint64_t duplicate_keys = 0;
+    std::uint64_t plain_pairs = 0;
+    std::uint64_t compound_pairs = 0;
+    std::uint64_t posed_children = 0;
+    std::uint64_t tested_child_pairs = 0;
+    std::uint64_t culled_child_pairs = 0;
+    std::uint64_t exact_narrowphase_calls = 0;
+    std::uint64_t speculative_calls = 0;
+    std::uint64_t heightfield_pairs = 0;
+    std::uint64_t produced_manifolds = 0;
+    std::uint64_t pair_query_ns = 0;
+    std::uint64_t pair_canonicalize_ns = 0;
+    std::uint64_t plain_exact_ns = 0;
+    std::uint64_t plain_speculative_ns = 0;
+    std::uint64_t compound_pose_ns = 0;
+    std::uint64_t compound_midphase_ns = 0;
+    std::uint64_t compound_exact_ns = 0;
+    std::uint64_t compound_speculative_ns = 0;
+    std::uint64_t heightfield_ns = 0;
+    std::uint64_t warmcache_ns = 0;
+    // Plain midphase only. These partition eligible exact tests into retained/rejected calls;
+    // CCD fallback is still evaluated independently. Bounds time includes cache initialization.
+    std::uint64_t plain_bounds_tests = 0;
+    std::uint64_t plain_bounds_rejected = 0;
+    std::uint64_t plain_bounds_bodies = 0;
+    std::uint64_t plain_bounds_ns = 0;
+};
+
 class PhysicsWorld {
 public:
     PhysicsWorld();
@@ -368,7 +409,9 @@ public:
     [[nodiscard]] std::uint32_t contacts_warm_started_last() const noexcept;
 
     // --- Islands, sleeping & the parallel step (M7.5) ---------------------------------------
-    // Borrow a job system so step() solves independent simulation islands in parallel. Passing null
+    // Borrow a job system for independent contact-pair ranges and simulation islands. Contact
+    // builds read a frozen snapshot, then merge range outputs in canonical pair/child/patch order.
+    // Passing null
     // (the default) solves them sequentially. Either way the result is BIT-IDENTICAL: islands share
     // no dynamic body and immovable bodies are read-only in the solver, so an island's math is a
     // pure function of that island regardless of which worker runs it (the determinism contract,
@@ -405,9 +448,26 @@ public:
     void set_island_profile_enabled(bool enabled) noexcept;
     [[nodiscard]] bool island_profile_enabled() const noexcept;
 
+    // The WAVEFRONT velocity solve (on by default where the build supports it — x86-64 today).
+    // Large islands run their velocity iterations four constraints at a time, in an order that
+    // keeps every Gauss–Seidel dependency (engine/physics/src/wavefront.hpp), so the result is
+    // bit-identical to the scalar sweep: world_hash() is the same with it on or off. The switch
+    // exists so tests can prove exactly that, and so a profile can price the lever; it is not a
+    // quality knob. `wavefront_islands_last()` counts the islands that took the wide path in the
+    // most recent step() — 0 when off or unsupported.
+    void set_wavefront_solve_enabled(bool enabled) noexcept;
+    [[nodiscard]] bool wavefront_solve_enabled() const noexcept;
+    [[nodiscard]] std::uint32_t wavefront_islands_last() const noexcept;
+
     // One entry per active island of the most recent step(), in island-id order; empty when the
     // profile is off. Invalidated by the next step().
     [[nodiscard]] std::span<const IslandSolveCost> island_solve_profile_last() const noexcept;
+
+    // Diagnostic side channel for step() and compute_contacts(); disabled by default. Disabling
+    // clears the last snapshot. A profiled contact build replaces it rather than accumulating.
+    void set_contact_profile_enabled(bool enabled) noexcept;
+    [[nodiscard]] bool contact_profile_enabled() const noexcept;
+    [[nodiscard]] const ContactProfile& contact_profile() const noexcept;
 
     // Whether a body is currently asleep (deactivated): skipped by integration and the solver until
     // something wakes it — a moving body colliding into its island, wake_body(), or sleeping being

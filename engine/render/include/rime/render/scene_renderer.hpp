@@ -15,6 +15,7 @@
 #include "rime/render/components.hpp"
 #include "rime/render/culling.hpp"
 #include "rime/render/first_person_pass.hpp"
+#include "rime/render/fx_pass.hpp"
 #include "rime/render/lighting/clustered.hpp"
 #include "rime/render/lighting/ddgi.hpp"
 #include "rime/render/lighting/local_shadows.hpp"
@@ -43,6 +44,10 @@
 // textures, the material sampler) and the three pass objects. It does NOT own the registries —
 // meshes and materials belong to the scene/application; the renderer only reads them.
 namespace rime::render {
+
+namespace detail {
+struct SceneShadowCasters;
+}
 
 // ── Extraction (GPU-free, unit-testable without a device) ────────────────────────────────────
 
@@ -129,6 +134,45 @@ struct FirstPersonDeformation {
     MeshId mesh = kInvalidMeshId;
     std::span<const MeshVertex> current;
     std::span<const core::Vec3> previous_positions;
+};
+
+// Copied presentation factors for a whole entity, after submesh/material-set resolution.
+// Optional detail maps are borrowed immutable resources: the owner must outlive this renderer
+// AND pending GPU work. Ordinary appearances leave geometry and alpha unchanged.
+enum class SurfaceKind : std::uint32_t { Ordinary, Water, Ice, Frost };
+
+// Optional creation-time tessellation for a phase sheet. The compact grid description stays
+// immutable; each render uploads a private stream so depth, shadows and colour see the same waves.
+// Thermal sheets require an admitted appearance; standalone ponds use their authored depth.
+struct SurfaceGeometry {
+    std::uint32_t vertex_count = 0, seed = 0;
+    float top = 0;
+    float half_x = 1, half_z = 1;
+    float depth = .12f;
+    bool oval = false;
+    bool thermal = false;
+    double seconds = 0;
+};
+
+// Pure bounded CPU displacement, also exposed to the phase geometry proof.
+[[nodiscard]] std::vector<MeshVertex> phase_surface_vertices(const SurfaceGeometry& geometry,
+                                                             const core::Mat4& model,
+                                                             float liquid,
+                                                             double seconds,
+                                                             float depth);
+
+struct SurfaceAppearance {
+    ecs::Entity entity{};
+    core::Vec3 base_color{1.0f, 1.0f, 1.0f};
+    float roughness = 0.5f;
+    // false inherits authored maps; true with invalid handles explicitly selects flat/white.
+    bool override_detail = false;
+    rhi::TextureHandle normal_texture{}, base_color_texture{};
+    float normal_scale = 1.0f;
+    SurfaceKind kind = SurfaceKind::Ordinary;
+    float liquid_fraction = 1.0f;
+    float thickness = .12f; // metres: visual column, not simulated mass or collision thickness
+    double seconds = 0;
 };
 
 // ── The renderer ──────────────────────────────────────────────────────────────────────────────
@@ -279,7 +323,7 @@ public:
     [[nodiscard]] bool temporal_jitter_enabled() const noexcept { return temporal_jitter_enabled_; }
 
     // The UNJITTERED view-projection of the most recent render() call, and of the render() before
-    // it. A velocity is `previous - current` of these, so it is pure geometric motion with no
+    // it. A velocity is `current - previous` of these, so it is pure geometric motion with no
     // jitter in it. Before the second render, previous == current (there is no history yet).
     [[nodiscard]] const core::Mat4& view_proj_unjittered() const noexcept {
         return view_proj_unjittered_;
@@ -362,6 +406,11 @@ public:
     // re-renders next frame. An app/sample bridges the destruction event stream to this call. Cheap
     // and idempotent — call it once per event as the stream drains.
     void invalidate_shadow_region(const WorldAabb& region) { local_shadows_.invalidate(region); }
+
+    // These counters describe the latest declared directional maps after graph execution.
+    [[nodiscard]] const std::array<CullStats, kMaxCascades>& csm_caster_stats() const noexcept {
+        return csm_.caster_stats();
+    }
 
     // Local-shadow cache stats from the most recent render() — how many spot maps were re-rendered
     // vs served from cache (the ≈100%-reuse property a static scene holds after warmup).
@@ -491,6 +540,43 @@ public:
     // submit_blocking pay two extra small buffers and need not call it at all.
     void set_frames_in_flight(std::uint32_t frames);
 
+    // Copy a bounded caller-owned smoke list for subsequent render(). Off or empty clears it.
+    // RGB is approximate incident lighting in linear HDR, alpha is opacity. This billboard
+    // path has hard depth occlusion, no soft intersections, self-shadowing, or volumetrics;
+    // TAA can ghost moving puffs. No vfx module dependency is implied.
+    void set_smoke_particles(std::span<const GpuParticle> particles, FxSettings settings);
+
+    // Bounded copied HDR flame tongues through the existing billboard substrate. GPU resources
+    // and the pass are lazy until a nonempty enabled render. Empty/off clears presentation.
+    void set_flame_particles(std::span<const GpuParticle> particles, FxSettings settings);
+
+    // Whole bounded batch admission. Null/duplicate entities, nonfinite/out-of-range factors,
+    // or more than 16 rows refuse AND clear previous rows. Empty input restores authored looks.
+    // Generations are matched exactly; no ECS or shared registry writes. Owned until replaced.
+    [[nodiscard]] bool set_surface_appearances(std::span<const SurfaceAppearance> rows);
+
+    [[nodiscard]] std::uint64_t surface_appearance_refusals() const noexcept {
+        return surface_appearance_refusals_;
+    }
+
+    // Copied cosmetic light rows, appended after authored scene lights. They never enter ECS or
+    // scene saves. At most 16 finite, nonnegative rows are retained; empty input clears them.
+    // Existing clustered/forward lighting budgets still apply to the combined scene.
+    void set_transient_point_lights(std::span<const GpuPointLight> lights);
+
+    [[nodiscard]] std::uint64_t transient_point_lights_dropped() const noexcept {
+        return transient_point_lights_dropped_;
+    }
+
+    // Cumulative rejects from the owned-list cap and FxParticlePass validation/draw budget.
+    [[nodiscard]] std::uint64_t smoke_particles_dropped() const noexcept {
+        return smoke_particles_dropped_ + (smoke_pass_ ? smoke_pass_->particles_dropped() : 0);
+    }
+
+    [[nodiscard]] std::uint64_t flame_particles_dropped() const noexcept {
+        return flame_particles_dropped_ + (flame_pass_ ? flame_pass_->particles_dropped() : 0);
+    }
+
     // Where per-submesh materials come from (m16.3). Null — the default — means every submesh uses
     // its entity's single MaterialRef, which is what a world built by hand or by a pre-m16.3 path
     // wants. The GpuAssetBridge owns the registry; hand it over with
@@ -533,6 +619,16 @@ private:
     rhi::Extent2D previous_first_person_extent_{};
     std::vector<core::Mat4> previous_first_person_models_;
     std::unique_ptr<FirstPersonPass> first_person_pass_; // constructed only on first live draw
+    std::unique_ptr<FxParticlePass> smoke_pass_; // constructed only for nonempty enabled smoke
+    std::vector<GpuParticle> smoke_particles_;
+    FxSettings smoke_settings_{};
+    std::uint64_t smoke_particles_dropped_ = 0;
+    std::unique_ptr<FxParticlePass> flame_pass_;
+    std::vector<GpuParticle> flame_particles_;
+    FxSettings flame_settings_{};
+    std::uint64_t flame_particles_dropped_ = 0;
+    std::vector<GpuPointLight> transient_point_lights_;
+    std::uint64_t transient_point_lights_dropped_ = 0;
     std::vector<DrawItem> frame_first_person_draws_;
     std::vector<rhi::TextureHandle> first_person_base_color_;
     std::vector<rhi::TextureHandle> first_person_metallic_roughness_;
@@ -548,11 +644,12 @@ private:
     TonemapPass tonemap_;
     CascadedShadowMap csm_; // m10.1: directional shadow cascades (only declared when enabled)
     LocalShadowMap local_shadows_; // m10.2: cached spot-light shadows (only declared when enabled)
-    ClusteredLights clustered_;    // m10.3: froxel light culling (only declared when enabled)
-    SdfClipmap sdf_clipmap_;       // m10.4b: the traceable field (only stepped when enabled)
-    DdgiProbes ddgi_; // m10.5a: irradiance/visibility probes (only stepped when enabled)
-    SsrPass ssr_;     // m10.7b: screen-space reflections resolve (only added when enabled)
-    SkyPass sky_;     // m17.0: procedural sky + clouds (only added when enabled)
+    std::unique_ptr<detail::SceneShadowCasters> shadow_casters_;
+    ClusteredLights clustered_; // m10.3: froxel light culling (only declared when enabled)
+    SdfClipmap sdf_clipmap_;    // m10.4b: the traceable field (only stepped when enabled)
+    DdgiProbes ddgi_;           // m10.5a: irradiance/visibility probes (only stepped when enabled)
+    SsrPass ssr_; // m10.7b: screen-space reflections resolve (only added when enabled)
+    SkyPass sky_; // m17.0: procedural sky + clouds (only added when enabled)
 
     // The m10.4b/m10.5a extraction bridge: which SdfRef entities are currently registered with
     // sdf_clipmap_, and the change-detection watermark sync_sdf_instances reads from.
@@ -633,6 +730,10 @@ private:
     // unsampled (m10.2). 2 layers so it gets a 2-D-ARRAY view compatible with sampler2DArrayShadow.
     rhi::TextureHandle dummy_shadow_array_;
 
+    std::array<SurfaceAppearance, 16> surface_appearances_{};
+    std::size_t surface_appearance_count_ = 0;
+    std::uint64_t surface_appearance_refusals_ = 0;
+    std::unordered_map<std::uint64_t, std::vector<MeshVertex>> surface_previous_vertices_;
     float ambient_[3] = {0.02f, 0.02f, 0.02f};
     bool warned_lights_ = false;
     bool warned_no_camera_ = false;

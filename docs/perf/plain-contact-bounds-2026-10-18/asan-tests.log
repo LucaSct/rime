@@ -1,0 +1,7 @@
+contact capture: 24 rows, 24 selected queries, 48 total queries, 0 cap drops
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:    7 |    7 passed | 0 failed | 0 skipped
+[doctest] assertions: 1175 | 1175 passed | 0 failed |
+[doctest] Status: SUCCESS!

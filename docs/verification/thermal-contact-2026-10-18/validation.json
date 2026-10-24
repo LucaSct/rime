@@ -1,0 +1,20 @@
+{
+  "implementation_commit": "9d50cb843226b93180b9de98457b27056afe3f09",
+  "full_build_exit": 0,
+  "full_ctest_exit": 8,
+  "full_ctest_passed": 89,
+  "full_ctest_total": 90,
+  "full_ctest_seconds": 288.2,
+  "inherited_failure": "the_block_headless: three unchanged collapse/locality claims",
+  "fluids_cases": 34,
+  "fluids_assertions": 24284,
+  "asan_contact_cases": 12,
+  "asan_contact_assertions": 1048,
+  "exact_cases_per_compiler": 1225,
+  "consultation_cost_usd": 0.32219,
+  "sdk_smoke_exit": 0,
+  "installed_contact_consumer_exit": 0,
+  "native_hardware_benchmark": false,
+  "review": "Full diff self-review by root; independent tool-free design proposals, not consultant diff review.",
+  "gcc_and_clang_output_equal": true
+}

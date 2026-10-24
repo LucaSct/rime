@@ -1,0 +1,60 @@
+{
+  "server": {
+    "steps": 360,
+    "summed_ms": {
+      "pair_query_ns": 161.326,
+      "pair_canonicalize_ns": 99.13,
+      "plain_exact_ns": 1247.959,
+      "plain_speculative_ns": 0.0,
+      "compound_pose_ns": 21.635,
+      "compound_midphase_ns": 4.678,
+      "compound_exact_ns": 35.998,
+      "compound_speculative_ns": 0.0,
+      "heightfield_ns": 10.244,
+      "warmcache_ns": 33.587
+    },
+    "counters": {
+      "raw_candidate_keys": 3630910,
+      "unique_pairs": 1916694,
+      "duplicate_keys": 1714216,
+      "plain_pairs": 1781075,
+      "compound_pairs": 38870,
+      "posed_children": 341120,
+      "tested_child_pairs": 508542,
+      "culled_child_pairs": 464151,
+      "exact_narrowphase_calls": 1825466,
+      "speculative_calls": 0,
+      "heightfield_pairs": 96749,
+      "produced_manifolds": 552825
+    }
+  },
+  "client": {
+    "steps": 360,
+    "summed_ms": {
+      "pair_query_ns": 153.976,
+      "pair_canonicalize_ns": 93.869,
+      "plain_exact_ns": 1207.605,
+      "plain_speculative_ns": 0.0,
+      "compound_pose_ns": 22.198,
+      "compound_midphase_ns": 4.782,
+      "compound_exact_ns": 36.817,
+      "compound_speculative_ns": 0.0,
+      "heightfield_ns": 9.529,
+      "warmcache_ns": 27.978
+    },
+    "counters": {
+      "raw_candidate_keys": 3507630,
+      "unique_pairs": 1849486,
+      "duplicate_keys": 1658144,
+      "plain_pairs": 1719656,
+      "compound_pairs": 39144,
+      "posed_children": 349967,
+      "tested_child_pairs": 538297,
+      "culled_child_pairs": 492842,
+      "exact_narrowphase_calls": 1765111,
+      "speculative_calls": 0,
+      "heightfield_pairs": 90686,
+      "produced_manifolds": 543243
+    }
+  }
+}

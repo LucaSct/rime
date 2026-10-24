@@ -1,0 +1,13 @@
+#include <rime/fluids/thermal_contact.hpp>
+#include <iostream>
+int main() {
+    using namespace rime::fluids;
+    auto a=ThermalSample::create(1.0,{283.15,1.0});
+    auto b=ThermalSample::create(1.0,{263.15,0.0});
+    if (!a || !b) return 1;
+    const auto r=exchange_heat(*a,*b,10.0,1.0);
+    if (r.status!=ThermalContactStatus::Exchanged ||
+        r.first.requested_joules!=-r.second.requested_joules ||
+        a->state().temperature_kelvin<b->state().temperature_kelvin) return 2;
+    std::cout << "Installed fluids consumer: PASS, trials=" << r.iterations << '\n';
+}

@@ -1,0 +1,17 @@
+[
+  {
+    "worktree": "/home/next/projects/rime-wt/csm-stable-fit",
+    "leaf": "bec61a0a31a09f7ced5ad470ad5e77539e2a7c12",
+    "clean": true
+  },
+  {
+    "worktree": "/home/next/projects/rime-wt/shadow-caster-tracker",
+    "leaf": "750c00ddcac1643ac8fd52151f701cc598c9286d",
+    "clean": true
+  },
+  {
+    "worktree": "/home/next/projects/rime-wt/shadow-motion-proof",
+    "leaf": "15e1663cb16a7b72715ec77666790964c5280102",
+    "clean": true
+  }
+]

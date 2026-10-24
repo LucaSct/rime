@@ -1,0 +1,311 @@
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:221:
+TEST CASE:  ddgi surface query: production forward depth-plane floor and ceiling stay openly lit
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := 1
+          height := -0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := 1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := -1
+          height := 0
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := -0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := 0.312
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.875 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.375 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := 0
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.125 <  0.002 )
+  logged: normal := -1
+          height := 0.001
+          yaw := 0
+
+/home/nex[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+t/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 1 <  0.002 )
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.5 <  0.002 )
+
+/home/next/projects/rime/tests/render/ddgi_surface_query_test.cpp:216: ERROR: CHECK( std::fabs(pixel[i] - expected[i]) < 0.002f ) is NOT correct!
+  values: CHECK( 0.25 <  0.002 )
+
+===============================================================================
+[doctest] test cases:   2 |   1 passed |  1 failed | 253 skipped
+[doctest] assertions: 241 | 190 passed | 51 failed |
+[doctest] Status: FAILURE!

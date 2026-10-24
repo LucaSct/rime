@@ -1,0 +1,8 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] editor-host: loaded 155 entities, 317 components, 0 skipped (/home/next/projects/rime/samples/thermal-courtyard/courtyard.rscene) (/home/next/projects/rime/engine/app/editor_host_app.cpp:153)
+editor-host: editor host + viewport on /tmp/rime-editor-2648883-1792362075688664482.sock (960x540, 'NVIDIA GeForce RTX 3060')
+editor: courtyard verified 120 cooling/melting/control steps, Pause, Stop and fresh Play over the real viewport host
+editor --smoke FAILED: picking background pixel (382,187) claimed a hit on entity 137:0

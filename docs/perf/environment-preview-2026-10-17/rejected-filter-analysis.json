@@ -1,0 +1,9 @@
+{
+  "matched_steps": 720,
+  "shadow_matched_steps": 720,
+  "shadow_hash_mismatches": 0,
+  "filter_hash_mismatches": 209,
+  "hull_snapshots": 4,
+  "pair_observations": 6,
+  "disposition": "Rejected: filter changes existing contacts and hashes. GJK/EPA cause not isolated."
+}

@@ -371,6 +371,7 @@ enum class ResourceState : std::uint8_t {
     Undefined,        // contents don't matter (fresh transient; first use)
     ColorTarget,      // written as a color attachment
     DepthTarget,      // written/tested as the depth(-stencil) attachment
+    DepthReadOnly,    // depth test attachment AND sampled depth; neither may write
     ShaderRead,       // sampled or uniform-read by any shader stage
     StorageReadWrite, // imageLoad/imageStore or storage-buffer access (general layout)
     IndirectRead,     // indexed draw arguments read by the GPU's indirect-command stage

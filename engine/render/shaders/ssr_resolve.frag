@@ -424,6 +424,31 @@ void main() {
     const vec3 f0 = mix(vec3(0.04), material.rgb, material.a);
     const vec3 fres = f0 + (vec3(1.0) - f0) * pow(1.0 - ndotv, 5.0);
 
-    const vec3 weight = use_chain ? sky_specular_environment_brdf(f0, roughness, ndotv) : fres;
+    // WHICH FRESNEL ON A DDGI FRAME (shimmer diagnosis, 2026-10-20). The probe this weight scales
+    // is a cosine-prefiltered IRRADIANCE, i.e. the reflection of a rough lobe, and a rough lobe
+    // has no mirror-sharp grazing rise: plain Schlick climbs as (1 - n.v)^5 toward 1 whatever the
+    // roughness, so on a roughness-0.89 brick wall it more than doubled the probe's contribution
+    // when the camera strafed 1.5 m (n.v fell with the viewing angle) -- most of the 45 % swing on
+    // a shadowed wall. Lagarde's roughness-aware Schlick caps the grazing gain at
+    // max(1 - roughness, f0) - f0: identical to Schlick at roughness 0 (a mirror), and exactly f0
+    // at n.v = 1 for every roughness, so head-on and smooth-surface pixels do not change.
+    const vec3 fres_rough = f0 + (max(vec3(1.0 - roughness), f0) - f0) * pow(1.0 - ndotv, 5.0);
+    const vec3 weight = use_chain ? sky_specular_environment_brdf(f0, roughness, ndotv)
+                                  : (ddgi_live ? fres_rough : fres);
     out_hdr = vec4(base + refl * weight, 1.0);
+    // Diagnostic term view (RIME_SHIMMER_TERM, see pbr_forward_shadowed.frag): ids 1-5 pass the
+    // forward pass's single term through untouched; 6 the probe fallback alone (what a miss
+    // reflects, times the Fresnel/BRDF weight), 7 the whole reflection term, 8 the weight, 9 the probe before the weight, 10 n.v and 11 roughness (grey), 12 the raw DDGI probe.
+    if (ddgi.enabled_pad.z != 0u) {
+        const uint t = ddgi.enabled_pad.z;
+        vec3 o = base;
+        if (t == 6u) o = probe * weight;
+        else if (t == 7u) o = refl * weight;
+        else if (t == 8u) o = weight;
+        else if (t == 9u) o = probe * 0.2;
+        else if (t == 10u) o = vec3(ndotv);
+        else if (t == 11u) o = vec3(roughness);
+        else if (t == 12u) o = (ddgi_covered ? ddgi_probe : vec3(-1.0)) * 0.2;
+        out_hdr = vec4(o, 1.0);
+    }
 }

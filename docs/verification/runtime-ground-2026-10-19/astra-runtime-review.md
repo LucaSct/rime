@@ -1,0 +1,17 @@
+The bias is a plausible targeted correction, but the supplied before/after measurements establish symptom suppression more strongly than the proposed causal chain. I found no definite implementation blocker in the inspected code.
+
+- **Source fact:** [Forward sampling](/home/next/projects/rime/engine/render/shaders/pbr_forward_shadowed.frag:300) clamps coordinates before interpolation, so an exact probe plane gives the next layer zero weight. It rejects trilinear, wrap, and combined weights at `1e-6`, then normalizes accepted contributions. Thus a small **accepted** contribution can determine the entire estimate; a rejected contribution cannot. Whether the runtime surface-layer probes are all visibility-blocked still requires atlas evidence. The discontinuous acceptance rule remains after this correction.
+
+- **Source fact:** The offset changes cell selection, probe distance, visibility lookup direction, and wrap weighting—not just which side wins a floating-point boundary. Consequently, improvement does not uniquely establish coordinate jitter as the cause. The supplied DDGI-off and SSR-off observations implicate forward DDGI, while leaving the exact visibility/normalization mechanism uncertain.
+
+- **Authored-grid compatibility:** The forward bias applies whenever DDGI is enabled, including legacy authored volumes; only the support blend is conditional. Edge clamping remains, but estimates can change near interior planes and boundaries. Authored grids therefore need explicit acceptance coverage. If preserving their prior estimates is a requirement and regressions appear, restricting the bias to runtime volumes becomes a must-fix.
+
+- **Thin geometry and units:** Bias and spacing are dimensionally consistent with world positions. However, the inspected code establishes no physical unit convention: `0.01` is one hundredth of a world unit. For spacing below `0.4`, that minimum exceeds 2.5% of spacing. Large spacing or narrow gaps can place the query across another surface and produce leakage; visibility then tests the displaced point. Neither local clearance nor wall thickness bounds the offset.
+
+- **Normal choice:** Forward uses normalized `v_world_normal`. These excerpts do not establish that it is a true face normal rather than an interpolated vertex normal, or that it is correctly oriented on backfaces. Likewise, SSR’s `n_world` cannot be proven equivalent from the permitted excerpt. “Same bias formula” is supported; “same geometric query” is not.
+
+- **Support envelope:** Keeping support at the actual surface is internally consistent. [Its margin](/home/next/projects/rime/engine/render/shaders/ddgi_support.glsl:12) reserves the same displacement magnitude for valid positive spacing, bounding each axis of the normalized-normal offset.
+
+The strongest remaining acceptance is the pending **original-shader negative control through the same production pass**, followed by fixed-atlas sweeps across both sides of the probe plane and several grid phases. Include measured black, fully blocked probes, thin gaps, authored boundaries/single-layer axes, and small/large spacing. Require the original band to reproduce and the correction to remove it without lifting legitimate darkness or leaking across walls. Retain full-scene turning/walking verification: row-mean reduction alone can hide relocated artifacts.
+
+Previously settled yaw anchors remain separate; neither this correction nor the shadow-distance cap establishes that all shadows are fixed.

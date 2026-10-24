@@ -30,6 +30,33 @@ case "$preset" in
     *) echo "editor-smoke.sh: unknown preset '$preset' (expected dev or release)" >&2; exit 2 ;;
 esac
 
+# Run a step whose OUTPUT we need, without throwing that output away when it fails.
+#
+# `out="$(cmd)"` under `set -e` dies AT THE ASSIGNMENT, so everything the command said -- including
+# the message that explains the failure -- goes into a variable that is never printed. Four PRs in
+# the #344-#348 chain reported nothing but "Process completed with exit code 101" for a Rust panic
+# whose own message named the bug exactly ("attempt to add with overflow" at smoke.rs:192). The
+# only way anyone saw it was re-running the command by hand. That is a diagnosability bug in this
+# script, not in the editor, and it belongs fixed here once rather than remembered four times.
+#
+# Usage: run_capture <var-name> <command> [args...]   -- on failure, prints the output and exits.
+run_capture() {
+    local __dest="$1"
+    shift
+    local __tmp __status=0
+    __tmp="$(mktemp)"
+    # `|| __status=$?` keeps set -e from firing, so we reach the reporting below.
+    "$@" >"$__tmp" 2>&1 || __status=$?
+    if [ "$__status" -ne 0 ]; then
+        cat "$__tmp" >&2
+        echo "editor-smoke.sh: $1 exited $__status -- its own output is above" >&2
+        rm -f "$__tmp"
+        exit "$__status"
+    fi
+    printf -v "$__dest" '%s' "$(cat "$__tmp")"
+    rm -f "$__tmp"
+}
+
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 say() { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
@@ -99,7 +126,7 @@ block_scene="$repo_root/$build_dir/editor-smoke-block.rscene"
 # the same thing, either the engine host has grown a game's module back or the game's host is not
 # registering anything — and both look fine from any other angle.
 say "run editor --smoke --scene block.rscene through the ENGINE's host (expect a degraded load)"
-engine_out="$("$editor_bin" --smoke --engine "$engine_bin" --scene "$block_scene" 2>&1)"
+run_capture engine_out "$editor_bin" --smoke --engine "$engine_bin" --scene "$block_scene"
 echo "$engine_out" | grep -E "skipped|editor <-> engine OK" || true
 echo "$engine_out" | grep -q "component(s) skipped" || {
     echo "editor-smoke.sh: the engine host opened a game's scene with nothing skipped — it should" \
@@ -108,8 +135,13 @@ echo "$engine_out" | grep -q "component(s) skipped" || {
 say "run editor --smoke --scene block.rscene through the GAME's host (expect 0 skipped)"
 blockhost_bin="$repo_root/$build_dir/bin/the-block-host"
 [ -x "$blockhost_bin" ] || { echo "editor-smoke.sh: missing $blockhost_bin" >&2; exit 1; }
-game_out="$("$editor_bin" --smoke --engine "$blockhost_bin" --scene "$block_scene" 2>&1)"
-echo "$game_out" | grep -E "0 skipped|editor <-> engine OK" || true
+run_capture game_out "$editor_bin" --smoke --engine "$blockhost_bin" --scene "$block_scene"
+# The pattern is "skipped", not "0 skipped", and that is not a cosmetic choice: the narrower
+# pattern matched the GOOD case only, so when this host DID skip something its own warning naming
+# the type was captured and never printed. Four PRs (#344-#347) reported this failure as nothing
+# but `exit code 101`. A check that hides the evidence for the case it exists to catch is worse
+# than no check.
+echo "$game_out" | grep -E "skipped|editor <-> engine OK" || true
 echo "$game_out" | grep -q "component(s) skipped" && {
     echo "editor-smoke.sh: the game's own host skipped components of its own scene" >&2; exit 1; }
 echo "$game_out" | grep -q ", 0 skipped" || {
@@ -182,14 +214,14 @@ if command -v vulkaninfo >/dev/null 2>&1 && vulkaninfo --summary >/dev/null 2>&1
         # work, and a coverage number alone cannot see that (the cube lands in front of the floor,
         # so it replaces lit pixels rather than adding them — measured, not assumed).
         say "reopen it in the viewport WITH --assets (expect the bridge to resolve it)"
-        with_out="$("$editor_bin" --smoke --frames 8 --engine "$engine_bin" --scene "$placed" \
-            --assets "$zoo_manifest" 2>&1)"
+        run_capture with_out "$editor_bin" --smoke --frames 8 --engine "$engine_bin" \
+            --scene "$placed" --assets "$zoo_manifest"
         echo "$with_out" | grep -E "resolved [0-9]+ mesh reference|viewport OK" || true
         echo "$with_out" | grep -qE "resolved [1-9][0-9]* mesh reference" || {
             echo "editor-smoke.sh: --assets did not resolve the scene's MeshAsset" >&2; exit 1; }
 
         say "reopen it WITHOUT --assets (expect no resolve — the id has nothing to resolve against)"
-        without_out="$("$editor_bin" --smoke --frames 8 --engine "$engine_bin" --scene "$placed" 2>&1)"
+        run_capture without_out "$editor_bin" --smoke --frames 8 --engine "$engine_bin" --scene "$placed"
         echo "$without_out" | grep -q "mesh reference" && {
             echo "editor-smoke.sh: the viewport resolved meshes with no manifest — the run with" \
                  "--assets proves nothing" >&2; exit 1; }

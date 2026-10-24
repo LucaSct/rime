@@ -61,7 +61,13 @@ jobs:
     name: self-hosted build & test (${{ inputs.runner_label || 'rime-linux' }})
     runs-on: [self-hosted, Linux, X64, "${{ inputs.runner_label || 'rime-linux' }}"]
     if: github.event_name == 'workflow_dispatch' || github.actor == github.repository_owner
-    timeout-minutes: 75 # the starbase container is a 2012 i7: a cold build there is slow but finite
+    # 150, raised from 75 on a measurement rather than a feeling: on PR #348 this job was
+    # CANCELLED on starbase at 75m40s against the old budget, and a cancelled job reports no logs
+    # at all, so the 75 bought nothing but a blind failure. "Slow but finite" was the right
+    # instinct and the wrong arithmetic -- starbase is a 2012 i7 running 2.2-2.8x nextos, and the
+    # suite it now runs includes the_block_desync_check at up to 3600 s on its own. This budget
+    # exists to stop a hung job holding the runner, not to express a performance target.
+    timeout-minutes: 150
     permissions:
       contents: read
     defaults:

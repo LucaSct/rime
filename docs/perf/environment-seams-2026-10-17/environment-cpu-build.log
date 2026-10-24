@@ -1,0 +1,40 @@
+[1/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/version.cpp.o
+[2/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/diagnostics/log.cpp.o
+[3/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/diagnostics/assert.cpp.o
+[4/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/memory/arena.cpp.o
+[5/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/diagnostics/profile.cpp.o
+[6/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/memory/pool.cpp.o
+[7/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/memory/stack_allocator.cpp.o
+[8/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/memory/memory_tracker.cpp.o
+[9/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/diagnostics/work_ledger.cpp.o
+[10/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/math/quat.cpp.o
+[11/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/math/transform.cpp.o
+[12/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/math/mat.cpp.o
+[13/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/reflect/serialize.cpp.o
+[14/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/world/bounds.cpp.o
+[15/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/jobs/job_system.cpp.o
+[16/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/modules/module_manager.cpp.o
+[17/40] Building CXX object engine/ecs/CMakeFiles/rime_ecs.dir/src/entity_directory.cpp.o
+[18/40] Building CXX object engine/ecs/CMakeFiles/rime_ecs.dir/src/signature.cpp.o
+[19/40] Building CXX object engine/ecs/CMakeFiles/rime_ecs.dir/src/chunk_pool.cpp.o
+[20/40] Building CXX object engine/ecs/CMakeFiles/rime_ecs.dir/src/chunk.cpp.o
+[21/40] Building CXX object engine/ecs/CMakeFiles/rime_ecs.dir/src/archetype.cpp.o
+[22/40] Building CXX object engine/ecs/CMakeFiles/rime_ecs.dir/src/world.cpp.o
+[23/40] Building CXX object engine/ecs/CMakeFiles/rime_ecs.dir/src/schedule.cpp.o
+[24/40] Building CXX object engine/ecs/CMakeFiles/rime_ecs.dir/src/schema_hash.cpp.o
+[25/40] Building CXX object engine/ecs/CMakeFiles/rime_ecs.dir/src/transform.cpp.o
+[26/40] Building CXX object engine/vfx/CMakeFiles/rime_vfx.dir/src/dust.cpp.o
+[27/40] Building CXX object engine/fluids/CMakeFiles/rime_fluids.dir/src/buoyancy.cpp.o
+[28/40] Building CXX object engine/physics/CMakeFiles/rime_physics.dir/src/sync.cpp.o
+[29/40] Building CXX object engine/core/CMakeFiles/rime_core.dir/src/diagnostics/perf_report.cpp.o
+[30/40] Linking CXX static library lib/librime_core.a
+[31/40] Linking CXX static library lib/librime_ecs.a
+[32/40] Linking CXX static library lib/librime_vfx.a
+[33/40] Linking CXX static library lib/librime_fluids.a
+[34/40] Building CXX object tests/vfx/CMakeFiles/rime_vfx_tests.dir/families_test.cpp.o
+[35/40] Building CXX object tests/vfx/CMakeFiles/rime_vfx_tests.dir/dust_test.cpp.o
+[36/40] Linking CXX executable bin/rime_vfx_tests
+[37/40] Building CXX object tests/fluids/CMakeFiles/rime_fluids_tests.dir/buoyancy_test.cpp.o
+[38/40] Building CXX object engine/physics/CMakeFiles/rime_physics.dir/src/world.cpp.o
+[39/40] Linking CXX static library lib/librime_physics.a
+[40/40] Linking CXX executable bin/rime_fluids_tests

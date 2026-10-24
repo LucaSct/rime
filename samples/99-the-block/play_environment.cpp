@@ -9,7 +9,9 @@
 #include <numbers>
 
 #include "rime/core/math.hpp"
+#include "rime/ecs/query.hpp"
 #include "rime/ecs/transform.hpp"
+#include "rime/fluids_render/phase_surface.hpp"
 #include "rime/render/components.hpp"
 
 namespace rime::block_play {
@@ -68,32 +70,38 @@ Texel surface(Surface kind, float u, float v) {
     Texel t;
     switch (kind) {
         case Surface::Brick: {
-            // Four stretchers by twelve courses per metre, alternating half-brick bond.
-            const int row = static_cast<int>(v * 12);
-            const float x = u * 4 + (row % 2) * .5f;
+            // Part-leaf UVs are projected in metres; one tile is one metre. Four stretchers and
+            // twelve courses give legible mortar without changing the cooked slab geometry.
+            const int row = static_cast<int>(std::floor(v * 12));
+            const float x = u * 4 + (row & 1) * .5f;
             const float bx = x - std::floor(x), by = v * 12 - std::floor(v * 12);
-            const float edge = std::min(std::min(bx, 1 - bx) * .25f, std::min(by, 1 - by) / 12.0f);
-            const float brick = std::clamp((edge - .002f) / .004f, 0.0f, 1.0f);
-            const float tone = .76f + .28f * noise(std::floor(x), static_cast<float>(row), 12);
-            t.color = core::Vec3{.72f, .64f, .51f} * (1 - brick) +
-                      core::Vec3{tone, tone * .94f, tone * .87f} * brick;
-            t.color = t.color * (.88f + fine * .12f + medium * .08f);
-            t.height = .18f + brick * (.40f + fine * .09f);
-            t.roughness = .78f + .20f * fine;
+            const float joint = std::min(std::min(bx, 1 - bx) * .25f, std::min(by, 1 - by) / 12.0f);
+            const float brick = std::clamp((joint - .004f) / .007f, 0.0f, 1.0f);
+            const float course = noise(std::floor(x), static_cast<float>(row), 16);
+            const float soot =
+                std::clamp((.52f - broad) * .42f + (.5f - medium) * .12f, -.12f, .18f);
+            const core::Vec3 clay{.68f, .39f, .30f};
+            const core::Vec3 mortar{.52f, .49f, .43f};
+            t.color = (mortar * (1 - brick) + clay * brick * (.82f + course * .3f)) *
+                      (1 - soot + (fine - .5f) * .10f);
+            t.height = .22f + brick * (.30f + fine * .085f) + medium * .035f;
+            t.roughness = std::clamp(.79f + (1 - brick) * .13f + fine * .07f, 0.0f, 1.0f);
             break;
         }
         case Surface::Plaster: {
-            const float staining = .72f + broad * .20f + medium * .08f;
-            const float chips = std::clamp((medium - .70f) * 5, 0.0f, 1.0f);
-            t.color = core::Vec3{1.0f, .98f, .92f} * staining * (1 - chips * .23f);
-            t.height = .44f + fine * .1f - chips * .14f;
-            t.roughness = .77f + fine * .2f;
+            const float weather = .76f + broad * .18f + medium * .08f;
+            const float chips = std::clamp((fine - .76f) * 5.0f, 0.0f, 1.0f);
+            const float mineral = std::clamp((.36f - medium) * 1.4f, 0.0f, .22f);
+            t.color = core::Vec3{.88f, .90f, .86f} * weather * (1 - chips * .15f - mineral);
+            t.height = .42f + fine * .10f + medium * .045f - chips * .10f;
+            t.roughness = std::clamp(.78f + fine * .15f + chips * .04f, 0.0f, 1.0f);
             break;
         }
         case Surface::Concrete:
-            t.color = core::Vec3{.83f, .84f, .81f} * (.76f + medium * .17f + fine * .12f);
-            t.height = .38f + fine * .15f + medium * .04f;
-            t.roughness = .8f + fine * .18f;
+            t.color =
+                core::Vec3{.78f, .79f, .76f} * (.72f + broad * .12f + medium * .14f + fine * .10f);
+            t.height = .39f + fine * .11f + medium * .05f;
+            t.roughness = std::clamp(.82f + fine * .14f, 0.0f, 1.0f);
             break;
         case Surface::Bark: {
             const float groove =
@@ -325,14 +333,27 @@ render::CpuMesh water_patch(float half_x, float half_z, unsigned seed) {
     // the existing filtered sky handles misses. Refraction/transparency are separate features.
     render::CpuMesh m;
     m.vertices.push_back({0, 0, 0, 0, 1, 0, 0, 0});
-    constexpr unsigned kSides = 64;
-    for (unsigned i = 0; i < kSides; ++i) {
-        const float a = 2 * kPi * static_cast<float>(i) / kSides;
-        const float radius = .88f + .07f * std::sin(a * 3 + seed) + .05f * std::sin(a * 7);
-        const float x = std::cos(a) * half_x * radius, z = std::sin(a) * half_z * radius;
-        m.vertices.push_back({x, 0, z, 0, 1, 0, x * .2f, z * .2f});
-        m.indices.insert(m.indices.end(), {0, (i + 1) % kSides + 1, i + 1});
-    }
+    // Polar tessellation: 32 radial rings × 64 sectors + centre = 2,049 vertices.
+    // The old 65-vertex fan could only tilt its huge triangles, not form wave silhouettes.
+    constexpr unsigned kSides = 64, kRings = 32;
+    m.vertices[0].u = m.vertices[0].v = .5f;
+    for (unsigned ring = 1; ring <= kRings; ++ring)
+        for (unsigned i = 0; i < kSides; ++i) {
+            const float a = 2 * kPi * static_cast<float>(i) / kSides;
+            const float radius = (.88f + .07f * std::sin(a * 3 + seed) + .05f * std::sin(a * 7)) *
+                                 float(ring) / kRings;
+            const float x = std::cos(a) * half_x * radius, z = std::sin(a) * half_z * radius;
+            m.vertices.push_back(
+                {x, 0, z, 0, 1, 0, .5f + x / (2 * half_x), .5f + z / (2 * half_z)});
+            const auto b = 1 + (ring - 1) * kSides + i;
+            const auto c = 1 + (ring - 1) * kSides + (i + 1) % kSides;
+            if (ring == 1)
+                m.indices.insert(m.indices.end(), {0, c, b});
+            else {
+                const auto a0 = b - kSides, d = c - kSides;
+                m.indices.insert(m.indices.end(), {a0, c, b, a0, d, c});
+            }
+        }
     render::compute_tangents(m);
     return m;
 }
@@ -354,7 +375,11 @@ void spawn(ecs::World& world,
 }
 
 float ground_y(const assets::ProceduralTerrainConfig& c, int x, int z) {
-    if (x >= c.street_min_x && x <= c.street_max_x && z >= c.street_min_z && z <= c.street_max_z)
+    // `c`'s rectangle is the plate shrunk by kPlateSkirt; anything on the PLATE itself stands at
+    // its walkable top, y = 0, not on the hidden terrain skirt beneath it.
+    const int k = PlayEnvironment::kPlateSkirt;
+    if (x >= c.street_min_x - k && x <= c.street_max_x + k && z >= c.street_min_z - k &&
+        z <= c.street_max_z + k)
         return 0;
     const auto q = assets::procedural_terrain_sample(c, x, z);
     return q ? assets::kProceduralHeightOffset + *q * assets::kProceduralHeightScale : 0;
@@ -482,23 +507,91 @@ bool PlayEnvironment::build(ecs::World& world,
                                                  {35, .024f, -2.1f},
                                                  {42, .023f, 3.4f},
                                                  {-3, .022f, 1.8f}}};
+    (void)world.register_component<render::SurfaceGeometry>();
+    // Tessellate only opted-in thermal sheets at creation. Preserve the thin slab's top
+    // height, transform and material; collision/thermal mass remain entirely independent.
+    std::vector<ecs::Entity> sheets;
+    world.query<fluids_render::ThermalSurface, render::MeshRef>().for_each(
+        [&](ecs::Entity e, const fluids_render::ThermalSurface& s, const render::MeshRef&) {
+            if (s.enabled)
+                sheets.push_back(e);
+        });
+    for (const auto e : sheets) {
+        const auto old = world.get<render::MeshRef>(e)->mesh;
+        if (!meshes.contains(old))
+            continue;
+        const auto lo = meshes.get(old).local_min, hi = meshes.get(old).local_max;
+        render::CpuMesh grid;
+        constexpr unsigned cells = 32; // 1,089 vertices, 2,048 triangles per basin
+        for (unsigned z = 0; z <= cells; ++z)
+            for (unsigned x = 0; x <= cells; ++x) {
+                const float u = float(x) / cells, v = float(z) / cells;
+                grid.vertices.push_back(
+                    {std::lerp(lo.x, hi.x, u), hi.y, std::lerp(lo.z, hi.z, v), 0, 1, 0, u, v});
+                if (x < cells && z < cells) {
+                    const auto a = z * (cells + 1) + x, b = a + cells + 1;
+                    grid.indices.insert(grid.indices.end(), {a, b, a + 1, a + 1, b, b + 1});
+                }
+            }
+        render::compute_tangents(grid);
+        const auto id = meshes.add(grid, "phase-sheet-grid");
+        if (!meshes.contains(id))
+            return false;
+        world.get<render::MeshRef>(e)->mesh = id;
+        render::SurfaceGeometry geometry;
+        geometry.vertex_count = static_cast<std::uint32_t>(grid.vertices.size());
+        geometry.top = hi.y;
+        geometry.half_x = (hi.x - lo.x) * .5f;
+        geometry.half_z = (hi.z - lo.z) * .5f;
+        geometry.thermal = true;
+        world.add_component<render::SurfaceGeometry>(e, std::move(geometry));
+    }
+    const auto spawn_water = [&](render::CpuMesh mesh,
+                                 core::Vec3 at,
+                                 float yaw,
+                                 float hx,
+                                 float hz,
+                                 float depth,
+                                 unsigned seed) {
+        const auto id = meshes.add(mesh, "play-water-grid");
+        core::Transform tf;
+        tf.translation = at;
+        tf.rotation = core::quat_from_axis_angle({0, 1, 0}, yaw);
+        render::SurfaceGeometry geometry;
+        geometry.vertex_count = static_cast<std::uint32_t>(mesh.vertices.size());
+        geometry.seed = seed;
+        geometry.half_x = hx;
+        geometry.half_z = hz;
+        geometry.depth = depth;
+        geometry.oval = true;
+        (void)world.spawn_with(ecs::LocalTransform{tf},
+                               ecs::WorldTransform{tf},
+                               render::MeshRef{id},
+                               render::MaterialRef{water},
+                               std::move(geometry));
+    };
     for (unsigned i = 0; i < puddles.size(); ++i) {
-        const auto m = meshes.add(
-            water_patch(1.3f + random(i) * 1.5f, .55f + random(i + 7) * .6f, i), "play-puddle");
-        spawn(world, m, water, puddles[i], 1, random(i + 15) * kPi);
+        const float hx = 1.3f + random(i) * 1.5f, hz = .55f + random(i + 7) * .6f;
+        spawn_water(water_patch(hx, hz, i), puddles[i], random(i + 15) * kPi, hx, hz, .025f, i);
         ++stats_.puddles;
     }
     // A shallow park pool sits on the flat authored surface. Its dirt rim and plants make the
     // shoreline legible without changing the shared collision heightfield or creating a hole.
     const auto bank = meshes.add(water_patch(7.6f, 5.2f, 13), "play-pond-bank");
-    const auto pond = meshes.add(water_patch(6.9f, 4.5f, 13), "play-pond-water");
     spawn(world, bank, dirt, {28, .018f, 26});
-    spawn(world, pond, water, {28, .035f, 26});
+    spawn_water(water_patch(6.9f, 4.5f, 13), {28, .035f, 26}, 0, 6.9f, 4.5f, .35f, 13);
     ++stats_.ponds;
 
     for (unsigned i = 0; i < terrain_.size(); ++i) {
-        const auto s = i == 0 ? Surface::Grass : i == 1 ? Surface::Dirt : Surface::Concrete;
-        terrain_[i].base_color = {1, 1, 1};
+        // Slots: 0 meadow grass, 1 dirt, 2 exposed rock (the concrete texture, tinted warm grey),
+        // 3 forest (the grass texture tinted dark). 2 and 3 exist for the distant hills only.
+        const auto s = i == 0   ? Surface::Grass
+                       : i == 1 ? Surface::Dirt
+                       : i == 2 ? Surface::Concrete
+                                : Surface::Grass;
+        terrain_[i].base_color = i == 2   ? core::Vec3{.62f, .55f, .47f}
+                                 : i == 3 ? core::Vec3{.42f, .6f, .36f}
+                                          : core::Vec3{1, 1, 1};
         terrain_[i].roughness = .92f;
         terrain_[i].albedo_height = get(s).albedo;
         terrain_[i].uv_scale[0] = 2;
@@ -516,26 +609,78 @@ void PlayEnvironment::paint_terrain(assets::HeightfieldAsset& a,
     a.layers[0] = assets::AssetId{1};
     a.layers[1] = assets::AssetId{2};
     a.layers[2] = assets::AssetId{3};
+    a.layers[3] = assets::AssetId{4};
     a.weights.resize(static_cast<std::size_t>(a.weight_columns) * a.weight_rows * 4);
+    const auto smoothstep = [](float lo, float hi, float v) {
+        const float t = std::clamp((v - lo) / (hi - lo), 0.0f, 1.0f);
+        return t * t * (3.0f - 2.0f * t);
+    };
     for (unsigned z = 0; z < a.rows; ++z) {
         for (unsigned x = 0; x < a.columns; ++x) {
             const float wx = a.origin.x + static_cast<float>(x) * a.cell_size_x;
             const float wz = a.origin.z + static_cast<float>(z) * a.cell_size_z;
-            const float dx = std::max({static_cast<float>(c.street_min_x) - wx,
-                                       wx - static_cast<float>(c.street_max_x),
+            // Distance is measured from the PLATE edge (the street rectangle grown back by the
+            // hidden skirt), so the grass/dirt look is unchanged by the terrain-height fix.
+            const auto skirt = static_cast<float>(kPlateSkirt);
+            const float dx = std::max({static_cast<float>(c.street_min_x) - skirt - wx,
+                                       wx - static_cast<float>(c.street_max_x) - skirt,
                                        0.0f});
-            const float dz = std::max({static_cast<float>(c.street_min_z) - wz,
-                                       wz - static_cast<float>(c.street_max_z),
+            const float dz = std::max({static_cast<float>(c.street_min_z) - skirt - wz,
+                                       wz - static_cast<float>(c.street_max_z) - skirt,
                                        0.0f});
             const float distance = std::sqrt(dx * dx + dz * dz);
             const float patches = noise(wx * .037f, wz * .037f, 256);
             const float dirt = std::clamp(.55f - distance * .025f + patches * .3f, .08f, .8f);
-            const auto w = byte(dirt);
+
+            // Near ground (the original two-layer look): meadow with dirt patches.
+            float grass = 1.0f - dirt, soil = dirt, rock = 0.0f, forest = 0.0f;
+
+            // HILLS: a slope- and height-driven blend, the way real terrain is coloured. Slope is
+            // the height gradient (central differences, clamped at the tile edge), because rock is
+            // exposed where ground is too steep to hold soil; height decides the treeline and the
+            // dry crest; two macro noises at ~100 m and ~25 m break the result up so no tile of the
+            // map repeats, and the finer one is what reads as a forest canopy.
+            const unsigned xl = x > 0 ? x - 1 : x, xr = x + 1 < a.columns ? x + 1 : x;
+            const unsigned zl = z > 0 ? z - 1 : z, zr = z + 1 < a.rows ? z + 1 : z;
+            const float gx =
+                (a.height(xr, z) - a.height(xl, z)) / (static_cast<float>(xr - xl) * a.cell_size_x);
+            const float gz =
+                (a.height(x, zr) - a.height(x, zl)) / (static_cast<float>(zr - zl) * a.cell_size_z);
+            const float slope = std::sqrt(gx * gx + gz * gz); // rise over run
+            const float elev = a.height(x, z);                // metres above the flat ground
+            const float macro = noise(wx * .0083f, wz * .0083f, 256);
+            const float canopy =
+                .6f * noise(wx * .031f, wz * .031f, 256) + .4f * noise(wx * .11f, wz * .11f, 256);
+            const float far = smoothstep(90.0f, 350.0f, distance);
+            if (far > 0.0f) {
+                const float crest = smoothstep(70.0f, 170.0f, elev) * (.5f + macro);
+                float h_rock = std::clamp(smoothstep(.42f, .85f, slope + (macro - .5f) * .25f) +
+                                              crest * .45f * smoothstep(.2f, .5f, slope),
+                                          0.0f,
+                                          1.0f);
+                const float tree_line =
+                    1.0f - smoothstep(95.0f, 165.0f, elev + (macro - .5f) * 60.0f);
+                float h_forest =
+                    std::clamp((canopy - .42f) * 4.0f, 0.0f, 1.0f) * tree_line * (1.0f - h_rock);
+                const float h_dry = std::clamp(smoothstep(60.0f, 150.0f, elev) * (1.0f - h_rock) *
+                                                   (1.0f - h_forest) * (.4f + macro),
+                                               0.0f,
+                                               1.0f);
+                const float h_grass = std::max(0.0f, 1.0f - h_rock - h_forest - h_dry);
+                grass = std::lerp(grass, h_grass, far);
+                soil = std::lerp(soil, h_dry, far);
+                rock = h_rock * far;
+                forest = h_forest * far;
+            }
+            const float total = std::max(grass + soil + rock + forest, 1e-4f);
             const auto i = (static_cast<std::size_t>(z) * a.columns + x) * 4;
-            a.weights[i] = static_cast<std::uint8_t>(255 - w);
-            a.weights[i + 1] = w;
-            a.weights[i + 2] = 0;
-            a.weights[i + 3] = 0;
+            const auto wr = byte(rock / total), wf = byte(forest / total), ws = byte(soil / total);
+            a.weights[i + 1] = ws;
+            a.weights[i + 2] = wr;
+            a.weights[i + 3] = wf;
+            // Grass takes the remainder so the four weights sum to exactly 255.
+            a.weights[i] = static_cast<std::uint8_t>(std::max(
+                0, 255 - static_cast<int>(ws) - static_cast<int>(wr) - static_cast<int>(wf)));
         }
     }
 }

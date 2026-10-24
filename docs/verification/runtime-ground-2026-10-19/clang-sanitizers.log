@@ -1,0 +1,24 @@
+Clang syntax PASS engine/render/src/lighting/shadows.cpp
+Clang syntax PASS engine/render/src/passes.cpp
+Clang syntax PASS tests/render/shadow_stability_test.cpp
+Clang syntax PASS tests/render/ddgi_surface_query_test.cpp
+Clang syntax PASS samples/99-the-block/main.cpp
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:    10 |    10 passed | 0 failed | 245 skipped
+[doctest] assertions: 10294 | 10294 passed | 0 failed |
+[doctest] Status: SUCCESS!
+Changed-TU CPU ASan/UBSan/LSan PASS
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:   2 |   2 passed | 0 failed | 253 skipped
+[doctest] assertions: 241 | 241 passed | 0 failed |
+[doctest] Status: SUCCESS!
+Changed-TU Vulkan ASan/UBSan PASS; GPU driver leak checks disabled
+Dependency archives are not fully instrumented. No threading primitives changed.

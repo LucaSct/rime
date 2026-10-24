@@ -2,7 +2,10 @@
 // Copyright (c) 2026 The Rime Engine Authors.
 #pragma once
 
+#include <array>
 #include <cstdint>
+#include <functional>
+#include <memory>
 
 #include "rime/core/math/mat.hpp"
 #include "rime/core/math/vec.hpp"
@@ -79,11 +82,19 @@ public:
     // light), upload the cascade matrices, and return what the shadowed forward pass binds.
     // `scene_data` is the same draw list the forward pass uses — the cascade passes render its
     // geometry's depth.
+    //
+    // `extra_casters` (optional) runs once per cascade, right after that cascade's mesh depth
+    // pass, with the cascade array, the layer and the light view_proj. A caster that is not a
+    // SceneDrawData mesh -- the heightfield terrain -- declares its own LOAD-ing depth pass into
+    // the same layer there, so the cascade is cleared once and everything shares its depth.
+    using ExtraCasters = std::function<
+        void(RenderGraph&, RGTexture cascades, std::uint32_t layer, const core::Mat4&)>;
     [[nodiscard]] ShadowBinding add(RenderGraph& graph,
                                     const DepthPrepass& prepass,
                                     const SceneDrawData& scene_data,
                                     const CascadeInputs& inputs,
-                                    const LightingSettings& settings);
+                                    const LightingSettings& settings,
+                                    const ExtraCasters& extra_casters = {});
 
     // The valid-but-empty cascade binding for a shadowed frame with NO directional light (a
     // spot-only scene, m10.2): the shadowed pipeline's binding 7/8 must still point at a real
@@ -91,10 +102,18 @@ public:
     // placeholder array.
     [[nodiscard]] ShadowBinding empty_binding(RenderGraph& graph, rhi::TextureHandle dummy);
 
+    // Updated when the graph executes. Each add() owns a fresh array; deferred passes retain
+    // shared ownership so a second declaration cannot overwrite the first frame's counters.
+    [[nodiscard]] const std::array<CullStats, kMaxCascades>& caster_stats() const noexcept {
+        return *caster_stats_;
+    }
+
 private:
     rhi::Device& device_;
     rhi::SamplerHandle compare_sampler_; // sampler2DArrayShadow: LessEqual hardware PCF
     std::uint32_t resolution_ = 0;       // the array texture's current per-cascade size
+    std::shared_ptr<std::array<CullStats, kMaxCascades>> caster_stats_ =
+        std::make_shared<std::array<CullStats, kMaxCascades>>();
 };
 
 } // namespace rime::render

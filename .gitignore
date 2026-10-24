@@ -49,3 +49,7 @@ desktop.ini
 # machine-specific paths; the repo-wide `.claude/skills/` beside it IS checked in on purpose.
 .claude/settings.local.json
 .env
+
+# ─── Generated assets (fetched/exported at build time) ───────────────────────
+assets/src/props/*.glb
+

@@ -16,6 +16,7 @@
 #include <numbers>
 #include <vector>
 
+#include "editor_fly_camera.hpp"
 #include "rime/gameplay/character.hpp"
 #include "rime/gameplay/first_person.hpp"
 #include "rime/gameplay/input_map.hpp"
@@ -296,4 +297,60 @@ TEST_CASE("m15.5: hold-to-look is required unless the cursor is actually locked"
     // the window and the camera still stops at the edge. Treating "we hid it" as "we captured it"
     // is the subtle version of the same mistake.
     CHECK(look_requires_drag_for(platform::CursorMode::Hidden));
+}
+
+TEST_CASE("city editor: Play ticks preserve repeated author camera writes and release") {
+    block_editor::FlyCamera camera;
+    core::Transform authored{};
+    authored.translation = {24.0f, 7.0f, -13.0f};
+    auto world = camera.update(authored, {}, 1.0 / 60.0);
+    for (int frame = 0; frame < 120; ++frame) {
+        // This is the editor/host order: editor SetComponent, then a fixed Play tick with no
+        // forwarded WASD (the native shell sends absolute poses, not runtime key events).
+        authored.translation.x += 0.2f;
+        world = camera.update(authored, {}, 1.0 / 60.0);
+        CHECK(world.translation.x == authored.translation.x);
+        CHECK(world.translation.y == authored.translation.y);
+        authored = world;
+    }
+    const auto released = world.translation;
+    for (int frame = 0; frame < 30; ++frame) {
+        world = camera.update(world, {}, 1.0 / 60.0);
+        CHECK(world.translation.x == released.x);
+        CHECK(world.translation.z == released.z);
+    }
+}
+
+TEST_CASE("city editor: restored or externally replaced camera clears old runtime input") {
+    block_editor::FlyCamera camera;
+    core::Transform baseline{};
+    baseline.translation = {10.0f, 4.0f, 20.0f};
+    const std::vector<platform::Event> down{key_event(platform::Key::W, true)};
+    auto world = camera.update(baseline, down, 0.1);
+    REQUIRE(world.translation.z < baseline.translation.z);
+    // Stop restores the authored pose; the next Play uses the same controller object.
+    world = camera.update(baseline, {}, 0.1);
+    CHECK(world.translation.z == baseline.translation.z);
+    const std::vector<platform::Event> up{key_event(platform::Key::W, false)};
+    world = camera.update(world, up, 0.1);
+    CHECK(world.translation.z == baseline.translation.z);
+    // Fresh runtime input still works after authoring takes ownership.
+    world = camera.update(world, down, 0.1);
+    CHECK(world.translation.z < baseline.translation.z);
+    const auto held = world.translation.z;
+    world = camera.update(world, {}, 0.1);
+    CHECK(world.translation.z < held); // self-owned ticks retain the input latch
+    world = camera.update(world, up, 0.1);
+    const auto stopped = world.translation.z;
+    world = camera.update(world, {}, 0.1);
+    CHECK(world.translation.z == stopped);
+    auto external = baseline;
+    external.translation = {-30.0f, 15.0f, 100.0f};
+    external.rotation = core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, 0.6f);
+    external.scale = {2.0f, 2.0f, 2.0f};
+    world = camera.update(external, {}, 0.1);
+    CHECK(world.translation.x == external.translation.x);
+    CHECK(world.translation.z == external.translation.z);
+    CHECK(core::same_rotation(world.rotation, external.rotation, 1e-5f));
+    CHECK(world.scale.x == 2.0f);
 }

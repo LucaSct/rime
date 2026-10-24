@@ -4,6 +4,7 @@
 add_subdirectory(jobs_core_saturation) # M1.6: work-stealing job system saturating all cores
 add_subdirectory(00-hello-window)      # M2: open a native window, pump input (preview of M2.5)
 add_subdirectory(codec_bench)          # S0.3: measure the streaming codecs (raw/LZ4/JPEG); GPU-free
+add_subdirectory(contact_bench)        # Frozen contact replay and exact-output oracle; GPU-free
 add_subdirectory(solver_bench)         # Fixed-workload, GPU-free physics solver timing
 add_subdirectory(05-ecs-playground)    # M4.6: 200k entities in parallel + transforms composing; GPU-free
 add_subdirectory(09-physics-playground) # M7.8: M7's "done when" — fall/collide/stack, raycast, parallel fixed tick; GPU-free
@@ -22,6 +23,7 @@ if(RIME_RHI_VULKAN)
     add_subdirectory(10-destructible-wall) # M8.6: M8's "done when" — a cooked wall breaks, debris flies, one event stream fans out
     add_subdirectory(11-lit-rooms)         # M10.8: M10's "done when" — full lighting stack; break a wall, the dark room lights up
     add_subdirectory(hello-game)        # m15.7 / ADR-0046 §1: the on-ramp — the smallest complete game, and M20's GameDefinition subject (its self-check is GPU-free, but it renders too)
+    add_subdirectory(thermal-courtyard) # opt-in fixed-cell phase and smoke/fire city demo
     add_subdirectory(target-range)      # m15.8 / ADR-0038: M15's "done when" — a game that is NOT the block, authored as a .rscene, with its OWN reflected component
     add_subdirectory(14-virtual-geometry)  # m18.3d: ADR-0043 gate 4's complexity sweep over the GPU-built draw list
     add_subdirectory(15-terrain)           # m19.8e: terrain travel budget — GPU/CPU ms, uploads, the speed envelope

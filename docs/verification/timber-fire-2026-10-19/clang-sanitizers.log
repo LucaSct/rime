@@ -1,0 +1,19 @@
+Clang syntax PASS engine/blockkit/src/palette.cpp
+Clang syntax PASS tests/blockkit/blockkit_test.cpp
+Clang syntax PASS engine/vfx_scene/src/effects.cpp
+Clang syntax PASS tests/vfx_scene/effects_test.cpp
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:   7 |   7 passed | 0 failed | 0 skipped
+[doctest] assertions: 321 | 321 passed | 0 failed |
+[doctest] Status: SUCCESS!
+Changed-TU ASan/UBSan + LSan PASS blockkit_test
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+[doctest] test cases:    10 |    10 passed | 0 failed | 0 skipped
+[doctest] assertions: 34496 | 34496 passed | 0 failed |
+[doctest] Status: SUCCESS!
+Changed-TU ASan/UBSan + LSan PASS rime_vfx_scene_tests
+Dependency archives are not fully instrumented.

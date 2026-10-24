@@ -6,6 +6,10 @@ a perfect first contribution.
 
 Entries are grouped roughly by area and kept short on purpose.
 
+- **ULP (unit in the last place).** The spacing between neighboring representable
+  floating-point values near a number. It grows with magnitude. Rounding a bound
+  outward by one ULP retains the next representable value beyond that face.
+
 ## Architecture & core
 
 - **Engine vs. game.** The *engine* is the reusable machinery (rendering, physics,
@@ -382,6 +386,19 @@ Entries are grouped roughly by area and kept short on purpose.
 
 ## Physics & destruction
 
+- **Enthalpy / latent heat (phase-change reference).** The water/ice CPU reference stores an
+  energy quantity and derives temperature and liquid fraction from it. Latent heat is the energy
+  absorbed or released while material changes phase; temperature alone cannot describe how much
+  of a mixed water/ice sample has melted. See the
+  [M-FL2 brick sequence](design/environment-effects-milestones.md#environment-and-editor-sequence-2026-10-18).
+- **Liquid mass fraction.** The liquid's mass divided by the total liquid-plus-solid mass.
+  It ranges from zero (all solid) to one (all liquid). It differs from a liquid volume fraction
+  when the phases have different densities; the thermal reference does not derive ice thickness
+  or displaced volume from this fraction alone.
+- **Error-free transformation.** An arithmetic algorithm that represents an exact operation on
+  floating-point inputs as multiple floating-point outputs. The thermal reference's ordered
+  FastTwoSum returns a rounded sum and the part that rounded away, rather than losing that part
+  in a claimed exact heat ledger. It requires the documented rounding/underflow mode.
 - **Heightfield.** Terrain stored as a regular grid of heights over the ground plane (one height
   per grid point, each cell split into two triangles along a fixed diagonal). Cheaper and more
   structured than a triangle mesh — "which triangles are under this point" is a division, not a
@@ -986,3 +1003,37 @@ See also **Determinism / replication** under *Physics & destruction*.
 - **Inverse kinematics (IK).** Solve joint rotations from a desired end contact, such as a wrist on a weapon grip. A two-bone arm uses shoulder/elbow/wrist positions and an elbow pole to choose its bend plane.
 - **Aim down sights (ADS).** Move the weapon so its sights or optic align with the eye. Optical magnification can be confined to a second camera sampled by the scope lens.
 - **Linear blend skinning.** Deform each mesh vertex by a weighted sum of joint pose matrices multiplied by inverse bind matrices; the same pose must transform normals and tangents.
+- **Thermal conductance.** Heat rate per temperature difference, in W/K, including the contact's geometry. Material conductivity instead has units W/(m K).
+- **Backward Euler.** A first-order time integrator that evaluates the rate at the end of the step and solves for that new state. The isolated thermal contact uses a bounded scalar sign bracket; this does not establish an N-body or spatial solver.
+- **Sign bracket.** Two ordered trial values whose evaluated residuals have opposite signs (or zero). Rounded temperature caches can make the residual jump across zero; a narrow bracket need not contain an exactly zero floating-point residual.
+- **Operator splitting.** Advance a coupled system by applying its component processes in sequence. The thermal graph applies sources then isolated contacts; the resulting first-order method depends on order and does not equal a simultaneous global implicit solve.
+- **Thermal operation journal.** The complete unaggregated receipts and stored-energy endpoints of one accepted field tick. Internal heat requests cancel; update residuals and external sources remain explicit. Failure and zero duration preserve the previous journal.
+
+- **Thermal preview revision.** A counter identifying the currently reconstructed
+  editor thermal graph. A relevant authored edit restarts all cell states and
+  advances the revision; the field tick restarts while the host tick continues.
+- **Accepted host tick.** The host simulation tick that last committed thermal
+  state. A refused thermal step can leave it behind the current host tick; the
+  inspector marks those retained values explicitly.
+
+- **Transient surface appearance.** Copied per-frame RGB/roughness values applied
+  to an entity's draws without changing its authored material or shared registry.
+  Empty input restores the normal appearance. Frost Yard uses this to display
+  accepted thermal phase on a fixed mesh; it is not a geometric ice model.
+
+- **Camera dolly.** Moving a camera closer/farther in world space. Unlike image
+  magnification, it renders geometry from a new viewpoint; unlike lens zoom, it
+  changes the camera position.
+- **Phase presentation clock.** A cosmetic sum of accepted thermal preview step
+  durations within one graph revision. Pause/refusal holds it; rebuild/Stop reset
+  it. It is not a heat/energy receipt.
+- **Prefab.** A reusable authored object or object hierarchy with configured
+  components. An engine module is code, not automatically a prefab/library item.
+
+### Run game (city editor)
+
+The native editor action that saves the current document, confirms success, then
+launches the configured full game executable with that scene. It opens a separate
+window and does not replace the editor's scene-system Preview. See
+[creator workflow](creator-workflow.md#open-the-city-with-weapons-and-run-the-game)
+and [ADR-0097](adr/0097-city-editor-run-and-development-bundle.md).

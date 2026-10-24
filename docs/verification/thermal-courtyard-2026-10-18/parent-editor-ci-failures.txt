@@ -1,0 +1,4 @@
+2026-10-18T21:30:47.2187290Z authoring-round-trip.sh: the demo FAILED on build/dev/round-trip/block.rscene
+2026-10-18T21:30:47.2191993Z     [FAIL] collapse: the far side of the street is untouched
+2026-10-18T21:30:47.2192174Z     [FAIL] collapse: most of the block is still standing
+2026-10-18T21:30:47.2192344Z     [FAIL] collapse: the damage stayed local to a few buildings

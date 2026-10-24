@@ -1,0 +1,455 @@
+
+== build engine (release) ==
+-- Using Conan toolchain: /home/next/projects/rime/build/release/conan_toolchain.cmake
+-- Conan toolchain: Defining architecture flag: -m64
+-- Conan toolchain: C++ Standard 20 with extensions OFF
+-- Conan: Component target declared 'fmt::fmt'
+-- Conan: Component target declared 'Vulkan::Headers'
+-- Conan: Component target declared 'Vulkan::Registry'
+-- Conan: Target declared 'vulkan-headers::vulkan-headers'
+-- Conan: Component target declared 'volk::volk'
+-- Conan: Component target declared 'volk::volk_headers'
+-- Conan: Target declared 'GPUOpen::VulkanMemoryAllocator'
+-- Conan: Component target declared 'libjpeg-turbo::jpeg-static'
+-- Conan: Component target declared 'libjpeg-turbo::turbojpeg-static'
+-- Conan: Target declared 'libjpeg-turbo::libjpeg-turbo'
+-- Conan: Target declared 'LZ4::lz4_static'
+-- Conan: Component target declared 'libsvtav1::encoder'
+-- Conan: Target declared 'libsvtav1::libsvtav1'
+-- Conan: Target declared 'dav1d::dav1d'
+-- rime_audio: ALSA sink enabled
+-- Conan: Target declared 'doctest::doctest'
+-- Rime: RIME_SANITIZER=off
+-- Rime 0.0.1 — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_physics, rime_assets, rime_destruction, rime_audio, rime_vfx, rime_fluids, rime_render, rime_stream, rime_editorhost, rime_scene, rime_app, rime_net, rime_replication, rime_destruction_net, rime_gameplay, rime_gameplay_net, rime_destruction_render, rime_blockkit, rime_capi, rime_hello.
+-- Configuring done (0.1s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/next/projects/rime/build/release
+[1/7] Linking CXX executable bin/target_range
+[2/7] Linking CXX executable bin/the_block
+[3/7] Linking CXX executable bin/rime_editorhost_tests
+[4/7] Linking CXX executable bin/target-range-host
+[5/7] Linking CXX executable bin/the-block-host
+[6/7] Linking CXX executable bin/rime_worldkit_tests
+[7/7] Linking CXX executable bin/rime_app_tests
+
+== install SDK -> build/release/sdk-prefix ==
+-- Install configuration: "RelWithDebInfo"
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_core.a
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/byte_cursor.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/containers.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/containers
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/containers/event_channel.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/containers/handle.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/containers/slot_map.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/diagnostics
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/diagnostics/assert.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/diagnostics/log.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/diagnostics/source_location.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/diagnostics/work_ledger.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/diagnostics/profile.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/diagnostics/perf_report.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/hash.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/jobs.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/jobs
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/jobs/chase_lev_deque.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/jobs/job_system.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/math.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/math
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/math/mat.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/math/reflect.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/math/scalar.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/math/simd.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/math/transform.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/math/vec.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/math/quat.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/memory.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/memory
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/memory/allocator.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/memory/arena.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/memory/memory_tracker.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/memory/pool.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/memory/stack_allocator.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/modules.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/modules
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/modules/module.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/modules/module_manager.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/reflect.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/reflect
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/reflect/serialize.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/reflect/type_info.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/version.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/diagnostics.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/force_inline.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/world.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/world
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/core/world/bounds.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_xdg_shell.a
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_platform.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/clock.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/event.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/filesystem.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/init.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/input.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/keyboard.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/mouse.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/native_window.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/platform.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/socket.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/threads.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/window.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/platform/hid_keys.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_vma.a
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_rhi.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/rhi
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/rhi/rhi.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/rhi/swapchain.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/rhi/adapter_choice.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/rhi/command_buffer.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/rhi/device.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/rhi/resources.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/rhi/types.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_ecs.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/archetype.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/chunk.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/chunk_pool.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/command_buffer.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/entity.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/entity_directory.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/query.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/reflect.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/schedule.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/schema_hash.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/signature.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/system.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/transform.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/world.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/render_transform.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/component.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ecs/entity_refs.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_physics.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics/components.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics/physics.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics/sync.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics/body.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics/query.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics/aabb.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics/contact.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics/events.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics/shape.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/physics/world.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_assets.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/clip_asset.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/destructible_asset.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/manifest.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/mesh_asset.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/sdf_asset.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/skeleton_asset.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/material_asset.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/texture_asset.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/registry.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/virtual_geometry.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/asset_id.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/asset_server.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/cooked_reader.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/heightfield_asset.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/terrain_layer_asset.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/terrain_world.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/assets/procedural_terrain.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_destruction.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction/bind.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction/components.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction/damage_op.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction/ids.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction/events.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction/world.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_audio.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/audio
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/audio/audio.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/audio/bank.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/audio/mixer.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/audio/sink.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/audio/wav.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_vfx.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/vfx
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/vfx/dust.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/vfx/fire.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/vfx/plume.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_vfx_scene.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/vfx_scene
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/vfx_scene/components.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/vfx_scene/effects.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_fluids.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/fluids
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/fluids/buoyancy.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/fluids/basin.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_render.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/gizmo_renderer.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/lighting
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/lighting/clustered.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/lighting/local_shadows.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/lighting/sky.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/lighting/sdf_clipmap.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/lighting/ssr.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/lighting/sky_specular.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/lighting/ddgi.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/lighting/settings.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/lighting/shadows.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/orbit_camera.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/scene_picker.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/text
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/text/font.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/text/hud.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/gpu_asset_bridge.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/material.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/components.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/virtual_geometry_gpu_selection.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/virtual_geometry_resolve_pass.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/virtual_geometry_selection.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/virtual_geometry_visibility_id.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/micro_triangle.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/virtual_geometry_micro_raster_pass.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/virtual_geometry_page_cache.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/virtual_geometry_page_pool.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/virtual_geometry_residency.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/virtual_geometry_visibility_pass.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/terrain_builder.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/terrain_lod.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/terrain_residency.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/temporal_jitter.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/first_person_pass.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/mesh.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/scope_lens_pass.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/terrain_pass.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/terrain_scene.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/render_graph.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/culling.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/passes.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/fx_pass.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/render/scene_renderer.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_stream.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/stream
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/stream/frame_streamer.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/stream/latency.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/stream/video_codec.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/stream/frame_codec.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/stream/protocol.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_editorhost.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/editorhost
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/editorhost/editor_host.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/editorhost/editor_identity.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_scene.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/scene
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/scene/derive_transforms.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/scene/scene_format.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_app.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/fixed_timestep.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/application.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/stream_input.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/content_root.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/game_definition.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/launch.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/editor_host_app.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_app_game.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/fixed_timestep.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/application.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/stream_input.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/content_root.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/game_definition.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/launch.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/editor_host_app.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_editorhost_app.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/fixed_timestep.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/application.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/stream_input.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/content_root.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/game_definition.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/launch.hpp
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime/app/editor_host_app.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_net.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/net
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/net/control_packets.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/net/link.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/net/net_driver.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/net/reliable_channel.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/net/session.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_replication.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/replication
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/replication/net_id.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/replication/wire_schema.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/replication/relevancy.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/replication/input.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/replication/server_replicator.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/replication/snapshot.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/replication/client_replicator.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/replication/interpolation.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_destruction_net.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction_net
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction_net/components.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction_net/composition.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction_net/wire.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction_net/destruction_client.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction_net/destruction_server.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_gameplay.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay/character.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay/components.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay/weapon.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay/first_person.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay/input_map.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_gameplay_net.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay_net
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay_net/components.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay_net/gameplay_client.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay_net/player_registry.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay_net/wire.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay_net/predictor.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay_net/gameplay_server.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/gameplay_net/convert.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_destruction_render.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction_render
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/destruction_render/part_leaves.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_ground.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ground
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ground/bind.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ground/derive.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/ground/surface.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_terrain_collision.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/terrain_collision
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/terrain_collision/asset_server_source.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/terrain_collision/terrain_collision.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/terrain_collision/procedural_source.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_worldkit.a
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/worldkit
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/worldkit/profile.hpp
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/librime_capi.so
+-- Set non-toolchain portion of runtime path of "build/release/sdk-prefix/lib/librime_capi.so" to ""
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include
+-- Up-to-date: /home/next/projects/rime/build/release/sdk-prefix/include/rime
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/capi
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/include/rime/capi/rime.h
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/cmake/rime/rime-targets.cmake
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/cmake/rime/rime-targets-relwithdebinfo.cmake
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/cmake/rime/rime-config.cmake
+-- Installing: /home/next/projects/rime/build/release/sdk-prefix/lib/cmake/rime/rime-config-version.cmake
+
+== guard: no private headers leaked into the SDK ==
+
+== configure + build out-of-tree consumer ==
+-- Using Conan toolchain: /home/next/projects/rime/build/release/conan_toolchain.cmake
+-- Conan toolchain: Defining architecture flag: -m64
+-- Conan toolchain: C++ Standard 20 with extensions OFF
+-- The CXX compiler identification is GNU 16.2.1
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Conan: Component target declared 'fmt::fmt'
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Conan: Component target declared 'libjpeg-turbo::jpeg-static'
+-- Conan: Component target declared 'libjpeg-turbo::turbojpeg-static'
+-- Conan: Target declared 'libjpeg-turbo::libjpeg-turbo'
+-- Conan: Target declared 'LZ4::lz4_static'
+-- Conan: Component target declared 'Vulkan::Headers'
+-- Conan: Component target declared 'Vulkan::Registry'
+-- Conan: Target declared 'vulkan-headers::vulkan-headers'
+-- Conan: Component target declared 'volk::volk'
+-- Conan: Component target declared 'volk::volk_headers'
+-- Conan: Target declared 'GPUOpen::VulkanMemoryAllocator'
+-- Found X11: /usr/include
+-- Looking for XOpenDisplay in /usr/lib/libX11.so;/usr/lib/libXext.so
+-- Looking for XOpenDisplay in /usr/lib/libX11.so;/usr/lib/libXext.so - found
+-- Looking for gethostbyname
+-- Looking for gethostbyname - found
+-- Looking for connect
+-- Looking for connect - found
+-- Looking for remove
+-- Looking for remove - found
+-- Looking for shmat
+-- Looking for shmat - found
+-- Looking for IceConnectionNumber in ICE
+-- Looking for IceConnectionNumber in ICE - found
+-- Found PkgConfig: /usr/bin/pkg-config (found version "3.0.7")
+-- Checking for module 'wayland-client'
+--   Found wayland-client, version 1.26.0
+-- Checking for module 'wayland-cursor'
+--   Found wayland-cursor, version 1.26.0
+-- Checking for module 'xkbcommon'
+--   Found xkbcommon, version 1.13.2
+-- Configuring done (0.6s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/next/projects/rime/build/release/sdk-consumer-build
+[1/2] Building CXX object CMakeFiles/sdk_consumer.dir/main.cpp.o
+[2/2] Linking CXX executable sdk_consumer
+
+== run consumer (headless tick + load a cooked mesh) ==
+sdk_consumer OK: ticked 3 frames, loaded mesh (24 vertices, 36 indices)
+
+== SDK smoke: PASS ==

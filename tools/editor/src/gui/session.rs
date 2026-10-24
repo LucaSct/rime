@@ -73,6 +73,10 @@ pub struct SharedState {
     /// `camera` above — continuous state the toolbar/border/tick-counter read each repaint, never
     /// consumed. Defaults to `PlayState::default()` (Edit, tick 0) before the engine's first frame.
     pub play_state: PlayState,
+    pub thermal: Option<rime_protocol::ThermalPreview>,
+    pub play_control: Option<rime_protocol::PlayControlState>,
+    pub thermal_session: u64,
+    pub thermal_revision: u64,
     /// The newest un-consumed answer to a `SaveScene` (m15.3). The UI `take()`s it each repaint and
     /// turns it into the status line, because **a refusal is a normal outcome** here, not a
     /// transport error: the engine declines to save a world whose load skipped component types it
@@ -358,7 +362,36 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
             // The play/edit phase + tick count (m9.7), like ViewportCamera above: overwrite with
             // the newest, sent every viewport frame.
             if let Ok(play_state) = PlayState::decode(payload) {
-                shared.lock().unwrap().play_state = play_state;
+                let mut s = shared.lock().unwrap();
+                s.play_state = play_state;
+                s.thermal = None; // diagnostics must follow THIS frame, never an older equal tick
+            }
+        }
+        MessageType::Other(code) if code == EditorMessage::PlayControlState.to_code() => {
+            if let Ok(control) = rime_protocol::PlayControlState::decode(payload) {
+                let mut s = shared.lock().unwrap();
+                if s.play_control.as_ref().is_none_or(|old| {
+                    control.session_id > old.session_id
+                        || (control.session_id == old.session_id
+                            && control.tick_count >= old.tick_count)
+                        || (control.session_id == old.session_id && control.phase == 0)
+                }) {
+                    s.play_control = Some(control);
+                }
+            }
+        }
+        MessageType::Other(code) if code == EditorMessage::ThermalPreview.to_code() => {
+            if let Ok(m) = rime_protocol::ThermalPreview::decode(payload) {
+                let mut s = shared.lock().unwrap();
+                if m.phase == s.play_state.phase as u8
+                    && m.host_tick == s.play_state.tick_count
+                    && (m.session_id > s.thermal_session
+                        || (m.session_id == s.thermal_session && m.revision >= s.thermal_revision))
+                {
+                    s.thermal_session = m.session_id;
+                    s.thermal_revision = m.revision;
+                    s.thermal = Some(m);
+                }
             }
         }
         _ => {} // an editor->engine type echoed, or something this build predates
@@ -382,6 +415,8 @@ fn to_input_event(input: Input) -> InputEvent {
         Input::PointerMove { x, y } => (InputKind::PointerMove, x, y, 0),
         Input::PointerDown { x, y, button } => (InputKind::PointerDown, x, y, button),
         Input::PointerUp { x, y, button } => (InputKind::PointerUp, x, y, button),
+        Input::KeyDown { code } => (InputKind::KeyDown, 0, 0, code),
+        Input::KeyUp { code } => (InputKind::KeyUp, 0, 0, code),
     };
     InputEvent {
         kind,
@@ -398,7 +433,90 @@ fn to_input_event(input: Input) -> InputEvent {
 
 #[cfg(test)]
 mod tests {
-    use super::engine_args;
+    use super::*;
+
+    #[test]
+    fn thermal_diagnostics_require_current_phase_tick_session_and_revision() {
+        use rime_protocol::{PlayPhase, ThermalPreview, ThermalPreviewCell};
+        let shared: Shared = Arc::new(Mutex::new(SharedState::default()));
+        let play = |tick_count| PlayState {
+            phase: PlayPhase::Paused,
+            tick_count,
+        };
+        let state = |s: PlayState| {
+            handle_message(
+                &shared,
+                MessageType::Other(EditorMessage::PlayState.to_code()),
+                &s.encode(),
+            )
+        };
+        let diagnostic = |m: &ThermalPreview| {
+            handle_message(
+                &shared,
+                MessageType::Other(EditorMessage::ThermalPreview.to_code()),
+                &m.encode().unwrap(),
+            )
+        };
+        let mut m = ThermalPreview {
+            status: 1,
+            phase: 2,
+            session_id: 2,
+            revision: 5,
+            host_tick: 12,
+            accepted_host_tick: 12,
+            field_tick: 12,
+            cells: vec![ThermalPreviewCell {
+                editor_id: 7,
+                temperature_kelvin: 273.15,
+                liquid_mass_fraction: 0.25,
+                energy_joules: 83375.,
+            }],
+            ..Default::default()
+        };
+        state(play(12));
+        diagnostic(&m);
+        assert_eq!(shared.lock().unwrap().thermal.as_ref(), Some(&m));
+        // Even equal-tick PlayState invalidates the prior frame before diagnostics arrive.
+        state(play(12));
+        assert!(shared.lock().unwrap().thermal.is_none());
+        m.session_id = 1;
+        diagnostic(&m);
+        assert!(shared.lock().unwrap().thermal.is_none());
+        m.session_id = 2;
+        m.revision = 4;
+        diagnostic(&m);
+        assert!(shared.lock().unwrap().thermal.is_none());
+        m.revision = 5;
+        m.host_tick = 13;
+        diagnostic(&m);
+        assert!(shared.lock().unwrap().thermal.is_none());
+        m.host_tick = 12;
+        m.phase = 1;
+        diagnostic(&m);
+        assert!(shared.lock().unwrap().thermal.is_none());
+        m.phase = 2;
+        diagnostic(&m);
+        handle_message(
+            &shared,
+            MessageType::Other(EditorMessage::ThermalPreview.to_code()),
+            &[1, 2, 3],
+        );
+        assert_eq!(shared.lock().unwrap().thermal.as_ref(), Some(&m));
+        // A newer session admits its own lower revision/tick; the old session stays rejected.
+        state(play(1));
+        m.session_id = 3;
+        m.revision = 1;
+        m.host_tick = 1;
+        m.accepted_host_tick = 1;
+        m.field_tick = 1;
+        diagnostic(&m);
+        assert_eq!(shared.lock().unwrap().thermal.as_ref(), Some(&m));
+        state(play(1));
+        m.session_id = 2;
+        m.revision = 99;
+        diagnostic(&m);
+        assert!(shared.lock().unwrap().thermal.is_none());
+    }
 
     #[test]
     fn forwards_assets_and_scene_when_present() {

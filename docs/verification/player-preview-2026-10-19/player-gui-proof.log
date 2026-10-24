@@ -1,0 +1,1 @@
+PASS: real GUI Walk selection/admission, capture, W, relative look, Esc, focus loss/refocus, Shift+Esc and Stop; screenshots retained. Source unchanged. Pixel/keyboard assertions evaluated separately; host wire proof supplies exact movement/restoration.

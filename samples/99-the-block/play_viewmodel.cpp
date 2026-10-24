@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -26,10 +27,135 @@ constexpr std::array<const char*, 6> kSources{"held-scar-h.glb",
                                               "arms-msr.glb"};
 constexpr std::size_t kMaxDraws = 32; // SceneRenderer's first-person draw contract
 
+struct RecoilTuning {
+    float bullet_mass;      // kg
+    float muzzle_velocity;  // m/s
+    float weapon_mass;      // kg
+    float gases;            // multiplier on projectile momentum, including propellant gases
+    float translation_gain; // shoulder compliance: fraction of free rearward velocity
+    float rotation_gain;    // rad/m: effective bore/shoulder torque coupling
+    float frequency;        // undamped angular frequency, rad/s (k = frequency squared)
+    float damping;          // damping ratio (c = 2 * damping * frequency), below 1 overshoots
+};
+
+constexpr std::array<RecoilTuning, 3> kRecoil{{
+    {.0095f, 800.0f, 3.9f, 1.5f, .14f, .40f, 32.0f, .60f}, // SCAR-H, 7.62 mm
+    {.0040f, 910.0f, 3.1f, 1.5f, .14f, .40f, 36.0f, .60f}, // M4, 5.56 mm
+    {.0160f, 900.0f, 6.8f, 1.5f, .26f, .55f, 20.0f, .60f}, // MSR, .338 class
+}};
+
 constexpr std::array<core::Vec3, 3> kAimOffsets{
     {{-.14f, .09f, .37f}, {-.137777f, .0947244f, .37f}, {-.14f, .118f, .035f}}};
-constexpr std::array<core::Vec3, 3> kHipOffsets{{{0, 0, .22f}, {0, 0, .22f}, {0, 0, 0}}};
+
+// HIP CARRY: frame the arms the way the eye actually sees them, not where the gun is shouldered.
+//
+// A real eye takes in nearly 180 degrees; a 50-degree game camera sees only its centre. Holding
+// a rifle at the hip a person sees both hands on the weapon and both forearms running down out
+// of view, but a camera that keeps the SHOULDERED geometry (stock in the shoulder, hands 30-60 cm
+// below the eye) frames a floating gun whose hands sit below the bottom edge. The firing hand is
+// about 27 cm below the top of the optic, so for both to fit in a 50-60 degree view the grip has
+// to sit 40-50 cm in front of the eye -- further than an arm hanging from a shoulder
+// beside the head can reach. Every military FPS resolves this the same way, and so does the
+// artist's rig: the weapon is carried higher and further forward than the aimed pose, and the
+// arms come up from shoulders placed below and ahead of the eye, outside the frame. Nothing of
+// the torso is drawn, so that placement is invisible; what IS visible -- hands on the grips,
+// forearms entering from the bottom edge, straight wrists -- is exactly the authored pose.
+//
+// So at the hip the arm rig keeps its AUTHORED orientation and the WEAPON is posed in camera
+// space like the ADS seat, only lowered and moved right: `grip` is the camera-space point for the
+// firing wrist, the weapon translates to put its authored grip there, and the rig translates by
+// the same amount plus `arm_shift`. With zero shift the bind pose is reproduced exactly (fingers
+// on the grips, elbows where the artist put them); the MSR's prepared space seats its arms
+// differently and needs a shift to keep its shoulders out of frame.
+//
+// WHY THE GUN READ AS "SIDEWAYS". A perspective camera shows a gun held off to one side as a
+// diagonal even when its bore is dead parallel to the view axis: the butt is near and far out,
+// the muzzle is far and close to the centre, so the receiver slopes toward the vanishing point.
+// The first carry (wrist at x .29, z -.47, 11.5 degrees of toe-in) stacked a real yaw on top of
+// that; round two moved the gun toward the centre line, to x .15, y -.235, z -.40, with only ~3.5
+// degrees of toe-in and a hair of pitch, so the eye looks along the top of the receiver from behind
+// and the left flank hardly shows (the stock leaves through the bottom-right corner, as in the
+// shooters this imitates). The bore stays within 8 degrees of the view direction and the sights
+// within 8 degrees of camera up. The wrist sits just under the viewmodel projection's bottom edge
+// (|y / z| = tan 27.5 degrees = .52, here .59): the HAND is in frame, the wrist and the elbows are
+// not, so only forearms and hands enter from the bottom. The elbows cannot be pushed further out
+// by lowering the shoulders: the support arm then runs out of reach for the magazine well.
+//
+// `support_slide` moves the support grip forward along the bore: a handguard is a prism about that
+// axis, so the authored finger wrap stays on its surface while the hand moves from the magazine
+// well to mid-handguard (zero for the SCAR, whose support hand holds a vertical foregrip; slightly
+// negative for the MSR, whose long fore-end already puts the support hand at the edge of its arm's
+// reach). pose() blends all of it into the shouldered seat with the aim fraction, so ADS geometry
+// -- sight alignment, eye relief, the 5x optic -- is unchanged. Values keep both wrists inside the
+// measured reach (elbows bent, never clamped) and both shoulders, with the rig's open sleeve rings,
+// outside the frame.
+struct HipCarry {
+    core::Vec3 grip;      // camera-space firing-wrist target, metres
+    core::Vec3 turn;      // pitch, yaw, roll about the firing wrist, radians
+    core::Vec3 arm_shift; // arm rig offset relative to the weapon's hip offset, metres
+    float support_slide;  // support hand moved forward along the bore, metres
+    // RESTING-ONLY seat, rig space, metres: extra rig offset and elbow-pole pushes (left, right)
+    // that fade out as a reload or bolt cycle lowers the weapon, so the actions keep the reach
+    // that was validated without them. This is what lets the support arm come from the left.
+    core::Vec3 rest_shift;
+    core::Vec3 rest_pole_left, rest_pole_right;
+};
+
+constexpr std::array<HipCarry, 3> kHipCarry{{
+    {{.15f, -.30f, -.50f},
+     {.03f, .06f, 0},
+     {0, -.14f, 0},
+     -.08f,
+     {0, -.03f, 0},
+     {-3.0f, 1.0f, 0},
+     {}}, // SCAR-H: foregrip
+    {{.15f, -.30f, -.50f},
+     {.03f, .06f, 0},
+     {0, -.10f, 0},
+     -.06f,
+     {0, -.07f, 0},
+     {-3.0f, 1.0f, 0},
+     {}}, // M4A1
+    // MSR: the long fore-end puts its support hand at the edge of the left arm's reach, so a
+    // nearly straight arm projects its elbow INTO the frame. The hand slides 8.5 cm back along
+    // the bore (slack in the arm), the resting seat drops and pulls the rig back (elbow below the
+    // bottom edge) and the whole carry sits 4 cm nearer the eye (which spreads the elbow and the
+    // forearm entry outward in ndc). Measured trade-off: more slide hides the left hand behind the
+    // receiver, a lower/further-back seat over-reaches it during bob and recoil.
+    {{.15f, -.30f, -.46f},
+     {-.02f, .06f, 0},
+     {.08f, -.245f, .15f},
+     -.085f,
+     {-.02f, -.03f, .04f},
+     {-3.0f, 0, 0},
+     {}}, // MSR
+}};
+
+// Elbow pole points for the shouldered seat, camera-local (left support arm first). At the hip
+// the poles are the rig's own bind elbows, which is what keeps the authored wrists straight.
+constexpr std::array<core::Vec3, 2> kAimPoles{{{-.4f, -.65f, -.25f}, {.5f, -.65f, -.25f}}};
+
+// VIEWMODEL FOV. Games draw the held weapon through its own, fixed projection so the arms keep
+// their proportions whatever FOV the player picks for the world. A narrower or wider projection
+// for points at the SAME depth is just a camera-space scale of x and y by the ratio of the two
+// half-angle tangents: tan(world/2) / tan(viewmodel/2). Scaling the model matrix that way, rather
+// than adding a second projection, keeps the weapon's depth exactly where the world's depth
+// buffer expects it (so it still occludes and is lit in the real scene), and the renderer's
+// inverse-transpose normal matrix keeps the shading correct under the non-uniform scale. The
+// scale fades to one at full aim: the optic's alignment and 5x calibration are measured with the
+// world projection and must not move.
+float viewmodel_squeeze(float world_fov_y) noexcept {
+    const float world = std::tan(.5f * world_fov_y);
+    const float model = std::tan(.5f * PlayViewmodel::kViewmodelFovY);
+    return std::isfinite(world) && world > 0.0f ? world / model : 1.0f;
+}
+
 constexpr core::Vec3 kScarSight{.14f, -.0848075f, -.473f};
+
+// The point a player aims through, weapon-local metres: the SCAR's holographic window, the M4's
+// rear peep and the PM II's ocular. The hip proof projects it to say how high the gun sits.
+constexpr std::array<core::Vec3, 3> kSightLocal{
+    {kScarSight, {.137777f, -.094724381f, -.46498038f}, {.14f, -.118f, -.085f}}};
 
 core::Mat4 sight_alignment(unsigned weapon, float aim) {
     if (weapon != 1)
@@ -103,6 +229,145 @@ bool extract_scar_glass(render::CpuMesh& gun, render::CpuMesh& glass) {
     return !glass.indices.empty();
 }
 
+struct MagazineSplit {
+    render::CpuMesh magazine;
+    core::Vec3 contact{};
+    std::uint32_t triangles = 0;
+};
+
+bool split_magazine(render::CpuMesh& body, unsigned weapon, MagazineSplit& out) {
+    // Source GLBs measured in prepared weapon-local metres. M4's authored material slot is a
+    // clean magazine. SCAR and MSR share materials with their receivers: classify WHOLE
+    // index-connected pieces by bounds, never triangles clipped along an arbitrary plane.
+    // MSR also gates material slots: slot 7 overlaps its box but is receiver geometry.
+    // Exact triangle totals make changed artwork fail closed instead of moving receiver faces.
+    constexpr std::array<core::Vec3, 3> lo{
+        {{.120f, -.349f, -.620f}, {}, {.1255f, -.308f, -.3282f}}};
+    constexpr std::array<core::Vec3, 3> hi{
+        {{.157f, -.187f, -.534f}, {}, {.1545f, -.204f, -.2165f}}};
+    constexpr std::array<std::uint32_t, 3> expected{1152, 664, 918};
+    if (weapon >= expected.size())
+        return false;
+    std::vector<std::uint32_t> parent(body.vertices.size());
+    for (std::uint32_t i = 0; i < parent.size(); ++i)
+        parent[i] = i;
+    const auto root = [&](std::uint32_t index) {
+        while (parent[index] != index) {
+            parent[index] = parent[parent[index]];
+            index = parent[index];
+        }
+        return index;
+    };
+    for (std::size_t t = 0; t < body.indices.size(); t += 3) {
+        const auto a = root(body.indices[t]);
+        parent[root(body.indices[t + 1])] = a;
+        parent[root(body.indices[t + 2])] = a;
+    }
+
+    struct Bounds {
+        core::Vec3 low{std::numeric_limits<float>::max(),
+                       std::numeric_limits<float>::max(),
+                       std::numeric_limits<float>::max()};
+        core::Vec3 high{-std::numeric_limits<float>::max(),
+                        -std::numeric_limits<float>::max(),
+                        -std::numeric_limits<float>::max()};
+    };
+
+    std::vector<Bounds> bounds(body.vertices.size());
+    for (const auto index : body.indices) {
+        auto& b = bounds[root(index)];
+        const auto& v = body.vertices[index];
+        b.low = {std::min(b.low.x, v.px), std::min(b.low.y, v.py), std::min(b.low.z, v.pz)};
+        b.high = {std::max(b.high.x, v.px), std::max(b.high.y, v.py), std::max(b.high.z, v.pz)};
+    }
+    const auto inside = [&](std::uint32_t index) {
+        const auto& b = bounds[root(index)];
+        return b.low.x >= lo[weapon].x && b.low.y >= lo[weapon].y && b.low.z >= lo[weapon].z &&
+               b.high.x <= hi[weapon].x && b.high.y <= hi[weapon].y && b.high.z <= hi[weapon].z;
+    };
+    out.magazine.vertices = body.vertices; // preserve positions, normals, UVs and tangents
+    std::vector<std::uint32_t> kept;
+    std::array<std::uint32_t, 12> magazine_by_material{};
+    core::Vec3 contact_sum{};
+    std::uint32_t contact_vertices = 0;
+    for (auto& range : body.submeshes) {
+        const auto body_begin = static_cast<std::uint32_t>(kept.size());
+        const auto mag_begin = static_cast<std::uint32_t>(out.magazine.indices.size());
+        for (std::size_t t = range.first_index; t < range.first_index + range.index_count; t += 3) {
+            const bool msr_material = range.material_slot == 6 || range.material_slot == 8 ||
+                                      range.material_slot == 9 || range.material_slot == 10;
+            const bool mag = weapon == 1 ? range.material_slot == 2
+                                         : inside(body.indices[t]) && (weapon == 0 || msr_material);
+            if (mag && range.material_slot < magazine_by_material.size())
+                ++magazine_by_material[range.material_slot];
+            auto& target = mag ? out.magazine.indices : kept;
+            for (unsigned j = 0; j < 3; ++j) {
+                const auto source = body.indices[t + j];
+                target.push_back(source);
+                if (mag) {
+                    const auto& v = body.vertices[source];
+                    contact_sum = contact_sum + core::Vec3{v.px, v.py, v.pz};
+                    ++contact_vertices;
+                }
+            }
+        }
+        out.magazine.submeshes.push_back(
+            {mag_begin,
+             static_cast<std::uint32_t>(out.magazine.indices.size()) - mag_begin,
+             range.material_slot});
+        range.first_index = body_begin;
+        range.index_count = static_cast<std::uint32_t>(kept.size()) - body_begin;
+    }
+    out.triangles = static_cast<std::uint32_t>(out.magazine.indices.size() / 3);
+    if (out.triangles != expected[weapon])
+        return false;
+    if (weapon == 2 && (magazine_by_material[6] != 282 || magazine_by_material[8] != 156 ||
+                        magazine_by_material[9] != 432 || magazine_by_material[10] != 48))
+        return false;
+    body.indices = std::move(kept);
+    // The palm aims at the magazine's centre near its upper socket. The articulated fingers in
+    // the source rig are locked; this is a wrist contact target, not a finger-grasp claim.
+    out.contact = contact_sum / static_cast<float>(contact_vertices);
+    out.contact.y = std::min(out.contact.y + .04f, hi[weapon].y);
+    return true;
+}
+
+std::uint64_t geometry_fingerprint(const render::CpuMesh& mesh) {
+    // Stable FNV-1a over authored topology and position bits, independent of host byte order.
+    // Calibrated from the optional cooked assets, then pinned before enabling their split.
+    std::uint64_t hash = 14695981039346656037ull;
+    const auto word = [&](std::uint32_t value) {
+        for (unsigned byte = 0; byte < 4; ++byte) {
+            hash ^= (value >> (8 * byte)) & 0xffu;
+            hash *= 1099511628211ull;
+        }
+    };
+    word(static_cast<std::uint32_t>(mesh.vertices.size()));
+    word(static_cast<std::uint32_t>(mesh.indices.size()));
+    word(static_cast<std::uint32_t>(mesh.submeshes.size()));
+    for (const auto& v : mesh.vertices) {
+        word(std::bit_cast<std::uint32_t>(v.px));
+        word(std::bit_cast<std::uint32_t>(v.py));
+        word(std::bit_cast<std::uint32_t>(v.pz));
+    }
+    for (auto index : mesh.indices)
+        word(index);
+    for (const auto& range : mesh.submeshes) {
+        word(range.first_index);
+        word(range.index_count);
+        word(range.material_slot);
+    }
+    return hash;
+}
+
+void remove_empty_ranges(render::CpuMesh& mesh) {
+    mesh.submeshes.erase(
+        std::remove_if(mesh.submeshes.begin(),
+                       mesh.submeshes.end(),
+                       [](const render::SubmeshRange& range) { return range.index_count == 0; }),
+        mesh.submeshes.end());
+}
+
 struct TextureRefs {
     assets::TextureAssetHandle base{};
     assets::TextureAssetHandle mr{};
@@ -124,6 +389,82 @@ const assets::ManifestEntry* mesh_entry(const assets::Manifest& manifest, const 
         }
     }
     return nullptr;
+}
+
+// MEASURE the reach the real solver enforces, rather than re-deriving it from bone lengths.
+// PlayArmIk clamps the shoulder-to-wrist distance into [|upper - lower|, upper + lower] and
+// reports the residual as wrist_position_error. So one solve with each wrist pushed 2 m past its
+// bind position along the shoulder ray reads the far limit as distance - error, and one with the
+// wrist 0.1 mm from the shoulder reads the near limit as distance + error. Both are the solver's
+// own arithmetic, so a later bone or clamp change cannot leave a stale copy here. The far solve
+// MUST clamp both sides, or the reading is not a limit at all.
+bool measure_reach(PlayArmIk& arms,
+                   const std::array<core::Vec3, 2>& poles,
+                   std::array<float, 2>& near_limit,
+                   std::array<float, 2>& far_limit) {
+    const auto shoulders = arms.bind_shoulders();
+    const auto& wrists = arms.bind_wrists();
+    const auto probe = [&](bool far, std::array<float, 2>& out) {
+        std::array<core::Mat4, 2> targets{};
+        std::array<float, 2> distance{};
+        for (unsigned side = 0; side < 2; ++side) {
+            const core::Vec3 wrist = core::transform_point(wrists[side], {});
+            const core::Vec3 ray = wrist - shoulders[side];
+            const float bind = core::length(ray);
+            if (!(bind > 1e-4f))
+                return false;
+            distance[side] = far ? bind + 2.0f : 1e-4f;
+            const core::Vec3 target = shoulders[side] + ray * (distance[side] / bind);
+            targets[side] = core::mat4_translation(target - wrist) * wrists[side];
+        }
+        (void)arms.solve(core::Mat4{}, targets, poles);
+        const auto& st = arms.stats();
+        if (!st.valid_input || (far && st.clamped_targets != 2))
+            return false;
+        for (unsigned side = 0; side < 2; ++side)
+            out[side] = far ? distance[side] - st.wrist_position_error[side]
+                            : distance[side] + st.wrist_position_error[side];
+        return true;
+    };
+    if (!probe(true, far_limit) || !probe(false, near_limit))
+        return false;
+    for (unsigned side = 0; side < 2; ++side)
+        if (!(far_limit[side] > near_limit[side] + 4.0f * PlayViewmodel::kReachMargin))
+            return false;
+    return true;
+}
+
+// The largest fraction f in [0, 1] of an action's hand offset whose wrist target stays inside
+// the measured reach, kReachMargin in from each limit. The path is the AUTHORED one -- the hand
+// still travels toward the magazine or bolt along the same weapon-local line, attached to the
+// moving gun -- it just stops where the arm runs out. Projecting the target onto the reach
+// sphere instead would be the solver's clamp done one step earlier: the counter would read
+// zero while the hand left the path it was asked to follow.
+//
+// Distance from the shoulder is convex along a straight line, so the reachable part of the
+// path that contains f = 0 is one interval and bisection finds its end. If even f = 0 (the
+// plain grip on the moved gun) is out of reach nothing here can help: the authored offset is
+// kept and the solver's clamp counter reports the frame honestly.
+float reachable_fraction(const core::Mat4& arms_from_weapon,
+                         core::Vec3 grip,
+                         core::Vec3 offset,
+                         core::Vec3 shoulder,
+                         float near_limit,
+                         float far_limit) {
+    const auto inside = [&](float f) {
+        const float d =
+            core::length(core::transform_point(arms_from_weapon, grip + offset * f) - shoulder);
+        return d >= near_limit + PlayViewmodel::kReachMargin &&
+               d <= far_limit - PlayViewmodel::kReachMargin;
+    };
+    if (inside(1.0f) || !inside(0.0f))
+        return 1.0f;
+    float lo = 0.0f, hi = 1.0f;
+    for (int i = 0; i < 20; ++i) { // 1e-6 of the offset: far below a visible millimetre
+        const float mid = 0.5f * (lo + hi);
+        (inside(mid) ? lo : hi) = mid;
+    }
+    return lo;
 }
 
 } // namespace
@@ -226,10 +567,63 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
                 }
             models_[i].muzzle = muzzle / static_cast<float>(count);
         }
+        const std::uint32_t original_triangles =
+            static_cast<std::uint32_t>(geometry.indices.size() / 3);
+        const std::uint64_t fingerprint = i < 3 ? geometry_fingerprint(geometry) : 0;
+        constexpr std::array<std::uint64_t, 3> expected_geometry{
+            0x4c74aa9179600ebaull, 0x57fbe42330511e32ull, 0xc50f3118a2bb7efaull};
+        if (i < 3 && fingerprint != expected_geometry[i]) {
+            std::fprintf(stderr,
+                         "99-the-block: %s geometry changed; recalibrate authored magazine\n",
+                         kSources[i]);
+            return false;
+        }
+        if (i < 3) {
+            models_[i].weapon_points.reserve(geometry.vertices.size());
+            for (const auto& v : geometry.vertices)
+                models_[i].weapon_points.push_back({v.px, v.py, v.pz});
+        }
+        MagazineSplit magazine;
+        if (i < 3) {
+            if (!split_magazine(geometry, static_cast<unsigned>(i), magazine)) {
+                std::fprintf(
+                    stderr,
+                    "99-the-block: %s magazine topology changed; expected authored split\n",
+                    kSources[i]);
+                return false;
+            }
+            models_[i].magazine_contact = magazine.contact;
+            models_[i].magazine_triangles = magazine.triangles;
+        }
+        if (i < 3) {
+            std::fprintf(
+                stderr,
+                "99-the-block: %s topology original=%u body=%zu magazine=%u fnv64=%016llx\n",
+                kSources[i],
+                original_triangles,
+                geometry.indices.size() / 3,
+                magazine.triangles,
+                static_cast<unsigned long long>(fingerprint));
+            if (original_triangles != geometry.indices.size() / 3 + magazine.triangles)
+                return false;
+        }
+        // Keep the authored range table for source material lookup. MeshRegistry intentionally
+        // discards zero-count ranges; filtering only the upload copies preserves source indices.
+        const auto authored_ranges = geometry.submeshes;
+        const auto magazine_ranges = magazine.magazine.submeshes;
+        remove_empty_ranges(geometry);
+        remove_empty_ranges(magazine.magazine);
         const render::MeshId mesh_id = meshes.add(geometry, kSources[i]);
         if (!meshes.contains(mesh_id))
             return false;
         ++resident_meshes_;
+        render::MeshId magazine_id = render::kInvalidMeshId;
+        if (i < 3) {
+            magazine_id = meshes.add(magazine.magazine, "held detachable magazine");
+            if (!meshes.contains(magazine_id))
+                return false;
+            ++resident_meshes_;
+        }
         if (i >= 3) {
             auto& model = models_[i - 3];
             const auto* skeleton_entry =
@@ -252,25 +646,47 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             const auto seat = core::transform_point(
                                   sight_alignment(static_cast<unsigned>(i - 3), 1), model.stock) +
                               kAimOffsets[i - 3];
-            model.camera_from_arms =
-                core::mat4_translation(seat) *
-                core::to_mat4(core::quat_from_axis_angle({0, 1, 0}, -1.0471975512f)) *
-                core::mat4_translation(-shoulder);
+            model.right_shoulder = shoulder;
+            model.aim_seat = seat;
+            model.aim_torso =
+                core::quat_from_axis_angle({0, 1, 0}, -1.0471975512f) *
+                // Shoulder slope: retain the seated firing shoulder while lowering the
+                // support shoulder. The authored sleeves end in open upper-arm rings; a
+                // level, strongly bladed torso projected that cut into the reload view.
+                // Tilting the torso keeps the cut below frame without hiding forearm faces.
+                core::quat_from_axis_angle({0, 0, 1}, .25f);
+            model.camera_from_arms = core::mat4_translation(seat) * core::to_mat4(model.aim_torso) *
+                                     core::mat4_translation(-shoulder);
             model.arms_from_camera = core::inverse(model.camera_from_arms);
-            model.elbow_poles = {
-                {core::transform_point(model.arms_from_camera, {-.4f, -.65f, -.25f}),
-                 core::transform_point(model.arms_from_camera, {.5f, -.65f, -.25f})}};
+            model.elbow_poles = {{core::transform_point(model.arms_from_camera, kAimPoles[0]),
+                                  core::transform_point(model.arms_from_camera, kAimPoles[1])}};
             model.arm_mesh = mesh_id;
             model.grips = model.arms.bind_wrists();
+            const auto& carry = kHipCarry[i - 3];
+            model.grips[0] = core::mat4_translation({0, 0, -carry.support_slide}) * model.grips[0];
+            // The authored rig's wrists ARE the weapon-local grips, so the firing wrist's bind
+            // position is where the hand holds this gun; the hip offset carries it to its target.
+            model.hip_pivot = core::transform_point(model.grips[1], {});
+            model.hip_translation = carry.grip - model.hip_pivot;
+            model.hip_seat = shoulder + model.hip_translation + carry.arm_shift;
+            model.rest_shift = carry.rest_shift;
+            model.rest_pole = {{carry.rest_pole_left, carry.rest_pole_right}};
+            model.hip_torso = core::Quat{}; // the authored rig orientation
+            model.bind_elbows = model.arms.bind_elbows();
+            if (!measure_reach(model.arms, model.elbow_poles, model.reach_near, model.reach_far)) {
+                std::fprintf(
+                    stderr, "99-the-block: arm rig %s has no measurable reach\n", kSources[i]);
+                return false;
+            }
             model.previous.resize(mesh->vertex_count);
             model.last.resize(mesh->vertex_count);
         }
-        const auto& ranges = meshes.get(mesh_id).submeshes;
-        if (ranges.size() != mesh->submeshes.size())
+        if (authored_ranges.size() != mesh->submeshes.size())
             return false;
         int normal_mapped = 0;
         int metal_rough_mapped = 0;
-        for (const auto& range : ranges) {
+        for (std::size_t j = 0; j < authored_ranges.size(); ++j) {
+            const auto& range = authored_ranges[j];
             const std::string source =
                 entries[i]->source_path + "#material" + std::to_string(range.material_slot);
             const auto* material_entry = manifest_->find_by_source(source);
@@ -295,17 +711,38 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             request_texture(material->occlusion_tex, p.textures.occlusion);
             request_texture(material->emissive_tex, p.textures.emissive);
             pending[i].push_back(p);
-            models_[i % 3].parts.push_back({mesh_id,
-                                            render::kInvalidMaterialId,
-                                            range.first_index,
-                                            range.index_count,
-                                            i >= 3});
+            if (range.index_count != 0)
+                models_[i % 3].parts.push_back({mesh_id,
+                                                render::kInvalidMaterialId,
+                                                range.first_index,
+                                                range.index_count,
+                                                i >= 3,
+                                                false,
+                                                static_cast<std::uint8_t>(i),
+                                                static_cast<std::uint32_t>(j)});
+            if (i < 3) {
+                const auto& mag_range = magazine_ranges[j];
+                if (mag_range.index_count != 0)
+                    models_[i].parts.push_back({magazine_id,
+                                                render::kInvalidMaterialId,
+                                                mag_range.first_index,
+                                                mag_range.index_count,
+                                                false,
+                                                true,
+                                                static_cast<std::uint8_t>(i),
+                                                static_cast<std::uint32_t>(j)});
+            }
         }
         // The CC-BY MSR is a solid-material model; retain those source materials
         // honestly. The other weapons and every arm still require their native maps.
         if (i != 2 && (normal_mapped == 0 || metal_rough_mapped == 0)) {
             std::fprintf(
                 stderr, "99-the-block: %s needs real normal and metal-rough maps\n", kSources[i]);
+            return false;
+        }
+        if (i >= 3 && models_[i - 3].parts.size() > kMaxDraws - 1) {
+            std::fprintf(
+                stderr, "99-the-block: %s exceeds first-person draw budget\n", kSources[i]);
             return false;
         }
     }
@@ -335,8 +772,10 @@ bool PlayViewmodel::load(const std::filesystem::path& cooked,
             desc.normal_texture = ready(p.textures.normal);
             desc.occlusion_texture = ready(p.textures.occlusion);
             desc.emissive_texture = ready(p.textures.emissive);
-            const std::size_t part_offset = i >= 3 ? pending[i - 3].size() : 0;
-            models_[i % 3].parts[part_offset + j].material = materials.add(desc);
+            const auto material_id = materials.add(desc);
+            for (auto& part : models_[i % 3].parts)
+                if (part.source_file == i && part.source_range == j)
+                    part.material = material_id;
             ++resident_materials_;
         }
     }
@@ -384,8 +823,11 @@ void PlayViewmodel::select(Weapon weapon) noexcept {
         selected_ = weapon;
         ++identity_epoch_;
         gait_phase_ = 0.0f;
-        recoil_ = 0.0f;
+        recoil_translation_ = {};
+        recoil_rotation_ = {};
+        shot_sequence_ = 0;
         aim_ = 0.0f;
+        motion_.cancel(static_cast<PlayWeaponMotion::Weapon>(weapon));
         for (auto& model : models_)
             model.history = false;
     }
@@ -411,7 +853,11 @@ void PlayViewmodel::apply_controls(const platform::Input& devices,
             select(Weapon::M4);
         if (event.key.key == platform::Key::Num3)
             select(Weapon::Sniper);
+        if (event.key.key == platform::Key::R)
+            (void)begin_ammo_reload();
     }
+    if (devices.key_pressed(platform::Key::R))
+        (void)begin_ammo_reload();
     set_aiming(devices.key_down(platform::Key::Q) ||
                devices.mouse_down(platform::MouseButton::Right));
 }
@@ -437,16 +883,58 @@ bool PlayViewmodel::scope_feed_visible(const core::Transform& eye) const noexcep
            p.x * p.x + p.y * p.y < support * support;
 }
 
+void PlayViewmodel::Spring::advance(float dt, float frequency, float damping) noexcept {
+    // Analytic underdamped spring: solve x'' + 2*zeta*omega*x' + omega^2*x = 0 between
+    // shot impulses. Velocity carries the kick through one visible overshoot and recovery;
+    // exponential position decay cannot do that. The closed form stays stable for long frames
+    // and gives the same trajectory when a frame is subdivided, without per-frame allocation.
+    const float decay = damping * frequency;
+    const float oscillation = frequency * std::sqrt(1.0f - damping * damping);
+    const float envelope = std::exp(-decay * dt);
+    if (envelope < 1e-8f) {
+        position = velocity = {};
+        return;
+    }
+    const float sine = std::sin(oscillation * dt) / oscillation;
+    const float cosine = std::cos(oscillation * dt);
+    const auto prior = position;
+    position = (prior * cosine + (velocity + prior * decay) * sine) * envelope;
+    velocity = (velocity * cosine - (velocity * decay + prior * (frequency * frequency)) * sine) *
+               envelope;
+}
+
 void PlayViewmodel::advance(float frame_dt, core::Vec3 actual_velocity, bool fired) noexcept {
-    const float dt = std::clamp(frame_dt, 0.0f, 0.05f);
+    // Animation time uses the entire finite frame; a slow frame must not extend a reload.
+    const float dt = std::isfinite(frame_dt) && frame_dt >= 0.0f ? frame_dt : 0.0f;
+    motion_.advance(frame_dt, static_cast<PlayWeaponMotion::Weapon>(selected_), fired, aiming_);
+    // The magazine arrives at the seat instant. A switch mid-reload cancels the motion, which
+    // clears this event, so the abandoned weapon keeps its old count.
+    if (motion_.take_mag_seated())
+        ammo_.refill(static_cast<PlayWeaponMotion::Weapon>(selected_));
     const float speed =
         std::sqrt(actual_velocity.x * actual_velocity.x + actual_velocity.z * actual_velocity.z);
     gait_phase_ += std::min(speed, 10.0f) * dt * 1.6f;
     bob_amount_ = std::clamp(speed / 6.0f, 0.0f, 1.0f);
-    if (fired)
-        recoil_ = std::min(recoil_ + 0.012f, 0.035f);
-    recoil_ *= std::exp(-14.0f * dt);
-    const float target_aim = aiming_ ? 1.0f : 0.0f;
+    const auto& tuning = kRecoil[static_cast<unsigned>(selected_)];
+    if (fired) {
+        // Conservation of momentum supplies a velocity IMPULSE, not a position jump. The
+        // shoulder absorbs most of the free-rifle speed; bore/shoulder leverage turns some
+        // into muzzle rise. A counter hash varies yaw/roll without global RNG or frame timing.
+        const float velocity =
+            tuning.bullet_mass * tuning.muzzle_velocity * tuning.gases / tuning.weapon_mass;
+        std::uint32_t hash = ++shot_sequence_ * 0x9e3779b9u;
+        hash ^= hash >> 16;
+        const float yaw_sign = (hash & 1u) ? 1.0f : -1.0f;
+        const float roll_sign = (hash & 2u) ? 1.0f : -1.0f;
+        const float kick = velocity * tuning.rotation_gain;
+        recoil_translation_.velocity +=
+            core::Vec3{0, .10f, 1} * (velocity * tuning.translation_gain);
+        recoil_rotation_.velocity +=
+            core::Vec3{kick, yaw_sign * kick * .10f, roll_sign * kick * .16f};
+    }
+    recoil_translation_.advance(dt, tuning.frequency, tuning.damping);
+    recoil_rotation_.advance(dt, tuning.frequency, tuning.damping);
+    const float target_aim = aiming_ && !motion_.reloading() && !motion_.cycling() ? 1.0f : 0.0f;
     aim_ += (target_aim - aim_) * (1.0f - std::exp(-16.0f * dt));
 }
 
@@ -456,7 +944,9 @@ void PlayViewmodel::observe_camera(core::Vec3 eye) noexcept {
     if (have_eye_ && core::length(eye - previous_eye_) > 2.0f) {
         ++identity_epoch_;
         gait_phase_ = 0.0f;
-        recoil_ = 0.0f;
+        recoil_translation_ = {};
+        recoil_rotation_ = {};
+        shot_sequence_ = 0;
         for (auto& model : models_)
             model.history = false;
     }
@@ -464,31 +954,190 @@ void PlayViewmodel::observe_camera(core::Vec3 eye) noexcept {
     have_eye_ = true;
 }
 
-std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& camera) {
+std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& camera,
+                                                      float world_fov_y) {
     draws_.clear();
+    const auto motion_pose = motion_.pose();
     core::Transform local{};
     local.translation = {0.006f * std::sin(gait_phase_) * bob_amount_,
-                         0.008f * std::sin(2.0f * gait_phase_) * bob_amount_ - recoil_,
-                         recoil_ * 0.5f};
+                         0.008f * std::sin(2.0f * gait_phase_) * bob_amount_,
+                         0.0f};
     const float pose_amount = 1.0f - aim_ * .85f;
-    local.translation = local.translation * pose_amount;
+    // A firm ADS shoulder reduces travel, but never suppresses the optic's shot impulse.
+    local.translation =
+        local.translation * pose_amount + recoil_translation_.position * (1.0f - .35f * aim_);
     // These weapon-local sight lines are authored in metres: SCAR holographic glass, M4 peep,
     // and PM II ocular. Align each line with the eye without changing the world camera.
     // Rifle aim has no magnification; only the sniper owns a second optical camera.
     // A shouldered stock belongs behind the eye. The old rifle pose exposed its rear cap
     // 23 cm IN FRONT of the camera; matching hip placement keeps the entire transition reachable.
     const auto index = static_cast<unsigned>(selected_);
+    auto& selected = models_[index];
+    const float hip = 1.0f - aim_;
     local.translation =
-        local.translation + kAimOffsets[index] * aim_ + kHipOffsets[index] * (1 - aim_);
+        local.translation + kAimOffsets[index] * aim_ + selected.hip_translation * hip;
+    // Rotate about the stock: lifting/translating a shouldered butt across the eye filled the
+    // viewport with near-clipped faces even when all projected magazine targets were valid.
+    const bool reload = motion_.reloading();
+    // The hip carry already frames the weapon, so the reload only needs a small lift toward the
+    // eye (y) and a pull back (z) that brings the magazine well closer. The earlier 12-18 cm lift
+    // existed to drag a below-frame weapon into view; from the hip carry it threw the butt and
+    // the open sleeve rings of the upper arms into the frame.
+    constexpr std::array<core::Vec3, 3> reload_offsets{
+        {{-.03f, .04f, .05f}, {-.03f, .04f, .05f}, {-.02f, -.04f, .06f}}};
+    // The MSR's values are retuned (smaller roll/pitch) because its long receiver swung the
+    // support hand and magazine off the bottom edge mid-reload.
+    // Reload pose: the weapon ROLLS about its bore (z) by 24-27 degrees so the magazine well
+    // turns toward the support hand and the viewer, and dips its muzzle slightly (negative x
+    // pitch). Rolling, rather than pitching the muzzle up as round 1 did, keeps the well and
+    // the hand inside the lower frame instead of swinging them out of the bottom.
+    constexpr std::array<float, 3> reload_pitch{.06f, .06f, .05f};
+    constexpr std::array<float, 3> reload_roll{-.50f, -.50f, -.30f};
+    const core::Vec3 action_offset = reload ? reload_offsets[index] : core::Vec3{-.16f, .14f, .04f};
+    local.translation = local.translation + action_offset * motion_pose.lower;
+    // Seat jolt: the fresh magazine slams home, kicking the weapon up and slightly back; the
+    // pulse is already shaped (fast rise, damped rebound) by PlayWeaponMotion::seat_pulse.
+    if (reload)
+        local.translation = local.translation + core::Vec3{0.0f, .012f, .018f} * motion_pose.seat;
     local.rotation = core::quat_from_euler(
-        recoil_ * .8f, .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount, 0.0f);
+        recoil_rotation_.position.x + (reload ? .05f * motion_pose.seat : .07f * motion_pose.lower),
+        recoil_rotation_.position.y +
+            .008f * std::sin(gait_phase_ * .5f) * bob_amount_ * pose_amount,
+        recoil_rotation_.position.z + (reload ? 0.0f : .24f) * motion_pose.tilt);
     const core::Mat4 camera_matrix = core::to_matrix(camera);
-    const core::Mat4 weapon_local = core::to_matrix(local) * sight_alignment(index, aim_);
+    const core::Vec3 pivot = models_[index].stock;
+    const core::Mat4 reload_rotation =
+        reload ? core::mat4_translation(pivot) *
+                     core::to_mat4(core::quat_from_euler(reload_pitch[index] * motion_pose.lower,
+                                                         0,
+                                                         reload_roll[index] * motion_pose.tilt)) *
+                     core::mat4_translation(-pivot)
+               : core::Mat4{};
+    // The hip turn pivots about the firing grip, so the hand stays on its framed target while
+    // the muzzle toes in. It fades to nothing at full aim, leaving the calibrated sight line.
+    const auto& turn = kHipCarry[index].turn;
+    const core::Mat4 hip_turn =
+        core::mat4_translation(selected.hip_pivot) *
+        core::to_mat4(core::quat_from_euler(turn.x * hip, turn.y * hip, turn.z * hip)) *
+        core::mat4_translation(-selected.hip_pivot);
+    const core::Mat4 weapon_local =
+        core::to_matrix(local) * hip_turn * reload_rotation * sight_alignment(index, aim_);
     weapon_local_ = weapon_local;
-    const core::Mat4 model = camera_matrix * weapon_local;
-    auto& selected = models_[static_cast<unsigned>(selected_)];
-    const auto vertices = selected.arms.solve(
-        selected.arms_from_camera * weapon_local, selected.grips, selected.elbow_poles);
+    // 1 - (1 - k) * hip is exactly 1.0f at full aim, so the aimed pose is bit-identical.
+    const float squeeze = 1.0f - (1.0f - viewmodel_squeeze(world_fov_y)) * hip;
+    view_squeeze_ = core::Mat4{};
+    view_squeeze_.at(0, 0) = squeeze;
+    view_squeeze_.at(1, 1) = squeeze;
+    // Everything DRAWN goes through the squeeze; the IK below stays in true metres, so reach,
+    // grips and recoil keep their physical meaning.
+    const core::Mat4 view = camera_matrix * view_squeeze_;
+    const core::Mat4 model = view * weapon_local;
+    sight_world_ = core::transform_point(model, kSightLocal[index]);
+    // Torso: blend the hip-carry anchor into the shouldered seat with the same aim fraction as
+    // the weapon. Position lerps, orientation slerps, so the frame stays rigid -- the IK and
+    // the skin palette both require a rigid camera_from_arms.
+    // The resting-only arm seat (see HipCarry::rest_shift) fades out as a reload or bolt cycle
+    // works the action. It must be GONE early in the sweep, not merely at its bottom: the seat
+    // tilts the arms for the resting framing, and the action then swings the weapon and hands
+    // through poses that were validated without it -- a half-faded seat lets the MSR's upper-arm
+    // sleeve cut sweep into view mid-reload. So the seat fades over the first kRestFade of the
+    // action envelope with a smoothstep: continuous in value and slope (no pop at either end),
+    // and fully off for the rest of the sweep.
+    constexpr float kRestFade = .25f;
+    const float action =
+        std::clamp(std::max(motion_pose.lower, motion_pose.right_bolt) / kRestFade, 0.0f, 1.0f);
+    const float rest = 1.0f - action * action * (3.0f - 2.0f * action);
+    selected.camera_from_arms =
+        core::mat4_translation((selected.hip_seat + selected.rest_shift * rest) * hip +
+                               selected.aim_seat * aim_) *
+        core::to_mat4(core::slerp(selected.hip_torso, selected.aim_torso, aim_)) *
+        core::mat4_translation(-selected.right_shoulder);
+    selected.arms_from_camera = core::inverse(selected.camera_from_arms);
+    for (unsigned side = 0; side < 2; ++side)
+        selected.elbow_poles[side] =
+            (selected.bind_elbows[side] + selected.rest_pole[side] * rest) * hip +
+            core::transform_point(selected.arms_from_camera, kAimPoles[side]) * aim_;
+    auto grips = selected.grips;
+    // Slot zero is the support left hand; slot one is the firing right hand. Moving
+    // wrist targets leaves the shoulder anchors fixed and uses the existing CPU IK mesh.
+    // Target the measured magazine body, then translate the wrist and detached mesh together.
+    // Approach reach and pull reach are solved separately. Once the wrist reaches the socket,
+    // any pull limit scales BOTH wrist and mesh displacement; otherwise the magazine stays seated
+    // and magazine_contact_gap reports the missed contact on all three authored guns.
+    const core::Vec3 pull{0.0f, -0.09f, 0.06f};
+    const core::Vec3 support_grip = core::transform_point(grips[0], {});
+    const core::Vec3 approach =
+        selected.magazine_triangles != 0 ? selected.magazine_contact - support_grip : core::Vec3{};
+    const float pull_amount = selected.magazine_triangles != 0 ? motion_pose.magazine_pull : 0.0f;
+    const core::Vec3 right_offset{0.025f * motion_pose.right_bolt,
+                                  0.035f * motion_pose.right_bolt,
+                                  -0.11f * motion_pose.right_bolt + 0.095f * motion_pose.bolt_pull};
+    const core::Mat4 arms_from_weapon = selected.arms_from_camera * weapon_local;
+    const auto shoulders = selected.arms.bind_shoulders();
+    const core::Vec3 approach_path = approach * motion_pose.left_magazine;
+    const float approach_fraction = reachable_fraction(arms_from_weapon,
+                                                       support_grip,
+                                                       approach_path,
+                                                       shoulders[0],
+                                                       selected.reach_near[0],
+                                                       selected.reach_far[0]);
+    const core::Vec3 approached = approach_path * approach_fraction;
+    if (selected.magazine_triangles != 0 && motion_pose.left_magazine >= .999f &&
+        approach_fraction < 1.0f)
+        ++reach_stats_.missed_magazine_contacts;
+    const float pull_fraction = approach_fraction == 1.0f
+                                    ? reachable_fraction(arms_from_weapon,
+                                                         support_grip + approached,
+                                                         pull * pull_amount,
+                                                         shoulders[0],
+                                                         selected.reach_near[0],
+                                                         selected.reach_far[0])
+                                    : 0.0f;
+    const core::Vec3 support_offset = approached + pull * (pull_amount * pull_fraction);
+    const core::Vec3 authored_support = approach_path + pull * pull_amount;
+    reach_stats_.retained[0] =
+        core::length(authored_support) > 0.0f
+            ? std::min(1.0f, core::length(support_offset) / core::length(authored_support))
+            : 1.0f;
+    reach_stats_.applied_offset[0] = core::length(support_offset);
+    grips[0] = core::mat4_translation(support_offset) * grips[0];
+    wrist_world_[0] = core::transform_point(model * grips[0], {});
+    wrist_camera_[0] = core::transform_point(weapon_local * grips[0], {});
+    const float right_fraction = reachable_fraction(arms_from_weapon,
+                                                    core::transform_point(grips[1], {}),
+                                                    right_offset,
+                                                    shoulders[1],
+                                                    selected.reach_near[1],
+                                                    selected.reach_far[1]);
+    reach_stats_.retained[1] = right_fraction;
+    reach_stats_.applied_offset[1] = core::length(right_offset) * right_fraction;
+    grips[1] = core::mat4_translation(right_offset * right_fraction) * grips[1];
+    wrist_world_[1] = core::transform_point(model * grips[1], {});
+    wrist_camera_[1] = core::transform_point(weapon_local * grips[1], {});
+    const core::Mat4 magazine_local = core::mat4_translation(pull * (pull_amount * pull_fraction));
+    if (motion_pose.old_mag_fall < 0.0f)
+        release_offset_ = pull * (pull_amount * pull_fraction);
+    magazine_world_ = model * magazine_local;
+    magazine_contact_world_ = core::transform_point(magazine_world_, selected.magazine_contact);
+    magazine_contact_gap_ = selected.magazine_triangles != 0
+                                ? core::length(wrist_world_[0] - magazine_contact_world_)
+                                : 0.0f;
+    reach_stats_.limited_poses +=
+        approach_fraction < 1.0f || pull_fraction < 1.0f || right_fraction < 1.0f ? 1u : 0u;
+    const auto vertices = selected.arms.solve(arms_from_weapon, grips, selected.elbow_poles);
+    weapon_from_arms_ = core::inverse(arms_from_weapon);
+    arm_model_ = view * selected.camera_from_arms;
+    // The hand continues the forearm: its centre is a palm's length past the wrist along the
+    // elbow-to-wrist line, which is orientation-independent (unlike a guess at the grip frame).
+    {
+        const auto joints = selected.arms.limb_points();
+        for (unsigned side = 0; side < 2; ++side) {
+            const core::Vec3 forearm = joints[side][2] - joints[side][1];
+            const float length = core::length(forearm);
+            const core::Vec3 along = length > 1e-6f ? forearm / length : core::Vec3{0, 0, -1};
+            hand_world_[side] = core::transform_point(arm_model_, joints[side][2] + along * .07f);
+        }
+    }
     for (std::size_t i = 0; i < vertices.size(); ++i) {
         const core::Vec3 current{vertices[i].px, vertices[i].py, vertices[i].pz};
         selected.previous[i] = selected.history ? selected.last[i] : current;
@@ -498,13 +1147,30 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
     deformations_.clear();
     deformations_.push_back({selected.arm_mesh, vertices, selected.previous});
     for (const auto& part : selected.parts) {
+        if (part.arm && !draw_arms_)
+            continue;
         render::DrawItem draw{};
         draw.mesh = part.mesh;
         draw.material = part.material;
-        draw.model = part.arm ? camera_matrix * selected.camera_from_arms : model;
+        draw.model =
+            part.arm ? view * selected.camera_from_arms : (part.magazine ? magazine_world_ : model);
         draw.first_index = part.first_index;
         draw.index_count = part.index_count;
         draws_.push_back(draw);
+        // The spent magazine: dropped from the hand at release and falling ballistically
+        // (y = -g t^2 / 2 in camera space) while tumbling, then culled once it is out of sight.
+        if (part.magazine && motion_pose.old_mag_fall >= 0.0f) {
+            const float tau = motion_pose.old_mag_fall;
+            const core::Vec3 fall{-.05f * tau, -4.905f * tau * tau, .10f * tau};
+            const core::Mat4 spin =
+                core::to_mat4(core::quat_from_euler(2.5f * tau, 0, -3.0f * tau));
+            const core::Vec3 centre = selected.magazine_contact;
+            render::DrawItem spent = draw;
+            spent.model = view * core::mat4_translation(fall) * weapon_local *
+                          core::mat4_translation(release_offset_) * core::mat4_translation(centre) *
+                          spin * core::mat4_translation(-centre);
+            draws_.push_back(spent);
+        }
     }
     if (scoped()) {
         lens_.model = model;
@@ -516,6 +1182,57 @@ std::span<const render::DrawItem> PlayViewmodel::pose(const core::Transform& cam
         optic_world_ = model * core::mat4_translation(kScarSight);
     }
     return draws_;
+}
+
+std::array<core::Vec3, 2> PlayViewmodel::elbows_world() const {
+    const auto joints = models_[static_cast<unsigned>(selected_)].arms.limb_points();
+    return {core::transform_point(arm_model_, joints[0][1]),
+            core::transform_point(arm_model_, joints[1][1])};
+}
+
+std::vector<core::Vec3> PlayViewmodel::sleeve_cuts_world() const {
+    const auto& arms = models_[static_cast<unsigned>(selected_)].arms;
+    const auto posed = arms.posed();
+    std::vector<core::Vec3> out;
+    out.reserve(arms.open_boundary().size());
+    for (const auto i : arms.open_boundary())
+        if (i < posed.size())
+            out.push_back(
+                core::transform_point(arm_model_, {posed[i].px, posed[i].py, posed[i].pz}));
+    return out;
+}
+
+std::size_t PlayViewmodel::limb_weapon_intrusions(float radius,
+                                                  float wrist_clearance) const noexcept {
+    // A capsule test in WEAPON space: the limb's bone axis is the centre of the sleeve, so a
+    // weapon vertex closer to that axis than the sleeve's radius is inside the arm. Measuring
+    // against the bone rather than the skinned surface keeps the test independent of how the
+    // sleeve mesh is tessellated, and conservative: a radius below the real sleeve radius can
+    // only under-count.
+    const auto& selected = models_[static_cast<unsigned>(selected_)];
+    const auto limbs = selected.arms.limb_points();
+    std::size_t inside = 0;
+    for (const auto& limb : limbs) {
+        const core::Vec3 shoulder = core::transform_point(weapon_from_arms_, limb[0]);
+        const core::Vec3 elbow = core::transform_point(weapon_from_arms_, limb[1]);
+        core::Vec3 wrist = core::transform_point(weapon_from_arms_, limb[2]);
+        const float forearm = core::length(wrist - elbow);
+        if (forearm > wrist_clearance)
+            wrist = elbow + (wrist - elbow) * ((forearm - wrist_clearance) / forearm);
+        else
+            wrist = elbow;
+        for (const auto& [a, b] : {std::pair{shoulder, elbow}, std::pair{elbow, wrist}}) {
+            const core::Vec3 ab = b - a;
+            const float span = core::dot(ab, ab);
+            for (const auto& p : selected.weapon_points) {
+                const float t =
+                    span > 0.0f ? std::clamp(core::dot(p - a, ab) / span, 0.0f, 1.0f) : 0.0f;
+                const core::Vec3 d = p - (a + ab * t);
+                inside += core::dot(d, d) < radius * radius ? 1u : 0u;
+            }
+        }
+    }
+    return inside;
 }
 
 std::size_t PlayViewmodel::selected_draw_count() const noexcept {

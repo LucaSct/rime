@@ -805,3 +805,58 @@ TEST_CASE(
     CHECK_FALSE(dw.part_alive(inst, 3));  // and it landed
     CHECK(dw.state_hash() != hash_before);
 }
+
+TEST_CASE("local damage gate counts suppressed ops and preserves remote application") {
+    const assets::DestructibleAsset asset = make_grid(2, 2, {0.25f, 0.25f, 0.15f}, 1000.0f, 1.0f);
+    const core::Vec3 point{-0.25f, 0.25f, 0.0f};
+    destruction::DestructionWorld enabled, gated;
+    physics::PhysicsWorld enabled_physics, gated_physics;
+    const auto enabled_pattern = enabled.register_pattern(asset, enabled_physics);
+    const auto gated_pattern = gated.register_pattern(asset, gated_physics);
+    REQUIRE(enabled_pattern.is_valid());
+    REQUIRE(gated_pattern.is_valid());
+    const auto enabled_inst = enabled.spawn(enabled_pattern, core::Transform{}, enabled_physics);
+    const auto gated_inst = gated.spawn(gated_pattern, core::Transform{}, gated_physics);
+    REQUIRE(enabled_inst.is_valid());
+    REQUIRE(gated_inst.is_valid());
+
+    enabled.apply_damage(enabled_inst, point, 0.2f, 0.25f, {});
+    enabled.update(enabled_physics);
+    const std::size_t committed_when_enabled = enabled.committed_ops().size();
+    REQUIRE(committed_when_enabled > 0);
+
+    // The same queued hit is expanded normally, then dropped before health can change.
+    gated.set_local_damage_enabled(false);
+    gated.apply_damage(gated_inst, point, 0.2f, 0.25f, {});
+    gated.update(gated_physics);
+    CHECK(gated.committed_ops().empty());
+    CHECK(gated.suppressed_local_ops() == committed_when_enabled);
+    for (std::uint32_t part = 0; part < 4; ++part)
+        CHECK(gated.part_health(gated_inst, part) == doctest::Approx(1.0f));
+
+    gated.set_local_damage_enabled(true);
+    gated.apply_damage(gated_inst, point, 0.2f, 0.25f, {});
+    gated.update(gated_physics);
+    CHECK(gated.committed_ops().size() == committed_when_enabled);
+    CHECK(gated.part_health(gated_inst, 0) == doctest::Approx(0.75f));
+    CHECK(gated.suppressed_local_ops() == committed_when_enabled);
+
+    // A mirror must still consume the authority's ops while its own generation is gated.
+    destruction::DestructionWorld remote;
+    physics::PhysicsWorld remote_physics;
+    const auto remote_pattern = remote.register_pattern(asset, remote_physics);
+    REQUIRE(remote_pattern.is_valid());
+    const auto remote_inst = remote.spawn(remote_pattern, core::Transform{}, remote_physics);
+    REQUIRE(remote_inst.is_valid());
+    remote.set_authority(remote_inst, destruction::Authority::Remote);
+    remote.set_local_damage_enabled(false);
+    destruction::DamageOp op{};
+    op.instance = remote_inst;
+    op.part = 0;
+    op.amount = 0.25f;
+    remote.apply_remote_ops(std::span{&op, 1});
+    remote.update(remote_physics);
+    CHECK(remote.committed_ops().size() == 1);
+    CHECK(remote.part_health(remote_inst, 0) == doctest::Approx(0.75f));
+    CHECK(remote.suppressed_local_ops() == 0);
+}

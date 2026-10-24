@@ -1,0 +1,16 @@
+perf.sh: this machine is not idle — something else is using the CPU.
+
+  python at 101% CPU
+  python at 101% CPU
+  python at 101% CPU
+  python at 101% CPU
+  python at 102% CPU
+  python at 101% CPU
+  python at 101% CPU
+
+  These samples are CPU-bound, so another process at full tilt does not merely slow the run, it
+  moves the TAIL while leaving the median about where it was — which is indistinguishable from a
+  real regression in the committed report.
+
+  Wait for the box to go quiet, or set RIME_PERF_ALLOW_BUSY_BOX=1 to measure anyway and say so in
+  the PR, because the numbers are not comparable against a report taken on an idle machine.

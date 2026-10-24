@@ -76,6 +76,14 @@ struct Frustum {
 // never costs a pixel, which is the right side to be wrong on.
 [[nodiscard]] bool aabb_in_frustum(const Frustum& frustum, core::Vec3 min, core::Vec3 max) noexcept;
 
+// CSM-only conservative test. Invalid bounds, matrix, or planes fail open. The margin covers
+// outward rounding of the CPU box/plane products relative to the vertex shader's float math.
+// This intentionally leaves the camera culling contract above untouched.
+[[nodiscard]] bool shadow_caster_aabb_in_frustum(const Frustum& frustum,
+                                                 const core::Mat4& model,
+                                                 core::Vec3 local_min,
+                                                 core::Vec3 local_max) noexcept;
+
 // The world-space AABB of a local box under a transform — the conservative one: all eight corners
 // transformed, then re-bounded. Cheaper closed forms exist for affine matrices, and they are worth
 // having when this shows up in a profile; eight transforms is 24 multiply-adds and is not that yet.

@@ -2,7 +2,9 @@
 # every CI OS + ASan/UBSan + TSan with no device.
 rime_add_test(rime_vfx_tests
     dust_test.cpp
-    families_test.cpp)
+    families_test.cpp
+    plume_test.cpp
+    fire_test.cpp)
 
 target_link_libraries(rime_vfx_tests
     PRIVATE rime::vfx)

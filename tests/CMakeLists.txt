@@ -43,6 +43,8 @@ add_subdirectory(physics) # rigid-body core: pure-CPU, GPU-free — always built
 add_subdirectory(destruction) # part-based destruction runtime: pure-CPU, GPU-free (M8)
 add_subdirectory(audio)  # audio seam: null backend logs play() calls — GPU-free (M8.4)
 add_subdirectory(vfx)    # destruction dust stub: CPU particle sim — GPU-free (M8.4)
+add_subdirectory(fluids_scene) # reflected thermal preview and editor/scene seams
+add_subdirectory(fluids) # analytic buoyancy and public physics impulse integration — GPU-free
 add_subdirectory(platform)
 add_subdirectory(assets) # RMA1 reader + registry + manifest: fully GPU-free (in-memory buffers)
 add_subdirectory(viewer) # viewer-side render math (orbit camera, …); pure rime::core, no GPU needed
@@ -60,6 +62,7 @@ add_subdirectory(blockkit) # the block as content: assembly, .rscene round trip,
 add_subdirectory(ground) # the ground's seam: drawn extent == collider extent, proven by raycast — GPU-free (m17.8)
 add_subdirectory(terrain_collision) # regional collision: permuted-completion determinism, deferred admission, the stall — GPU-free (m19.8c)
 add_subdirectory(worldkit) # the component profile: the block's scene loads with zero unknown types — GPU-free (m14.1)
+add_subdirectory(vfx_scene) # source authoring, save/reload and disposable Play presentation
 if(RIME_BUILD_CAPI)
     add_subdirectory(capi) # the C ABI (M6.9), driven through librime_capi — GPU-free
 endif()
@@ -68,6 +71,7 @@ endif()
 # is built.
 if(RIME_RHI_VULKAN)
     add_subdirectory(rhi)
+    add_subdirectory(fluids_render) # opt-in validated phase -> pixel proof
     add_subdirectory(render) # the render graph (M5.4): pixel proofs on lavapipe
     # m19.3: the drawn terrain IS the collided terrain — needs render + physics + a device
     add_subdirectory(terrain_render)

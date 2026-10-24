@@ -56,3 +56,38 @@ sights define its calibrated sight line. The SCAR's opaque panes are separated f
 housing material; its original near glass masks a transparent 1× parent-world image and collimated
 red ring. This path needs no second world camera. See
 [ADR-0086](../../../../docs/adr/0086-play-sight-calibration-and-render-graph-scale.md).
+
+## Reload and bolt presentation
+
+`R` drives a 2.2-second rifle or 2.8-second MSR action. Each magazine now has its
+own resident geometry and model transform. The support wrist approaches its authored
+socket, moves with extraction, reseats it and returns; the firing hand keeps its
+receiver grip. This first animation removes and reinserts the same magazine. It does
+not animate a replacement from a pouch or update a replicated ammunition inventory.
+The source finger curls remain fixed, so wrist contact is not a finished finger grasp.
+
+The stock is the reload rotation pivot, with separate poses for the three guns.
+Raising/translating the whole shouldered gun had brought its rear faces across the
+eye. The hardware proof now sweeps contact through every action frame and projects
+the manipulating hand and magazine instead of demanding that the muzzle fit.
+
+Magazine selection uses whole index-connected components and authored material/bounds
+filters: SCAR 1,152 triangles, M4 664, MSR 918 including its visible cartridges.
+A pinned fingerprint of the cooked positions, indices and material ranges refuses
+changed topology. Regenerating the optional artwork can require deliberately rechecking
+the split, visible surfaces and contact pose before updating those fingerprints;
+never automatically accept an observed hash.
+
+The torso keeps the firing shoulder seated and slopes the support shoulder down by
+0.25 radians. The authored upper-arm sleeve ends are open rings; the slope keeps
+those cuts below the reload view while the wrist solver retains magazine contact.
+
+Shots drive analytic underdamped translation and rotation springs. The tuning table
+in `play_viewmodel.cpp` starts from projectile momentum and weapon mass, with shoulder
+compliance and angular coupling controlling the visible kick. The MSR has the largest,
+slowest response; the two rifles recover faster. Per-shot yaw/roll signs are deterministic.
+
+A scoped MSR shot kicks the physical optic and its rendered sight picture while aim
+is held, recovering near the starting pose by 0.6 seconds. Releasing aim begins the
+one deferred bolt cycle and case extraction, without a second recoil impulse.
+Automatic rifle trigger behavior remains separate.

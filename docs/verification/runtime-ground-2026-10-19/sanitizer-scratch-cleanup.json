@@ -1,0 +1,27 @@
+[
+  {
+    "path": "/home/next/reports/rime-runtime-ground-2026-10-19/engine_render_src_lighting_shadows.cpp.asan.o",
+    "bytes": 527264,
+    "sha256": "8b81419453d80621d0955de620c04e3d62d021b1b1ea57e81f3ec4dfa662e85a"
+  },
+  {
+    "path": "/home/next/reports/rime-runtime-ground-2026-10-19/engine_render_src_passes.cpp.asan.o",
+    "bytes": 1720920,
+    "sha256": "60163ed245c5349c327290ef75bff1a14e9ee4952f882de05254b41a73d7dbeb"
+  },
+  {
+    "path": "/home/next/reports/rime-runtime-ground-2026-10-19/tests_render_shadow_stability_test.cpp.asan.o",
+    "bytes": 1021048,
+    "sha256": "8627b5df8792d37155b3dd647ba71c353487c8dd89ad7610069f1141b17edc70"
+  },
+  {
+    "path": "/home/next/reports/rime-runtime-ground-2026-10-19/tests_render_ddgi_surface_query_test.cpp.asan.o",
+    "bytes": 1150528,
+    "sha256": "1a79e1d064729a4b0c51eac38d56a7534709ac9a14aa8f32923412c95fdf42c9"
+  },
+  {
+    "path": "/home/next/reports/rime-runtime-ground-2026-10-19/rime_render_tests-changed-tu-asan",
+    "bytes": 79689368,
+    "sha256": "232503539eca24f82a5c29d2d00f95cad44d92c38017d1809af60fbd0ca3dcf4"
+  }
+]

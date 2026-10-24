@@ -1,0 +1,34 @@
+{
+  "city-1.frames.csv.gz": {
+    "sha256": "610ff75fe4011bed98f7d70e2f3a44dadadc10c1fc4e53d83ca52a6175abf873",
+    "uncompressed_sha256": "43266e5fcbc58c92d8034152233e569724e0d4eab33882eceefbd7d403fe9a97"
+  },
+  "city-1.gpu.csv.gz": {
+    "sha256": "96487a089a02ada59a9de6252f0c088159bd019444b1342c32aa9a8b1bfd7d27",
+    "uncompressed_sha256": "18b7f5a3e025f67a5ec48e8c6cc01a53910c2c216794809bdf334345a9a3cbd6"
+  },
+  "control-1.frames.csv.gz": {
+    "sha256": "01edad4bf028ca3b76237d61c897d26ec55cac49f4d8efe00651c8bef4348cad",
+    "uncompressed_sha256": "0d043adc951a27f482aa31bbec7a2c9bdb04933c8c3416298cd9f40fbd397927"
+  },
+  "control-1.gpu.csv.gz": {
+    "sha256": "03311e397ad9b2ebc62a278d7a3797d51fe7350ebb2921b7cc7da87963259d83",
+    "uncompressed_sha256": "e8418974bc8ff1e6aaa81f072619ad1ac632206d2ed921b07e546a81f3b60068"
+  },
+  "control-2.frames.csv.gz": {
+    "sha256": "4f7940cc13571ab4186f395f39b015d35a8e64a886de2e8e8354ea7704d17b4f",
+    "uncompressed_sha256": "3063dc9cfda1e85b61a90412dd1715a4c2f1937abbab3f019a30ac96a472d7f1"
+  },
+  "control-2.gpu.csv.gz": {
+    "sha256": "d049a54c764105bf116ab55145e6278ebd26539aa9c5c3709473629a1ed6ff64",
+    "uncompressed_sha256": "1e8a8b9bdd1bab5aac2de2bb044c263a28d03a040f260ff308f1b271715a624c"
+  },
+  "city-2.frames.csv.gz": {
+    "sha256": "2af42d6e433e915121fdf6a9904ddf2e082f4515336594e235d04f5593bbbe98",
+    "uncompressed_sha256": "0cedbc99ff2bbf471a109320809a768b3e1b1461a662cbf52d491ffaae5081b1"
+  },
+  "city-2.gpu.csv.gz": {
+    "sha256": "035ac88fd9a3affd552d2eae125db75273d0fb48c7aeef3f407a41fb3152d17e",
+    "uncompressed_sha256": "b0e295b12a6fea82fd9fe96373f8171957652c05c7f90247f8764c2e02060fd9"
+  }
+}

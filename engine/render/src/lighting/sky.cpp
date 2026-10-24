@@ -8,6 +8,7 @@
 
 #include "rime/render/lighting/sky.hpp"
 
+#include <algorithm>
 #include <cmath>
 
 #include "fullscreen.vert.spv.h"
@@ -33,6 +34,8 @@ struct GpuSkyUniforms {
     float horizon[4]{};
     float cloud[4]{};
     float wind[4]{};
+    float aerial_rayleigh[4]{}; // rgb extinction (1/m) x aerial_density, w scale height (m)
+    float aerial_mie[4]{};      // same for the Mie (aerosol) species
 };
 
 // Unlike GpuSkyUniforms this block is deliberately free of camera and art-direction data.  The
@@ -123,6 +126,19 @@ constexpr std::uint64_t kSkyShBytes = 10 * 4 * sizeof(float);
     u.wind[2] = params.sharpness;
     u.wind[3] = params.clouds_enabled ? 1.0f : 0.0f;
 
+    // Aerial perspective extinction. The atmosphere block is in 1/km, the world in metres, so
+    // divide by 1000; Rayleigh and Mie keep separate scale heights because haze (Mie) hugs the
+    // ground while the blue Rayleigh air extends for kilometres. Extinction = scattering plus (for
+    // Mie) absorption. `aerial_density` is an art multiplier on top of the physical numbers.
+    const auto& at = params.atmosphere;
+    const float dens = std::max(params.aerial_density, 0.0f);
+    for (int i = 0; i < 3; ++i) {
+        u.aerial_rayleigh[i] = at.rayleigh_scattering[i] * 0.001f * dens;
+        u.aerial_mie[i] = (at.mie_scattering[i] + at.mie_absorption[i]) * 0.001f * dens;
+    }
+    u.aerial_rayleigh[3] = at.rayleigh_scale_height_km * 1000.0f;
+    u.aerial_mie[3] = at.mie_scale_height_km * 1000.0f;
+
     return u;
 }
 
@@ -143,7 +159,87 @@ constexpr std::uint64_t kSkyShBytes = 10 * 4 * sizeof(float);
     return u;
 }
 
+// ---- CPU port of the cloud layer, for the sun's direct light ---------------------------------
+//
+// The cloud field lives in sky_common.glsl as a hash-based value-noise fBm. The DirectionalLight is
+// uploaded on the CPU before any pass runs, so to dim it by the cloud over the sun the same field
+// has to be evaluated here. This is a line-for-line port (same hash, same quintic fade, same five
+// octaves and rotation); it costs a few dozen flops once per frame. If the GLSL changes, change
+// this.
+struct V2 {
+    float x, y;
+};
+
+float fract1(float v) noexcept {
+    return v - std::floor(v);
+}
+
+float hash2(V2 p) noexcept {
+    p = {fract1(p.x * 123.34f), fract1(p.y * 345.45f)};
+    const float d = p.x * (p.x + 34.345f) + p.y * (p.y + 34.345f);
+    p.x += d;
+    p.y += d;
+    return fract1(p.x * p.y);
+}
+
+float value_noise2(V2 p) noexcept {
+    const V2 i{std::floor(p.x), std::floor(p.y)};
+    const V2 f{p.x - i.x, p.y - i.y};
+    const auto fade = [](float t) { return t * t * t * (t * (t * 6.0f - 15.0f) + 10.0f); };
+    const float ux = fade(f.x);
+    const float uy = fade(f.y);
+    const float a = hash2(i);
+    const float b = hash2({i.x + 1.0f, i.y});
+    const float c = hash2({i.x, i.y + 1.0f});
+    const float d = hash2({i.x + 1.0f, i.y + 1.0f});
+    const float top = a + (b - a) * ux;
+    const float bottom = c + (d - c) * ux;
+    return top + (bottom - top) * uy;
+}
+
+float fbm2(V2 p) noexcept {
+    float sum = 0.0f;
+    float amp = 0.5f;
+    for (int i = 0; i < 5; ++i) {
+        sum += amp * value_noise2(p);
+        // GLSL mat2(0.80, 0.60, -0.60, 0.80) is column-major: rot * p = (0.8x - 0.6y, 0.6x + 0.8y).
+        p = {(0.80f * p.x - 0.60f * p.y) * 1.93f, (0.60f * p.x + 0.80f * p.y) * 1.93f};
+        amp *= 0.5f;
+    }
+    return sum;
+}
+
+float smoothstep1(float e0, float e1, float x) noexcept {
+    const float t = std::min(std::max((x - e0) / (e1 - e0), 0.0f), 1.0f);
+    return t * t * (3.0f - 2.0f * t);
+}
+
 } // namespace
+
+float sky_sun_cloud_transmittance(const SkyParams& params, const core::Vec3& camera_pos) noexcept {
+    constexpr float kCloudLeak = 0.12f; // keep equal to sky_common.glsl
+    float sx = params.sun_direction[0];
+    float sy = params.sun_direction[1];
+    float sz = params.sun_direction[2];
+    const float len = std::sqrt(sx * sx + sy * sy + sz * sz);
+    if (!params.clouds_enabled || len < 1e-6f) {
+        return 1.0f;
+    }
+    sx /= len;
+    sy /= len;
+    sz /= len;
+    if (sy <= 0.02f) {
+        return 1.0f; // sun at/below the horizon: the slab is edge-on, as in clouds()
+    }
+    const float dist = params.altitude / sy;
+    const V2 p{(camera_pos.x + sx * dist) * params.scale + params.wind[0],
+               (camera_pos.z + sz * dist) * params.scale + params.wind[1]};
+    const float n = fbm2(p);
+    float cov = smoothstep1(1.0f - params.coverage, 1.0f - params.coverage + params.sharpness, n);
+    cov *= smoothstep1(0.02f, 0.28f, sy);
+    cov = std::min(std::max(cov * params.density, 0.0f), 1.0f);
+    return 1.0f + (kCloudLeak - 1.0f) * cov;
+}
 
 SkyPass::SkyPass(rhi::Device& device) : device_(device), specular_(device) {
     rhi::ShaderDesc vs{};

@@ -194,6 +194,38 @@ TEST_CASE("m13.1b: families share one budget, and the cap still holds") {
     }
     CHECK(field.count() <= field.capacity());
     CHECK(field.count() == 32); // …and it really filled, so the cap was exercised
+    const auto& stats = field.stats();
+    CHECK(stats.requested_particles == 20ull * (192 + 72 + 40));
+    CHECK(stats.spawned_particles == 32);
+    CHECK(stats.dropped_capacity == stats.requested_particles - stats.spawned_particles);
+    CHECK(stats.rejected_emissions == 0);
+}
+
+TEST_CASE("smoke seam: resetting counters preserves live smoke and future scatter") {
+    vfx::ParticleField field(100, 0xBA5E);
+    vfx::ParticleField control(100, 0xBA5E);
+    const core::Vec3 lo{-0.2f, -0.2f, -0.2f};
+    const core::Vec3 hi{0.2f, 0.2f, 0.2f};
+    field.emit_burst(lo, hi, 1.0f, vfx::lingering_smoke());
+    control.emit_burst(lo, hi, 1.0f, vfx::lingering_smoke());
+    REQUIRE(field.count() == 18);
+    field.reset_stats();
+    CHECK(field.count() == 18);
+    CHECK(field.stats().requested_particles == 0);
+    CHECK(field.stats().spawned_particles == 0);
+    field.emit_burst(lo, hi, 1.0f, vfx::muzzle_flash());
+    control.emit_burst(lo, hi, 1.0f, vfx::muzzle_flash());
+    REQUIRE(field.count() == control.count());
+    for (std::size_t i = 0; i < field.count(); ++i) {
+        CHECK(field.particles()[i].position.x == control.particles()[i].position.x);
+        CHECK(field.particles()[i].position.y == control.particles()[i].position.y);
+        CHECK(field.particles()[i].position.z == control.particles()[i].position.z);
+        CHECK(field.particles()[i].velocity.x == control.particles()[i].velocity.x);
+        CHECK(field.particles()[i].velocity.y == control.particles()[i].velocity.y);
+        CHECK(field.particles()[i].velocity.z == control.particles()[i].velocity.z);
+    }
+    CHECK(field.stats().requested_particles == 10);
+    CHECK(field.stats().spawned_particles == 10);
 }
 
 TEST_CASE("m13.1b: every family is still deterministic") {
