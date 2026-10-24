@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -17,6 +18,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/platform/event.hpp"
 #include "rime/platform/keyboard.hpp"
+#include "rime/replication/input_v2.hpp"
 
 // `GameDefinition` — what a GAME supplies to the engine, as opposed to what the engine owns (m20.1,
 // ADR-0056-m20.1).
@@ -37,7 +39,7 @@
 //   its component set + an optional scene      the process: argument parsing and the mode
 //   `setup`: build the simulated world          the loop: the fixed tick and its ordering
 //   `fixed_tick`: one step, from an ActionState the device: whether one exists at all
-//   an InputMap: which keys mean which actions  input: events → actions, and when they apply
+//   an InputMap and remote input profile      input: events/commands → actions, and their tick
 //   optional presentation hooks                 the renderer, the window, presentation
 //   an optional autopilot and a state digest    the report: ticks run, what was skipped, why
 //
@@ -49,8 +51,8 @@
 //      only in a mode that has a device. That is what lets `dedicated` run the SAME object with no
 //      Vulkan in the process.
 //   2. **Input is actions, never keys.** The game declares `InputMap` bindings and receives an
-//      `ActionState`; the engine maps the keyboard to it in `play`, and later a DataChannel or a
-//      network peer will produce the same struct. A game that read `platform::Event` directly
+//      `ActionState`; the engine maps the keyboard to it in `play`, and an admitted network peer
+//      supplies it in `dedicated`. A game that read `platform::Event` directly
 //      could not be driven by anything but a keyboard, and could not be tested without faking one.
 //   3. **No scripting engine.** Everything here is plain C++ compiled into the game's own target,
 //      as VISION and `docs/design/hosted-rime.md` require. A `GameDefinition` is a struct of values
@@ -67,7 +69,7 @@ namespace rime::app {
 // ── Input: actions, never keys ────────────────────────────────────────────────────────────────
 //
 // A fixed-size snapshot rather than a map of named actions, deliberately: it is copied once per
-// tick, it must one day cross a network (a fixed layout is its own wire format), and a game names
+// tick, it is also the target of the network command mapper, and a game names
 // its actions with its own constants — `kMoveX = 0` — so a string lookup would buy nothing but a
 // hash per tick. Eight axes and 32 buttons is more than any game in this tree uses; it is a v1
 // bound, and widening it is additive.
@@ -175,7 +177,7 @@ struct TickContext {
     // 0-based index of THIS tick within the run. Ticks the engine skipped (see `RunReport`) do not
     // advance it, so it counts steps the game actually took.
     std::uint64_t tick = 0;
-    // The player's (or autopilot's, or — later — the network's) wish for this tick.
+    // The player's, autopilot's, or admitted network client's wish for this tick.
     ActionState input{};
 };
 
@@ -290,6 +292,16 @@ struct GameDefinition {
 
     // Keyboard bindings for `play`. Ignored by modes with no local keyboard.
     InputMap input;
+
+    // A game opts into remote input by naming its command profile and mapping validated commands
+    // to the same actions its local bindings produce. An absent mapper refuses a listening launch.
+    struct NetworkInputProfile {
+        std::string_view profile_id;
+        std::uint32_t profile_version = 0;
+        ActionState (*to_actions)(const replication::InputCommand&) = nullptr;
+    };
+
+    std::optional<NetworkInputProfile> network_input;
 
     // Make a fresh game. Required.
     std::function<std::unique_ptr<Game>()> create;

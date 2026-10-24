@@ -313,7 +313,8 @@ void LocalListener::close() noexcept {
 // SOCK_DGRAM: connectionless, message-oriented. The one behavioural difference from the TCP
 // backend is non-blocking receive — the game loop polls per tick and must never stall — set once
 // at bind with O_NONBLOCK. SIGPIPE does not exist for unconnected UDP sends, so no suppression.
-std::optional<UdpSocket> UdpSocket::bind(std::uint16_t port, std::string_view host) {
+std::optional<UdpSocket>
+UdpSocket::bind(std::uint16_t port, std::string_view host, bool reuse_address) {
     addrinfo hints{};
     hints.ai_family = AF_INET; // v1 is IPv4-only (see socket.hpp's Endpoint note)
     hints.ai_socktype = SOCK_DGRAM;
@@ -334,8 +335,10 @@ std::optional<UdpSocket> UdpSocket::bind(std::uint16_t port, std::string_view ho
         if (fd < 0) {
             continue;
         }
-        const int yes = 1;
-        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        if (reuse_address) {
+            const int yes = 1;
+            ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        }
         if (::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
             break;
         }

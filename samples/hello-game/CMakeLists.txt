@@ -46,7 +46,7 @@ add_test(NAME hello_game_dedicated_proof COMMAND hello_game --dedicated-proof --
 
 # The shipped-game CLI end to end: a bounded dedicated run, and a stub mode that must refuse with
 # the "not yet" exit code (3) rather than quietly running `play`.
-add_test(NAME hello_game_cli_dedicated COMMAND hello_game dedicated --ticks 120 --autopilot)
+add_test(NAME hello_game_cli_dedicated COMMAND hello_game dedicated --offline --ticks 120 --autopilot)
 add_test(NAME hello_game_cli_browser_not_yet COMMAND hello_game browser --port 8443)
 # PASS_REGULAR_EXPRESSION rather than WILL_FAIL: WILL_FAIL passes on ANY non-zero exit, a crash
 # included. The exact exit code (3) is asserted by tests/app/launch_test.cpp.
@@ -57,6 +57,35 @@ set_tests_properties(hello_game_cli_browser_not_yet PROPERTIES
 # on an empty world. (The bundle-side half — a moved binary with its content deleted — is
 # scripts/export-proof.sh, because it needs a binary outside the build tree.)
 add_test(NAME hello_game_cli_content_missing
-    COMMAND hello_game dedicated --ticks 1 --content ${CMAKE_CURRENT_BINARY_DIR}/no-such-content)
+    COMMAND hello_game dedicated --offline --ticks 1 --content ${CMAKE_CURRENT_BINARY_DIR}/no-such-content)
 set_tests_properties(hello_game_cli_content_missing PROPERTIES
     PASS_REGULAR_EXPRESSION "no content root found; tried, in order:.*no-such-content: missing")
+
+# These process-level gates exercise the listener without a GPU or a network client. The Python
+# helper only reads events and, for the conflict case, holds a local UDP port open.
+add_test(NAME hello_game_listen_ready COMMAND python3 -c [=[
+import json, subprocess, sys
+p = subprocess.run([sys.argv[1], 'dedicated', '--listen', '127.0.0.1:0', '--ticks', '30'],
+                   capture_output=True, text=True, timeout=10)
+assert p.returncode == 0, (p.returncode, p.stdout, p.stderr)
+lines = [json.loads(line) for line in p.stdout.splitlines()]
+assert lines[0]['event'] == 'ready' and lines[0]['transport'] == 'udp'
+assert lines[0]['auth'] == 'none' and int(lines[0]['bind'].rsplit(':', 1)[1]) > 0
+assert lines[-1]['event'] == 'finished' and lines[-1]['ticks'] == 30
+assert lines[-1]['synthesized'] == 30
+]=] $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_listen_ready PROPERTIES TIMEOUT 15)
+
+add_test(NAME hello_game_listen_bind_conflict COMMAND python3 -c [=[
+import json, socket, subprocess, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('127.0.0.1', 0))
+port = s.getsockname()[1]
+p = subprocess.run([sys.argv[1], 'dedicated', '--listen', f'127.0.0.1:{port}', '--ticks', '1'],
+                   capture_output=True, text=True, timeout=10)
+assert p.returncode == 1, (p.returncode, p.stdout, p.stderr)
+lines = [json.loads(line) for line in p.stdout.splitlines()]
+assert len(lines) == 1 and lines[0]['event'] == 'bind_failed'
+assert lines[0]['error'] == 'EADDRINUSE'
+]=] $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_listen_bind_conflict PROPERTIES TIMEOUT 15)

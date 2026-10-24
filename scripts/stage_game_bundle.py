@@ -200,7 +200,7 @@ def stage(export_record: Path, out_root: Path, repository: Path) -> tuple[Path, 
             "hello-game — a native Linux game built with Rime.\n\n"
             "  ./hello_game play                         windowed play\n"
             "  ./hello_game play --headless               off-screen/simulation fallback\n"
-            "  ./hello_game dedicated --ticks 120 --autopilot\n"
+            "  ./hello_game dedicated --offline --ticks 120 --autopilot\n"
             "                                            GPU-free bounded simulation\n"
             "  ./hello_game --help                       options\n\n"
             "Dedicated networking and browser/stream/host launch modes are not implemented.\n"

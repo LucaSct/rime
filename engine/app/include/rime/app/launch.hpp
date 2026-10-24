@@ -21,6 +21,7 @@
 //
 //     mygame [play | dedicated | browser | stream | host] [--port N] [--ticks N] [--frames N]
 //            [--autopilot] [--headless] [--workers N] [--content DIR]
+//     mygame dedicated [--listen ADDR:PORT | --port N | --offline]
 //
 // and it fixes the ORDER: the mode is decided before any device exists, because the only way to
 // guarantee a dedicated server never touches Vulkan is for the code that would create a device to
@@ -34,8 +35,8 @@
 // What is real in this brick and what is a stub, stated at the top rather than discovered:
 //
 //   play       REAL  — a device, optionally a window, the engine's SceneRenderer, keyboard input
-//   dedicated  REAL  — no window, no device, no presentation; the same game object, the same loop.
-//                      Its input is the autopilot or nothing: accepting network clients is later.
+//   dedicated  REAL  — no window, no device, no presentation; listens for one network input client
+//                      by default, or runs the earlier local loop with --offline.
 //   browser    STUB  — parsed, then `RunStatus::NotYetImplemented` (ADR-0045's gateway path)
 //   stream     STUB  — parsed, then `RunStatus::NotYetImplemented` (the 04-remote-view pipeline)
 //   host       STUB  — parsed, then `RunStatus::NotYetImplemented` (net / replication for
@@ -55,6 +56,7 @@ class Application;
 // literal because a caller reading back the last frame (`RunHooks::on_finished`) needs the same
 // numbers the runner used.
 inline constexpr rhi::Extent2D kPlayRenderExtent{1280, 720};
+inline constexpr std::uint16_t kDefaultListenPort = 7463;
 
 enum class LaunchMode : std::uint8_t { Play, Dedicated, Browser, Stream, Host };
 
@@ -72,13 +74,15 @@ enum class LaunchMode : std::uint8_t { Play, Dedicated, Browser, Stream, Host };
 
 struct LaunchOptions {
     LaunchMode mode = LaunchMode::Play;
-    // For the listening modes. Parsed and validated now so the contract is fixed before the modes
-    // that use it exist; `play` and `dedicated` do not listen yet and ignore it.
-    std::uint16_t port = 0;
-    // > 0: a BOUNDED, DETERMINISTIC run of exactly this many fixed ticks — one tick per frame,
-    // stepped with the fixed dt, no wall clock — ending early only if the game finishes. This is
-    // what a proof, a soak run or a CI job wants. 0: run off the real clock until the game finishes
-    // or (windowed) the window closes.
+    // Dedicated listens here by default. --port changes the port on 0.0.0.0; --listen can change
+    // both host and port. A port of 0 asks the OS to choose and is reported in the ready event.
+    // Other modes still parse --port as before; they do not bind it in this brick.
+    std::string listen_host = "0.0.0.0";
+    std::uint16_t port = kDefaultListenPort;
+    bool offline = false;
+    bool explicit_listen = false;
+    // > 0: bound by this many fixed ticks. Listening dedicated runs them at the real tick rate;
+    // offline dedicated and play keep the deterministic, unpaced one-tick-per-step path.
     std::uint64_t ticks = 0;
     // > 0 (play only): run exactly this many real-clock frames, then stop — the off-screen render
     // check's shape. Ignored when `ticks` is set.
@@ -146,6 +150,22 @@ struct RunReport {
 
     // `Game::state_digest` of the final world, taken before teardown. 0 if the game supplies none.
     std::uint64_t state_digest = 0;
+
+    struct NetworkInputCounters {
+        std::uint64_t accepted = 0, late = 0, future = 0, duplicate = 0;
+        std::uint64_t applied = 0, synthesized = 0, neutralized = 0;
+        std::uint64_t truncated = 0, bad_length = 0, bad_count = 0, unknown_codec = 0;
+        std::uint64_t reserved_nonzero = 0, non_finite = 0, sequence_order = 0;
+        std::uint64_t hello_malformed = 0, hello_version = 0, hello_schema = 0;
+        std::uint64_t clients_admitted = 0, clients_refused = 0, clients_left = 0;
+        std::uint64_t unadmitted_messages = 0;
+        std::uint64_t wrong_channel = 0, amplification_blocked = 0;
+        std::uint64_t driver_dropped = 0, connect_requests_seen = 0;
+    } network_input;
+
+    bool bind_failed = false;
+    bool usage_error = false;
+    std::string bind_error;
 
     // The content root this run used (m20.2) — or, on a Failed run that could not find one, every
     // candidate tried (`content.tried`). `content.source == None` and `content.ok == false` with an

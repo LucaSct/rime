@@ -322,7 +322,8 @@ void LocalListener::close() noexcept {
 // ── UdpSocket (m11.1, ADR-0033) ─────────────────────────────────────────────────────────
 // SOCK_DGRAM over Winsock: connectionless, message-oriented. recv_from is non-blocking (the game
 // loop polls per tick), set once at bind with FIONBIO — the Winsock counterpart of O_NONBLOCK.
-std::optional<UdpSocket> UdpSocket::bind(std::uint16_t port, std::string_view host) {
+std::optional<UdpSocket>
+UdpSocket::bind(std::uint16_t port, std::string_view host, bool reuse_address) {
     ensure_wsa_started();
 
     addrinfo hints{};
@@ -345,8 +346,20 @@ std::optional<UdpSocket> UdpSocket::bind(std::uint16_t port, std::string_view ho
         if (s == INVALID_SOCKET) {
             continue;
         }
-        const BOOL yes = TRUE;
-        ::setsockopt(s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
+        if (reuse_address) {
+            const BOOL yes = TRUE;
+            ::setsockopt(
+                s, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&yes), sizeof(yes));
+        } else {
+            // Winsock's default sharing rules are weaker than POSIX's. Exclusive use preserves
+            // the dedicated listener's one-owner bind contract without enabling SO_REUSEADDR.
+            const BOOL yes = TRUE;
+            ::setsockopt(s,
+                         SOL_SOCKET,
+                         SO_EXCLUSIVEADDRUSE,
+                         reinterpret_cast<const char*>(&yes),
+                         sizeof(yes));
+        }
         if (::bind(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0) {
             break;
         }
