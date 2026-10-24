@@ -14,10 +14,13 @@
 #include <utility>
 #include <vector>
 
+#include "rime/ecs/query.hpp"
+#include "rime/ecs/transform.hpp"
 #include "rime/net/link.hpp"
 #include "rime/net/net_driver.hpp"
 #include "rime/platform/socket.hpp"
 #include "rime/replication/input_v2.hpp"
+#include "rime/replication/server_replicator.hpp"
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -29,11 +32,14 @@ namespace {
 using namespace replication;
 
 // UdpLink currently only exposes a bind() that enables SO_REUSEADDR. Its socket constructor is
-// private, so this small Link adapter owns the no-reuse socket until that seam can be widened.
-// Keep at most one poll's endpoints: anonymous addresses must not grow a permanent allocation.
+// private, so this Link adapter owns the no-reuse socket in production and forwards to a
+// caller-owned ScriptedNetwork link in the deterministic proof. Keep at most one poll's endpoints:
+// anonymous addresses must not grow a permanent allocation.
 class ListenerLink final : public net::Link {
 public:
     explicit ListenerLink(platform::UdpSocket socket) : socket_(std::move(socket)) {}
+
+    explicit ListenerLink(net::Link& external) : external_(&external) {}
 
     // NO AMPLIFICATION (ADR-0103 §6), and only where it applies. A peer with no session yet is
     // anonymous: it may be a spoofed source address, so nothing we send it may be larger than the
@@ -42,6 +48,10 @@ public:
     // session completed the connect exchange and is exempt; holding its retransmits and acks to its
     // last datagram's size would starve the very session the server admitted.
     bool send(const platform::Endpoint& to, std::span<const std::byte> bytes) override {
+        // ScriptedNetwork owns every endpoint in the proof; anonymous amplification is a UDP
+        // listener concern and remains guarded below on the production socket path.
+        if (external_)
+            return external_->send(to, bytes);
         if (std::find(established_.begin(), established_.end(), to) == established_.end()) {
             std::optional<std::size_t> smallest;
             for (const auto& [peer, length] : received_sizes_) {
@@ -56,10 +66,12 @@ public:
                 return false;
             }
         }
-        return socket_.send_to(to, bytes).has_value();
+        return socket_->send_to(to, bytes).has_value();
     }
 
     std::size_t receive(std::vector<net::Datagram>& out) override {
+        if (external_)
+            return external_->receive(out);
         received_sizes_.clear();
         std::size_t count = 0;
         // Read the whole UDP datagram so oversize input is refused explicitly, not silently
@@ -68,7 +80,7 @@ public:
         // A fixed poll budget bounds anonymous work even when a peer floods the socket.
         while (count < 64) {
             platform::Endpoint from{};
-            const auto n = socket_.recv_from(from, buffer);
+            const auto n = socket_->recv_from(from, buffer);
             if (!n) {
                 break;
             }
@@ -88,7 +100,9 @@ public:
     // session the driver drops this tick loses its exemption at the next one.
     void set_established(std::vector<platform::Endpoint> peers) { established_ = std::move(peers); }
 
-    [[nodiscard]] std::uint16_t port() const noexcept { return socket_.local_port(); }
+    [[nodiscard]] std::uint16_t port() const noexcept {
+        return socket_ ? socket_->local_port() : 0;
+    }
 
     [[nodiscard]] std::uint64_t amplification_blocked() const noexcept {
         return amplification_blocked_;
@@ -97,7 +111,8 @@ public:
     [[nodiscard]] std::uint64_t oversized() const noexcept { return oversized_; }
 
 private:
-    platform::UdpSocket socket_;
+    std::optional<platform::UdpSocket> socket_;
+    net::Link* external_ = nullptr;
     std::vector<platform::Endpoint> established_;
     std::vector<std::pair<platform::Endpoint, std::size_t>> received_sizes_;
     std::uint64_t amplification_blocked_ = 0;
@@ -173,12 +188,29 @@ void count_refusal(RunReport::NetworkInputCounters& counts, InputV2Refusal reaso
 } // namespace
 
 struct NetworkInputServer::Impl {
-    Impl(platform::UdpSocket socket,
+    Impl(ListenerLink supplied_link,
          double tick_hz,
-         const GameDefinition::NetworkInputProfile& profile)
-        : link(std::move(socket)), driver(link, driver_config()), profile(profile),
+         const GameDefinition::NetworkInputProfile& profile,
+         ecs::World& world,
+         const GameDefinition::RemotePlayProfile* remote_play)
+        : link(std::move(supplied_link)), driver(link, driver_config()), profile(profile),
           neutral_after_ticks(static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz * 0.1)))) {
         driver.listen();
+        if (remote_play) {
+            owner = remote_play->owned_player(world);
+            hooks = remote_play->prediction_hooks(world, owner);
+            replicator = std::make_unique<ServerReplicator>(world);
+            // Dedicated setup has finished and presentation has not run: this enumerates the
+            // simulated entities whose structure a joining client needs.
+            world.query<ecs::WorldTransform>().for_each(
+                [&](ecs::Entity entity, const ecs::WorldTransform&) {
+                    if (replicator->replicate(entity) == kNullNetId)
+                        ++totals.replication_registration_refused;
+                });
+            if (const auto mapped = replicator->map().net_id_of(owner))
+                owner_net_id = *mapped;
+            replicator->set_budget(Budget{.max_bytes_per_tick = 1024});
+        }
     }
 
     static net::NetDriver::Config driver_config() {
@@ -204,11 +236,11 @@ struct NetworkInputServer::Impl {
         schedule.reset();
     }
 
-    void pump() {
-        const auto now_ms =
+    void pump(std::optional<std::uint64_t> clock_override = {}) {
+        const auto now_ms = clock_override.value_or(
             static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
                                            std::chrono::steady_clock::now().time_since_epoch())
-                                           .count());
+                                           .count()));
         now = now_ms;
         events.clear();
         std::vector<platform::Endpoint> established;
@@ -218,8 +250,17 @@ struct NetworkInputServer::Impl {
         }
         link.set_established(std::move(established));
         driver.update(now, events);
+        if (refused_close && now >= refused_close->second) {
+            if (auto* refused = driver.session(refused_close->first))
+                refused->disconnect();
+            refused_close.reset();
+        }
         for (const auto& e : events) {
             if (e.kind == net::SessionEvent::Kind::Disconnected && admitted && e.id == *admitted) {
+                if (replicator) {
+                    replicator->on_session_events(std::vector<net::SessionEvent>{e});
+                    ++totals.replication_clients_released;
+                }
                 ++totals.clients_left;
                 const auto reason = e.reason == net::DisconnectReason::Graceful   ? "graceful"
                                     : e.reason == net::DisconnectReason::Replaced ? "replaced"
@@ -235,6 +276,17 @@ struct NetworkInputServer::Impl {
                 continue;
             messages.clear();
             session->drain_received(messages);
+            if (replicator && admitted && id == *admitted) {
+                std::size_t ack_tags = 0;
+                for (const auto& message : messages)
+                    if (!message.bytes.empty() &&
+                        message.bytes[0] ==
+                            std::byte{static_cast<std::uint8_t>(MessageTag::BaselineAck)})
+                        ++ack_tags;
+                const auto applied = replicator->apply_messages(id, messages);
+                totals.replication_acks += applied;
+                totals.replication_ack_refused += ack_tags - std::min(ack_tags, applied);
+            }
             for (const auto& message : messages) {
                 const auto bytes = std::span<const std::byte>(message.bytes);
                 if (bytes.empty()) {
@@ -265,12 +317,23 @@ struct NetworkInputServer::Impl {
                     const auto n = encode_input_hello_reply(reply, out);
                     (void)session->send_reliable(std::span(out).first(n), now);
                     if (reply.refusal != InputHelloRefusal::None) {
-                        // A refused profile must not occupy one of the two transport slots until
-                        // the idle timeout; the reply is queued before closing the session.
-                        session->disconnect();
+                        // A reliable reply queued immediately before disconnect was not reaching
+                        // the second client once world publication shared this driver. Keep the
+                        // bounded transport slot briefly so it can deliver the refusal first.
+                        if (!refused_close || refused_close->first != id) {
+                            refused_close = std::pair{id, now + 250};
+                            ++totals.refusal_close_deferred;
+                        }
                     }
                     if (reply.refusal == InputHelloRefusal::None && !admitted) {
                         admitted = id;
+                        if (replicator) {
+                            net::SessionEvent joined{};
+                            joined.kind = net::SessionEvent::Kind::Connected;
+                            joined.id = id;
+                            replicator->on_session_events(std::vector<net::SessionEvent>{joined});
+                            ++membership_epoch;
+                        }
                         // The leaf's six-tick default is 100 ms only at 60 Hz. Derive the
                         // silence bound from this game's fixed rate before its first command.
                         schedule.emplace(1, neutral_after_ticks);
@@ -283,6 +346,12 @@ struct NetworkInputServer::Impl {
                 }
                 if (!admitted || id != *admitted) {
                     ++totals.unadmitted_messages;
+                    continue;
+                }
+                if (replicator &&
+                    bytes[0] == std::byte{static_cast<std::uint8_t>(MessageTag::BaselineAck)}) {
+                    if (message.channel != net::Channel::UnreliableSequenced)
+                        ++totals.wrong_channel;
                     continue;
                 }
                 if (message.channel != net::Channel::UnreliableSequenced) {
@@ -309,13 +378,30 @@ struct NetworkInputServer::Impl {
     GameDefinition::NetworkInputProfile profile;
     std::uint32_t neutral_after_ticks = 6;
     std::optional<net::SessionId> admitted;
+    std::optional<std::pair<net::SessionId, std::uint64_t>> refused_close;
     std::optional<InputSchedule> schedule;
+    std::unique_ptr<ServerReplicator> replicator;
+    PredictionHooks hooks;
+    ecs::Entity owner{};
+    NetId owner_net_id{};
+    std::uint32_t membership_epoch = 0;
     RunReport::NetworkInputCounters totals{};
     std::uint64_t now = 0;
     bool last_applied = false;
     std::vector<net::SessionEvent> events;
     std::vector<net::Received> messages;
     std::vector<InputCommand> commands;
+
+    [[nodiscard]] ActionState select_actions() {
+        last_applied = false;
+        if (!schedule) {
+            ++totals.synthesized;
+            return {};
+        }
+        const ScheduledInput selected = schedule->step();
+        last_applied = selected.applied;
+        return profile.to_actions(selected.command);
+    }
 };
 
 NetworkInputServer::NetworkInputServer(std::unique_ptr<Impl> impl) noexcept
@@ -328,6 +414,8 @@ NetworkInputServer::bind(const std::string& host,
                          std::uint16_t port,
                          double tick_hz,
                          const GameDefinition::NetworkInputProfile& profile,
+                         ecs::World& world,
+                         const GameDefinition::RemotePlayProfile* remote_play,
                          std::string& error) {
     const auto local = platform::Endpoint::from_string(host, port);
     if (!local) {
@@ -339,8 +427,45 @@ NetworkInputServer::bind(const std::string& host,
         error = error_name();
         return nullptr;
     }
-    return std::unique_ptr<NetworkInputServer>(
-        new NetworkInputServer(std::make_unique<Impl>(std::move(*socket), tick_hz, profile)));
+    if (remote_play && (!remote_play->owned_player || !remote_play->prediction_hooks)) {
+        error = "remote play profile is incomplete";
+        return nullptr;
+    }
+    if (remote_play && !world.is_alive(remote_play->owned_player(world))) {
+        error = "owned player is not alive";
+        return nullptr;
+    }
+    auto impl = std::make_unique<Impl>(
+        ListenerLink{std::move(*socket)}, tick_hz, profile, world, remote_play);
+    if (remote_play &&
+        (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
+         !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {
+        error = "remote play prediction hooks are incomplete";
+        return nullptr;
+    }
+    return std::unique_ptr<NetworkInputServer>(new NetworkInputServer(std::move(impl)));
+}
+
+std::unique_ptr<NetworkInputServer>
+NetworkInputServer::on_link(net::Link& link,
+                            double tick_hz,
+                            const GameDefinition::NetworkInputProfile& profile,
+                            ecs::World& world,
+                            const GameDefinition::RemotePlayProfile* remote_play,
+                            std::string& error) {
+    if (remote_play && (!remote_play->owned_player || !remote_play->prediction_hooks ||
+                        !world.is_alive(remote_play->owned_player(world)))) {
+        error = "remote play profile has no live owned player";
+        return nullptr;
+    }
+    auto impl = std::make_unique<Impl>(ListenerLink{link}, tick_hz, profile, world, remote_play);
+    if (remote_play &&
+        (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
+         !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {
+        error = "remote play prediction hooks are incomplete";
+        return nullptr;
+    }
+    return std::unique_ptr<NetworkInputServer>(new NetworkInputServer(std::move(impl)));
 }
 
 std::uint16_t NetworkInputServer::local_port() const noexcept {
@@ -349,14 +474,12 @@ std::uint16_t NetworkInputServer::local_port() const noexcept {
 
 ActionState NetworkInputServer::before_tick(std::uint64_t) {
     impl_->pump();
-    impl_->last_applied = false;
-    if (!impl_->schedule) {
-        ++impl_->totals.synthesized;
-        return {};
-    }
-    const ScheduledInput selected = impl_->schedule->step();
-    impl_->last_applied = selected.applied;
-    return impl_->profile.to_actions(selected.command);
+    return impl_->select_actions();
+}
+
+ActionState NetworkInputServer::before_tick(std::uint64_t, std::uint64_t now_ms) {
+    impl_->pump(now_ms);
+    return impl_->select_actions();
 }
 
 bool NetworkInputServer::last_applied() const noexcept {
@@ -367,11 +490,42 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick) {
     if (!impl_->admitted || !impl_->schedule)
         return;
     net::Session* session = impl_->driver.session(*impl_->admitted);
-    if (!session)
+    if (!session) {
+        ++impl_->totals.publish_missing_session;
         return;
+    }
     std::array<std::byte, kInputResultBytes> bytes{};
-    const auto n = encode_input_result(impl_->schedule->result(server_tick), bytes);
-    (void)session->send_unreliable(std::span(bytes).first(n), impl_->now);
+    const InputResult result = impl_->schedule->result(server_tick);
+    const auto n = encode_input_result(result, bytes);
+    if (!session->send_unreliable(std::span(bytes).first(n), impl_->now, kRemoteInputResultStream))
+        ++impl_->totals.input_result_send_refused;
+    if (!impl_->replicator)
+        return;
+    impl_->replicator->publish(impl_->driver, impl_->now);
+    OwnerCheckpoint checkpoint{};
+    checkpoint.server_tick = server_tick;
+    checkpoint.membership_epoch = impl_->membership_epoch;
+    checkpoint.result = result;
+    // The client resolves this replicated NetId through its map to find its own mirror.
+    const PredictedEntityId id{impl_->owner_net_id.index, impl_->owner_net_id.generation};
+    auto state = impl_->hooks.capture(id);
+    if (state.empty()) {
+        ++impl_->totals.checkpoint_capture_refused;
+        return;
+    }
+    checkpoint.entities.push_back(PredictedEntityState{id, std::move(state)});
+    checkpoint.group_state = impl_->hooks.capture_group();
+    std::array<std::byte, kCheckpointMaxMessageBytes> checkpoint_bytes{};
+    const auto encoded = encode_owner_checkpoint(checkpoint, checkpoint_bytes);
+    if (!encoded) {
+        ++impl_->totals.checkpoint_encode_refused;
+    } else if (!session->send_unreliable(std::span(checkpoint_bytes).first(encoded.bytes_written),
+                                         impl_->now,
+                                         kRemoteOwnerCheckpointStream)) {
+        ++impl_->totals.checkpoint_send_refused;
+    } else {
+        ++impl_->totals.checkpoint_encoded;
+    }
 }
 
 RunReport::NetworkInputCounters NetworkInputServer::counters() const noexcept {
@@ -389,6 +543,11 @@ RunReport::NetworkInputCounters NetworkInputServer::counters() const noexcept {
     counts.driver_dropped = impl_->driver.datagrams_dropped();
     counts.connect_requests_seen = impl_->driver.connect_requests_seen();
     counts.oversized = impl_->link.oversized();
+    if (impl_->replicator) {
+        counts.replication_records_too_large = impl_->replicator->records_too_large();
+        counts.replication_budget_deferred = impl_->replicator->entities_dropped_over_budget();
+        counts.replication_orphans = impl_->replicator->net_ids_orphaned();
+    }
     return counts;
 }
 

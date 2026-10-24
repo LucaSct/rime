@@ -341,6 +341,9 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (definition.register_components) {
         definition.register_components(app.world());
     }
+    if (definition.remote_play && definition.remote_play->register_replicated) {
+        definition.remote_play->register_replicated(app.world());
+    }
     if (!entry_scene_path.empty()) {
         const scene::LoadReport loaded = scene::load_scene_file(app.world(), entry_scene_path);
         if (!loaded.ok) {
@@ -374,6 +377,12 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (!game->setup(setup)) {
         return refuse(report, RunStatus::Failed, "the game's setup() refused to start");
     }
+    if (listening && definition.remote_play &&
+        (!definition.remote_play->register_replicated || !definition.remote_play->owned_player ||
+         !definition.remote_play->prediction_hooks || !definition.remote_play->digest ||
+         definition.remote_play->fixed_dt != app.fixed_dt())) {
+        return refuse(report, RunStatus::Failed, "invalid remote play profile or fixed timestep");
+    }
 
     std::unique_ptr<NetworkInputServer> network;
     std::ofstream input_trace;
@@ -384,14 +393,20 @@ RunReport run_game_mode(const LaunchOptions& options,
                 return refuse(report, RunStatus::Failed, "could not open input trace");
             }
         }
-        network = NetworkInputServer::bind(options.listen_host,
-                                           options.port,
-                                           definition.tick_hz,
-                                           *definition.network_input,
-                                           report.bind_error);
+        network =
+            NetworkInputServer::bind(options.listen_host,
+                                     options.port,
+                                     definition.tick_hz,
+                                     *definition.network_input,
+                                     app.world(),
+                                     definition.remote_play ? &*definition.remote_play : nullptr,
+                                     report.bind_error);
         if (!network) {
-            report.bind_failed = true;
-            return refuse(report, RunStatus::Failed, "UDP bind failed: " + report.bind_error);
+            report.bind_failed = report.bind_error.starts_with('E');
+            return refuse(report,
+                          RunStatus::Failed,
+                          (report.bind_failed ? "UDP bind failed: " : "remote play refused: ") +
+                              report.bind_error);
         }
         fmt::print("{{\"event\":\"ready\",\"transport\":\"udp\",\"bind\":\"{}:{}\",\"codec\":2,"
                    "\"auth\":\"none\"}}\n",
@@ -550,7 +565,9 @@ RunReport run_game_mode(const LaunchOptions& options,
     report.frames = app.frame_index();
     report.finished = game_finished;
     report.windowed = app.windowed();
-    report.state_digest = game->state_digest(app.world());
+    report.state_digest = definition.remote_play && definition.remote_play->digest
+                              ? definition.remote_play->digest(app.world())
+                              : game->state_digest(app.world());
     if (network) {
         report.network_input = network->counters();
         if (options.ticks > 0) {
@@ -562,7 +579,16 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"sequence_order\":{},\"hello_malformed\":{},\"hello_version\":{},"
                        "\"hello_schema\":{},\"unadmitted_messages\":{},\"wrong_channel\":{},"
                        "\"oversized\":{},\"clients_admitted\":{},\"clients_refused\":{},"
-                       "\"clients_left\":{},\"amplification_blocked\":{},\"driver_dropped\":{}}}\n",
+                       "\"clients_left\":{},\"refusal_close_deferred\":{},"
+                       "\"amplification_blocked\":{},\"driver_dropped\":{},"
+                       "\"replication_acks\":{},\"replication_ack_refused\":{},"
+                       "\"replication_records_too_large\":{},"
+                       "\"replication_budget_deferred\":{},\"replication_orphans\":{},"
+                       "\"replication_clients_released\":{},"
+                       "\"checkpoint_encoded\":{},\"checkpoint_encode_refused\":{},"
+                       "\"checkpoint_send_refused\":{},\"input_result_send_refused\":{},"
+                       "\"replication_registration_refused\":{},\"publish_missing_session\":{},"
+                       "\"checkpoint_capture_refused\":{}}}\n",
                        report.ticks,
                        report.state_digest,
                        report.network_input.applied,
@@ -587,8 +613,22 @@ RunReport run_game_mode(const LaunchOptions& options,
                        report.network_input.clients_admitted,
                        report.network_input.clients_refused,
                        report.network_input.clients_left,
+                       report.network_input.refusal_close_deferred,
                        report.network_input.amplification_blocked,
-                       report.network_input.driver_dropped);
+                       report.network_input.driver_dropped,
+                       report.network_input.replication_acks,
+                       report.network_input.replication_ack_refused,
+                       report.network_input.replication_records_too_large,
+                       report.network_input.replication_budget_deferred,
+                       report.network_input.replication_orphans,
+                       report.network_input.replication_clients_released,
+                       report.network_input.checkpoint_encoded,
+                       report.network_input.checkpoint_encode_refused,
+                       report.network_input.checkpoint_send_refused,
+                       report.network_input.input_result_send_refused,
+                       report.network_input.replication_registration_refused,
+                       report.network_input.publish_missing_session,
+                       report.network_input.checkpoint_capture_refused);
             std::fflush(stdout);
         }
     }

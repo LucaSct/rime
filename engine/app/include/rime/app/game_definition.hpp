@@ -19,6 +19,7 @@
 #include "rime/platform/event.hpp"
 #include "rime/platform/keyboard.hpp"
 #include "rime/replication/input_v2.hpp"
+#include "rime/replication/prediction.hpp"
 
 // `GameDefinition` — what a GAME supplies to the engine, as opposed to what the engine owns (m20.1,
 // ADR-0056-m20.1).
@@ -302,6 +303,21 @@ struct GameDefinition {
     };
 
     std::optional<NetworkInputProfile> network_input;
+
+    // Both worlds register the same reflected component schema before constructing a replicator.
+    // ServerReplicator currently publishes the full reflected registry. A per-profile filter can
+    // follow when a larger game needs it; hello-game's small world does not need one yet.
+    // The hooks bind to one world and one owned entity; the server uses capture for checkpoints,
+    // while the client uses the same contract for prediction and reconciliation.
+    struct RemotePlayProfile {
+        GameComponentRegistrar register_replicated;
+        ecs::Entity (*owned_player)(ecs::World&) = nullptr;
+        replication::PredictionHooks (*prediction_hooks)(ecs::World&, ecs::Entity) = nullptr;
+        double fixed_dt = 0.0;
+        std::uint64_t (*digest)(const ecs::World&) = nullptr;
+    };
+
+    std::optional<RemotePlayProfile> remote_play;
 
     // Make a fresh game. Required.
     std::function<std::unique_ptr<Game>()> create;

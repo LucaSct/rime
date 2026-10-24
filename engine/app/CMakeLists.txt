@@ -60,6 +60,17 @@ target_link_libraries(rime_app_game
 rime_apply_common_target_options(rime_app_game)
 rime_install_module(rime_app_game)
 
+# The remote-play proof uses a loopback client in this process, including the real server pump,
+# mirror replicator and prediction hooks; no device or child process is needed.
+find_package(doctest CONFIG REQUIRED)
+add_executable(rime_remote_play_tests
+    ../../tests/app/remote_play_test.cpp
+    ../../samples/hello-game/game.cpp)
+target_include_directories(rime_remote_play_tests PRIVATE ../../samples/hello-game)
+target_link_libraries(rime_remote_play_tests PRIVATE
+    rime::app_game rime::replication rime::physics rime::scene rime::net doctest::doctest)
+rime_apply_common_target_options(rime_remote_play_tests)
+
 # rime_game_content(<target> <content-dir>) — m20.2 (ADR-0076-m20.2): declare a game's content.
 #
 # Two things, both build-tree facts the game cannot know any other way:

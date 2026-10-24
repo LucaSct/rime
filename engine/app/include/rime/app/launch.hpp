@@ -161,10 +161,19 @@ struct RunReport {
         std::uint64_t reserved_nonzero = 0, non_finite = 0, sequence_order = 0;
         std::uint64_t hello_malformed = 0, hello_version = 0, hello_schema = 0;
         std::uint64_t clients_admitted = 0, clients_refused = 0, clients_left = 0;
+        std::uint64_t refusal_close_deferred = 0;
         std::uint64_t unadmitted_messages = 0;
         std::uint64_t wrong_channel = 0, amplification_blocked = 0;
         std::uint64_t driver_dropped = 0, connect_requests_seen = 0;
         std::uint64_t oversized = 0;
+        std::uint64_t replication_acks = 0, replication_ack_refused = 0;
+        std::uint64_t replication_records_too_large = 0;
+        std::uint64_t replication_budget_deferred = 0, replication_orphans = 0;
+        std::uint64_t replication_clients_released = 0;
+        std::uint64_t checkpoint_encoded = 0, checkpoint_encode_refused = 0;
+        std::uint64_t checkpoint_send_refused = 0, input_result_send_refused = 0;
+        std::uint64_t replication_registration_refused = 0, publish_missing_session = 0;
+        std::uint64_t checkpoint_capture_refused = 0;
     } network_input;
 
     bool bind_failed = false;

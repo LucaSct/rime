@@ -32,3 +32,6 @@ target_link_libraries(rime_app_tests
 # counts and returns null, so the suite still runs on every CI OS with no device.
 target_link_libraries(rime_app_tests
     PRIVATE rime::app_game rime::scene rime::rhi)
+
+# The engine target is declared before testing is enabled; register it in the test directory.
+add_test(NAME remote_play_test COMMAND rime_remote_play_tests)

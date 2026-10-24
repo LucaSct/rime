@@ -26,7 +26,10 @@
 #include <vector>
 
 #include "rime/app/game_definition.hpp"
+#include "rime/core/math/quat.hpp"
+#include "rime/core/math/reflect.hpp"
 #include "rime/core/math/vec.hpp"
+#include "rime/core/reflect/type_info.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/physics/physics.hpp"
 
@@ -51,6 +54,23 @@ struct Intent {
     rime::core::Vec3 move{0.0f, 0.0f, 0.0f};
     bool quit = false;
 };
+
+// One authoritative, reflected record keeps every byte the digest reads on the replicated side.
+// The physics bridge still owns its bodies; this records its crate pose after each fixed step.
+struct ReplicatedGameState {
+    std::uint64_t ticks = 0;
+    std::uint32_t score = 0;
+    std::uint64_t collected0 = 0, collected1 = 0, collected2 = 0, collected3 = 0, collected4 = 0;
+    rime::core::Vec3 player_position{};
+    rime::core::Vec3 player_velocity{};
+    rime::core::Vec3 crate_position{};
+    rime::core::Quat crate_rotation{};
+};
+
+[[nodiscard]] std::uint64_t replicated_digest(const rime::ecs::World& world);
+[[nodiscard]] rime::ecs::Entity owned_player(rime::ecs::World& world);
+[[nodiscard]] rime::replication::PredictionHooks prediction_hooks(rime::ecs::World& world,
+                                                                  rime::ecs::Entity player);
 
 class HelloGame final : public rime::app::Game {
 public:
@@ -81,23 +101,21 @@ public:
     void present_frame(rime::app::PresentFrameContext& ctx) override;
 
     // ── What a host may ask about the game ────────────────────────────────────────────────────
-    [[nodiscard]] int score() const noexcept { return score_; }
+    [[nodiscard]] int score() const noexcept;
 
-    [[nodiscard]] bool won() const noexcept { return score_ == kPickupCount; }
+    [[nodiscard]] bool won() const noexcept { return score() == kPickupCount; }
 
     [[nodiscard]] bool quit_requested() const noexcept { return quit_; }
 
-    [[nodiscard]] std::uint64_t ticks() const noexcept { return ticks_; }
+    [[nodiscard]] std::uint64_t ticks() const noexcept;
 
-    [[nodiscard]] rime::core::Vec3 player_position() const noexcept { return player_pos_; }
+    [[nodiscard]] rime::core::Vec3 player_position() const noexcept;
 
     // The tick the Nth marker was collected on, or 0 for one still out there. The self-check
     // compares these between two runs: a scalar score would also match if the pickups were
     // collected in a different order on a different thread count, and that is exactly the failure
     // a determinism proof is for.
-    [[nodiscard]] std::uint64_t collected_on(std::size_t index) const {
-        return pickups_[index].collected_tick;
-    }
+    [[nodiscard]] std::uint64_t collected_on(std::size_t index) const;
 
     // How many times the engine called a presentation hook. The dedicated proof asserts ZERO: a
     // server that set up meshes nobody will see is a server that needed a device to start.
@@ -107,12 +125,11 @@ private:
     struct Pickup {
         rime::ecs::Entity entity{};
         rime::physics::BodyId body{};
-        bool collected = false;
-        std::uint64_t collected_tick = 0;
     };
 
     void apply_intent(const Intent& intent);
     void move_player(rime::ecs::World& world, float dt);
+    [[nodiscard]] ReplicatedGameState* state() const noexcept;
     void bind_bodies(rime::ecs::World& world);
     void collect(rime::ecs::World& world);
 
@@ -125,13 +142,12 @@ private:
     rime::ecs::Entity player_{};
     rime::ecs::Entity crate_{};
     rime::ecs::Entity camera_{}; // presentation only: spawned by present_setup, absent otherwise
+    rime::ecs::Entity state_entity_{};
     rime::physics::BodyId player_body_{};
-    rime::core::Vec3 player_pos_{};
+    rime::ecs::World* world_ = nullptr;
     std::vector<Pickup> pickups_;
     bool bound_ = false;
     bool quit_ = false;
-    int score_ = 0;
-    std::uint64_t ticks_ = 0;
     std::uint64_t presentation_calls_ = 0;
 };
 
@@ -150,3 +166,18 @@ void register_components(rime::ecs::World& world);
 [[nodiscard]] rime::app::GameDefinition definition();
 
 } // namespace hello_game
+
+// Beside the declaration because World::spawn_with registers components in whichever TU sees it.
+RIME_REFLECT_BEGIN(hello_game::ReplicatedGameState)
+RIME_REFLECT_FIELD(ticks)
+RIME_REFLECT_FIELD(score)
+RIME_REFLECT_FIELD(collected0)
+RIME_REFLECT_FIELD(collected1)
+RIME_REFLECT_FIELD(collected2)
+RIME_REFLECT_FIELD(collected3)
+RIME_REFLECT_FIELD(collected4)
+RIME_REFLECT_FIELD(player_position)
+RIME_REFLECT_FIELD(player_velocity)
+RIME_REFLECT_FIELD(crate_position)
+RIME_REFLECT_FIELD(crate_rotation)
+RIME_REFLECT_END()

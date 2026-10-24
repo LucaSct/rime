@@ -95,6 +95,59 @@ Intent intent_from(const app::ActionState& input) {
     return intent;
 }
 
+std::uint64_t& collection_time(ReplicatedGameState& state, std::size_t index) {
+    switch (index) {
+        case 0:
+            return state.collected0;
+        case 1:
+            return state.collected1;
+        case 2:
+            return state.collected2;
+        case 3:
+            return state.collected3;
+        default:
+            return state.collected4;
+    }
+}
+
+std::uint64_t collection_time(const ReplicatedGameState& state, std::size_t index) {
+    switch (index) {
+        case 0:
+            return state.collected0;
+        case 1:
+            return state.collected1;
+        case 2:
+            return state.collected2;
+        case 3:
+            return state.collected3;
+        default:
+            return state.collected4;
+    }
+}
+
+// Fixed tick and prediction call this exact arithmetic, so a replay cannot drift because its
+// controller used a separately maintained interpretation of movement or clamping.
+void integrate_player(ReplicatedGameState& state, const Intent& intent, float dt) {
+    const core::Vec3 before = state.player_position;
+    core::Vec3 dir = intent.move;
+    const float len = core::length(dir);
+    // Normalising prevents diagonal speed gain; the zero guard prevents a NaN from entering
+    // both the authoritative component and every later checkpoint.
+    if (len > 1e-4f) {
+        dir = dir * (1.0f / len);
+    } else {
+        dir = {0.0f, 0.0f, 0.0f};
+    }
+    state.player_position = state.player_position + dir * (HelloGame::kPlayerSpeed * dt);
+    const float limit = kArenaHalf - HelloGame::kPlayerRadius;
+    state.player_position.x = std::clamp(state.player_position.x, -limit, limit);
+    state.player_position.z = std::clamp(state.player_position.z, -limit, limit);
+    state.player_position.y = kPlayerStart.y;
+    // The clamp can stop motion even while an axis stays held. Record actual displacement per
+    // second, which is the kinematic velocity the physics bridge sees, not the unfulfilled wish.
+    state.player_velocity = (state.player_position - before) * (1.0f / dt);
+}
+
 // A fixed-angle chase camera: behind and above the player, looking down at it. Fixed rather than
 // free because this sample is about the game loop, and a free camera is a second input system
 // competing for the reader's attention (07-first-light already demonstrates one).
@@ -122,6 +175,7 @@ core::Vec3 HelloGame::marker_position(int index) {
 bool HelloGame::setup(app::SetupContext& ctx) {
     using ecs::WorldTransform;
     ecs::World& world = ctx.world;
+    world_ = &world;
     physics::register_physics_components(world);
     physics_.set_job_system(&ctx.jobs);
     physics_.set_sleeping_enabled(true);
@@ -148,12 +202,12 @@ bool HelloGame::setup(app::SetupContext& ctx) {
     {
         core::Transform tf{};
         tf.translation = kPlayerStart;
-        player_ = world.spawn_with(WorldTransform{tf},
+        player_ = world.spawn_with(ecs::LocalTransform{tf},
+                                   WorldTransform{tf},
                                    physics::RigidBody{.motion = kKinematic},
                                    physics::Collider{.shape_type = kCapsuleShape,
                                                      .radius = kPlayerRadius,
                                                      .half_height = kPlayerHalfHeight});
-        player_pos_ = kPlayerStart;
     }
 
     // The crate: the one DYNAMIC body, and the reason the player is kinematic-with-velocity rather
@@ -161,7 +215,8 @@ bool HelloGame::setup(app::SetupContext& ctx) {
     {
         core::Transform tf{};
         tf.translation = {0.0f, kCrateHalf, -2.5f};
-        crate_ = world.spawn_with(WorldTransform{tf},
+        crate_ = world.spawn_with(ecs::LocalTransform{tf},
+                                  WorldTransform{tf},
                                   physics::RigidBody{.motion = kDynamic, .mass = 6.0f},
                                   box_collider(kCrateHalf, kCrateHalf, kCrateHalf));
     }
@@ -176,11 +231,19 @@ bool HelloGame::setup(app::SetupContext& ctx) {
         core::Transform tf{};
         tf.translation = marker_position(i);
         const ecs::Entity e = world.spawn_with(
+            ecs::LocalTransform{tf},
             WorldTransform{tf},
             physics::RigidBody{.motion = kStatic},
             physics::Collider{.shape_type = kSphereShape, .radius = kPickupRadius, .sensor = true});
-        pickups_.push_back(Pickup{e, physics::BodyId{}, false});
+        pickups_.push_back(Pickup{e, physics::BodyId{}});
     }
+    ReplicatedGameState state{};
+    state.player_position = kPlayerStart;
+    if (const auto* wt = world.get<WorldTransform>(crate_)) {
+        state.crate_position = wt->value.translation;
+        state.crate_rotation = wt->value.rotation;
+    }
+    state_entity_ = world.spawn_with(WorldTransform{}, state);
     return true;
 }
 
@@ -209,7 +272,18 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
     // `RigidBodyHandle` is added by `reconcile`, which first runs inside this call.
     bind_bodies(ctx.world);
     collect(ctx.world);
-    ++ticks_;
+    if (auto* replicated = state()) {
+        ++replicated->ticks;
+        if (const auto* wt = ctx.world.get<ecs::WorldTransform>(crate_)) {
+            replicated->crate_position = wt->value.translation;
+            replicated->crate_rotation = wt->value.rotation;
+            if (auto* local = ctx.world.get<ecs::LocalTransform>(crate_)) {
+                local->value = wt->value;
+                ctx.world.mark_changed<ecs::LocalTransform>(crate_);
+            }
+        }
+        ctx.world.mark_changed<ReplicatedGameState>(state_entity_);
+    }
 }
 
 // Integrate the stored intent into the player's transform, and clamp it to the arena.
@@ -219,23 +293,16 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
 // player holds a direction, which is a contact the solver cannot resolve (neither body yields) and
 // a permanent source of jitter. Games clamp.
 void HelloGame::move_player(ecs::World& world, float dt) {
-    core::Vec3 dir = intent_.move;
-    const float len = core::length(dir);
-    // Normalised so holding two keys is not 1.41x faster than one — and guarded, because
-    // normalising a zero vector is a division by zero that shows up as a NaN player three ticks
-    // later with nothing pointing at the cause.
-    if (len > 1e-4f) {
-        dir = dir * (1.0f / len);
-    } else {
-        dir = {0.0f, 0.0f, 0.0f};
-    }
-    player_pos_ = player_pos_ + dir * (kPlayerSpeed * dt);
-    const float limit = kArenaHalf - kPlayerRadius;
-    player_pos_.x = std::clamp(player_pos_.x, -limit, limit);
-    player_pos_.z = std::clamp(player_pos_.z, -limit, limit);
-    player_pos_.y = kPlayerStart.y; // no jumping: this game is flat, and says so
+    auto* replicated = state();
+    if (!replicated)
+        return;
+    integrate_player(*replicated, intent_, dt);
     if (auto* wt = world.get<ecs::WorldTransform>(player_)) {
-        wt->value.translation = player_pos_;
+        wt->value.translation = replicated->player_position;
+    }
+    if (auto* local = world.get<ecs::LocalTransform>(player_)) {
+        local->value.translation = replicated->player_position;
+        world.mark_changed<ecs::LocalTransform>(player_);
     }
 }
 
@@ -265,6 +332,9 @@ void HelloGame::bind_bodies(ecs::World& world) {
 // consumer has to check both — the header says so, and a consumer that checks only `b` works until
 // the day body indices happen to come out the other way round.
 void HelloGame::collect(ecs::World& world) {
+    auto* replicated = state();
+    if (!replicated)
+        return;
     for (const physics::TriggerEvent& ev : physics_.trigger_events()) {
         if (ev.phase != physics::ContactPhase::Began) {
             continue; // Persisted/Ended would collect the same marker again, or on the way out
@@ -274,13 +344,13 @@ void HelloGame::collect(ecs::World& world) {
             continue; // a trigger the crate rolled through is not a pickup
         }
         const physics::BodyId other = ev.a == player_body_ ? ev.b : ev.a;
-        for (Pickup& p : pickups_) {
-            if (p.collected || !(p.body == other)) {
+        for (std::size_t index = 0; index < pickups_.size(); ++index) {
+            Pickup& p = pickups_[index];
+            if (collection_time(*replicated, index) != 0 || !(p.body == other)) {
                 continue;
             }
-            p.collected = true;
-            p.collected_tick = ticks_ + 1; // the tick being completed, 1-based
-            ++score_;
+            collection_time(*replicated, index) = replicated->ticks + 1;
+            ++replicated->score;
             // Despawning takes the RigidBodyHandle with it, which is precisely why the bridge keeps
             // its own entity↔body roster: next tick's `reconcile` destroys the orphaned sensor body
             // from that roster rather than failing to find it in a query.
@@ -303,8 +373,9 @@ app::ActionState HelloGame::autopilot() const {
             continue;
         }
         const core::Vec3 target = marker_position(i);
-        input.axes[kAxisMoveX] = target.x - player_pos_.x;
-        input.axes[kAxisMoveZ] = target.z - player_pos_.z;
+        const auto position = player_position();
+        input.axes[kAxisMoveX] = target.x - position.x;
+        input.axes[kAxisMoveZ] = target.z - position.z;
         return input;
     }
     input.pressed = 1u << kButtonQuit; // everything collected: ask to stop
@@ -314,22 +385,52 @@ app::ActionState HelloGame::autopilot() const {
 // What a dedicated server and a player must agree on: the rules' state and the one pose the
 // SOLVER owns (the crate — the player's pose is the game's own arithmetic, the crate's is physics).
 // Not the camera, not anything presentation touched.
-std::uint64_t HelloGame::state_digest(const ecs::World& world) const {
+std::uint64_t replicated_digest(const ecs::World& world) {
     Fnv1a h;
-    h.u64(ticks_);
-    h.u64(static_cast<std::uint64_t>(score_));
-    for (const Pickup& p : pickups_) {
-        h.u64(p.collected_tick);
-    }
-    h.vec3(player_pos_);
-    if (const auto* wt = world.get<ecs::WorldTransform>(crate_)) {
-        h.vec3(wt->value.translation);
-        h.f32(wt->value.rotation.x);
-        h.f32(wt->value.rotation.y);
-        h.f32(wt->value.rotation.z);
-        h.f32(wt->value.rotation.w);
-    }
+    // Query is read-only here; World currently exposes query() only on a non-const object.
+    auto& readable = const_cast<ecs::World&>(world);
+    readable.query<ReplicatedGameState>().for_each(
+        [&](ecs::Entity, const ReplicatedGameState& state) {
+            h.u64(state.ticks);
+            h.u64(static_cast<std::uint64_t>(state.score));
+            for (std::size_t i = 0; i < HelloGame::kPickupCount; ++i)
+                h.u64(collection_time(state, i));
+            h.vec3(state.player_position);
+            h.vec3(state.crate_position);
+            h.f32(state.crate_rotation.x);
+            h.f32(state.crate_rotation.y);
+            h.f32(state.crate_rotation.z);
+            h.f32(state.crate_rotation.w);
+        });
     return h.value();
+}
+
+std::uint64_t HelloGame::state_digest(const ecs::World& world) const {
+    return replicated_digest(world);
+}
+
+ReplicatedGameState* HelloGame::state() const noexcept {
+    return world_ ? world_->get<ReplicatedGameState>(state_entity_) : nullptr;
+}
+
+int HelloGame::score() const noexcept {
+    const auto* replicated = state();
+    return replicated ? static_cast<int>(replicated->score) : 0;
+}
+
+std::uint64_t HelloGame::ticks() const noexcept {
+    const auto* replicated = state();
+    return replicated ? replicated->ticks : 0;
+}
+
+core::Vec3 HelloGame::player_position() const noexcept {
+    const auto* replicated = state();
+    return replicated ? replicated->player_position : core::Vec3{};
+}
+
+std::uint64_t HelloGame::collected_on(std::size_t index) const {
+    const auto* replicated = state();
+    return replicated && index < kPickupCount ? collection_time(*replicated, index) : 0;
 }
 
 // ── Presentation ──────────────────────────────────────────────────────────────────────────────
@@ -412,13 +513,14 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
         (void)world.spawn_with(ecs::WorldTransform{tf},
                                render::DirectionalLight{0.98f, 0.96f, 0.90f, 3.2f});
     }
-    camera_ = world.spawn_with(ecs::WorldTransform{chase_camera(player_pos_)}, render::Camera{});
+    camera_ =
+        world.spawn_with(ecs::WorldTransform{chase_camera(player_position())}, render::Camera{});
 }
 
 void HelloGame::present_frame(app::PresentFrameContext& ctx) {
     ++presentation_calls_;
     if (auto* wt = ctx.world.get<ecs::WorldTransform>(camera_)) {
-        wt->value = chase_camera(player_pos_);
+        wt->value = chase_camera(player_position());
     }
 }
 
@@ -441,6 +543,90 @@ void build_arena(ecs::World& world) {
 void register_components(ecs::World& world) {
     ecs::register_transform_components(world);
     physics::register_physics_components(world);
+    (void)world.register_component<ReplicatedGameState>();
+}
+
+ecs::Entity owned_player(ecs::World& world) {
+    ecs::Entity result{};
+    world.query<physics::RigidBody, physics::Collider>().for_each(
+        [&](ecs::Entity entity, const physics::RigidBody& body, const physics::Collider& collider) {
+            if (body.motion == kKinematic && collider.shape_type == kCapsuleShape)
+                result = entity;
+        });
+    return result;
+}
+
+replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity player) {
+    ecs::Entity state_entity{};
+    world.query<ReplicatedGameState>().for_each(
+        [&](ecs::Entity entity, const ReplicatedGameState&) { state_entity = entity; });
+    auto* bound = &world;
+    replication::PredictionHooks hooks{};
+    hooks.capture = [bound, state_entity](replication::PredictedEntityId) {
+        std::vector<std::byte> bytes;
+        const auto* state = bound->get<ReplicatedGameState>(state_entity);
+        if (!state)
+            return bytes;
+        bytes.reserve(24);
+        const auto append = [&](float value) {
+            const auto bits = std::bit_cast<std::uint32_t>(value);
+            for (unsigned shift = 0; shift < 32; shift += 8)
+                bytes.push_back(std::byte{static_cast<std::uint8_t>(bits >> shift)});
+        };
+        append(state->player_position.x);
+        append(state->player_position.y);
+        append(state->player_position.z);
+        append(state->player_velocity.x);
+        append(state->player_velocity.y);
+        append(state->player_velocity.z);
+        return bytes;
+    };
+    hooks.restore = [bound, state_entity, player](replication::PredictedEntityId,
+                                                  std::span<const std::byte> bytes) {
+        if (bytes.size() != 24)
+            return;
+        auto* state = bound->get<ReplicatedGameState>(state_entity);
+        if (!state)
+            return;
+        const auto read = [&](std::size_t offset) {
+            std::uint32_t bits = 0;
+            for (unsigned i = 0; i < 4; ++i)
+                bits |= std::to_integer<std::uint32_t>(bytes[offset + i]) << (i * 8);
+            return std::bit_cast<float>(bits);
+        };
+        state->player_position = {read(0), read(4), read(8)};
+        state->player_velocity = {read(12), read(16), read(20)};
+        bound->mark_changed<ReplicatedGameState>(state_entity);
+        if (auto* transform = bound->get<ecs::WorldTransform>(player))
+            transform->value.translation = state->player_position;
+        if (auto* local = bound->get<ecs::LocalTransform>(player)) {
+            local->value.translation = state->player_position;
+            bound->mark_changed<ecs::LocalTransform>(player);
+        }
+    };
+    // The locomotion controller has no RNG or hidden timer. Keep an explicit empty group so
+    // later interaction prediction cannot silently inherit this assumption.
+    hooks.capture_group = [] { return std::vector<std::byte>{}; };
+    hooks.restore_group = [](std::span<const std::byte>) {};
+    hooks.simulate = [bound, state_entity, player](std::span<const replication::PredictedEntityId>,
+                                                   const replication::InputCommand& command,
+                                                   const replication::PredictionStep& step) {
+        auto* state = bound->get<ReplicatedGameState>(state_entity);
+        if (!state)
+            return;
+        app::ActionState actions{};
+        actions.axes[kAxisMoveX] = command.move_x;
+        actions.axes[kAxisMoveZ] = command.move_y;
+        integrate_player(*state, intent_from(actions), static_cast<float>(step.fixed_dt));
+        bound->mark_changed<ReplicatedGameState>(state_entity);
+        if (auto* transform = bound->get<ecs::WorldTransform>(player))
+            transform->value.translation = state->player_position;
+        if (auto* local = bound->get<ecs::LocalTransform>(player)) {
+            local->value.translation = state->player_position;
+            bound->mark_changed<ecs::LocalTransform>(player);
+        }
+    };
+    return hooks;
 }
 
 // ── The definition ────────────────────────────────────────────────────────────────────────────
@@ -476,6 +662,8 @@ app::GameDefinition definition() {
     // tree's `samples/hello-game/content`. The two RIME_GAME_* paths come from
     // `rime_game_content()` in CMakeLists.txt and are inert once the binary is moved.
     def.register_components = register_components;
+    def.remote_play = app::GameDefinition::RemotePlayProfile{
+        register_components, owned_player, prediction_hooks, 1.0 / 60.0, replicated_digest};
     def.entry_scene = std::string{kEntryScene};
 #if defined(RIME_GAME_CONTENT_DIR) && defined(RIME_GAME_BINARY_DIR)
     def.dev_content_dir = RIME_GAME_CONTENT_DIR;
