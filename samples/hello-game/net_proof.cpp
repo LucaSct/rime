@@ -390,7 +390,11 @@ int positive(const std::filesystem::path& binary) {
     Child child(binary, 240, trace_path.string());
     const auto port = child.ready();
     check(port != 0, "ready parsed with nonzero port");
-    bool mapped = false, maps_read = false;
+    // Read only by the Linux-only /proc/<pid>/maps check below; [[maybe_unused]] keeps Apple
+    // Clang's -Wunused-but-set-variable (an error under -Werror, CI on #349) quiet on the other
+    // platforms.
+    [[maybe_unused]] bool mapped = false;
+    [[maybe_unused]] bool maps_read = false;
     if (auto value = vulkan_mapped(child.pid)) {
         mapped = *value;
         maps_read = true;
