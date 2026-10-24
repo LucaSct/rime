@@ -62,13 +62,20 @@ public:
     std::size_t receive(std::vector<net::Datagram>& out) override {
         received_sizes_.clear();
         std::size_t count = 0;
-        std::array<std::byte, 1200> buffer{};
+        // Read the whole UDP datagram so oversize input is refused explicitly, not silently
+        // truncated into a plausible 1200-byte packet by the receive buffer.
+        std::array<std::byte, 65536> buffer{};
         // A fixed poll budget bounds anonymous work even when a peer floods the socket.
         while (count < 64) {
             platform::Endpoint from{};
             const auto n = socket_.recv_from(from, buffer);
             if (!n) {
                 break;
+            }
+            if (*n > 1200) {
+                ++oversized_;
+                ++count;
+                continue;
             }
             received_sizes_.emplace_back(from, *n);
             out.push_back(net::Datagram{from, {buffer.begin(), buffer.begin() + *n}});
@@ -87,11 +94,14 @@ public:
         return amplification_blocked_;
     }
 
+    [[nodiscard]] std::uint64_t oversized() const noexcept { return oversized_; }
+
 private:
     platform::UdpSocket socket_;
     std::vector<platform::Endpoint> established_;
     std::vector<std::pair<platform::Endpoint, std::size_t>> received_sizes_;
     std::uint64_t amplification_blocked_ = 0;
+    std::uint64_t oversized_ = 0;
 };
 
 void event(std::string_view line) {
@@ -302,6 +312,7 @@ struct NetworkInputServer::Impl {
     std::optional<InputSchedule> schedule;
     RunReport::NetworkInputCounters totals{};
     std::uint64_t now = 0;
+    bool last_applied = false;
     std::vector<net::SessionEvent> events;
     std::vector<net::Received> messages;
     std::vector<InputCommand> commands;
@@ -338,12 +349,18 @@ std::uint16_t NetworkInputServer::local_port() const noexcept {
 
 ActionState NetworkInputServer::before_tick(std::uint64_t) {
     impl_->pump();
+    impl_->last_applied = false;
     if (!impl_->schedule) {
         ++impl_->totals.synthesized;
         return {};
     }
     const ScheduledInput selected = impl_->schedule->step();
+    impl_->last_applied = selected.applied;
     return impl_->profile.to_actions(selected.command);
+}
+
+bool NetworkInputServer::last_applied() const noexcept {
+    return impl_->last_applied;
 }
 
 void NetworkInputServer::after_tick(std::uint64_t server_tick) {
@@ -371,6 +388,7 @@ RunReport::NetworkInputCounters NetworkInputServer::counters() const noexcept {
     counts.amplification_blocked = impl_->link.amplification_blocked();
     counts.driver_dropped = impl_->driver.datagrams_dropped();
     counts.connect_requests_seen = impl_->driver.connect_requests_seen();
+    counts.oversized = impl_->link.oversized();
     return counts;
 }
 

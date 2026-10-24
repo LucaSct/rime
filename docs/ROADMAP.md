@@ -1938,6 +1938,18 @@ acceptance of the captured case, not a claim that all lighting artifacts are gon
 > run on this machine with the repo hidden rather than moved to a second box. **Not yet:** network
 > input for `dedicated`, the listening modes, the no-argument launcher, and the bundle manifest
 > (`rime-game.toml`, content hash, `LICENSES/`) with `rime package`.
+>
+> **m20.3 (2026-10-24)** — `dedicated` takes network input ([ADR-0103](adr/0103-m20.3-dedicated-network-input.md)).
+> It listens by default on `0.0.0.0:7463` (`--listen ADDR:PORT`, `--port N`, `--offline`), prints
+> JSON-lines events on stdout, and drives the game from an InputV2 client: redundant commands, a
+> server jitter buffer that executes one per tick and synthesizes a stand-in when one is late, and an
+> acknowledgement of what was EXECUTED (`retired_through` + applied mask), not what arrived.
+> `hello_game_net_proof` runs a real `dedicated` child on loopback, drives it for 240 ticks (238
+> applied, 5/5 runs), and replays the server's executed-input trace in-process to the same digest —
+> which differs from a zero-input control, and fails when the server ignores the network
+> (sensitivity control). Its negative run gates 13 refusal cases. LAN, unauthenticated; one client;
+> POSIX-only proof (no child-process helper on Windows yet); stale-incarnation case not yet gated.
+> Still not yet: `host`, `play --connect`, snapshot replication to the remote player, authentication.
 
 ### Detail
 

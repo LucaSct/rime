@@ -13,6 +13,8 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <thread>
 #include <vector>
@@ -106,7 +108,8 @@ std::string launch_usage(std::string_view program) {
         "  --listen ADDR:PORT  dedicated: bind IPv4 address and port (0 = OS chosen)\n"
         "  --offline    dedicated: run without a network listener\n"
         "  --port N     dedicated: shorthand for --listen 0.0.0.0:N\n"
-        "  --content DIR the game's content root (default: content/ beside this executable)\n",
+        "  --content DIR the game's content root (default: content/ beside this executable)\n"
+        "  --input-trace PATH  listening dedicated: record the action used each tick\n",
         program);
 }
 
@@ -162,6 +165,11 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
                 return fail("--content needs a directory");
             }
             result.options.content_dir = std::string{args[++i]};
+        } else if (arg == "--input-trace") {
+            if (!has_value || args[i + 1].empty()) {
+                return fail("--input-trace needs a path");
+            }
+            result.options.input_trace = std::string{args[++i]};
         } else if (arg == "--port") {
             if (!has_value || !parse_uint(args[++i], result.options.port)) {
                 return fail("--port needs an integer in 0..65535");
@@ -216,6 +224,10 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         (result.options.offline || result.options.explicit_listen)) {
         return fail("--listen and --offline require dedicated mode");
     }
+    if (!result.options.input_trace.empty() &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline)) {
+        return fail("--input-trace requires listening dedicated mode");
+    }
     return result;
 }
 
@@ -258,6 +270,10 @@ RunReport run_game_mode(const LaunchOptions& options,
         report.usage_error = true;
         return refuse(
             report, RunStatus::Failed, "this game has no network input profile; use --offline");
+    }
+    if (!options.input_trace.empty() && !listening) {
+        report.usage_error = true;
+        return refuse(report, RunStatus::Failed, "--input-trace requires listening dedicated mode");
     }
 
     // ── 1b. The content root, before anything is constructed (m20.2) ─────────────────────────────
@@ -360,7 +376,14 @@ RunReport run_game_mode(const LaunchOptions& options,
     }
 
     std::unique_ptr<NetworkInputServer> network;
+    std::ofstream input_trace;
     if (listening) {
+        if (!options.input_trace.empty()) {
+            input_trace.open(options.input_trace, std::ios::out | std::ios::trunc);
+            if (!input_trace) {
+                return refuse(report, RunStatus::Failed, "could not open input trace");
+            }
+        }
         network = NetworkInputServer::bind(options.listen_host,
                                            options.port,
                                            definition.tick_hz,
@@ -438,6 +461,17 @@ RunReport run_game_mode(const LaunchOptions& options,
                                        : ActionState{};
         if (network) {
             tick.input = network->before_tick(game_ticks);
+            if (input_trace) {
+                // One line per committed tick: tick, applied(1)/synthesized(0), four axes,
+                // held and pressed. max_digits10 preserves the exact float for replay.
+                input_trace << game_ticks << ' ' << (network->last_applied() ? 1 : 0);
+                for (float axis : tick.input.axes) {
+                    input_trace << ' '
+                                << std::setprecision(std::numeric_limits<float>::max_digits10)
+                                << axis;
+                }
+                input_trace << ' ' << tick.input.held << ' ' << tick.input.pressed << '\n';
+            }
         }
         game->fixed_tick(tick);
         if (network) {
@@ -520,17 +554,41 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (network) {
         report.network_input = network->counters();
         if (options.ticks > 0) {
-            if (report.state_digest != 0) {
-                fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
-                           "\"synthesized\":{}}}\n",
-                           report.ticks,
-                           report.state_digest,
-                           report.network_input.synthesized);
-            } else {
-                fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"synthesized\":{}}}\n",
-                           report.ticks,
-                           report.network_input.synthesized);
-            }
+            fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
+                       "\"applied\":{},\"synthesized\":{},\"neutralized\":{},"
+                       "\"late\":{},\"duplicate\":{},\"future\":{},"
+                       "\"truncated\":{},\"bad_length\":{},\"bad_count\":{},"
+                       "\"unknown_codec\":{},\"reserved_nonzero\":{},\"non_finite\":{},"
+                       "\"sequence_order\":{},\"hello_malformed\":{},\"hello_version\":{},"
+                       "\"hello_schema\":{},\"unadmitted_messages\":{},\"wrong_channel\":{},"
+                       "\"oversized\":{},\"clients_admitted\":{},\"clients_refused\":{},"
+                       "\"clients_left\":{},\"amplification_blocked\":{},\"driver_dropped\":{}}}\n",
+                       report.ticks,
+                       report.state_digest,
+                       report.network_input.applied,
+                       report.network_input.synthesized,
+                       report.network_input.neutralized,
+                       report.network_input.late,
+                       report.network_input.duplicate,
+                       report.network_input.future,
+                       report.network_input.truncated,
+                       report.network_input.bad_length,
+                       report.network_input.bad_count,
+                       report.network_input.unknown_codec,
+                       report.network_input.reserved_nonzero,
+                       report.network_input.non_finite,
+                       report.network_input.sequence_order,
+                       report.network_input.hello_malformed,
+                       report.network_input.hello_version,
+                       report.network_input.hello_schema,
+                       report.network_input.unadmitted_messages,
+                       report.network_input.wrong_channel,
+                       report.network_input.oversized,
+                       report.network_input.clients_admitted,
+                       report.network_input.clients_refused,
+                       report.network_input.clients_left,
+                       report.network_input.amplification_blocked,
+                       report.network_input.driver_dropped);
             std::fflush(stdout);
         }
     }

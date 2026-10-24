@@ -89,3 +89,22 @@ assert len(lines) == 1 and lines[0]['event'] == 'bind_failed'
 assert lines[0]['error'] == 'EADDRINUSE'
 ]=] $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_listen_bind_conflict PROPERTIES TIMEOUT 15)
+
+# The process proof uses POSIX fork/exec and a pipe because engine/platform has no child-process
+# helper. Compile the game rules into this test too so its replay uses the same implementation.
+if(NOT WIN32)
+    add_executable(hello_game_net_proof net_proof.cpp game.cpp)
+    target_link_libraries(hello_game_net_proof
+        PRIVATE rime::app_game rime::app rime::physics rime::scene rime::net rime::replication)
+    target_compile_definitions(hello_game_net_proof PRIVATE
+        RIME_GAME_CONTENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/content"
+        RIME_GAME_BINARY_DIR="${CMAKE_BINARY_DIR}/bin")
+    rime_apply_common_target_options(hello_game_net_proof)
+    add_dependencies(hello_game_net_proof hello_game)
+    add_test(NAME hello_game_net_proof COMMAND hello_game_net_proof)
+    add_test(NAME hello_game_net_proof_negative COMMAND hello_game_net_proof --negative)
+    set_tests_properties(hello_game_net_proof PROPERTIES TIMEOUT 25 LABELS "hello_game")
+    set_tests_properties(hello_game_net_proof_negative PROPERTIES TIMEOUT 75 LABELS "hello_game")
+else()
+    message(STATUS "hello_game_net_proof excluded on Windows: engine/platform has no child-process helper and this proof uses POSIX fork/exec and pipe")
+endif()

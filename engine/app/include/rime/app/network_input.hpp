@@ -24,6 +24,7 @@ public:
 
     [[nodiscard]] std::uint16_t local_port() const noexcept;
     [[nodiscard]] ActionState before_tick(std::uint64_t server_tick);
+    [[nodiscard]] bool last_applied() const noexcept;
     void after_tick(std::uint64_t server_tick);
     [[nodiscard]] RunReport::NetworkInputCounters counters() const noexcept;
 

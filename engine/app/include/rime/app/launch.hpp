@@ -97,6 +97,9 @@ struct LaunchOptions {
     // --content: the content root, overriding the search (`rime/app/content_root.hpp`). Empty =
     // search.
     std::string content_dir;
+    // Listening dedicated can record the action handed to each fixed tick for an independent
+    // replay.
+    std::string input_trace;
 };
 
 enum class ParseStatus : std::uint8_t { Ok, Help, Error };
@@ -161,6 +164,7 @@ struct RunReport {
         std::uint64_t unadmitted_messages = 0;
         std::uint64_t wrong_channel = 0, amplification_blocked = 0;
         std::uint64_t driver_dropped = 0, connect_requests_seen = 0;
+        std::uint64_t oversized = 0;
     } network_input;
 
     bool bind_failed = false;

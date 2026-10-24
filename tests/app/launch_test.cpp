@@ -249,6 +249,18 @@ TEST_CASE("launch: dedicated listen grammar and conflicts") {
     CHECK(parse({"play", "--port", "9000"}).status == ParseStatus::Ok);
 }
 
+TEST_CASE("launch: input trace needs a listening dedicated run") {
+    const auto valid =
+        parse({"dedicated", "--listen", "127.0.0.1:0", "--input-trace", "trace.txt"});
+    REQUIRE(valid.status == ParseStatus::Ok);
+    CHECK(valid.options.input_trace == "trace.txt");
+    CHECK(parse({"dedicated", "--input-trace"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--input-trace", ""}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--offline", "--input-trace", "trace.txt"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"play", "--input-trace", "trace.txt"}).status == ParseStatus::Error);
+}
+
 TEST_CASE("socket: no-reuse UDP binding refuses a second owner of the port") {
     auto first = platform::UdpSocket::bind(0, "127.0.0.1", false);
     REQUIRE(first.has_value());
