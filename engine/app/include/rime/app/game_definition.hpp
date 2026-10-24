@@ -234,6 +234,11 @@ public:
 
     [[nodiscard]] virtual ActionState autopilot() const { return {}; }
 
+    // Remote play binds a newly replicated mirror after its initial world is complete. A game
+    // keeps its own entity handles; binding them here lets its normal presentation and autopilot
+    // read that mirror without simulating or duplicating it.
+    [[nodiscard]] virtual bool bind_remote_world(ecs::World&) { return false; }
+
     // A hash of the game's SIMULATED state — what a dedicated server and a player must agree on.
     // Game-defined because only the game knows which state is authoritative (a camera pose is not,
     // a crate's pose is). 0 means "this game supplies none", and a proof that compares digests must
@@ -315,6 +320,8 @@ struct GameDefinition {
         replication::PredictionHooks (*prediction_hooks)(ecs::World&, ecs::Entity) = nullptr;
         double fixed_dt = 0.0;
         std::uint64_t (*digest)(const ecs::World&) = nullptr;
+        replication::InputCommand (*to_command)(const ActionState&) = nullptr;
+        ecs::Entity (*seed_prediction)(ecs::World&, ecs::World&, ecs::Entity) = nullptr;
     };
 
     std::optional<RemotePlayProfile> remote_play;

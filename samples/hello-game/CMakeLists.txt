@@ -93,6 +93,43 @@ set_tests_properties(hello_game_listen_bind_conflict PROPERTIES TIMEOUT 15)
 # The process proof uses POSIX fork/exec and a pipe because engine/platform has no child-process
 # helper. Compile the game rules into this test too so its replay uses the same implementation.
 if(NOT WIN32)
+    # The production executable on both sides, with a real loopback UDP port. A child-process
+    # helper is not available on Windows yet, so this POSIX-only check uses Python subprocess.
+    add_test(NAME hello_game_play_connect COMMAND python3 -c [=[
+import json, subprocess, sys
+exe = sys.argv[1]
+for impairment in ([], ['--net-impair', 'delay_ms=50,loss=0.05,seed=7']):
+    server = subprocess.Popen([exe, 'dedicated', '--listen', '127.0.0.1:0',
+                               '--ticks', '240', '--linger-ms', '1000'],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True, bufsize=1)
+    try:
+        ready = json.loads(server.stdout.readline())
+        assert ready['event'] == 'ready', ready
+        port = ready['bind'].rsplit(':', 1)[1]
+        client = subprocess.run([exe, 'play', '--connect', '127.0.0.1:' + port,
+                                 '--no-gpu', '--autopilot', *impairment],
+                                capture_output=True, text=True, timeout=15)
+        out, err = server.communicate(timeout=10)
+        server_events = [json.loads(line) for line in out.splitlines()
+                         if line.startswith('{')]
+        client_events = [json.loads(line) for line in client.stdout.splitlines()
+                         if line.startswith('{')]
+        final_server = next(e for e in server_events if e['event'] == 'finished')
+        final_client = next(e for e in client_events if e['event'] == 'finished')
+        assert server.returncode == client.returncode == 0, (server.returncode, client.returncode, out, err, client.stdout, client.stderr)
+        assert final_server['digest'] == final_client['digest'] and int(final_server['digest'], 16) != 0
+        assert final_client['checkpoints'] > 200, final_client
+        print('impair=', bool(impairment), 'digest=', final_client['digest'],
+              'checkpoints=', final_client['checkpoints'],
+              'corrections=', final_client['corrections'],
+              'replayed=', final_client['replayed'])
+    finally:
+        if server.poll() is None:
+            server.kill()
+            server.communicate()
+]=] $<TARGET_FILE:hello_game>)
+    set_tests_properties(hello_game_play_connect PROPERTIES TIMEOUT 35 LABELS "hello_game")
     add_executable(hello_game_net_proof net_proof.cpp game.cpp)
     target_link_libraries(hello_game_net_proof
         PRIVATE rime::app_game rime::app rime::physics rime::scene rime::net rime::replication)
@@ -106,5 +143,5 @@ if(NOT WIN32)
     set_tests_properties(hello_game_net_proof PROPERTIES TIMEOUT 25 LABELS "hello_game")
     set_tests_properties(hello_game_net_proof_negative PROPERTIES TIMEOUT 75 LABELS "hello_game")
 else()
-    message(STATUS "hello_game_net_proof excluded on Windows: engine/platform has no child-process helper and this proof uses POSIX fork/exec and pipe")
+    message(STATUS "hello_game_net_proof and hello_game_play_connect excluded on Windows: no child-process helper")
 endif()

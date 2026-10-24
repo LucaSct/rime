@@ -96,6 +96,7 @@ public:
     [[nodiscard]] bool has_autopilot() const override { return true; }
 
     [[nodiscard]] rime::app::ActionState autopilot() const override;
+    [[nodiscard]] bool bind_remote_world(rime::ecs::World& world) override;
     [[nodiscard]] std::uint64_t state_digest(const rime::ecs::World& world) const override;
     void present_setup(rime::app::PresentSetupContext& ctx) override;
     void present_frame(rime::app::PresentFrameContext& ctx) override;

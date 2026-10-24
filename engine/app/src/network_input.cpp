@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <optional>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -262,9 +263,32 @@ struct NetworkInputServer::Impl {
                     ++totals.replication_clients_released;
                 }
                 ++totals.clients_left;
-                const auto reason = e.reason == net::DisconnectReason::Graceful   ? "graceful"
-                                    : e.reason == net::DisconnectReason::Replaced ? "replaced"
-                                                                                  : "timeout";
+                // Every reason by its own name. Folding the rest into "timeout" made the server's
+                // OWN graceful close (`LocalClose`, e.g. the end of --linger-ms) read as a dead
+                // client.
+                const auto reason = [&] {
+                    switch (e.reason) {
+                        case net::DisconnectReason::Graceful:
+                            return "graceful";
+                        case net::DisconnectReason::LocalClose:
+                            return "server_closed";
+                        case net::DisconnectReason::Timeout:
+                            return "timeout";
+                        case net::DisconnectReason::Replaced:
+                            return "replaced";
+                        case net::DisconnectReason::ConnectTimeout:
+                            return "connect_timeout";
+                        case net::DisconnectReason::ProtocolMismatch:
+                            return "protocol_mismatch";
+                        case net::DisconnectReason::AppMismatch:
+                            return "app_mismatch";
+                        case net::DisconnectReason::SchemaMismatch:
+                            return "schema_mismatch";
+                        case net::DisconnectReason::ServerFull:
+                            return "server_full";
+                    }
+                    return "unknown";
+                }();
                 event(fmt::format("{{\"event\":\"client_left\",\"reason\":\"{}\"}}", reason));
                 admitted.reset();
                 save_schedule();
@@ -525,6 +549,26 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick) {
         ++impl_->totals.checkpoint_send_refused;
     } else {
         ++impl_->totals.checkpoint_encoded;
+    }
+}
+
+void NetworkInputServer::linger(std::uint64_t final_tick, std::uint32_t duration_ms) {
+    // Authority is frozen here. Re-offer the named final snapshot while acks and reliable spawns
+    // drain; another simulation tick would change the very digest the client must hold at close.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(duration_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        impl_->pump();
+        after_tick(final_tick);
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
+    }
+    if (impl_->admitted) {
+        if (auto* session = impl_->driver.session(*impl_->admitted))
+            session->disconnect();
+    }
+    // Disconnect frames and their resends are emitted by driver.update, not disconnect().
+    for (int i = 0; i < 5; ++i) {
+        impl_->pump();
+        std::this_thread::sleep_for(std::chrono::milliseconds(8));
     }
 }
 

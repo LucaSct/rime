@@ -524,6 +524,23 @@ void HelloGame::present_frame(app::PresentFrameContext& ctx) {
     }
 }
 
+bool HelloGame::bind_remote_world(ecs::World& world) {
+    world_ = &world;
+    pickups_.clear();
+    player_ = owned_player(world);
+    world.query<ReplicatedGameState>().for_each(
+        [&](ecs::Entity entity, const ReplicatedGameState&) { state_entity_ = entity; });
+    world.query<physics::RigidBody, physics::Collider>().for_each(
+        [&](ecs::Entity entity, const physics::RigidBody& body, const physics::Collider& collider) {
+            if (body.motion == kDynamic)
+                crate_ = entity;
+            if (collider.sensor)
+                pickups_.push_back(Pickup{entity, physics::BodyId{}});
+        });
+    return world.is_alive(player_) && world.is_alive(state_entity_) && world.is_alive(crate_) &&
+           pickups_.size() == kPickupCount;
+}
+
 // ── The content ───────────────────────────────────────────────────────────────────────────────
 //
 // The floor: a static slab whose top surface is exactly y = 0, so every other height in this file
@@ -663,7 +680,28 @@ app::GameDefinition definition() {
     // `rime_game_content()` in CMakeLists.txt and are inert once the binary is moved.
     def.register_components = register_components;
     def.remote_play = app::GameDefinition::RemotePlayProfile{
-        register_components, owned_player, prediction_hooks, 1.0 / 60.0, replicated_digest};
+        register_components,
+        owned_player,
+        prediction_hooks,
+        1.0 / 60.0,
+        replicated_digest,
+        [](const app::ActionState& actions) {
+            replication::InputCommand command{};
+            command.move_x = actions.axis(kAxisMoveX);
+            command.move_y = actions.axis(kAxisMoveZ);
+            command.held = actions.held;
+            command.pressed = actions.pressed;
+            return command;
+        },
+        [](ecs::World& mirror, ecs::World& prediction, ecs::Entity mirror_player) {
+            const auto* wt = mirror.get<ecs::WorldTransform>(mirror_player);
+            ReplicatedGameState initial{};
+            mirror.query<ReplicatedGameState>().for_each(
+                [&](ecs::Entity, const ReplicatedGameState& state) { initial = state; });
+            // The controller state lives on a separate entity in the authoritative world. Place
+            // its prediction copy on the player so this world still contains exactly one entity.
+            return prediction.spawn_with(wt ? *wt : ecs::WorldTransform{}, initial);
+        }};
     def.entry_scene = std::string{kEntryScene};
 #if defined(RIME_GAME_CONTENT_DIR) && defined(RIME_GAME_BINARY_DIR)
     def.dev_content_dir = RIME_GAME_CONTENT_DIR;

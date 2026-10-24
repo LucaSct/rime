@@ -33,6 +33,23 @@ struct DelayedBatch {
 
 } // namespace
 
+TEST_CASE("hello-game remote commands round-trip its action slots") {
+    const auto definition = hello_game::definition();
+    REQUIRE(definition.network_input.has_value());
+    REQUIRE(definition.remote_play.has_value());
+    app::ActionState actions{};
+    actions.axes[hello_game::kAxisMoveX] = -0.5f;
+    actions.axes[hello_game::kAxisMoveZ] = 0.75f;
+    actions.held = 1u << hello_game::kButtonQuit;
+    actions.pressed = actions.held;
+    const auto command = definition.remote_play->to_command(actions);
+    const auto again = definition.network_input->to_actions(command);
+    CHECK(again.axis(hello_game::kAxisMoveX) == actions.axis(hello_game::kAxisMoveX));
+    CHECK(again.axis(hello_game::kAxisMoveZ) == actions.axis(hello_game::kAxisMoveZ));
+    CHECK(again.held == actions.held);
+    CHECK(again.pressed == actions.pressed);
+}
+
 TEST_CASE("owner checkpoints refuse a wrong membership and a truncated wire message") {
     const replication::PredictedEntityId player{7, 3};
     std::vector<std::byte> state{std::byte{4}};

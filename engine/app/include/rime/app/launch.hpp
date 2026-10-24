@@ -92,6 +92,15 @@ struct LaunchOptions {
     bool autopilot = false;
     // play only: render off-screen instead of opening a window. (Dedicated renders nothing at all.)
     bool headless = false;
+    std::string connect_host;
+    std::uint16_t connect_port = kDefaultListenPort;
+    bool no_gpu = false;
+    bool no_prediction = false;
+    std::uint32_t net_delay_ms = 0;
+    double net_loss = 0.0;
+    std::uint64_t net_seed = 0;
+    bool net_impair = false;
+    std::uint32_t linger_ms = 0;
     // JobSystem workers; 0 = hardware_concurrency()-1 (AppConfig's rule).
     unsigned workers = 0;
     // --content: the content root, overriding the search (`rime/app/content_root.hpp`). Empty =

@@ -46,6 +46,7 @@ add_library(rime_app_game STATIC
     src/content_root.cpp
     src/game_definition.cpp
     src/launch.cpp
+    src/network_client.cpp
     src/network_input.cpp)
 add_library(rime::app_game ALIAS rime_app_game)
 

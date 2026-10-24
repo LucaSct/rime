@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -20,6 +21,7 @@
 #include <vector>
 
 #include "rime/app/application.hpp"
+#include "rime/app/network_client.hpp"
 #include "rime/app/network_input.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/platform/clock.hpp"
@@ -104,6 +106,11 @@ std::string launch_usage(std::string_view program) {
         "  --frames N    play: run N real-clock frames, then stop\n"
         "  --autopilot   drive the game from its built-in autopilot\n"
         "  --headless    play: render off-screen instead of opening a window\n"
+        "  --connect HOST[:PORT]  play on a remote server (default port 7463)\n"
+        "  --no-gpu     connected play without a device or window\n"
+        "  --no-prediction  display the authoritative local player\n"
+        "  --net-impair delay_ms=D,loss=P,seed=S  connected diagnostics\n"
+        "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
         "  --listen ADDR:PORT  dedicated: bind IPv4 address and port (0 = OS chosen)\n"
         "  --offline    dedicated: run without a network listener\n"
@@ -123,6 +130,7 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
 
     std::size_t i = 0;
     bool port_given = false;
+    bool linger_given = false;
     // The mode word, if any, is FIRST. Positional-first keeps `mygame dedicated --port 7777` and
     // `mygame --port 7777 dedicated` from both being valid spellings of one command, which is how a
     // CLI grows a second, undocumented grammar.
@@ -144,6 +152,53 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             result.options.autopilot = true;
         } else if (arg == "--headless") {
             result.options.headless = true;
+        } else if (arg == "--no-gpu") {
+            result.options.no_gpu = true;
+        } else if (arg == "--no-prediction") {
+            result.options.no_prediction = true;
+        } else if (arg == "--linger-ms") {
+            if (!has_value || linger_given || !parse_uint(args[++i], result.options.linger_ms))
+                return fail("--linger-ms needs a non-negative integer");
+            linger_given = true;
+        } else if (arg == "--connect") {
+            if (!has_value || !result.options.connect_host.empty())
+                return fail("--connect needs HOST[:PORT] once");
+            const auto address = args[++i];
+            if (address.starts_with("["))
+                return fail("IPv6 is not supported yet");
+            const auto colon = address.find(':');
+            const auto host = address.substr(0, colon);
+            if (host.empty() ||
+                (colon != std::string_view::npos &&
+                 (address.find(':', colon + 1) != std::string_view::npos ||
+                  !parse_uint(address.substr(colon + 1), result.options.connect_port) ||
+                  result.options.connect_port == 0)))
+                return fail("--connect needs HOST[:PORT] with port 1..65535");
+            result.options.connect_host = host == "localhost" ? "127.0.0.1" : std::string(host);
+            if (!platform::Endpoint::from_string(result.options.connect_host,
+                                                 result.options.connect_port))
+                return fail("--connect needs a numeric IPv4 address or localhost");
+        } else if (arg == "--net-impair") {
+            if (!has_value || result.options.net_impair)
+                return fail("--net-impair needs delay_ms=D,loss=P,seed=S once");
+            const auto value = args[++i];
+            const auto a = value.find(',');
+            const auto b = a == std::string_view::npos ? a : value.find(',', a + 1);
+            if (a == std::string_view::npos || b == std::string_view::npos ||
+                !value.substr(0, 9).starts_with("delay_ms=") || value.substr(a + 1, 5) != "loss=" ||
+                value.substr(b + 1, 5) != "seed=" ||
+                !parse_uint(value.substr(9, a - 9), result.options.net_delay_ms) ||
+                !parse_uint(value.substr(b + 6), result.options.net_seed))
+                return fail("--net-impair needs delay_ms=D,loss=P,seed=S");
+            const auto loss_text = value.substr(a + 6, b - a - 6);
+            const auto* begin = loss_text.data();
+            const auto [end, ec] =
+                std::from_chars(begin, begin + loss_text.size(), result.options.net_loss);
+            if (ec != std::errc{} || end != begin + loss_text.size() ||
+                !std::isfinite(result.options.net_loss) || result.options.net_loss < 0.0 ||
+                result.options.net_loss >= 1.0)
+                return fail("--net-impair loss must be in [0,1)");
+            result.options.net_impair = true;
         } else if (arg == "--ticks") {
             if (!has_value || !parse_uint(args[++i], result.options.ticks) ||
                 result.options.ticks == 0) {
@@ -228,6 +283,17 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         (result.options.mode != LaunchMode::Dedicated || result.options.offline)) {
         return fail("--input-trace requires listening dedicated mode");
     }
+    if (!result.options.connect_host.empty() && result.options.mode != LaunchMode::Play)
+        return fail("--connect requires play mode");
+    if (!result.options.connect_host.empty() &&
+        (result.options.ticks > 0 || port_given || !result.options.content_dir.empty()))
+        return fail("connected play does not use --ticks, --port or --content");
+    if ((result.options.no_gpu || result.options.no_prediction || result.options.net_impair) &&
+        result.options.connect_host.empty())
+        return fail("--no-gpu, --no-prediction and --net-impair require --connect");
+    if (linger_given && (result.options.mode != LaunchMode::Dedicated || result.options.offline ||
+                         result.options.ticks == 0))
+        return fail("--linger-ms requires bounded listening dedicated mode");
     return result;
 }
 
@@ -237,6 +303,8 @@ RunReport run_game_mode(const LaunchOptions& options,
     RunReport report{};
     report.mode = options.mode;
     const bool listening = options.mode == LaunchMode::Dedicated && !options.offline;
+    if (!options.connect_host.empty())
+        return run_network_client(options, definition, hooks);
 
     // ── 1. The modes this build cannot run, refused by name before anything is constructed ──────
     switch (options.mode) {
@@ -530,6 +598,8 @@ RunReport run_game_mode(const LaunchOptions& options,
             std::this_thread::sleep_until(deadline);
             (void)app.step(app.fixed_dt());
         }
+        if (options.linger_ms > 0 && game_ticks > 0)
+            network->linger(game_ticks - 1, options.linger_ms);
     } else if (options.ticks > 0) {
         // Bounded and deterministic: a frame dt equal to the fixed dt is exactly one tick per step,
         // with no wall clock anywhere — which is what makes two runs (two modes, two thread counts)
