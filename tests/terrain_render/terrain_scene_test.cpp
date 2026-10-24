@@ -186,6 +186,63 @@ Probe draw_scene_tile(rhi::Device& device,
 }
 } // namespace
 
+TEST_CASE("terrain shadow lateral clip keeps an inside tile and rejects four outside tiles") {
+    const core::Mat4 vp = core::ortho(-1.0f, 1.0f, -1.0f, 1.0f, 0.1f, 10.0f);
+    CHECK_FALSE(terrain_tile_outside_clip({-0.5f, -0.5f, -2.0f}, {0.5f, 0.5f, -1.0f}, vp));
+    CHECK(terrain_tile_outside_clip({-3.0f, -0.5f, -2.0f}, {-2.0f, 0.5f, -1.0f}, vp));
+    CHECK(terrain_tile_outside_clip({2.0f, -0.5f, -2.0f}, {3.0f, 0.5f, -1.0f}, vp));
+    CHECK(terrain_tile_outside_clip({-0.5f, 2.0f, -2.0f}, {0.5f, 3.0f, -1.0f}, vp));
+    CHECK(terrain_tile_outside_clip({-0.5f, -3.0f, -2.0f}, {0.5f, -2.0f, -1.0f}, vp));
+}
+
+TEST_CASE("terrain shadow lateral clip retains a tile crossing an edge") {
+    const core::Mat4 vp = core::ortho(-1.0f, 1.0f, -1.0f, 1.0f, 0.1f, 10.0f);
+    CHECK_FALSE(terrain_tile_outside_clip({0.5f, -0.5f, -2.0f}, {1.5f, 0.5f, -1.0f}, vp));
+}
+
+TEST_CASE("terrain shadow lateral clip retains a tile behind the near plane") {
+    const core::Mat4 vp = core::ortho(-1.0f, 1.0f, -1.0f, 1.0f, 0.1f, 10.0f);
+    // Positive view Z lies before this orthographic camera's near plane; lateral coverage alone
+    // cannot rule out a shadow caster there.
+    CHECK_FALSE(terrain_tile_outside_clip({-0.5f, -0.5f, 1.0f}, {0.5f, 0.5f, 2.0f}, vp));
+}
+
+TEST_CASE("terrain shadow batch culls an outside tile in one cascade pass") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (test::vulkan_required())
+            FAIL("Vulkan device required");
+        return;
+    }
+    TerrainPass pass(*device);
+    const auto inside = pass.upload(flat_tile());
+    auto far_tile = flat_tile();
+    far_tile.origin.x = 100.0f;
+    const auto outside = pass.upload(far_tile);
+    REQUIRE(inside != kInvalidTerrainTile);
+    REQUIRE(outside != kInvalidTerrainTile);
+    const core::Vec3 eye{0.0f, 8.0f, 0.0f};
+    const core::Mat4 vp = core::ortho(-5.0f, 5.0f, -5.0f, 5.0f, 0.1f, 20.0f) *
+                          core::look_at(eye, {0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, -1.0f});
+    RenderGraph graph(*device);
+    graph.reset();
+    const auto depth = graph.create_texture({{kSize, kSize}, kDepthFormat, "terrain-shadow-depth"});
+    const RGDepthAttachment clear{
+        depth, rhi::LoadOp::Clear, rhi::StoreOp::Store, 1.0f, 0, false, 0};
+    RenderGraph::RasterPassDesc clear_desc{};
+    clear_desc.depth = &clear;
+    graph.add_raster_pass("clear-shadow-depth", clear_desc, [](rhi::CommandBuffer&) {});
+    const std::array<TerrainShadowDraw, 2> draws{{{inside, {}}, {outside, {}}}};
+    pass.add_shadow_casters(graph, depth, 0, draws, vp, eye);
+    CHECK(graph.pass_count() == 2); // one clear and one batch, even with two tiles
+    graph.export_texture(depth);
+    auto cmd = device->begin_commands();
+    graph.execute(*cmd);
+    device->submit_blocking(*cmd);
+    CHECK(pass.shadow_tiles_drawn() == 1);
+    CHECK(pass.shadow_tiles_culled() == 1);
+}
+
 TEST_CASE("terrain scene variants write depth, material and unjittered camera velocity") {
     auto device = rhi::create_device({});
     if (!device) {

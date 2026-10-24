@@ -78,6 +78,47 @@ void fill_grid_indices(std::uint32_t columns, std::uint32_t rows, std::vector<st
 
 } // namespace
 
+bool terrain_tile_outside_clip(core::Vec3 aabb_min,
+                               core::Vec3 aabb_max,
+                               const core::Mat4& view_proj) noexcept {
+    const auto finite = [](float v) { return std::isfinite(v); };
+    if (!finite(aabb_min.x) || !finite(aabb_min.y) || !finite(aabb_min.z) || !finite(aabb_max.x) ||
+        !finite(aabb_max.y) || !finite(aabb_max.z) || aabb_min.x > aabb_max.x ||
+        aabb_min.y > aabb_max.y || aabb_min.z > aabb_max.z)
+        return false;
+    for (int row = 0; row < 4; ++row)
+        for (int col = 0; col < 4; ++col)
+            if (!finite(view_proj.at(row, col)))
+                return false;
+
+    bool left = true, right = true, below = true, above = true;
+    for (float x : {aabb_min.x, aabb_max.x}) {
+        for (float y : {aabb_min.y, aabb_max.y}) {
+            for (float z : {aabb_min.z, aabb_max.z}) {
+                const double point[4] = {x, y, z, 1.0};
+                double clip[4] = {};
+                for (int row = 0; row < 4; ++row)
+                    for (int col = 0; col < 4; ++col)
+                        clip[row] += static_cast<double>(view_proj.at(row, col)) * point[col];
+                if (!std::isfinite(clip[0]) || !std::isfinite(clip[1]) || !std::isfinite(clip[3]))
+                    return false;
+                // Shader float products may round outward; an uncertainty margin makes edge
+                // contact survive even when the CPU's double-precision result is just outside.
+                const double margin =
+                    64.0 * std::numeric_limits<float>::epsilon() *
+                    (std::abs(clip[0]) + std::abs(clip[1]) + std::abs(clip[3]) + 1.0);
+                left &= clip[0] < -clip[3] - margin;
+                right &= clip[0] > clip[3] + margin;
+                below &= clip[1] < -clip[3] - margin;
+                above &= clip[1] > clip[3] + margin;
+            }
+        }
+    }
+    // The existing frustum extractor uses Vulkan's z=0..w convention, but shadow casters
+    // need no z rejection; only these four shared homogeneous inequalities apply.
+    return left || right || below || above;
+}
+
 TerrainPush terrain_push(const TerrainTile& tile,
                          const core::Mat4& view_proj,
                          const core::Vec3& eye,
@@ -751,22 +792,99 @@ void TerrainPass::add_scene(RenderGraph& graph,
              true);
 }
 
-void TerrainPass::add_shadow_caster(RenderGraph& graph,
-                                    RGTexture cascades,
-                                    std::uint32_t layer,
-                                    TerrainTileId id,
-                                    const core::Mat4& view_proj,
-                                    const core::Vec3& eye,
-                                    const TerrainLodDraw& lod) {
-    if (!contains(id)) {
+void TerrainPass::add_shadow_casters(RenderGraph& graph,
+                                     RGTexture cascades,
+                                     std::uint32_t layer,
+                                     std::span<const TerrainShadowDraw> draws,
+                                     const core::Mat4& view_proj,
+                                     const core::Vec3& eye) {
+    if (draws.empty())
         return;
+
+    struct ShadowCommand {
+        rhi::TextureHandle heights;
+        rhi::BufferHandle indices;
+        std::uint32_t index_count;
+        TerrainPush push;
+    };
+
+    std::vector<ShadowCommand> commands;
+    std::vector<RGTexture> sampled;
+    commands.reserve(draws.size());
+    sampled.reserve(draws.size());
+    for (const TerrainShadowDraw& draw : draws) {
+        if (!contains(draw.tile))
+            continue;
+        const TerrainTile& tile = tiles_[draw.tile];
+        const TerrainLodDraw& lod = draw.lod;
+        // LOD vertices use global sample indices rather than tile.origin. Bound the actual
+        // shader placement so an edge tile cannot be rejected because the two round differently.
+        const float first_x =
+            lod.enabled ? lod.grid_origin.x + static_cast<float>(lod.base_x) * tile.cell_size_x
+                        : tile.origin.x;
+        const float last_x =
+            lod.enabled
+                ? lod.grid_origin.x +
+                      static_cast<float>(lod.base_x + static_cast<std::int32_t>(tile.columns - 1)) *
+                          tile.cell_size_x
+                : tile.origin.x + static_cast<float>(tile.columns - 1) * tile.cell_size_x;
+        const float first_z =
+            lod.enabled ? lod.grid_origin.z + static_cast<float>(lod.base_z) * tile.cell_size_z
+                        : tile.origin.z;
+        const float last_z =
+            lod.enabled
+                ? lod.grid_origin.z +
+                      static_cast<float>(lod.base_z + static_cast<std::int32_t>(tile.rows - 1)) *
+                          tile.cell_size_z
+                : tile.origin.z + static_cast<float>(tile.rows - 1) * tile.cell_size_z;
+        const float base_y = (lod.enabled ? lod.grid_origin.y : tile.origin.y) + tile.height_offset;
+        const float top_y = base_y + tile.height_scale * 65535.0f;
+        core::Vec3 minimum{std::min(first_x, last_x), base_y, std::min(first_z, last_z)};
+        core::Vec3 maximum{std::max(first_x, last_x), top_y, std::max(first_z, last_z)};
+        // Morphing interpolates sample heights, so it stays inside the R16 range. Pad for the
+        // different float operation orders in bounds construction and terrain.vert.
+        const auto pad = [](float lo, float hi, float origin, float extent) {
+            return 32.0f * std::numeric_limits<float>::epsilon() *
+                   std::max({1.0f, std::abs(lo), std::abs(hi), std::abs(origin), std::abs(extent)});
+        };
+        const float px = pad(minimum.x,
+                             maximum.x,
+                             lod.enabled ? lod.grid_origin.x : tile.origin.x,
+                             static_cast<float>(tile.columns - 1) * tile.cell_size_x);
+        const float py = pad(minimum.y,
+                             maximum.y,
+                             lod.enabled ? lod.grid_origin.y : tile.origin.y,
+                             tile.height_scale * 65535.0f);
+        const float pz = pad(minimum.z,
+                             maximum.z,
+                             lod.enabled ? lod.grid_origin.z : tile.origin.z,
+                             static_cast<float>(tile.rows - 1) * tile.cell_size_z);
+        minimum.x -= px;
+        minimum.y -= py;
+        minimum.z -= pz;
+        maximum.x += px;
+        maximum.y += py;
+        maximum.z += pz;
+        if (terrain_tile_outside_clip(minimum, maximum, view_proj)) {
+            ++shadow_culled_;
+            continue;
+        }
+        // Bake flags are fragment-only; clear them so the push block describes geometry alone.
+        TerrainLodDraw geometry = lod;
+        geometry.own_bake = false;
+        geometry.parent_bake = false;
+        commands.push_back({tile.heights,
+                            tile.indices,
+                            tile.index_count,
+                            terrain_push(tile, view_proj, eye, TerrainLight{}, geometry)});
+        sampled.push_back(graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead));
+        ++shadow_drawn_;
     }
-    const TerrainTile& tile = tiles_[id];
-    // Bake flags are fragment-only; clear them so the push block describes geometry alone.
-    TerrainLodDraw geometry = lod;
-    geometry.own_bake = false;
-    geometry.parent_bake = false;
-    const TerrainPush push = terrain_push(tile, view_proj, eye, TerrainLight{}, geometry);
+    // Every tile culled (a tight near cascade looking away from the hills): declare nothing. An
+    // empty pass would still LOAD and STORE the whole 2048² layer, which on a CPU rasterizer is
+    // most of what this function exists to stop paying for.
+    if (commands.empty())
+        return;
     RGDepthAttachment depth_att{};
     depth_att.texture = cascades;
     depth_att.load = rhi::LoadOp::Load; // the cascade was cleared by its mesh pass
@@ -774,22 +892,19 @@ void TerrainPass::add_shadow_caster(RenderGraph& graph,
     depth_att.layer = layer;
     RenderGraph::RasterPassDesc desc{};
     desc.depth = &depth_att;
-    const RGTexture sampled[] = {
-        graph.import_texture(tile.heights, rhi::ResourceState::ShaderRead)};
     desc.sampled = sampled;
     graph.add_raster_pass("terrain-shadow",
                           desc,
                           [pipeline = shadow_pipeline_,
                            sampler = sampler_,
-                           heights = tile.heights,
-                           indices = tile.indices,
-                           index_count = tile.index_count,
-                           push](rhi::CommandBuffer& cmd) {
+                           commands = std::move(commands)](rhi::CommandBuffer& cmd) {
                               cmd.bind_pipeline(pipeline);
-                              cmd.bind_texture(0, heights, sampler);
-                              cmd.bind_index_buffer(indices, rhi::IndexType::Uint32);
-                              cmd.push_constants(&push, sizeof(push));
-                              cmd.draw_indexed(index_count);
+                              for (const ShadowCommand& draw : commands) {
+                                  cmd.bind_texture(0, draw.heights, sampler);
+                                  cmd.bind_index_buffer(draw.indices, rhi::IndexType::Uint32);
+                                  cmd.push_constants(&draw.push, sizeof(draw.push));
+                                  cmd.draw_indexed(draw.index_count);
+                              }
                           });
 }
 

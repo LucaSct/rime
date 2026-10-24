@@ -1261,14 +1261,19 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
             const core::Vec3 shadow_eye{fu.camera_pos[0], fu.camera_pos[1], fu.camera_pos[2]};
             CascadedShadowMap::ExtraCasters terrain_casters;
             if (terrain_pass_ != nullptr && !terrain_draws_.empty()) {
-                terrain_casters = [this, shadow_eye](RenderGraph& g,
-                                                     RGTexture cascades,
-                                                     std::uint32_t layer,
-                                                     const core::Mat4& light_vp) {
-                    for (const TerrainSceneDraw& draw : terrain_draws_) {
-                        terrain_pass_->add_shadow_caster(
-                            g, cascades, layer, draw.tile, light_vp, shadow_eye, draw.lod);
-                    }
+                // TerrainPass keeps the tile/LOD boundary; convert once before the three
+                // cascade callbacks rather than rebuilding a draw list for every layer.
+                std::vector<TerrainShadowDraw> shadow_draws;
+                shadow_draws.reserve(terrain_draws_.size());
+                for (const TerrainSceneDraw& draw : terrain_draws_)
+                    shadow_draws.push_back({draw.tile, draw.lod});
+                terrain_casters = [this, shadow_eye, shadow_draws = std::move(shadow_draws)](
+                                      RenderGraph& g,
+                                      RGTexture cascades,
+                                      std::uint32_t layer,
+                                      const core::Mat4& light_vp) {
+                    terrain_pass_->add_shadow_casters(
+                        g, cascades, layer, shadow_draws, light_vp, shadow_eye);
                 };
             }
             shadow = csm_.add(graph, depth_prepass_, shadow_data, ci, lighting_, terrain_casters);
