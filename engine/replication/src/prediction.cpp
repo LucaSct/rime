@@ -137,8 +137,8 @@ CheckpointEncode encode_owner_checkpoint(const OwnerCheckpoint& checkpoint,
 }
 
 CheckpointRefusal decode_owner_checkpoint_prefix(std::span<const std::byte> in,
-                                                  OwnerCheckpoint& out,
-                                                  std::size_t& consumed) {
+                                                 OwnerCheckpoint& out,
+                                                 std::size_t& consumed) {
     if (in.size() > kCheckpointMaxMessageBytes)
         return CheckpointRefusal::MessageTooLarge;
     if (in.size() < kOwnerCheckpointHeaderBytes)
