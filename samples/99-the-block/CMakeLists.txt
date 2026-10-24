@@ -225,9 +225,18 @@ add_test(NAME the_block_environment_smoke COMMAND the_block --environment-smoke)
 # the matrix can produce is the sanitizer build on the slow runner, ~1160 s extrapolated, so
 # 1800 s leaves headroom without being so large that a genuine hang sits in the queue for an
 # hour. Raise it if the street grows again; the number is a measurement, not a convention.
+#
+# It grew again, and this is the re-measurement (oct24, on a05f676's parent): **714.5 s** on the
+# faster runner in Debug -- 3.8x the 189 s above -- and a CTest Timeout at 1800 s on the slower one,
+# which runs the_block_headless 3.96x slower than here (31.21 s vs 7.88 s), predicting ~2830 s. It
+# is plain CPU cost, not a stall: sampling 150 s of the run, the 32 llvmpipe worker threads used
+# 848 CPU-seconds against 185 for every engine thread together, so lavapipe rasterizing the street
+# is ~82 % of the work. 3600 covers the Debug build on the slow runner with ~27 % headroom. It does
+# NOT cover the sanitizer build there (~1.4x, ~3960 s predicted) -- the fix for that is making each
+# frame cheaper (what grew 189 -> 714 s is unmeasured), not another raise.
 set_tests_properties(the_block_environment_smoke PROPERTIES
     FIXTURES_REQUIRED block_demo_cook
-    TIMEOUT 1800)
+    TIMEOUT 3600)
 
 add_test(NAME the_block_effects_smoke COMMAND the_block --effects-smoke)
 set_tests_properties(the_block_effects_smoke PROPERTIES
