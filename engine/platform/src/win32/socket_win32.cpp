@@ -341,6 +341,12 @@ UdpSocket::bind(std::uint16_t port, std::string_view host, bool reuse_address) {
     }
 
     SOCKET s = INVALID_SOCKET;
+    // The bind's own error, kept across the cleanup below. Winsock's last error is thread-local
+    // state that closesocket, freeaddrinfo and the logger's console write are all free to
+    // overwrite, so a caller asking WSAGetLastError() after a failed bind -- the dedicated
+    // listener names the failure in its `bind_failed` event -- read a stale 0 and reported
+    // EUNKNOWN on Windows where Linux said EADDRINUSE (CI on #349). Restored just before return.
+    int bind_error = 0;
     for (addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
         s = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (s == INVALID_SOCKET) {
@@ -363,13 +369,15 @@ UdpSocket::bind(std::uint16_t port, std::string_view host, bool reuse_address) {
         if (::bind(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0) {
             break;
         }
+        bind_error = ::WSAGetLastError(); // read NOW: closesocket and logging may overwrite it
         ::closesocket(s);
         s = INVALID_SOCKET;
     }
     ::freeaddrinfo(results);
 
     if (s == INVALID_SOCKET) {
-        RIME_WARN("udp bind {}:{}: WSA error {}", host, port, ::WSAGetLastError());
+        RIME_WARN("udp bind {}:{}: WSA error {}", host, port, bind_error);
+        ::WSASetLastError(bind_error); // the contract: on failure, the last error is the bind's
         return std::nullopt;
     }
     // Non-blocking from birth: recv_from polls and returns nullopt when nothing waits.
