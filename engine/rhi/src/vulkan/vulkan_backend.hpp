@@ -81,6 +81,17 @@ struct VulkanPipeline {
     // draw (VulkanCommandBuffer::flush_bindings), and `bindings` is what it validates against.
     VkDescriptorSetLayout set_layout = VK_NULL_HANDLE;
     std::vector<BindingDesc> bindings;
+    // The Vulkan descriptor type each entry of `bindings` was ACTUALLY given in `set_layout` (same
+    // index). Usually to_vk(bindings[i].type) — except that up to kMaxDynamicUniforms uniform
+    // buffers are silently promoted to UNIFORM_BUFFER_DYNAMIC (see dynamic_index below). The
+    // public BindingType is untouched, so callers and validation still see "UniformBuffer".
+    std::vector<VkDescriptorType> vk_types;
+    // For each entry of `bindings`: which dynamic-offset slot it feeds (0 or 1), or -1 if it is
+    // an ordinary descriptor. Vulkan consumes pDynamicOffsets in ASCENDING BINDING NUMBER order,
+    // not in declaration order, so the slot is assigned by sorting the promoted binding numbers
+    // — a caller declaring {binding 3, binding 1} still gets binding 1 in slot 0.
+    std::vector<std::int8_t> dynamic_index;
+    std::uint32_t dynamic_count = 0; // number of promoted bindings (0 .. kMaxDynamicUniforms)
     // Stage mask of the pipeline's push-constant range (0 = none). push_constants() needs it
     // because vkCmdPushConstants must be told which stages the data is for, and it must match the
     // range.
@@ -89,6 +100,80 @@ struct VulkanPipeline {
 
 struct VulkanSampler {
     VkSampler sampler = VK_NULL_HANDLE;
+};
+
+// The highest set-0 binding index a pipeline may declare (VulkanCommandBuffer::kMaxBindings has
+// the history). Hoisted to namespace scope so pipeline creation can refuse to promote a binding
+// the encoder could never read.
+inline constexpr std::uint32_t kMaxSetBindings = 24;
+
+// How many uniform buffers per pipeline the backend promotes to UNIFORM_BUFFER_DYNAMIC. Two
+// covers the shape the hot passes actually have — one per-draw slice (object constants) and one
+// per-view/per-material slice — and Vulkan guarantees maxDescriptorSetUniformBuffersDynamic >= 8,
+// so two is always within the device limit (still clamped to the queried limit).
+inline constexpr std::uint32_t kMaxDynamicUniforms = 2;
+
+// A bounded, per-encoder cache of IMMUTABLE descriptor sets (the descriptor-cache brick).
+//
+// WHY. ADR-0020 baked one transient set per draw: vkAllocateDescriptorSets +
+// vkUpdateDescriptorSets on every draw. In a city frame (~6.8k draws) that is the dominant CPU
+// cost of recording. But most consecutive draws differ only in WHERE in one big uniform buffer
+// their per-draw constants live. The classic fix is two techniques together:
+//
+//   * DYNAMIC UNIFORM BUFFERS: the descriptor names (buffer, base 0, range) and the per-draw
+//     offset travels separately in vkCmdBindDescriptorSets' pDynamicOffsets. Two draws that only
+//     moved the slice now want the SAME descriptor contents.
+//   * SET CACHING: identical contents -> reuse the set already written. A set is written exactly
+//     once and never modified afterwards (rewriting a set a recorded command still references is
+//     undefined behaviour), so a cache hit is a pure re-bind.
+//
+// KEY. Exact identity of the set layout plus a CANONICAL encoding of each active binding in the
+// pipeline's declared order: (buffer, descriptor base offset, range) for buffers,
+// (view, sampler, image layout) for images. Built field by field from the active members only —
+// never a memcmp over a struct with padding or stale inactive fields. The dynamic offset is the
+// ONE thing excluded, because it is not part of the set. Resource CONTENTS are not in the key and
+// must not be: a descriptor names memory, it does not snapshot it (ordering is the barriers' job).
+//
+// SHAPE. 128 buckets x 2 ways, collision-checked against the full key. A miss into a full bucket
+// evicts the least-recently-used way: the cache FORGETS that set, it never frees or rewrites it —
+// the set stays alive in its pool for any command already recorded against it.
+//
+// LIFETIME CONTRACT. Every cached set lives in a transient pool owned by the same encoder, so the
+// table is invalidated (generation bump) and handed back to the device at exactly the moment the
+// encoder hands its pools back — release_descriptor_pools() or the destructor — i.e. before any of
+// those pools can be reset. A cached set can therefore never outlive its pool, and no encoder ever
+// sees another encoder's sets. Tables are pooled on the device like the descriptor pools so a
+// per-frame encoder does not pay a ~160 KB allocation; nothing is allocated per draw.
+struct VulkanDescriptorCache {
+    static constexpr std::uint32_t kBuckets = 128;
+    static constexpr std::uint32_t kWays = 2; // 256 entries total
+
+    // One canonical binding payload. Buffers: {VkBuffer, base offset, range}. Images:
+    // {VkImageView, VkSampler, VkImageLayout}. A declared-but-unattached binding is all zeros
+    // (that set is written without it, exactly as the uncached path does). Three plain uint64s:
+    // no padding, so == is total over the key.
+    struct Slot {
+        std::uint64_t a = 0;
+        std::uint64_t b = 0;
+        std::uint64_t c = 0;
+
+        friend bool operator==(const Slot&, const Slot&) = default;
+    };
+
+    struct Entry {
+        std::uint64_t generation = 0; // live iff == VulkanDescriptorCache::generation
+        std::uint64_t hash = 0;
+        std::uint64_t last_use = 0; // per-table use stamp; the smaller way is evicted
+        VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        std::uint32_t count = 0; // slots[0, count) are the key
+        std::array<Slot, kMaxSetBindings> slots{};
+    };
+
+    // Bumped on every acquire, so a recycled table starts empty without touching 256 entries.
+    std::uint64_t generation = 1;
+    std::uint64_t clock = 0;
+    std::array<Entry, kBuckets * kWays> entries{};
 };
 
 class VulkanCommandBuffer; // defined below; VulkanDevice::submit_with_sync takes one by reference
@@ -165,6 +250,35 @@ public:
     [[nodiscard]] VkDescriptorPool acquire_descriptor_pool();
     void recycle_descriptor_pool(VkDescriptorPool pool) noexcept;
 
+    // Descriptor-set cache tables (see VulkanDescriptorCache). Same free-list discipline as the
+    // pools above; acquire returns an EMPTY table (its generation is bumped). Recycling needs no
+    // GPU wait — a table holds no Vulkan object, only handles into pools the caller is returning
+    // in the same breath.
+    [[nodiscard]] std::unique_ptr<VulkanDescriptorCache> acquire_descriptor_cache();
+    void recycle_descriptor_cache(std::unique_ptr<VulkanDescriptorCache> cache) noexcept;
+
+    // The descriptor-cache A/B switch, read ONCE at device creation from RIME_VK_DESCRIPTOR_CACHE
+    // ("0" disables, anything else / unset enables). Off restores the ADR-0020 path exactly: no
+    // dynamic-UBO promotion in pipeline creation, the original pool sizes, and one freshly
+    // allocated + written set per draw. Device-wide and fixed for the device's life on purpose —
+    // a pipeline's layout and an encoder's path must agree, and a per-draw switch could not
+    // guarantee that.
+    [[nodiscard]] bool descriptor_cache_enabled() const noexcept {
+        return descriptor_cache_enabled_;
+    }
+
+    // RIME_VK_DESCRIPTOR_STATS=1 (read once at creation): each encoder logs ONE counter line when
+    // it hands its descriptor pools back. Off by default; nothing is logged on the hot path.
+    [[nodiscard]] bool descriptor_stats_enabled() const noexcept {
+        return descriptor_stats_enabled_;
+    }
+
+    // limits.minUniformBufferOffsetAlignment: a dynamic offset that is not a multiple of it is
+    // invalid, so such a slice is encoded the old way (offset in the descriptor) instead.
+    [[nodiscard]] VkDeviceSize min_uniform_offset_alignment() const noexcept {
+        return min_uniform_offset_alignment_;
+    }
+
     // GPU-timing facts the encoder needs (M5.3): whether the graphics queue can timestamp at all
     // (timestampValidBits > 0) and the tick→nanosecond scale (limits.timestampPeriod).
     [[nodiscard]] bool timestamps_supported() const noexcept { return timestamps_supported_; }
@@ -228,6 +342,12 @@ private:
     VkQueue graphics_queue_ = VK_NULL_HANDLE;
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorPool> descriptor_pool_free_list_; // recycled transient pools
+    std::vector<std::unique_ptr<VulkanDescriptorCache>> descriptor_cache_free_list_;
+    bool descriptor_cache_enabled_ = true;  // RIME_VK_DESCRIPTOR_CACHE != "0" at creation
+    bool descriptor_stats_enabled_ = false; // RIME_VK_DESCRIPTOR_STATS == "1" at creation
+    // limits.maxDescriptorSetUniformBuffersDynamic, clamped to kMaxDynamicUniforms.
+    std::uint32_t max_dynamic_uniforms_ = 0;
+    VkDeviceSize min_uniform_offset_alignment_ = 256; // limits.minUniformBufferOffsetAlignment
 
     // In-flight async submissions (submit()/is_complete()/wait(), ADR-0030 s1.1). Each entry keeps
     // its fence AND the command buffer alive until the GPU signals — the command buffer owns the
@@ -286,7 +406,7 @@ private:
 class VulkanCommandBuffer final : public CommandBuffer {
 public:
     VulkanCommandBuffer(VulkanDevice& device, VkCommandBuffer cmd) noexcept
-        : device_(device), cmd_(cmd) {}
+        : device_(device), cmd_(cmd), cache_enabled_(device.descriptor_cache_enabled()) {}
 
     // An encoder that was never submitted still owns its transient descriptor pools; hand them
     // straight back (nothing was submitted, so the pools are provably idle). Submitted encoders
@@ -346,7 +466,11 @@ public:
     // recycling them once the submission's fence has been waited (submit_blocking does it
     // immediately after its wait; the swapchain defers to when the frame slot recurs — the same
     // discipline as its deferred command-buffer free).
+    //
+    // The descriptor-set cache dies here too, BEFORE the pools can be reset: every set it names
+    // lives in one of these pools (see VulkanDescriptorCache's lifetime contract).
     [[nodiscard]] std::vector<VkDescriptorPool> release_descriptor_pools() noexcept {
+        drop_descriptor_cache();
         return std::move(pools_);
     }
 
@@ -360,6 +484,9 @@ private:
         VkBuffer buffer = VK_NULL_HANDLE; // UniformBuffer / StorageBuffer
         VkDeviceSize offset = 0;
         VkDeviceSize range = VK_WHOLE_SIZE;
+        // Whole size of `buffer` (UniformBuffer only): lets flush prove a dynamic slice stays in
+        // bounds before encoding it with a base offset of 0.
+        VkDeviceSize buffer_size = 0;
         VkImageView view = VK_NULL_HANDLE; // CombinedImageSampler / StorageImage
         VkSampler sampler = VK_NULL_HANDLE;
         // The layout the descriptor promises the image is in when accessed: SHADER_READ_ONLY for
@@ -376,7 +503,7 @@ private:
     // whatever wires a shadow-cascade sampler into a lighting compute pass next — still safe on
     // MoltenVK at 24 (Metal's per-stage floors are ~16 samplers / ~31 buffers; a shadowed forward
     // shader sits at ~9 samplers / ~8 buffers, comfortably under both).
-    static constexpr std::uint32_t kMaxBindings = 24;
+    static constexpr std::uint32_t kMaxBindings = kMaxSetBindings;
 
     // Bake the pending bindings into one transient descriptor set and bind it (ADR-0020).
     // Called by draw/draw_indexed when `bindings_dirty_`; no-op for pipelines with no layout.
@@ -387,6 +514,24 @@ private:
     // growth, not failure).
     [[nodiscard]] VkDescriptorSet allocate_transient_set(VkDescriptorSetLayout layout);
 
+    // Invalidate the descriptor-set cache and hand its table back to the device; also emits the
+    // RIME_VK_DESCRIPTOR_STATS line (once per encoder). Idempotent.
+    void drop_descriptor_cache() noexcept;
+
+    // Per-encoder counters behind RIME_VK_DESCRIPTOR_STATS. Always counted (a handful of
+    // increments per draw); only ever printed when the device flag is on.
+    struct DescriptorStats {
+        std::uint64_t draws = 0;           // draw / draw_indexed / draw_indexed_indirect / dispatch
+        std::uint64_t binds = 0;           // vkCmdBindDescriptorSets calls
+        std::uint64_t dynamic_binds = 0;   // ... of which carried >= 1 dynamic offset
+        std::uint64_t allocations = 0;     // vkAllocateDescriptorSets successes
+        std::uint64_t updates = 0;         // vkUpdateDescriptorSets calls
+        std::uint64_t hits = 0;            // cache hits (no allocation, no update)
+        std::uint64_t misses = 0;          // cache lookups that had to allocate
+        std::uint64_t evictions = 0;       // misses that displaced a live entry
+        std::uint64_t static_fallback = 0; // promoted UBO encoded with its offset in the set
+    };
+
     VulkanDevice& device_;
     VkCommandBuffer cmd_ = VK_NULL_HANDLE;
     VulkanPipeline* current_pipeline_ =
@@ -395,6 +540,12 @@ private:
     bool bindings_dirty_ = false; // a bind_* or pipeline switch happened since the last flush
     bool in_rendering_ = false;   // inside begin/end_rendering (barriers are illegal there)
     std::vector<VkDescriptorPool> pools_; // transient pools this encoder drew sets from
+    // Descriptor-set cache (null until the first flush that wants it; returned to the device by
+    // drop_descriptor_cache). cache_enabled_ is the device switch, copied once at construction.
+    std::unique_ptr<VulkanDescriptorCache> cache_;
+    bool cache_enabled_ = true;
+    bool stats_emitted_ = false;
+    DescriptorStats stats_{};
     // GPU timing (M5.3): a lazily-created kMaxTimestamps-slot query pool, reset in full on first
     // use. Owned by the encoder (destroyed with it), so read_timestamps stays valid after
     // submit_blocking while the caller still holds the encoder.

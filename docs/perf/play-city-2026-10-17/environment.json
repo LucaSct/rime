@@ -1,0 +1,15 @@
+{
+  "gpu": "NVIDIA GeForce RTX 3060, 615.78.08",
+  "kernel": "7.2.10-1-cachyos",
+  "compositor": "Hyprland 0.56.2 built from branch v0.56.2 at commit efb50993780079460b0cbed1363e2166a2de1d9f clean ([gha] Nix: update inputs).",
+  "cpu": "AMD Ryzen 9 9950X3D 16-Core Processor",
+  "cpu_governor": "performance",
+  "monitors": [
+    {
+      "width": 1920,
+      "height": 1080,
+      "refreshRate": 60.0,
+      "scale": 1
+    }
+  ]
+}

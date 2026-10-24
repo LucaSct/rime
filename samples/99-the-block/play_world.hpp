@@ -3,6 +3,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <span>
 #include <vector>
@@ -11,6 +12,7 @@
 #include "rime/core/math/vec.hpp"
 #include "rime/destruction/world.hpp"
 #include "rime/ecs/world.hpp"
+#include "rime/gameplay/character.hpp"
 #include "rime/physics/world.hpp"
 #include "rime/render/terrain_pass.hpp"
 #include "rime/render/terrain_residency.hpp"
@@ -59,6 +61,34 @@ public:
         std::uint64_t recoveries = 0;
     };
 
+    // The authored city plate (the one GroundSurface): its exact rectangle and walkable top, in
+    // world metres. Kept beside the integer terrain rectangle because the two differ on purpose --
+    // see PlayEnvironment::kPlateSkirt for why the terrain's low rectangle is the plate shrunk.
+    struct PlateRect {
+        float min_x = 0.0f;
+        float max_x = 0.0f;
+        float min_z = 0.0f;
+        float max_z = 0.0f;
+        float top_y = 0.0f;
+    };
+
+    // The result of `prove_plate_boundary`: every number the check judges, so a failing run says
+    // which side and by how much, and a passing run can be shown to have looked (non-vacuity).
+    struct PlateProof {
+        unsigned samples = 0;   // perimeter points where a collision height was read
+        unsigned uncovered = 0; // points where the collision tile could not be made resident
+        unsigned no_hit = 0;    // points where a downward ray found no static surface
+        float plate_top = 0.0f;
+        float max_collision_gap = 0.0f;       // max |terrain collision y - plate top| just outside
+        float max_render_gap = 0.0f;          // the same for the RENDERED (drawn) terrain height
+        float max_render_vs_collision = 0.0f; // |rendered - collision| at the same point
+        float worst_x = 0.0f;
+        float worst_z = 0.0f;
+        std::array<bool, 4> walked{};         // N, E, S, W: reached 5 m inside, no jump
+        std::array<float, 4> walk_progress{}; // metres of the 25 m approach actually covered
+        bool ok = false;
+    };
+
     PlayWorld(ecs::World& server_world,
               physics::PhysicsWorld& server_physics,
               physics::PhysicsWorld& client_physics,
@@ -102,6 +132,21 @@ public:
 
     void note_recovery() noexcept { ++stats_.recoveries; }
 
+    [[nodiscard]] const PlateRect& plate() const noexcept { return plate_; }
+
+    // The owner could not walk from the outer terrain onto the city plate. This proves the two
+    // walkable surfaces are continuous along the WHOLE plate perimeter, on the server's real
+    // physics world and real terrain collision: (1) at >= 64 points just outside the edge, the
+    // terrain's collision height and its drawn height are each within the character's step-up
+    // height of the plate top; (2) the real `step_character`, never jumping, walks from 20 m
+    // outside to 5 m inside from all four sides. `self` is the avatar's own body (excluded from
+    // casts); `tick` must exceed every tick already given to `server().collision.plan`.
+    // Prints a per-point table to `report` when non-null.
+    [[nodiscard]] PlateProof prove_plate_boundary(const gameplay::CharacterConfig& character,
+                                                  physics::BodyId self,
+                                                  std::uint64_t tick,
+                                                  std::FILE* report);
+
 private:
     struct Key {
         std::int32_t x = 0;
@@ -117,13 +162,14 @@ private:
         std::uint64_t bytes = 0;
     };
 
-    [[nodiscard]] static assets::ProceduralTerrainConfig street_config(ecs::World& world,
-                                                                       bool& valid);
+    [[nodiscard]] static assets::ProceduralTerrainConfig
+    street_config(ecs::World& world, bool& valid, PlateRect* plate = nullptr);
     [[nodiscard]] static physics::Aabb street_bounds(const assets::ProceduralTerrainConfig& cfg);
     [[nodiscard]] std::vector<Key> wanted(core::Vec3 eye) const;
     [[nodiscard]] Held* find(const Key& key) noexcept;
 
     bool valid_ = false;
+    PlateRect plate_{}; // declared BEFORE config_: street_config fills it during config_'s init
     assets::ProceduralTerrainConfig config_{};
     CollisionPeer server_;
     CollisionPeer client_;

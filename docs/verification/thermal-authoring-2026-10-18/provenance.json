@@ -1,0 +1,27 @@
+{
+  "parent": "c1ca901f2210a55f09097753738d1f66b6e1b1fe",
+  "sources": {
+    "engine/fluids_scene/include/rime/fluids_scene/components.hpp": "cbf3e93216b7882a55a508e1274dbdbb051cf18940e6822b49fbb9e7b787daa1",
+    "engine/fluids_scene/include/rime/fluids_scene/preview.hpp": "b3ac53e208387d3dc3da05fedcbb9ea9890d8ba4cdf6ddb55e1c6c7f224f6401",
+    "engine/fluids_scene/src/preview.cpp": "9483a42fb04ff82d86a4a427233e87c7bd4a3c304d7b9c17d80dc1f45ec6130d",
+    "engine/editorhost/src/thermal_preview.cpp": "f5703ef12abc7b9d20a2a87a8409e8f38409a14c8759c431c68e7a7d35d8023e",
+    "engine/editorhost/include/rime/editorhost/thermal_preview.hpp": "b02b59b669c7b9184a61d92335eaab4732612a7fddefc0e35e6d1d0334ac727d",
+    "engine/app/editor_host_app.cpp": "2893aa4b964caa40a07a24e6daba83f33f6c2670f64fbb208fbc93665a6f7f93",
+    "tests/fluids_scene/preview_test.cpp": "a0bc90dd4f46053b1b4f713a644f87db78910c65585a8dabb9062ce9f1f49d5d",
+    "tools/rime-protocol/src/thermal.rs": "37b00d2850c709ea623b1f12d95b6ff805fa4b258106d91803ad9353778ad9de",
+    "tools/editor/src/gui.rs": "940b586dace46b2bcf38bd5be9893980086497c31335b84a4b985b685245e0cc",
+    "tools/editor/src/gui/session.rs": "6123824baff6189142790464b95c4c0c7d7f052e6571ebf0b9e20e7ee2e4925c",
+    "tools/editor/src/smoke.rs": "28c0d752aa6b694b45c6d7d7516e1bd7101a97526c67c858f425153a47658e06"
+  },
+  "binaries": {
+    "/home/next/projects/rime/build/release/bin/rime-engine": "1ca2950f5c1edfeac164557a4fb5877b38e9fdcd0f9816cb3866f16dbabf160d",
+    "/home/next/projects/rime/build/release/bin/rime_fluids_scene_tests": "57d8fe7649f6d1fda6b6e1eca90efc16e5163a4bdc34f931414f7d394bb2f3e5",
+    "/home/next/projects/rime/build/release/lib/librime_fluids_scene.a": "c57561e6d3ffaaa680eb29913b0220ee23c177f73327a9442e77be474b4174c3",
+    "/home/next/projects/rime/build/release/lib/librime_editorhost.a": "0e79d0e05df8d955d3d61c08066cf28bfdf2b4a6ab23cf601ea1b5bbed1b8835",
+    "/home/next/projects/rime/tools/target/debug/editor": "8105d685844358c2354f460786f920f45d2601a3e88c2e52eb91c5681bed6930",
+    "/home/next/reports/rime-thermal-authoring-2026-10-18/asan-tests": "435da30a64af66b384297b047f03721b241b6bebbd47c978801e9d6d9f0068b8",
+    "/home/next/projects/rime/build/release/sdk-consumer-build/sdk_consumer": "906cd9e5ca79eb25d6e0f1a2648a3275f86644631af5d1dae317507538197eb8"
+  },
+  "platform": "Linux nextos 7.2.10-1-cachyos #1 SMP PREEMPT_DYNAMIC Wed, 14 Oct 2026 07:02:02 +0000 x86_64 GNU/Linux",
+  "note": "Hashes recorded after final SDK rebuild; no numerical runtime source changed during this brick."
+}

@@ -11,7 +11,7 @@
 //!   * **Inspector** — the selected entity's components as **editable, reflection-typed fields**
 //!     (m9.4): each field decoded from the schema, edited with a drag-number / checkbox, and pushed
 //!     back as a `SetComponent`. Add/remove a component; undo/redo edits.
-//!   * **Assets** — a placeholder (the manifest-driven browser is m9.5).
+//!   * **Assets** — cooked manifest assets; scene effects are components in the Inspector.
 //!
 //! Everything below the window is the same `rime-protocol` wire the headless `--smoke` exercises, so
 //! the plumbing is CI-proven; only the on-screen result is Mac-eyeballed (a windowed UI is not
@@ -19,7 +19,7 @@
 //! thin, crash-isolated client of it, and **every edit is a [`commands::Command`]** — the same typed
 //! mutations a scripted test drives, which is what makes undo and the headless proof honest.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::process::ExitCode;
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
@@ -37,6 +37,12 @@ use crate::gizmo::{self, DragSession, Snapping};
 #[cfg(test)]
 mod click_tests;
 mod commands;
+mod entity_picker;
+mod game_run;
+mod outliner;
+mod player;
+#[cfg(test)]
+use outliner::label as outliner_label;
 mod session;
 
 use commands::{Awaiting, Command, CommandStack, Edit, EntityId, PendingStep};
@@ -66,6 +72,13 @@ pub fn run(args: &[String]) -> ExitCode {
     // (the m9.5 passthrough); without it the engine builds its built-in demo scene.
     let scene = arg_value(args, "--scene");
 
+    let game_config = match game_run::Config::parse(args) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("editor: {error}");
+            return ExitCode::from(2);
+        }
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Rime Editor")
@@ -76,11 +89,9 @@ pub fn run(args: &[String]) -> ExitCode {
         "Rime Editor",
         options,
         Box::new(move |_cc| {
-            Ok(Box::new(EditorApp::new(
-                engine,
-                assets.clone(),
-                scene.clone(),
-            )))
+            let mut app = EditorApp::new(engine, assets.clone(), scene.clone());
+            app.game.config = game_config;
+            Ok(Box::new(app))
         }),
     ) {
         Ok(()) => ExitCode::SUCCESS,
@@ -210,14 +221,68 @@ fn quat_from_yaw_pitch(yaw: f32, pitch: f32) -> gizmo::Quat {
 ///
 /// Yaw/pitch are kept HERE rather than re-derived from the entity's quaternion each frame, because
 /// round-tripping through a quaternion loses which way you came: at the poles the extracted angles
-/// jump, and a camera that flips when you look straight up is the classic symptom. Seeded once from
-/// the entity, then owned by the editor for the rest of the session.
+/// jump, and a camera that flips when you look straight up is the classic symptom. Keep them while
+/// navigating, but rebase when an inspector edit, camera replacement or Stop changes the pose.
 #[derive(Default)]
 struct FlyCam {
     yaw: f32,
     pitch: f32,
     pos: [f32; 3],
     seeded: bool,
+    key: Option<EntityId>,
+    local_hash: u64,
+    phase: Option<PlayPhase>,
+    last_blob: Vec<u8>,
+    snapshot_revision: u64,
+    // Baseline followed by our unacknowledged poses, in socket order.
+    pending: VecDeque<Vec<u8>>,
+    navigating: bool,
+}
+
+impl FlyCam {
+    /// Snapshot reconciliation: the UI runs ahead of the engine, so an old snapshot must not undo
+    /// movement accumulated since that snapshot was requested. Recognise our in-flight poses and
+    /// retain the latest local pose; an unfamiliar pose is an external edit and takes ownership.
+    /// A snapshot containing our latest output acknowledges the queue. Release requests one such
+    /// snapshot, bounding this optimistic history to the gesture rather than the editor session.
+    fn sync(&mut self, key: EntityId, blob: &[u8], revision: u64, phase: PlayPhase) {
+        let replacement = self.key != Some(key) || self.phase != Some(phase);
+        let fresh_snapshot = revision != self.snapshot_revision;
+        self.snapshot_revision = revision;
+        self.phase = Some(phase);
+        if !replacement && blob == self.last_blob {
+            if fresh_snapshot {
+                self.pending.clear();
+            }
+            return;
+        }
+        if !replacement {
+            if let Some(ack) = self.pending.iter().position(|p| p == blob) {
+                if fresh_snapshot {
+                    // Keep the acknowledged pose as a baseline: several delayed snapshots may
+                    // contain it before any of the more recent camera writes are processed.
+                    self.pending.drain(..ack);
+                }
+                return;
+            }
+        }
+        if let Some(trs) = gizmo::decode_trs_blob(blob) {
+            self.pos = [trs.translation.x, trs.translation.y, trs.translation.z];
+            (self.yaw, self.pitch) = yaw_pitch_from_quat(trs.rotation);
+            self.seeded = true;
+            self.key = Some(key);
+            self.last_blob = blob.to_vec();
+            self.pending.clear();
+        }
+    }
+
+    fn sent(&mut self, blob: &[u8]) {
+        if self.pending.is_empty() {
+            self.pending.push_back(self.last_blob.clone());
+        }
+        self.pending.push_back(blob.to_vec());
+        self.last_blob = blob.to_vec();
+    }
 }
 
 /// The camera entity's edit target: which entity, and the LocalTransform bytes to rewrite.
@@ -317,6 +382,7 @@ struct EditorApp {
     active_edit: Option<ActiveEdit>,
     // Asset browser (m9.5) filter state.
     asset_search: String,
+    outliner_options: outliner::Options,
     asset_kind_filter: Option<AssetKind>,
     // Gizmo interaction state (m9.6b). `gizmo_mode` None = hidden. `gizmo_hover` is the axis the
     // cursor is over (drives the engine highlight); `gizmo_drag` is the live drag, if any;
@@ -329,6 +395,7 @@ struct EditorApp {
     last_gizmo_state: Option<GizmoState>,
     // Viewport fly camera (m17.1). See FlyCam for why yaw/pitch live here.
     fly: FlyCam,
+    player: player::PlayerControl,
     // ── Saving (m15.3) ──────────────────────────────────────────────────────────────────────
     // The scene this session opened, if any: what `Save` writes back to, and what makes it
     // meaningfully different from `Save As`. `save_as_path` is the inline text field, because there
@@ -338,6 +405,8 @@ struct EditorApp {
     // and has to be shown rather than swallowed.
     scene_path: Option<String>,
     save_as_path: String,
+    save_pending: Option<game_run::PendingSave>,
+    game: game_run::GameRun,
     save_status: Option<(String, bool)>, // (message, ok)
     // ── New / Open (E2) ─────────────────────────────────────────────────────────────────────
     // `opener` starts a replacement session for Open; `None` only in tests that have not supplied
@@ -392,6 +461,7 @@ impl EditorApp {
             stack: CommandStack::default(),
             active_edit: None,
             asset_search: String::new(),
+            outliner_options: outliner::Options::default(),
             asset_kind_filter: None,
             gizmo_mode: None,
             gizmo_hover: None,
@@ -399,9 +469,12 @@ impl EditorApp {
             gizmo_snap: false,
             last_gizmo_state: None,
             fly: FlyCam::default(),
+            player: player::PlayerControl::default(),
             scene_path: scene.clone(),
             save_as_path: scene.unwrap_or_default(),
             save_status: None,
+            save_pending: None,
+            game: game_run::GameRun::default(),
             opener: None,
             pending_open: None,
             open_path: String::new(),
@@ -578,6 +651,21 @@ impl EditorApp {
                 type_hash,
                 blob,
             } => {
+                if self.fly.key == Some(*id)
+                    && self.fly.local_hash == *type_hash
+                    && self.fly.last_blob != *blob
+                {
+                    // An inspector/undo command is a known new owner, even when it restores a
+                    // pose equal to an older pending navigation sample. Only delayed snapshots
+                    // need the conservative stale-pose filter in sync().
+                    self.fly.pending.clear();
+                    self.fly.sync(
+                        *id,
+                        blob,
+                        self.fly.snapshot_revision,
+                        self.fly.phase.unwrap_or(PlayPhase::Edit),
+                    );
+                }
                 self.shared
                     .lock()
                     .unwrap()
@@ -699,6 +787,9 @@ impl eframe::App for EditorApp {
             pick,
             camera,
             play_state,
+            thermal,
+            play_control,
+            snapshot_revision,
         ) = {
             let mut s = self.shared.lock().unwrap();
             let new_image = match &s.frame {
@@ -727,8 +818,58 @@ impl eframe::App for EditorApp {
                 pick,
                 s.camera, // Copy: the newest render lens (gizmo math reads it, never consumes)
                 s.play_state, // Copy: the newest play phase + tick count (m9.7), never consumed
+                s.thermal.clone(),
+                s.play_control.clone(),
+                s.snapshots_received,
             )
         };
+
+        self.game.poll();
+        let saved = self.shared.lock().unwrap().last_save.take();
+        if let Some(result) = saved {
+            if let Some(pending) = self.save_pending.take() {
+                if !result.ok || result.path != pending.target {
+                    self.save_status = Some((
+                        if result.error.is_empty() {
+                            "save acknowledgement did not match the requested file".into()
+                        } else {
+                            result.error
+                        },
+                        false,
+                    ));
+                } else {
+                    self.scene_path = Some(result.path.clone());
+                    self.save_status = Some((
+                        format!("saved {} entities to {}", result.entities, result.path),
+                        true,
+                    ));
+                    if pending.run {
+                        if let Err(error) = self.game.launch(&result.path) {
+                            self.game.status = Some(error);
+                        }
+                    }
+                }
+            } // No pending request: discard an unsolicited/stale result, never launch from it.
+        }
+        if self.save_pending.is_some() && (!connected || error.is_some()) {
+            self.save_pending = None;
+            self.save_status = Some(("save interrupted; game was not launched".into(), false));
+        }
+        let saving = self.save_pending.is_some() || self.pending_open.is_some();
+        let player_active = play_control
+            .as_ref()
+            .is_some_and(|s| s.mode == 1 && s.phase != 0);
+        let viewport_open = self
+            .dock
+            .iter_all_tabs()
+            .any(|(_, tab)| *tab == Tab::Viewport);
+        self.player.prepare(
+            ctx,
+            play_control.as_ref(),
+            connected,
+            saving || !viewport_open,
+            &self.out_tx,
+        );
 
         // Click-to-select (m9.6): the engine answered a viewport click with the entity under that
         // pixel, as a handle — the one message that still speaks handles — so map it to the
@@ -749,7 +890,7 @@ impl eframe::App for EditorApp {
         // The undo history is frozen while the simulation runs (ADR-0075): Stop discards whatever
         // play did, so a step recorded against the played world would undo something that is no
         // longer there. Entering play remembers the selection; Stop hands it back with the world.
-        let editing = play_state.phase == PlayPhase::Edit;
+        let editing = play_state.phase == PlayPhase::Edit && !saving;
         if !editing && self.pre_play_selection.is_none() {
             self.pre_play_selection = Some(self.selected);
         }
@@ -784,10 +925,11 @@ impl eframe::App for EditorApp {
         // While a text box has focus, Ctrl+Z / Ctrl+Y belong to it (E2): the world's undo is only
         // for when no text is being typed, so fixing a typo in the asset search box cannot revert
         // a world edit. Only the key routing is gated; the undo itself is unchanged.
-        let typing = ctx.wants_keyboard_input();
+        let typing = ctx.wants_keyboard_input() || saving;
         // Saving (m15.3): set by Ctrl+S or the File menu; `Some("")` means "write back where the
         // scene was opened", which is a decision the engine owns.
         let mut do_save: Option<String> = None;
+        let mut do_run = false;
         // File → New and File → Open (E2): set by the menu, applied after it.
         let mut do_new = false;
         let mut do_open: Option<String> = None;
@@ -805,7 +947,12 @@ impl eframe::App for EditorApp {
             }
             // Ctrl/Cmd+S — the reflex every user already has. Only meaningful with a scene open;
             // Save As lives in the menu, because it needs a path and this shell has no file dialog.
-            if i.modifiers.command && i.key_pressed(egui::Key::S) && scene_is_open {
+            if !saving
+                && !player_active
+                && i.modifiers.command
+                && i.key_pressed(egui::Key::S)
+                && scene_is_open
+            {
                 do_save = Some(String::new());
             }
         });
@@ -818,7 +965,7 @@ impl eframe::App for EditorApp {
         // while the right button is up. With it held they fly instead (E2, the Unreal convention),
         // and the same key does one job at a time. R and Esc are not fly keys and always act.
         let looking = ctx.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
-        if !typing {
+        if !typing && !player_active && !self.player.captured() {
             ctx.input(|i| {
                 if !looking && i.key_pressed(egui::Key::W) {
                     self.gizmo_mode = Some(gizmo::Mode::Translate);
@@ -839,8 +986,8 @@ impl eframe::App for EditorApp {
             self.gizmo_hover = None;
         }
 
-        let can_undo = self.stack.can_undo();
-        let can_redo = self.stack.can_redo();
+        let can_undo = self.stack.can_undo() && !saving;
+        let can_redo = self.stack.can_redo() && !saving;
         // Mirror into locals the menu-bar closure mutates, then write back (the closure borrows
         // these, not `self`, keeping the panel body free of a self-borrow tangle).
         let mut gizmo_mode = self.gizmo_mode;
@@ -852,6 +999,13 @@ impl eframe::App for EditorApp {
             .filter(|t| self.dock.find_tab(t).is_some())
             .collect();
         let mut reopen_tab: Option<Tab> = None;
+        let can_run_game = connected
+            && !saving
+            && self.game.config.is_some()
+            && !self.game.running()
+            && self.scene_path.is_some()
+            && self.pending_open.is_none()
+            && play_state.phase == PlayPhase::Edit;
         egui::TopBottomPanel::top("menu").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.label(egui::RichText::new("Rime Editor").strong());
@@ -865,7 +1019,7 @@ impl eframe::App for EditorApp {
                 ui.menu_button("File", |ui| {
                     let has_scene = self.scene_path.is_some();
                     if ui
-                        .add_enabled(has_scene, egui::Button::new("Save\tCtrl+S"))
+                        .add_enabled(has_scene && !saving && !player_active, egui::Button::new("Save\tCtrl+S"))
                         .on_disabled_hover_text(
                             "no scene was opened — use Save As, or launch with --scene",
                         )
@@ -887,7 +1041,7 @@ impl eframe::App for EditorApp {
                         );
                         if ui
                             .add_enabled(
-                                !self.save_as_path.trim().is_empty(),
+                                !saving && !player_active && !self.save_as_path.trim().is_empty(),
                                 egui::Button::new("Write"),
                             )
                             .clicked()
@@ -899,7 +1053,7 @@ impl eframe::App for EditorApp {
                     ui.separator();
                     // New and Open replace the whole world, so they wait until it is not being
                     // played: Stop is what brings the edit world back.
-                    let editing = play_state.phase == PlayPhase::Edit;
+                    let editing = play_state.phase == PlayPhase::Edit && !saving;
                     if ui
                         .add_enabled(editing, egui::Button::new("New"))
                         .on_disabled_hover_text("stop the play session first")
@@ -971,6 +1125,18 @@ impl eframe::App for EditorApp {
                 }
                 ui.checkbox(&mut gizmo_snap, "Snap");
                 ui.separator();
+                if let Some(control) = play_control.as_ref().filter(|s| s.supported_modes & 2 != 0) {
+                    let mut walking = control.mode == 1;
+                    if ui.add_enabled(!saving && play_state.phase == PlayPhase::Edit,
+                        egui::Checkbox::new(&mut walking, "Walk"))
+                        .on_hover_text("Preview a local walking player. Click the viewport after Play; Esc releases the mouse. Use Run game for weapons.")
+                        .changed() {
+                        self.player.release(ctx, play_control.as_ref(), &self.out_tx);
+                        player::send_control(&self.out_tx, control,
+                            if walking { rime_protocol::PlayControlAction::SelectPlayer }
+                            else { rime_protocol::PlayControlAction::SelectInspect });
+                    }
+                }
                 // Play/Pause/Step/Stop (m9.7, ADR-0031 §4) — the same wire the headless
                 // play/restore proof drives (tests/app/editor_play_test.cpp); each button just
                 // pushes the matching zero-payload Command onto the same `actions` dispatch every
@@ -980,29 +1146,34 @@ impl eframe::App for EditorApp {
                 // safe) from Edit, Playing, or Paused alike (the engine pauses-then-steps).
                 let phase = play_state.phase;
                 if ui
-                    .add_enabled(phase != PlayPhase::Playing, egui::Button::new("▶"))
-                    .on_hover_text("Play")
+                    .add_enabled(!saving && phase != PlayPhase::Playing, egui::Button::new("▶"))
+                    .on_hover_text("Preview simulation in editor (use Run game for the full runtime)")
                     .clicked()
                 {
                     actions.push(Command::Play);
                 }
                 if ui
-                    .add_enabled(phase == PlayPhase::Playing, egui::Button::new("⏸"))
+                    .add_enabled(!saving && phase == PlayPhase::Playing, egui::Button::new("⏸"))
                     .on_hover_text("Pause")
                     .clicked()
                 {
+                    self.player.release(ctx, play_control.as_ref(), &self.out_tx);
                     actions.push(Command::Pause);
                 }
-                if ui.button("⏭").on_hover_text("Step one tick").clicked() {
+                if ui.add_enabled(!saving, egui::Button::new("⏭")).on_hover_text("Step one tick").clicked() {
                     actions.push(Command::Step);
                 }
                 if ui
-                    .add_enabled(phase != PlayPhase::Edit, egui::Button::new("⏹"))
+                    .add_enabled(!saving && phase != PlayPhase::Edit, egui::Button::new("⏹"))
                     .on_hover_text("Stop (restore the pre-play world)")
                     .clicked()
                 {
+                    self.player.release(ctx, play_control.as_ref(), &self.out_tx);
                     actions.push(Command::Stop);
                 }
+                if ui.add_enabled(can_run_game,
+                    egui::Button::new("Run game")).on_hover_text("Save this scene, then launch the full game in a separate window. The game continues if the editor closes.")
+                    .on_disabled_hover_text("Stop Preview first. A game must be configured by the city editor launcher; wait for any save or running game to finish.").clicked() { do_run = true; }
                 ui.label(match phase {
                     PlayPhase::Edit => "Edit".to_owned(),
                     PlayPhase::Playing => format!("▶ Playing · tick {}", play_state.tick_count),
@@ -1052,29 +1223,31 @@ impl eframe::App for EditorApp {
         if let Some(path) = do_open {
             self.start_open(path);
         }
-        if let Some(path) = do_save {
-            // Straight to the wire, NOT onto the undo stack: a save mutates a file, not the world,
-            // so there is nothing for an inverse to restore. `Save As` also becomes the session's
-            // scene, so the next Ctrl+S writes where the user last chose.
-            if !path.is_empty() {
-                self.scene_path = Some(path.clone());
-            }
-            let (msg, payload) = Command::SaveScene { path }.to_wire();
-            let _ = self.out_tx.send(Outbound::Editor { msg, payload });
-            self.save_status = Some(("saving…".to_owned(), true));
+        if do_run {
+            do_save = self.scene_path.clone();
         }
-        // The engine's answer. A REFUSAL IS A NORMAL OUTCOME (the engine declines to save a world
-        // whose load dropped component types it does not register — m14.3), so it lands in the
-        // status bar with its reason rather than being swallowed as a failed request.
-        if let Some(result) = self.shared.lock().unwrap().last_save.take() {
-            self.save_status = Some(if result.ok {
-                (
-                    format!("saved {} entities to {}", result.entities, result.path),
-                    true,
-                )
-            } else {
-                (result.error, false)
-            });
+        if let Some(path) = do_save {
+            if !saving {
+                let target = if path.is_empty() {
+                    self.scene_path.clone()
+                } else {
+                    Some(path.clone())
+                };
+                if let Some(target) = target {
+                    self.save_pending = Some(game_run::PendingSave {
+                        target,
+                        run: do_run,
+                    });
+                    let (msg, payload) = Command::SaveScene { path }.to_wire();
+                    if self.out_tx.send(Outbound::Editor { msg, payload }).is_err() {
+                        self.save_pending = None;
+                        self.save_status =
+                            Some(("could not send save; game was not launched".into(), false));
+                    } else {
+                        self.save_status = Some(("saving…".into(), true));
+                    }
+                }
+            }
         }
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -1096,9 +1269,19 @@ impl eframe::App for EditorApp {
                 ui.label(format!("{} entities", entities.len()));
                 ui.separator();
                 ui.label(format!("{frames} frames · {fps:.0} fps"));
+                if let Some(control) = play_control.as_ref().filter(|s| !s.reason.is_empty()) {
+                    ui.separator();
+                    ui.colored_label(egui::Color32::from_rgb(220, 150, 80), &control.reason);
+                }
                 // The save outcome, kept visible until the next one. A refusal is red and carries
                 // the engine's reason verbatim — "cannot save" with no cause is indistinguishable
                 // from a bug, and a user who cannot tell those apart reaches for a workaround.
+                if let Some(status) = &self.game.status {
+                    let label = ui.label(status);
+                    if let Some(path) = &self.game.log {
+                        label.on_hover_text(format!("Game output: {}", path.display()));
+                    }
+                }
                 if let Some((message, ok)) = &self.save_status {
                     ui.separator();
                     ui.colored_label(
@@ -1165,9 +1348,8 @@ impl eframe::App for EditorApp {
                 })
             });
 
-        // The camera entity (m17.1): the FIRST entity carrying a render::Camera, matching the
-        // engine's own "first active camera wins" rule in extract_scene -- if the editor flew a
-        // different one, the picture would not move and nothing would say why.
+        // Skip inactive cameras, matching the renderer's first-active rule. Flying an inactive
+        // camera would change the scene data without moving the picture.
         let camera_hash = schema
             .types
             .iter()
@@ -1177,35 +1359,43 @@ impl eframe::App for EditorApp {
             let lh = local_hash?;
             let e = entities
                 .iter()
-                .find(|e| e.components.iter().any(|c| c.type_hash == ch))?;
+                .find(|e| {
+                    e.components.iter().any(|c| {
+                        c.type_hash == ch
+                            && matches!(decode_value(&schema, ch, &c.data), Ok(Value::Struct(fields))
+                                if fields.iter().any(|(name, value)| name == "active" && *value == Value::Bool(true)))
+                    })
+                })?;
             let local = e.components.iter().find(|c| c.type_hash == lh)?;
-            // Seed once from the entity, then the editor owns the orientation. Re-seeding every
-            // frame would fight the user: the pose we send this frame arrives back next frame.
-            if !self.fly.seeded {
-                if let Some(trs) = gizmo::decode_trs_blob(&local.data) {
-                    self.fly.pos = [trs.translation.x, trs.translation.y, trs.translation.z];
-                    let (yaw, pitch) = yaw_pitch_from_quat(trs.rotation);
-                    self.fly.yaw = yaw;
-                    self.fly.pitch = pitch;
-                    self.fly.seeded = true;
-                }
-            }
+            self.fly.sync(
+                e.editor_id,
+                &local.data,
+                snapshot_revision,
+                play_state.phase,
+            );
+            self.fly.local_hash = lh;
             Some(NavTarget {
                 key: e.editor_id,
                 local_hash: lh,
             })
         });
 
+        let saving_now = self.save_pending.is_some() || self.pending_open.is_some();
         let mut viewer = EditorTabs {
+            editing_enabled: !saving_now && !player_active,
             frame_tex: self.frame_tex.as_ref(),
             frame_dims,
             play_phase: play_state.phase,
+            play_control: play_control.as_ref(),
+            player: &mut self.player,
+            thermal: thermal.as_ref(),
             entities: &entities,
             schema: &schema,
             addable: &addable,
             assets: &assets,
             mesh_asset_hash,
             asset_search: &mut self.asset_search,
+            outliner_options: &mut self.outliner_options,
             asset_kind_filter: &mut self.asset_kind_filter,
             selected: &mut self.selected,
             out_tx: &self.out_tx,
@@ -1231,7 +1421,10 @@ impl eframe::App for EditorApp {
         // Tell the engine which gizmo to render (selection + mode + the now-updated hovered axis).
         // Sent only when it changes: the message is tiny, but this runs every repaint, and the
         // engine only needs the transitions (a new selection, a mode switch, a hover move).
-        let desired = match (self.gizmo_mode, gizmo_target.as_ref()) {
+        let desired = match (
+            self.gizmo_mode.filter(|_| !player_active),
+            gizmo_target.as_ref(),
+        ) {
             (Some(mode), Some(target)) => GizmoState {
                 editor_id: target.key,
                 mode: to_proto_mode(Some(mode)),
@@ -1273,16 +1466,21 @@ fn spawn_opened(engine: &str, assets: Option<&str>, scene: &str) -> OpenedSessio
 
 /// The per-frame view over app state handed to each dock panel.
 struct EditorTabs<'a> {
+    editing_enabled: bool,
     frame_tex: Option<&'a egui::TextureHandle>,
     frame_dims: Option<(u32, u32)>,
     // The engine's play/edit phase (m9.7) — the viewport border's state colour.
     play_phase: PlayPhase,
+    play_control: Option<&'a rime_protocol::PlayControlState>,
+    player: &'a mut player::PlayerControl,
+    thermal: Option<&'a rime_protocol::ThermalPreview>,
     entities: &'a [SnapshotEntity],
     schema: &'a Schema,
     addable: &'a [(u64, String)],
     assets: &'a [AssetEntry],
     mesh_asset_hash: Option<u64>,
     asset_search: &'a mut String,
+    outliner_options: &'a mut outliner::Options,
     asset_kind_filter: &'a mut Option<AssetKind>,
     selected: &'a mut Option<EntityId>,
     out_tx: &'a Sender<Outbound>,
@@ -1323,6 +1521,14 @@ impl TabViewer for EditorTabs<'_> {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Self::Tab) {
+        if !self.editing_enabled
+            && (*tab != Tab::Viewport
+                || !self
+                    .play_control
+                    .is_some_and(|s| s.mode == 1 && s.phase != 0))
+        {
+            ui.disable();
+        }
         match tab {
             Tab::Viewport => {
                 let mut gz = GizmoView {
@@ -1339,7 +1545,11 @@ impl TabViewer for EditorTabs<'_> {
                     ui,
                     self.frame_tex,
                     self.frame_dims,
-                    self.play_phase,
+                    &mut ViewportPlay {
+                        phase: self.play_phase,
+                        state: self.play_control,
+                        player: &mut *self.player,
+                    },
                     self.out_tx,
                     &mut gz,
                     &mut FlyView {
@@ -1348,19 +1558,27 @@ impl TabViewer for EditorTabs<'_> {
                     },
                 );
             }
-            Tab::Outliner => {
-                outliner_ui(ui, self.schema, self.entities, self.selected, self.actions)
-            }
-            Tab::Inspector => inspector_ui(
+            Tab::Outliner => outliner::ui(
                 ui,
-                self.entities,
                 self.schema,
-                self.addable,
-                *self.selected,
+                self.entities,
+                self.selected,
                 self.actions,
-                self.active_edit,
-                self.stack,
+                self.outliner_options,
             ),
+            Tab::Inspector => {
+                thermal_preview_ui(ui, self.thermal, *self.selected);
+                inspector_ui(
+                    ui,
+                    self.entities,
+                    self.schema,
+                    self.addable,
+                    *self.selected,
+                    self.actions,
+                    self.active_edit,
+                    self.stack,
+                );
+            }
             Tab::Assets => assets_ui(
                 ui,
                 self.assets,
@@ -1407,6 +1625,7 @@ fn assets_ui(
     });
     ui.separator();
 
+    ui.weak("Scene effects: Outliner > + spawn > Inspector > + add component");
     if assets.is_empty() {
         ui.weak("(no cooked assets — launch the engine with --assets <manifest>)");
         return;
@@ -1524,7 +1743,7 @@ fn viewport_fly(
     // keys from firing on their other meanings: WASD typed into an inspector field never flies (the
     // pointer is not over the viewport), W/E/Q switch the gizmo while the button is up, and Ctrl+S
     // over the viewport saves without moving the camera (the Command modifier is excluded here).
-    let flying = response.hovered()
+    let flying = (response.hovered() || response.dragged_by(egui::PointerButton::Secondary))
         && ui.input(|i| {
             i.pointer.button_down(egui::PointerButton::Secondary) && !i.modifiers.command
         });
@@ -1566,6 +1785,31 @@ fn viewport_fly(
         }
     }
 
+    // Wheel dolly moves the camera along its sight line, rather than magnifying the streamed
+    // image. Consume only vertical scrolling over this panel; inspector scrolling stays local.
+    if response.hovered()
+        && !ui.input(|i| i.modifiers.command || i.modifiers.alt || i.pointer.primary_down())
+    {
+        let delta = ui.input_mut(|i| {
+            let d = i.smooth_scroll_delta.y;
+            i.smooth_scroll_delta.y = 0.0;
+            d
+        });
+        if delta.is_finite() && delta != 0.0 {
+            let distance = delta.clamp(-120.0, 120.0) * 0.03;
+            let (sy, cy) = fly.yaw.sin_cos();
+            let (sp, cp) = fly.pitch.sin_cos();
+            fly.pos[0] -= sy * cp * distance;
+            fly.pos[1] += sp * distance;
+            fly.pos[2] -= cy * cp * distance;
+            changed = true;
+        }
+    }
+    let navigating = flying || changed;
+    if fly.navigating && !navigating {
+        actions.push(Command::RequestSnapshot);
+    }
+    fly.navigating = navigating;
     if !changed {
         return;
     }
@@ -1576,36 +1820,91 @@ fn viewport_fly(
         // stray one would silently distort the lens.
         scale: gizmo::Vec3::new(1.0, 1.0, 1.0),
     };
+    let blob = gizmo::encode_trs_blob(&trs);
+    fly.sent(&blob);
     actions.push(Command::SetComponent {
         id: target.key,
         type_hash: target.local_hash,
-        blob: gizmo::encode_trs_blob(&trs),
+        blob,
     });
     // The engine only redraws when something asks it to; without this the view would advance one
     // frame per input event rather than continuously while a key is held.
     ui.ctx().request_repaint();
 }
 
+/// Fit the stream into the dock panel without stretching its lens. The fitted image rectangle
+/// also owns interaction: picking and gizmo rays must map from the same pixels that are painted,
+/// and letterbox bars must not become invisible scene controls.
+fn viewport_image_rect(panel: egui::Rect, dims: (u32, u32)) -> egui::Rect {
+    if dims.0 == 0 || dims.1 == 0 {
+        return egui::Rect::from_center_size(panel.center(), egui::Vec2::ZERO);
+    }
+    let aspect = dims.0 as f32 / dims.1 as f32;
+    let width = panel.width().min(panel.height() * aspect).max(0.0);
+    let height = (width / aspect).min(panel.height().max(0.0));
+    egui::Rect::from_center_size(panel.center(), egui::vec2(width, height))
+}
+
+struct ViewportPlay<'a> {
+    phase: PlayPhase,
+    state: Option<&'a rime_protocol::PlayControlState>,
+    player: &'a mut player::PlayerControl,
+}
+
 fn viewport_ui(
     ui: &mut egui::Ui,
     frame_tex: Option<&egui::TextureHandle>,
     frame_dims: Option<(u32, u32)>,
-    play_phase: PlayPhase,
+    play: &mut ViewportPlay,
     out_tx: &Sender<Outbound>,
     gz: &mut GizmoView,
     fly: &mut FlyView,
 ) {
     let avail = ui.available_size();
-    let (rect, response) = ui.allocate_exact_size(avail, egui::Sense::click_and_drag());
+    let (panel, allocation) = ui.allocate_exact_size(avail, egui::Sense::hover());
+    ui.painter()
+        .rect_filled(panel, 0.0, egui::Color32::from_gray(12));
+    let rect = frame_tex
+        .map(|tex| {
+            viewport_image_rect(
+                panel,
+                frame_dims.unwrap_or((tex.size()[0] as u32, tex.size()[1] as u32)),
+            )
+        })
+        .unwrap_or(panel);
     if let Some(tex) = frame_tex {
+        let response = ui.interact(
+            rect,
+            allocation.id.with("scene"),
+            egui::Sense::click_and_drag(),
+        );
         ui.painter().image(
             tex.id(),
             rect,
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
         );
-        viewport_input(out_tx, &response, rect, frame_dims, gz);
-        viewport_fly(ui, &response, fly, &mut *gz.actions);
+        let player_owns = play
+            .player
+            .viewport(ui, &response, rect, play.state, out_tx);
+        if !player_owns {
+            viewport_input(out_tx, &response, rect, frame_dims, gz);
+            viewport_fly(ui, &response, fly, &mut *gz.actions);
+        }
+        let navigating = ui.input(|i| i.pointer.button_down(egui::PointerButton::Secondary));
+        if !player_owns {
+            ui.painter().text(
+                rect.left_bottom() + egui::vec2(10.0, -10.0),
+                egui::Align2::LEFT_BOTTOM,
+                if navigating {
+                    "NAVIGATING: keep right mouse held + WASD / Q down / E up / Shift faster"
+                } else {
+                    "Hold right mouse + WASD to move | Right-drag to look | Wheel closer / farther"
+                },
+                egui::FontId::proportional(12.0),
+                egui::Color32::WHITE,
+            );
+        }
     } else {
         ui.painter()
             .rect_filled(rect, 0.0, egui::Color32::from_gray(20));
@@ -1621,7 +1920,7 @@ fn viewport_ui(
     // the-time state should not add visual noise), Playing green, Paused amber — the same
     // at-a-glance vocabulary a video editor's transport uses, so "is this live right now" never
     // depends on reading the toolbar label.
-    if let Some(color) = phase_border_color(play_phase) {
+    if let Some(color) = phase_border_color(play.phase) {
         // Inside: the stroke stays within the panel's own rect rather than bleeding a pixel or two
         // into whatever dock tab sits next to it.
         ui.painter().rect_stroke(
@@ -1668,7 +1967,12 @@ fn viewport_input(
         let v = ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0);
         (u * ext.0, v * ext.1)
     };
-    let cursor = response.hover_pos().map(to_px);
+    // A gesture started on the image retains capture across a letterbox bar. New gestures in
+    // bars have neither hover nor interaction position, but an existing drag must still release.
+    let cursor = response
+        .hover_pos()
+        .or_else(|| response.interact_pointer_pos())
+        .map(to_px);
 
     // Hover: while idle, which handle is under the cursor? Drives the engine's axis highlight, and
     // decides whether a press grabs the gizmo or picks. Instant (this frame's lens), never a
@@ -1698,7 +2002,7 @@ fn viewport_input(
     };
 
     // Press → grab a handle (begin the drag) or fall through to camera input.
-    if response.drag_started() {
+    if response.drag_started_by(egui::PointerButton::Primary) {
         let grabbed = match (cursor, gz.mode, gz.camera, gz.target.as_ref(), *gz.hover) {
             (Some(px), Some(mode), Some(cam), Some(target), Some(axis)) => DragSession::begin(
                 mode,
@@ -1750,7 +2054,7 @@ fn viewport_input(
     }
 
     // Release → fold the whole drag into ONE undo Edit (grab bytes → final bytes), or camera up.
-    if response.drag_stopped() {
+    if response.drag_stopped_by(egui::PointerButton::Primary) {
         if let Some(session) = gz.drag.take() {
             if let (Some(px), Some(cam), Some(target)) = (cursor, gz.camera, gz.target.clone()) {
                 let after = session.update(&ray_at(px, &cam), snapping);
@@ -1796,86 +2100,6 @@ fn viewport_input(
             });
         }
     }
-}
-
-/// A readable name for an outliner row (m15.3).
-///
-/// The block opens as 213 entities, and `entity 0 · 3 components` … `entity 212 · 3 components` is
-/// a list you cannot work in. There is no `Name` component to fall back on: reflection has no
-/// string type at all (`FieldType` is Bool/Int/UInt/Float/Double/Struct) and ECS components must be
-/// trivially-copyable PODs, so an authored name needs `FieldType::String` threaded through the
-/// serializer, the scene format, the schema wire and the inspector — a brick of its own, ruled in
-/// ADR-0038 and not smuggled in here.
-///
-/// So the label is DERIVED from what the entity already carries: its most distinctive component's
-/// short type name. That is free, it works for every scene including ones authored before any
-/// naming existed, and for the block it turns an unreadable list into `SlabRole`, `PointLight`,
-/// `Camera`. An entity is still addressed by index — this changes what a human reads, not what the
-/// protocol says.
-fn outliner_label(schema: &Schema, index: usize, entity: &SnapshotEntity) -> String {
-    // Least-common-first: a `Camera` or a `SlabRole` says far more about an entity than the
-    // `LocalTransform` almost everything has, so the ranking is by how much the type narrows things
-    // down rather than by declaration order.
-    const BORING: [&str; 4] = [
-        "rime::ecs::LocalTransform",
-        "rime::ecs::WorldTransform",
-        "rime::ecs::Parent",
-        "rime::ecs::RenderTransform",
-    ];
-    let mut best: Option<&str> = None;
-    for component in &entity.components {
-        let Some(entry) = schema.type_by_hash(component.type_hash) else {
-            continue;
-        };
-        if BORING.contains(&entry.name.as_str()) {
-            continue;
-        }
-        best = Some(&entry.name);
-        break;
-    }
-    let short = best.map(|full| full.rsplit("::").next().unwrap_or(full));
-    match short {
-        Some(name) => format!("{index}  {name}"),
-        // Nothing distinctive: a freshly spawned entity, or one that is only a transform.
-        None => format!("{index}  entity"),
-    }
-}
-
-fn outliner_ui(
-    ui: &mut egui::Ui,
-    schema: &Schema,
-    entities: &[SnapshotEntity],
-    selected: &mut Option<EntityId>,
-    actions: &mut Vec<Command>,
-) {
-    ui.horizontal(|ui| {
-        if ui.button("+ spawn").clicked() {
-            *selected = None;
-            actions.push(Command::Spawn { id: 0 });
-        }
-    });
-    ui.separator();
-    if entities.is_empty() {
-        ui.weak("(no entities yet)");
-        return;
-    }
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        for (i, e) in entities.iter().enumerate() {
-            let label = outliner_label(schema, i, e);
-            let row = ui.selectable_label(*selected == Some(e.editor_id), label);
-            if row.clicked() {
-                *selected = Some(e.editor_id);
-            }
-            // The full picture on hover, so the derived label costs no information.
-            row.on_hover_text(format!(
-                "entity {} ({}:{}) · {} components",
-                i,
-                e.index,
-                e.generation,
-                e.components.len()
-            ));
-        }
-    });
 }
 
 #[allow(clippy::too_many_arguments)] // an inspector genuinely needs its world view + edit sinks
@@ -1946,7 +2170,16 @@ fn inspector_ui(
                             type_hash: comp.type_hash,
                         });
                     }
-                    component_fields_ui(ui, comp, key, schema, actions, active_edit, stack);
+                    component_fields_ui(
+                        ui,
+                        comp,
+                        key,
+                        schema,
+                        entities,
+                        actions,
+                        active_edit,
+                        stack,
+                    );
                 });
         }
     });
@@ -1955,11 +2188,13 @@ fn inspector_ui(
 // Decode one component into typed fields, render an editor per field, and turn edits into a live
 // `SetComponent` + a single undo step per gesture. A component the schema can't describe (or whose
 // bytes don't fit) is shown honestly as read-only.
+#[allow(clippy::too_many_arguments)] // edits also need the snapshot for semantic reference choices
 fn component_fields_ui(
     ui: &mut egui::Ui,
     comp: &rime_protocol::SnapshotComponent,
     key: EntityId,
     schema: &Schema,
+    entities: &[SnapshotEntity],
     actions: &mut Vec<Command>,
     active_edit: &mut Option<ActiveEdit>,
     stack: &mut CommandStack,
@@ -1982,7 +2217,18 @@ fn component_fields_ui(
             // Every field is keyed by its component and its path, so no two fields share an id
             // (see `exact_int_field`).
             let salt = format!("{:016x}/{fname}", comp.type_hash);
-            render_field(ui, &salt, fname, fval, &mut it);
+            if !entity_picker::field_ui(
+                ui,
+                &salt,
+                schema,
+                comp.type_hash,
+                fname,
+                fval,
+                entities,
+                &mut it,
+            ) {
+                render_field(ui, &salt, fname, fval, &mut it);
+            }
         }
     }
 
@@ -2179,6 +2425,71 @@ pub mod protocol_input {
         PointerMove { x: i32, y: i32 },
         PointerDown { x: i32, y: i32, button: u32 },
         PointerUp { x: i32, y: i32, button: u32 },
+        KeyDown { code: u32 },
+        KeyUp { code: u32 },
+    }
+}
+
+/// Runtime-only information. Settings edits restart all cells from authored initial values;
+/// this panel never emits SetComponent or enters undo/save state.
+fn thermal_preview_ui(
+    ui: &mut egui::Ui,
+    preview: Option<&rime_protocol::ThermalPreview>,
+    selected: Option<EntityId>,
+) {
+    let Some(m) = preview else {
+        return;
+    };
+    egui::CollapsingHeader::new("Thermal preview")
+        .default_open(true)
+        .show(ui, |ui| {
+            let status = match m.status {
+                0 => "Stopped / no enabled thermal graph",
+                1 => "Ready",
+                2 => "Invalid thermal description",
+                3 => "Thermal preview capacity exceeded",
+                _ => "Step refused — showing last committed state",
+            };
+            ui.label(status);
+            ui.label(format!("Tick {} · revision {}", m.field_tick, m.revision));
+            if m.problem_editor_id != 0 {
+                ui.label(format!("Check entity {}", m.problem_editor_id));
+            }
+            if m.status == 4 {
+                ui.label(thermal_refusal_message(m));
+                ui.label(format!("Last accepted host tick {}", m.accepted_host_tick));
+            }
+            if let Some(c) = m.cells.iter().find(|c| Some(c.editor_id) == selected) {
+                ui.label(format!("Temperature: {:.3} K", c.temperature_kelvin));
+                ui.label(format!(
+                    "Liquid mass: {:.3}%",
+                    c.liquid_mass_fraction * 100.
+                ));
+                ui.label(format!("Energy: {:.3e} J", c.energy_joules));
+            }
+            ui.small(
+                "Changing thermal settings restarts the whole preview from its initial state.",
+            );
+        });
+    ui.separator();
+}
+
+fn thermal_refusal_message(m: &rime_protocol::ThermalPreview) -> &'static str {
+    match m.field_status {
+        1 => "Invalid thermal time step",
+        2 => "Unsupported arithmetic mode",
+        3 => "Time step exceeds the substep budget",
+        4 => "Thermal operation budget exceeded",
+        5 => "Thermal solve budget exceeded",
+        6 if m.heat_status == 2 => "Heat source exceeds the material temperature range",
+        6 if m.heat_status == 4 => "Unsupported arithmetic mode",
+        6 => "Source heat cannot be represented at this scale",
+        7 if m.contact_status == 3 => "Contact exceeds the material temperature range",
+        7 if m.contact_status == 5 => "Unsupported arithmetic mode",
+        7 if m.contact_status == 6 => "Contact could not meet the accuracy limit",
+        7 => "Contact heat cannot be represented at this scale",
+        8 => "Thermal tick limit reached",
+        _ => "Thermal step refused",
     }
 }
 
@@ -2220,6 +2531,30 @@ mod outliner_tests {
     // list nobody can work in. There is no Name component to lean on — reflection has no string
     // type at all — so the label is derived from the most DISTINCTIVE component the entity carries.
     #[test]
+    fn source_roles_beat_mesh_storage_regardless_of_component_order() {
+        let schema = Schema {
+            types: vec![
+                entry("rime::render::MeshRef", 1),
+                entry("rime::render::MaterialRef", 2),
+                entry("rime::vfx_scene::FireEmitter", 3),
+                entry("rime::fluids_scene::ThermalCell", 4),
+            ],
+        };
+        assert_eq!(
+            outliner_label(&schema, 0, &entity(&[1, 2, 3])),
+            "0  Fire emitter"
+        );
+        assert_eq!(
+            outliner_label(&schema, 0, &entity(&[3, 2, 1])),
+            "0  Fire emitter"
+        );
+        assert_eq!(
+            outliner_label(&schema, 1, &entity(&[1, 4, 2])),
+            "1  Water / ice"
+        );
+    }
+
+    #[test]
     fn a_transform_is_not_what_names_an_entity() {
         let schema = Schema {
             types: vec![
@@ -2229,7 +2564,8 @@ mod outliner_tests {
         };
         // LocalTransform first in the component list, and still not the label: almost everything has
         // one, so it narrows nothing down.
-        assert_eq!(outliner_label(&schema, 4, &entity(&[1, 2])), "4  SlabRole");
+        // This schema-only fixture has no role fields; it uses the readable fallback.
+        assert_eq!(outliner_label(&schema, 4, &entity(&[1, 2])), "4  City part");
     }
 
     #[test]
@@ -2237,7 +2573,7 @@ mod outliner_tests {
         let schema = Schema {
             types: vec![entry("rime::render::PointLight", 9)],
         };
-        assert_eq!(outliner_label(&schema, 0, &entity(&[9])), "0  PointLight");
+        assert_eq!(outliner_label(&schema, 0, &entity(&[9])), "0  Point light");
     }
 
     #[test]

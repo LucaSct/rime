@@ -1,0 +1,6 @@
+ninja: no work to do.
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] rhi: swapchain ready — 887x514, 3 images, vsync (/home/next/projects/rime/engine/rhi/src/vulkan/swapchain_vulkan.cpp:84)
+[INFO] app: presenting in a 887x514 window (/home/next/projects/rime/engine/app/src/application.cpp:103)
+courtyard: 3 thermal ticks, 0 refused, 0 particles, 3 phase surfaces

@@ -1,0 +1,6 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+99-the-block: building support: loaded=1 all_supported=1 buildings=32 quarantined=0 nodes=6540 roots=728 bond_edges=12971 contact_edges=13851 unreachable=0 missing_geometry=0
+99-the-block: no display available; running the script headless instead.
+99-the-block: 240 frames, 240 ticks
+  wrote /home/next/reports/rime-city-profile-2026-10-17/cache-on-collapse.ppm

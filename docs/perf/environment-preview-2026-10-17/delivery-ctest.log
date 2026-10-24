@@ -1,0 +1,183 @@
+Test project /home/next/projects/rime/build/release
+      Start 34: block_demo_cook_ground
+      Start  2: networked_destruction_cook
+      Start 73: block_cook_wall_bg
+      Start 13: destructible_wall_cook
+ 1/89 Test #73: block_cook_wall_bg ..................   Passed    0.59 sec
+      Start  5: networked_player_cook
+ 2/89 Test #13: destructible_wall_cook ..............   Passed    0.61 sec
+      Start 74: block_cook_wall_hero
+ 3/89 Test  #2: networked_destruction_cook ..........   Passed    0.62 sec
+      Start 76: block_cook_side_hero
+ 4/89 Test #74: block_cook_wall_hero ................   Passed    0.16 sec
+      Start 78: block_cook_floor_hero
+ 5/89 Test  #5: networked_player_cook ...............   Passed    0.19 sec
+      Start 11: gltf_zoo_cook
+ 6/89 Test #76: block_cook_side_hero ................   Passed    0.17 sec
+      Start 79: block_cook_half_bg
+ 7/89 Test #11: gltf_zoo_cook .......................   Passed    0.17 sec
+      Start 81: block_cook_crate
+ 8/89 Test #78: block_cook_floor_hero ...............   Passed    0.19 sec
+      Start 77: block_cook_floor_bg
+ 9/89 Test #79: block_cook_half_bg ..................   Passed    0.18 sec
+      Start 80: block_cook_half_hero
+10/89 Test #77: block_cook_floor_bg .................   Passed    0.17 sec
+      Start 75: block_cook_side_bg
+11/89 Test #81: block_cook_crate ....................   Passed    0.19 sec
+      Start 26: block_demo_cook_wall_hero
+12/89 Test #80: block_cook_half_hero ................   Passed    0.18 sec
+      Start 30: block_demo_cook_floor_hero
+13/89 Test #75: block_cook_side_bg ..................   Passed    0.18 sec
+      Start 25: block_demo_cook_wall_bg
+14/89 Test #26: block_demo_cook_wall_hero ...........   Passed    0.19 sec
+      Start 28: block_demo_cook_side_hero
+15/89 Test #30: block_demo_cook_floor_hero ..........   Passed    0.18 sec
+      Start 27: block_demo_cook_side_bg
+16/89 Test #28: block_demo_cook_side_hero ...........   Passed    0.17 sec
+      Start 29: block_demo_cook_floor_bg
+17/89 Test #25: block_demo_cook_wall_bg .............   Passed    0.19 sec
+      Start 33: block_demo_cook_crate
+18/89 Test #27: block_demo_cook_side_bg .............   Passed    0.18 sec
+      Start 31: block_demo_cook_half_bg
+19/89 Test #33: block_demo_cook_crate ...............   Passed    0.17 sec
+      Start 32: block_demo_cook_half_hero
+20/89 Test #29: block_demo_cook_floor_bg ............   Passed    0.18 sec
+      Start 41: block_demo_cook_viewmodel
+21/89 Test #31: block_demo_cook_half_bg .............   Passed    0.18 sec
+      Start 88: rime_render_tests
+22/89 Test #41: block_demo_cook_viewmodel ...........   Passed    0.01 sec
+      Start 89: rime_terrain_render_tests
+23/89 Test #32: block_demo_cook_half_hero ...........   Passed    0.08 sec
+      Start 87: rime_rhi_tests
+24/89 Test #87: rime_rhi_tests ......................   Passed    0.72 sec
+      Start 18: hello_game_dedicated_proof
+25/89 Test #34: block_demo_cook_ground ..............   Passed    3.00 sec
+      Start 40: the_block_viewmodel_smoke
+26/89 Test #18: hello_game_dedicated_proof ..........   Passed    0.87 sec
+      Start 38: the_block_environment_smoke
+27/89 Test #89: rime_terrain_render_tests ...........   Passed   10.14 sec
+      Start 37: the_block_world_gpu_smoke
+28/89 Test #37: the_block_world_gpu_smoke ...........   Passed    6.81 sec
+      Start 35: the_block_headless
+29/89 Test #35: the_block_headless ..................   Passed    5.04 sec
+      Start  3: networked_destruction_headless
+30/89 Test  #3: networked_destruction_headless ......   Passed    2.03 sec
+      Start 84: rime_terrain_collision_tests
+31/89 Test #84: rime_terrain_collision_tests ........   Passed    0.62 sec
+      Start 36: the_block_world_smoke
+32/89 Test #36: the_block_world_smoke ...............   Passed    0.50 sec
+      Start 64: rime_net_smoke
+33/89 Test #64: rime_net_smoke ......................   Passed    1.02 sec
+      Start 45: rime_destruction_tests
+34/89 Test #45: rime_destruction_tests ..............   Passed    1.17 sec
+      Start 10: first_light_windowed_input
+35/89 Test #10: first_light_windowed_input ..........   Passed    0.87 sec
+      Start  4: networked_destruction_udp
+36/89 Test  #4: networked_destruction_udp ...........   Passed    0.91 sec
+      Start 68: rime_gameplay_tests
+37/89 Test #68: rime_gameplay_tests .................   Passed    1.63 sec
+      Start 14: destructible_wall_headless
+38/89 Test #14: destructible_wall_headless ..........   Passed    0.74 sec
+      Start  7: remote_view_window_smoke
+39/89 Test  #7: remote_view_window_smoke ............   Passed    0.48 sec
+      Start 15: lit_rooms_headless
+40/89 Test #15: lit_rooms_headless ..................   Passed    0.61 sec
+      Start 17: hello_game_headless
+41/89 Test #17: hello_game_headless .................   Passed    0.23 sec
+      Start 23: target_range_headless
+42/89 Test #23: target_range_headless ...............   Passed    0.21 sec
+      Start 72: block_standup_test
+43/89 Test #72: block_standup_test ..................   Passed    0.43 sec
+      Start 82: block_render_test
+44/89 Test #82: block_render_test ...................   Passed    0.37 sec
+      Start 63: rime_net_session_tests
+45/89 Test #63: rime_net_session_tests ..............   Passed    0.32 sec
+      Start 46: rime_audio_tests
+46/89 Test #46: rime_audio_tests ....................   Passed    0.37 sec
+      Start 44: rime_physics_tests
+47/89 Test #44: rime_physics_tests ..................   Passed    0.61 sec
+      Start  9: first_light_headless
+48/89 Test  #9: first_light_headless ................   Passed    0.28 sec
+      Start 12: gltf_zoo_headless
+49/89 Test #12: gltf_zoo_headless ...................   Passed    0.23 sec
+      Start  8: render_graph_sample_smoke
+50/89 Test  #8: render_graph_sample_smoke ...........   Passed    0.16 sec
+      Start 69: rime_gameplay_net_tests
+51/89 Test #88: rime_render_tests ...................   Passed   35.83 sec
+      Start  6: networked_player_headless
+52/89 Test #69: rime_gameplay_net_tests .............   Passed    0.11 sec
+      Start 57: rime_stream_tests
+53/89 Test  #6: networked_player_headless ...........   Passed    0.09 sec
+      Start 67: rime_destruction_net_tests
+54/89 Test #67: rime_destruction_net_tests ..........   Passed    0.09 sec
+      Start 42: rime_core_tests
+55/89 Test #57: rime_stream_tests ...................   Passed    0.14 sec
+      Start 53: rime_stream_video_tests
+56/89 Test #42: rime_core_tests .....................   Passed    0.07 sec
+      Start 61: rime_app_tests
+57/89 Test #53: rime_stream_video_tests .............   Passed    0.08 sec
+      Start 43: rime_ecs_tests
+58/89 Test #61: rime_app_tests ......................   Passed    0.09 sec
+      Start 48: rime_fluids_tests
+59/89 Test #48: rime_fluids_tests ...................   Passed    0.01 sec
+      Start 65: rime_replication_tests
+60/89 Test #43: rime_ecs_tests ......................   Passed    0.06 sec
+      Start  1: physics_playground_headless
+61/89 Test  #1: physics_playground_headless .........   Passed    0.03 sec
+      Start 70: rime_destruction_render_tests
+62/89 Test #65: rime_replication_tests ..............   Passed    0.05 sec
+      Start 59: rime_editorhost_tests
+63/89 Test #59: rime_editorhost_tests ...............   Passed    0.00 sec
+      Start 58: rime_stream_loopback_tests
+64/89 Test #70: rime_destruction_render_tests .......   Passed    0.03 sec
+      Start 50: rime_assets_tests
+65/89 Test #50: rime_assets_tests ...................   Passed    0.01 sec
+      Start 83: ground_test
+66/89 Test #83: ground_test .........................   Passed    0.00 sec
+      Start 56: rime_protocol_fixtures_tests
+67/89 Test #56: rime_protocol_fixtures_tests ........   Passed    0.00 sec
+      Start 52: rime_stream_codec_tests
+68/89 Test #58: rime_stream_loopback_tests ..........   Passed    0.02 sec
+      Start 16: hello_game_selftest
+69/89 Test #52: rime_stream_codec_tests .............   Passed    0.01 sec
+      Start 49: rime_platform_tests
+70/89 Test #16: hello_game_selftest .................   Passed    0.01 sec
+      Start 24: target_range_authoring_round_trip
+71/89 Test #24: target_range_authoring_round_trip ...   Passed    0.00 sec
+      Start 22: target_range_selftest
+72/89 Test #49: rime_platform_tests .................   Passed    0.01 sec
+      Start 51: rime_viewer_tests
+73/89 Test #51: rime_viewer_tests ...................   Passed    0.00 sec
+      Start 54: rime_stream_latency_tests
+74/89 Test #22: target_range_selftest ...............   Passed    0.01 sec
+      Start 62: rime_net_tests
+75/89 Test #54: rime_stream_latency_tests ...........   Passed    0.01 sec
+      Start 55: rime_stream_protocol_tests
+76/89 Test #62: rime_net_tests ......................   Passed    0.01 sec
+      Start 86: rime_capi_tests
+77/89 Test #86: rime_capi_tests .....................   Passed    0.00 sec
+      Start 19: hello_game_cli_dedicated
+78/89 Test #55: rime_stream_protocol_tests ..........   Passed    0.01 sec
+      Start 60: rime_scene_tests
+79/89 Test #19: hello_game_cli_dedicated ............   Passed    0.00 sec
+      Start 85: rime_worldkit_tests
+80/89 Test #60: rime_scene_tests ....................   Passed    0.00 sec
+      Start 71: blockkit_test
+81/89 Test #85: rime_worldkit_tests .................   Passed    0.00 sec
+      Start 66: rime_replication_input_tests
+82/89 Test #71: blockkit_test .......................   Passed    0.00 sec
+      Start 21: hello_game_cli_content_missing
+83/89 Test #21: hello_game_cli_content_missing ......   Passed    0.00 sec
+      Start 20: hello_game_cli_browser_not_yet
+84/89 Test #66: rime_replication_input_tests ........   Passed    0.00 sec
+      Start 47: rime_vfx_tests
+85/89 Test #20: hello_game_cli_browser_not_yet ......   Passed    0.00 sec
+      Start 39: the_block_effects_smoke
+86/89 Test #47: rime_vfx_tests ......................   Passed    0.00 sec
+87/89 Test #39: the_block_effects_smoke .............   Passed   30.90 sec
+88/89 Test #38: the_block_environment_smoke .........   Passed  201.71 sec
+89/89 Test #40: the_block_viewmodel_smoke ...........   Passed  283.97 sec
+
+100% tests passed out of 89
+
+Total Test time (real) = 286.97 sec

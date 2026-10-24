@@ -21,6 +21,10 @@
 #include <utility>
 #include <vector>
 
+#include "editor_fly_camera.hpp"
+#include "editor_preview_player.hpp"
+#include "play_city.hpp"
+#include "player_spawn.hpp"
 #include "rime/app/editor_host_app.hpp"
 #include "rime/blockkit/block.hpp"
 #include "rime/blockkit/palette.hpp"
@@ -40,6 +44,33 @@
 #include "rime/worldkit/profile.hpp"
 
 namespace {
+
+// Preview the same convex-part source geometry used by the live city patterns. Runtime mesh
+// handles never enter the saved map; only Destructible content identities survive save/reload.
+rime::render::CpuMesh intact_city_mesh(const rime::assets::DestructibleAsset& asset) {
+    rime::render::CpuMesh mesh;
+    for (const auto& part : asset.parts) {
+        std::size_t offset = 0;
+        for (const auto count : part.face_counts) {
+            const auto first = static_cast<std::uint32_t>(mesh.vertices.size());
+            const auto p0 = part.vertices[part.face_indices[offset]];
+            const auto p1 = part.vertices[part.face_indices[offset + 1]];
+            const auto p2 = part.vertices[part.face_indices[offset + 2]];
+            const auto normal = rime::core::normalize(rime::core::cross(p1 - p0, p2 - p0));
+            for (std::uint32_t i = 0; i < count; ++i) {
+                const auto point = part.vertices[part.face_indices[offset + i]] + part.com;
+                mesh.vertices.push_back(
+                    {point.x, point.y, point.z, normal.x, normal.y, normal.z, point.x, point.y});
+            }
+            for (std::uint32_t i = 1; i + 1 < count; ++i) {
+                mesh.indices.insert(mesh.indices.end(), {first, first + i, first + i + 1});
+            }
+            offset += count;
+        }
+    }
+    rime::render::compute_tangents(mesh);
+    return mesh;
+}
 
 // Turn the block's authored data into something the viewport can draw.
 //
@@ -77,6 +108,11 @@ void prepare_block_for_viewport(rime::ecs::World& world,
                        spec.name);
     }
 
+    preview[rime::block_play::city::kLampAsset] = meshes.add(
+        intact_city_mesh(rime::block_play::city::make_lamp_asset()), "city-lamp-preview");
+    preview[rime::block_play::city::kBarrierAsset] = meshes.add(
+        intact_city_mesh(rime::block_play::city::make_barrier_asset()), "city-barrier-preview");
+
     std::vector<std::pair<rime::ecs::Entity, rime::render::MeshId>> to_mesh;
     std::size_t unknown_pattern = 0;
     world.query<rime::blockkit::SlabRole, rime::destruction::Destructible>().for_each(
@@ -92,6 +128,7 @@ void prepare_block_for_viewport(rime::ecs::World& world,
             to_mesh.emplace_back(e, it->second); // collect: add_component moves the archetype
         });
     for (const auto& [e, mesh] : to_mesh) {
+        (void)world.add_component(e, rime::ecs::DerivedComponents{});
         (void)world.add_component(e, rime::render::MeshRef{mesh});
     }
 
@@ -145,40 +182,17 @@ public:
             return; // a scene with no active camera: nothing to fly, and nothing being rendered
         }
 
-        // SEED FROM THE SCENE, ONCE PER SESSION. Starting the fly camera at the origin looking
-        // down −Z would teleport the viewer away from the shot the scene was authored to open on,
-        // the first time they nudge the mouse. Yaw/pitch are recovered from the camera's own
-        // forward vector — exact, because `eye_transform` builds the rotation as yaw-then-pitch
-        // and this inverts precisely that.
-        if (!seeded_) {
-            const rime::core::Vec3 forward =
-                rime::core::rotate(current.rotation, rime::core::Vec3{0.0f, 0.0f, -1.0f});
-            fly_.position = current.translation;
-            fly_.view.yaw = std::atan2(-forward.x, -forward.z);
-            fly_.view.pitch = std::asin(std::clamp(forward.y, -1.0f, 1.0f));
-            seeded_ = true;
-        }
-
-        // Pointer capture is the browser page's job (it calls `requestPointerLock` before it
-        // forwards anything), and the page only sends input while locked — so look does NOT
-        // require a held button here. This is the one place `look_requires_drag` is set from
-        // knowledge the engine does not have: what the CLIENT did, not what this process asked
-        // for.
-        fly_.bindings.look_requires_drag = false;
-        fly_.update(events, static_cast<float>(dt));
-
+        // The editor writes this same camera while inspecting a running simulation. Hand its
+        // current authored pose to the controller so a cached play pose cannot overwrite it.
+        const auto eye = fly_.update(current, events, dt);
         if (auto* local = world.get<rime::ecs::LocalTransform>(camera)) {
-            // Scale is preserved rather than overwritten: a camera's scale is meaningless to the
-            // lens but it is the author's data, and a play session must give back what it took.
-            const rime::core::Transform eye = fly_.transform();
             local->value.translation = eye.translation;
             local->value.rotation = eye.rotation;
         }
     }
 
 private:
-    rime::gameplay::FlyCamera fly_{};
-    bool seeded_ = false;
+    block_editor::FlyCamera fly_{};
 };
 
 } // namespace
@@ -187,16 +201,19 @@ int main(int argc, char** argv) {
     // One per process, outliving the callback the host holds: a fly camera that forgot its angle
     // every tick would not be a camera.
     BlockFlyCamera fly;
+    block_editor::PreviewPlayer player;
     return rime::app::run_editor_host(
         argc,
         argv,
         [](rime::ecs::World& world) {
-            (void)rime::worldkit::register_engine_components(world); // the engine's
-            rime::blockkit::register_blockkit_components(world);     // this game's
+            // The same list the game registers (engine + blockkit + PlayerSpawn), so the
+            // Inspector can author what Play consumes.
+            rime::block_play::register_block_components(world);
         },
         "the-block-host",
         prepare_block_for_viewport,
         [&fly](rime::ecs::World& world, std::span<const rime::platform::Event> events, double dt) {
             fly.tick(world, events, dt);
-        });
+        },
+        player.hooks());
 }

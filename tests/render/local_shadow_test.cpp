@@ -8,15 +8,10 @@
 //      consumes — world position, the −z cone axis, pre-cosined cone angles (inner ≥ outer), and
 //      radiance = colour × intensity.
 //
-//  (2) The money test (on lavapipe): a spot lights a floor with a wall between it and one patch.
-//  That
-//      patch is in shadow (a). Then the wall is DESTROYED — removed from the world:
-//        * with NO invalidation the cache serves last frame's depth, so the patch stays (wrongly)
-//          dark and stats report a pure cache reuse (b) — proof the cache actually caches, and that
-//          a light-parameter check alone cannot see geometry change;
-//        * calling invalidate() over the wall's region (the C2 destruction hook) forces a re-render
-//          and the patch lights back up (c) — *break a wall, the shadow it cast lifts*, the thesis
-//          of this milestone.
+//  (2) A stationary spot lights a floor with a wall between it and one patch. An unchanged
+//      repeat serves cached depth. Removing the wall refreshes its old region automatically;
+//      an explicit C2 invalidation still forces a refresh. Cache reuse must not depend on the
+//      camera, nor retain shadows from scene edits that have no destruction event.
 //
 // Shares pbr_pipeline/shadow_test's harness via render_test_support.hpp.
 
@@ -186,15 +181,20 @@ TEST_CASE("local shadows: a spot casts a shadow, and the cache is destruction-aw
     CHECK(s1.reused == 0);
     CHECK(shadowed < 0.4f * lit); // (a) the spot casts a shadow
 
-    // Frame 2 — the wall is DESTROYED (removed) but NOTHING invalidates the cache. The spot itself
-    // is unchanged, so the cache reuses last frame's depth: the shadow persists even though the
-    // caster is gone. This is the proof the cache caches — a light-parameter check alone can't see
-    // geometry move.
+    // An unchanged world reuses its map. This is the cache-hit control: refreshing every map on
+    // every frame could fix stale shadows, but must fail this assertion.
+    const HdrImage unchanged = render_scene(/*with_wall=*/true);
+    CHECK(renderer.local_shadow_stats().rendered == 0);
+    CHECK(renderer.local_shadow_stats().reused == 1);
+    CHECK(lum(unchanged, shadow_px) < 0.5f * lit);
+
+    // Removing a caster now invalidates its old region automatically. An editor deletion or
+    // moving actor has no destruction C2 event, and must not leave a ghost shadow behind.
     const HdrImage f2 = render_scene(/*with_wall=*/false);
     const LocalShadowStats s2 = renderer.local_shadow_stats();
-    CHECK(s2.rendered == 0);                // (b) pure cache hit …
-    CHECK(s2.reused == 1);                  //     … one slot served from cache
-    CHECK(lum(f2, shadow_px) < 0.5f * lit); // … and the stale shadow is still there
+    CHECK(s2.rendered == 1);
+    CHECK(s2.reused == 0);
+    CHECK(lum(f2, shadow_px) > 0.7f * lit);
 
     // Frame 3 — the C2 destruction hook fires: invalidate the wall's world region. Now the slot is
     // re-rendered (without the wall) and the floor lights back up. Break a wall, the shadow lifts.

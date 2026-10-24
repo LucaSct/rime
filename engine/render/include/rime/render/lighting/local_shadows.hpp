@@ -29,6 +29,8 @@
 //   * the light itself moved / retargeted (its cached parameters changed), or
 //   * a destruction event's world-space AABB (ADR-0032 C2) overlaps the slot's frustum — the wall
 //     between the lamp and the floor came down, so the shadow it cast is now stale.
+//   * SceneRenderer reports the old/new regions of changed or removed world casters. Actor
+//     motion and editor edits do not have to manufacture a destruction event to refresh depth.
 //
 // That last case is this brick's thesis: `invalidate(region)` is the seam the C2 destruction
 // channel (destruction/events.hpp, `world_bounds`) drives, so *breaking geometry moves the shadows
@@ -128,6 +130,10 @@ public:
     // destruction hook. Persists until the slot is next drawn, so it survives frames where the
     // light is off-screen. Idempotent; safe to call many times per frame as events drain.
     void invalidate(const WorldAabb& region);
+
+    // Unknown deformation bounds or a resumed feature gate cannot name a safe affected region.
+    // Refresh every cached slot; ordinary rigid changes still use the regional path above.
+    void invalidate_all();
 
     [[nodiscard]] const LocalShadowStats& stats() const noexcept { return stats_; }
 

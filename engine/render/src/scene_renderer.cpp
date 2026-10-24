@@ -19,8 +19,17 @@
 #include "rime/ecs/transform.hpp"
 #include "rime/render/components.hpp"
 #include "rime/render/culling.hpp"
+#include "shadow_caster_tracker.hpp"
 
 namespace rime::render {
+
+namespace detail {
+struct SceneShadowCasters {
+    ShadowCasterTracker tracker;
+    std::vector<ShadowCasterRecord> frame;
+    bool active = false;
+};
+} // namespace detail
 
 namespace {
 
@@ -209,8 +218,8 @@ SceneRenderer::SceneRenderer(rhi::Device& device,
                              const MaterialRegistry& materials)
     : device_(device), meshes_(meshes), materials_(materials), depth_prepass_(device),
       velocity_(device), forward_(device), tonemap_(device), csm_(device), local_shadows_(device),
-      clustered_(device), sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device),
-      taa_resolve_(device) {
+      shadow_casters_(std::make_unique<detail::SceneShadowCasters>()), clustered_(device),
+      sdf_clipmap_(device), ddgi_(device), ssr_(device), sky_(device), taa_resolve_(device) {
     // Default ring depth: kFramesInFlight (2, private to the Vulkan swapchain) + 1. See
     // set_frames_in_flight for why the default is the safe maximum rather than the headless
     // minimum.
@@ -340,6 +349,172 @@ void SceneRenderer::set_frames_in_flight(std::uint32_t frames) {
     }
 }
 
+void SceneRenderer::set_smoke_particles(std::span<const GpuParticle> particles,
+                                        FxSettings settings) {
+    smoke_settings_ = settings;
+    smoke_particles_.clear();
+    if (!settings.enabled || particles.empty())
+        return;
+    constexpr std::size_t kSmokeCapacity = 4096;
+    const std::size_t count = std::min(particles.size(), kSmokeCapacity);
+    smoke_particles_.assign(particles.begin(), particles.begin() + count);
+    smoke_particles_dropped_ += particles.size() - count;
+}
+
+void SceneRenderer::set_flame_particles(std::span<const GpuParticle> particles,
+                                        FxSettings settings) {
+    flame_settings_ = settings;
+    flame_particles_.clear();
+    if (!settings.enabled || particles.empty())
+        return;
+    constexpr std::size_t kFlameCapacity = 256;
+    const std::size_t count = std::min(particles.size(), kFlameCapacity);
+    flame_particles_.assign(particles.begin(), particles.begin() + count);
+    flame_particles_dropped_ += particles.size() - count;
+}
+
+std::vector<MeshVertex> phase_surface_vertices(const SurfaceGeometry& geometry,
+                                               const core::Mat4& model,
+                                               float liquid,
+                                               double seconds,
+                                               float depth) {
+    // ECS chunks copy components with memcpy. Keep only a small parametric description
+    // there; reconstruct the bounded grid in renderer-owned frame scratch, never a vector
+    // inside a component. Vertex order exactly matches the creation-time index topology.
+    std::vector<MeshVertex> vertices;
+    vertices.reserve(geometry.vertex_count);
+    const auto append = [&](float x, float z) {
+        MeshVertex v;
+        v.px = x;
+        v.py = geometry.top;
+        v.pz = z;
+        v.nx = v.nz = 0;
+        v.ny = 1;
+        v.u = .5f + x / (2 * geometry.half_x);
+        v.v = .5f + z / (2 * geometry.half_z);
+        v.tw = -1;
+        vertices.push_back(v);
+    };
+    if (geometry.oval) {
+        append(0, 0);
+        for (unsigned ring = 1; ring <= 32; ++ring)
+            for (unsigned i = 0; i < 64; ++i) {
+                const float angle = 6.2831853f * float(i) / 64;
+                const float radius = (.88f + .07f * std::sin(angle * 3 + geometry.seed) +
+                                      .05f * std::sin(angle * 7)) *
+                                     float(ring) / 32;
+                append(std::cos(angle) * geometry.half_x * radius,
+                       std::sin(angle) * geometry.half_z * radius);
+            }
+    } else {
+        for (unsigned z = 0; z <= 32; ++z)
+            for (unsigned x = 0; x <= 32; ++x)
+                append((float(x) / 16 - 1) * geometry.half_x,
+                       (float(z) / 16 - 1) * geometry.half_z);
+    }
+    if (liquid <= 0)
+        return vertices;
+    const auto inverse = core::inverse(model);
+    const auto transpose = core::transpose(model);
+    const auto xaxis = model * core::Vec4{1, 0, 0, 0};
+    const auto zaxis = model * core::Vec4{0, 0, 1, 0};
+    // Bounded Gerstner waves: three wind-aligned trochoids, with total Q*k*A < .18.
+    // Their horizontal Jacobian stays positive, so no crest can loop. Analytic derivatives
+    // include the shoreline envelope; positions and normals describe the same surface.
+    constexpr std::array<core::Vec4, 3> waves{
+        {{.940f, .342f, 1.8f, 1.0f},
+         {.819f, .574f, .93f, .48f},
+         {.996f, -.087f, .47f, .22f}}}; // direction xz, wavelength metres, amplitude share
+    const float amplitude = std::min(.012f, depth * .12f) * liquid;
+    for (auto& vertex : vertices) {
+        const auto p = model * core::Vec4{vertex.px, vertex.py, vertex.pz, 1};
+        const float x = vertex.px / geometry.half_x, z = vertex.pz / geometry.half_z;
+        const float ex = std::max(0.f, 1 - x * x), ez = std::max(0.f, 1 - z * z);
+        const float edge = geometry.oval ? std::max(0.f, 1 - x * x - z * z) : ex * ez;
+        const float envelope = edge * edge;
+        const float gx = -4 * edge * x / geometry.half_x * (geometry.oval ? 1 : ez);
+        const float gz = -4 * edge * z / geometry.half_z * (geometry.oval ? 1 : ex);
+        core::Vec3 offset{}, dx{xaxis.x, xaxis.y, xaxis.z}, dz{zaxis.x, zaxis.y, zaxis.z};
+        for (std::size_t i = 0; i < waves.size(); ++i) {
+            const auto w = waves[i];
+            const float k = 6.2831853f / w.z;
+            const float phase =
+                k * (w.x * p.x + w.y * p.z) -
+                static_cast<float>(std::fmod(seconds, 4096.0)) * std::sqrt(9.81f * k) +
+                float(i) * 2.17f;
+            const float s = std::sin(phase), c = std::cos(phase);
+            const float a = amplitude * w.w;
+            constexpr float q = .55f;
+            const core::Vec3 shape{q * w.x * c, s, q * w.y * c};
+            const core::Vec3 slope{-q * w.x * s, c, -q * w.y * s};
+            offset = offset + shape * (a * envelope);
+            dx = dx + (shape * gx + slope * (envelope * k * (w.x * xaxis.x + w.y * xaxis.z))) * a;
+            dz = dz + (shape * gz + slope * (envelope * k * (w.x * zaxis.x + w.y * zaxis.z))) * a;
+        }
+        const auto local = inverse * core::Vec4{p.x + offset.x, p.y + offset.y, p.z + offset.z, 1};
+        const auto normal = core::normalize(core::cross(dz, dx));
+        const auto n = transpose * core::Vec4{normal.x, normal.y, normal.z, 0};
+        const auto t = inverse * core::Vec4{dx.x, dx.y, dx.z, 0};
+        vertex.px = local.x;
+        vertex.py = local.y;
+        vertex.pz = local.z;
+        vertex.nx = n.x;
+        vertex.ny = n.y;
+        vertex.nz = n.z;
+        vertex.tx = t.x;
+        vertex.ty = t.y;
+        vertex.tz = t.z;
+    }
+    return vertices;
+}
+
+bool SceneRenderer::set_surface_appearances(std::span<const SurfaceAppearance> rows) {
+    surface_appearance_count_ = 0;
+    const auto refuse = [&] {
+        ++surface_appearance_refusals_;
+        return false;
+    };
+    if (rows.size() > surface_appearances_.size())
+        return refuse();
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+        const auto& r = rows[i];
+        if (!r.entity.is_valid() || !std::isfinite(r.base_color.x) ||
+            !std::isfinite(r.base_color.y) || !std::isfinite(r.base_color.z) ||
+            r.base_color.x < 0 || r.base_color.x > 1 || r.base_color.y < 0 || r.base_color.y > 1 ||
+            r.base_color.z < 0 || r.base_color.z > 1 || !std::isfinite(r.roughness) ||
+            r.roughness < 0 || r.roughness > 1 ||
+            static_cast<unsigned>(r.kind) > static_cast<unsigned>(SurfaceKind::Frost) ||
+            !std::isfinite(r.liquid_fraction) || r.liquid_fraction < 0 || r.liquid_fraction > 1 ||
+            !std::isfinite(r.thickness) || r.thickness <= 0 || r.thickness > 100 ||
+            !std::isfinite(r.seconds) || r.seconds < 0 ||
+            (r.override_detail &&
+             (!std::isfinite(r.normal_scale) || r.normal_scale < 0 || r.normal_scale > 2)))
+            return refuse();
+        for (std::size_t j = 0; j < i; ++j)
+            if (rows[j].entity == r.entity)
+                return refuse();
+    }
+    std::copy(rows.begin(), rows.end(), surface_appearances_.begin());
+    surface_appearance_count_ = rows.size();
+    return true;
+}
+
+void SceneRenderer::set_transient_point_lights(std::span<const GpuPointLight> lights) {
+    transient_point_lights_.clear();
+    for (const auto& light : lights) {
+        bool valid = true;
+        for (unsigned i = 0; i < 4; ++i)
+            valid = valid && std::isfinite(light.position[i]) && std::isfinite(light.radiance[i]);
+        valid = valid && light.position[3] > 0.0f && light.radiance[0] >= 0.0f &&
+                light.radiance[1] >= 0.0f && light.radiance[2] >= 0.0f;
+        if (!valid || transient_point_lights_.size() == 16) {
+            ++transient_point_lights_dropped_;
+            continue;
+        }
+        transient_point_lights_.push_back(light);
+    }
+}
+
 void SceneRenderer::ensure_draw_capacity(std::uint32_t draw_count) {
     // Grows only THIS FRAME'S SLOT. That is what makes destroy-and-recreate safe again: the slot is
     // one the ring has come back round to, so its previous submission has already been waited on by
@@ -409,6 +584,8 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     ubo_slot_ = (ubo_slot_ + 1) % static_cast<std::uint32_t>(frame_ubos_.size());
 
     ExtractedScene scene = extract_scene(world);
+    scene.point_lights.insert(
+        scene.point_lights.end(), transient_point_lights_.begin(), transient_point_lights_.end());
     if (camera_override)
         scene.camera = *camera_override;
     // Before ANY registry lookup: a MeshRef can name a mesh this registry does not hold (a scene
@@ -426,8 +603,12 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         }
     }
     if (!scene.camera.found) {
-        if (previous_first_person_active_)
-            taa_history_valid_ = false;
+        // A camera gap breaks rendered-frame continuity even without a first-person overlay.
+        // The next camera has no predecessor to reproject into, so discard both kinds of history.
+        taa_history_valid_ = false;
+        last_frame_resolved_ = false;
+        has_view_proj_history_ = false;
+        prev_models_.clear();
         previous_first_person_active_ = false;
         previous_first_person_models_.clear();
         first_person_draws_ = {};
@@ -589,123 +770,11 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         fu.point_lights[i] = scene.point_lights[i];
     fu.light_counts[0] = ndir;
     fu.light_counts[1] = npoint;
-    device_.write_buffer(frame_ubos_[ubo_slot_], &fu, sizeof(fu));
-
-    // ── Per-draw uniforms + resolved textures ─────────────────────────────────────────────
-    frame_draws_ = std::move(scene.draws);
-    const auto draw_count = static_cast<std::uint32_t>(frame_draws_.size());
-    ensure_draw_capacity(std::max(draw_count, 1u));
-    draw_staging_.assign(static_cast<std::size_t>(draw_count) * kDrawUniformStride, 0);
-    frame_base_color_.resize(draw_count);
-    frame_metallic_roughness_.resize(draw_count);
-    frame_normal_.resize(draw_count);
-    frame_occlusion_.resize(draw_count);
-    frame_emissive_.resize(draw_count);
-    // Previous-frame model matrices (ADR-0078 step 1c, decision 7): look each drawn entity up in
-    // the cache the LAST render() left, and build the cache for the NEXT one from this frame's
-    // draws. Building a fresh map rather than editing in place is what drops an entity that was not
-    // drawn this frame, so the cache is bounded by the live drawn set and cannot grow with a long
-    // session of spawning debris. (Culled draws are still in `frame_draws_` -- the cull PARTITIONS,
-    // it does not delete -- so an entity that merely left the frustum keeps its history.)
-    //
-    // First-seen entity: prev_model = model, i.e. ZERO object motion. A guessed velocity would
-    // smear history across a pixel that had no history; zero says "nothing moved from where I
-    // started", which is true by definition on the first frame.
-    std::unordered_map<std::uint64_t, core::Mat4> next_prev_models;
-    const bool track_motion =
-        motion_vectors_enabled_ && scene.draw_entities.size() == frame_draws_.size();
-    if (track_motion) {
-        next_prev_models.reserve(frame_draws_.size());
-    }
-    for (std::uint32_t i = 0; i < draw_count; ++i) {
-        const DrawItem& item = frame_draws_[i];
-        // Out-of-range material ids are a caller bug, but a defensive default keeps a bad id
-        // from becoming an out-of-bounds read.
-        const PbrMaterialDesc material =
-            item.material < materials_.size() ? materials_.get(item.material) : PbrMaterialDesc{};
-        GpuDrawUniforms du{};
-        du.model = item.model;
-        du.prev_model = item.model;
-        if (track_motion) {
-            const std::uint64_t key = std::bit_cast<std::uint64_t>(scene.draw_entities[i]);
-            const auto prev = prev_models_.find(key);
-            if (prev != prev_models_.end()) {
-                du.prev_model = prev->second;
-            }
-            next_prev_models.emplace(key, item.model);
-        }
-        // Normals transform by the inverse-transpose (see pbr_forward.vert). A degenerate
-        // (zero-scale) model has no inverse — fall back to the model matrix rather than feed
-        // NaNs to the whole draw.
-        const float det = core::determinant(item.model);
-        du.normal_matrix =
-            std::fabs(det) > 1e-12f ? core::transpose(core::inverse(item.model)) : item.model;
-        du.base_color[0] = material.base_color[0];
-        du.base_color[1] = material.base_color[1];
-        du.base_color[2] = material.base_color[2];
-        du.base_color[3] = material.base_color[3];
-        du.params[0] = material.metallic;
-        du.params[1] = material.roughness;
-        du.params[2] = material.normal_scale;
-        du.params[3] = material.occlusion_strength;
-        du.emissive[0] = material.emissive[0];
-        du.emissive[1] = material.emissive[1];
-        du.emissive[2] = material.emissive[2];
-        du.emissive[3] = material.alpha_cutoff;
-        // Route this draw to the alpha-testing depth pipeline (m16.4). A nonzero cutoff is exactly
-        // what "this material masks" means -- the same single float the shader branches on, so the
-        // CPU and GPU cannot disagree about which draws are masked.
-        if (material.alpha_cutoff > 0.0f) {
-            frame_draws_[i].flags |= DrawItem::AlphaMasked;
-        }
-        if (material.double_sided) {
-            frame_draws_[i].flags |= DrawItem::DoubleSided;
-        }
-        if (material.clamp_uv) {
-            frame_draws_[i].flags |= DrawItem::ClampUv;
-        } // 0 = no masking; see PbrMaterialDesc
-        std::memcpy(
-            &draw_staging_[static_cast<std::size_t>(i) * kDrawUniformStride], &du, sizeof(du));
-        // Resolve each slot to its map or the correct fallback, so record_draws never branches on
-        // presence: the normal slot falls back to the flat-normal texel, every other slot to white.
-        const auto pick = [](rhi::TextureHandle map, rhi::TextureHandle fallback) {
-            return map.is_valid() ? map : fallback;
-        };
-        frame_base_color_[i] = pick(material.base_color_texture, white_);
-        frame_metallic_roughness_[i] = pick(material.metallic_roughness_texture, white_);
-        frame_normal_[i] = pick(material.normal_texture, flat_normal_);
-        frame_occlusion_[i] = pick(material.occlusion_texture, white_);
-        frame_emissive_[i] = pick(material.emissive_texture, white_);
-    }
-    if (draw_count > 0)
-        device_.write_buffer(draw_ubos_[ubo_slot_], draw_staging_.data(), draw_staging_.size());
-    if (motion_vectors_enabled_) {
-        prev_models_ = std::move(next_prev_models);
-    }
-
-    // The runtime SDF clipmap (m10.4b): a fourth, independent gate. `sync_sdf_instances` (m10.5a)
-    // closes the gap this brick's own comment used to name here: every entity carrying
-    // (WorldTransform, SdfRef) is now change-detection-fed into the clipmap automatically, so an
-    // empty scene (no SdfRef entities) still recomposes cheaply (clears only) whenever the camera
-    // crosses a level's own voxel boundary, and settles to zero passes the rest of the time —
-    // exactly the ADR-0032 §11 discipline every other M10 technique follows.
-    const core::Vec3 camera_pos{
-        scene.camera.position[0], scene.camera.position[1], scene.camera.position[2]};
-    if (lighting_.sdf_clipmap_enabled) {
-        sync_sdf_instances(world);
-        sdf_clipmap_.add(graph, camera_pos);
-    }
-
-    // ── The sky, resolved once and BAKED before anything reads it (m17.7b) ────────────────────
-    //
-    // This sits above the DDGI trace and the forward pass because both consume what it produces:
-    // the nine SH coefficients the forward pass shades ambient with, and the sky-view LUT a probe
-    // ray samples when it escapes. The graph derives its order from declared accesses, so these
-    // passes have to be declared first for the edges to exist at all.
-    //
-    // The SAME resolved SkyParams then feeds the background composite further down. That is the
-    // point of resolving here rather than twice: a scene lit by one sky and painted with another
-    // would be wrong in a way no screenshot could show you.
+    // ── The sky resolved EARLY, so cloud can dim the sun (sun vs cloud) ──────────────────────
+    // The frame uniform buffer below carries the sun's radiance, so whatever dims the sun has to be
+    // known before it uploads. The sky (including its sun coupling) is therefore resolved here,
+    // once; the bake and composite further down reuse this same `sp`, so a scene still cannot be
+    // lit by one sky and painted with another.
     const bool sky_on = sky_params_.enabled || scene.has_sky;
     SkyParams sp = sky_params_;
     if (scene.has_sky) {
@@ -736,6 +805,256 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         sp.sun_direction[1] = -fu.dir_lights[0].direction[1];
         sp.sun_direction[2] = -fu.dir_lights[0].direction[2];
     }
+    // A cloud over the sun must dim the DIRECT light and not only the painted disc, or the sun is
+    // visibly hidden while shadows stay razor sharp and fully lit. The sky composite scales the
+    // disc by the same transmittance (sky_common.glsl). It multiplies radiance, so shadow-map
+    // lookups are unchanged and shadows fade smoothly with the light rather than switching off.
+    if (sky_on && ndir > 0) {
+        const float t = sky_sun_cloud_transmittance(sp,
+                                                    core::Vec3{scene.camera.position[0],
+                                                               scene.camera.position[1],
+                                                               scene.camera.position[2]});
+        for (float& c : fu.dir_lights[0].radiance) {
+            c *= t;
+        }
+    }
+    device_.write_buffer(frame_ubos_[ubo_slot_], &fu, sizeof(fu));
+
+    // ── Per-draw uniforms + resolved textures ─────────────────────────────────────────────
+    frame_draws_ = std::move(scene.draws);
+    const auto draw_count = static_cast<std::uint32_t>(frame_draws_.size());
+    ensure_draw_capacity(std::max(draw_count, 1u));
+    draw_staging_.assign(static_cast<std::size_t>(draw_count) * kDrawUniformStride, 0);
+    frame_base_color_.resize(draw_count);
+    frame_metallic_roughness_.resize(draw_count);
+    frame_normal_.resize(draw_count);
+    frame_occlusion_.resize(draw_count);
+    frame_emissive_.resize(draw_count);
+    const bool track_shadow_casters =
+        lighting_.shadows_enabled && lighting_.local_shadows_enabled && !scene.spot_lights.empty();
+    shadow_casters_->frame.clear();
+    if (track_shadow_casters) {
+        shadow_casters_->frame.reserve(draw_count);
+        if (!shadow_casters_->active)
+            local_shadows_.invalidate_all();
+    } else if (shadow_casters_->active) {
+        // Maps can survive a disabled frame while geometry changes. Resuming invalidates every
+        // slot, including an empty new world whose removed casters have no current bounds.
+        shadow_casters_->tracker.clear();
+    }
+    shadow_casters_->active = track_shadow_casters;
+    // Previous-frame model matrices (ADR-0078 step 1c, decision 7): look each drawn entity up in
+    // the cache the LAST render() left, and build the cache for the NEXT one from this frame's
+    // draws. Building a fresh map rather than editing in place is what drops an entity that was not
+    // drawn this frame, so the cache is bounded by the live drawn set and cannot grow with a long
+    // session of spawning debris. (Culled draws are still in `frame_draws_` -- the cull PARTITIONS,
+    // it does not delete -- so an entity that merely left the frustum keeps its history.)
+    //
+    // First-seen entity: prev_model = model, i.e. ZERO object motion. A guessed velocity would
+    // smear history across a pixel that had no history; zero says "nothing moved from where I
+    // started", which is true by definition on the first frame.
+    std::unordered_map<std::uint64_t, core::Mat4> next_prev_models;
+    const bool track_motion =
+        motion_vectors_enabled_ && scene.draw_entities.size() == frame_draws_.size();
+    if (track_motion) {
+        next_prev_models.reserve(frame_draws_.size());
+    }
+    std::unordered_map<std::uint64_t, std::vector<MeshVertex>> next_surface_vertices;
+    for (std::uint32_t i = 0; i < draw_count; ++i) {
+        DrawItem& item = frame_draws_[i];
+        // Out-of-range material ids are a caller bug, but a defensive default keeps a bad id
+        // from becoming an out-of-bounds read.
+        PbrMaterialDesc material =
+            item.material < materials_.size() ? materials_.get(item.material) : PbrMaterialDesc{};
+        // Change the private frame copy, never the registry or authored components. Matching
+        // after resolve_draws applies the same diagnostic appearance to every submesh of a cell.
+        const auto* geometry = world.get<SurfaceGeometry>(scene.draw_entities[i]);
+        SurfaceAppearance surface;
+        if (geometry && !geometry->thermal) {
+            surface.kind = SurfaceKind::Water;
+            surface.thickness = geometry->depth;
+            surface.seconds = geometry->seconds;
+        }
+        for (std::size_t j = 0; j < surface_appearance_count_; ++j) {
+            const auto& appearance = surface_appearances_[j];
+            if (appearance.entity != scene.draw_entities[i])
+                continue;
+            surface = appearance;
+            material.base_color[0] = appearance.base_color.x;
+            material.base_color[1] = appearance.base_color.y;
+            material.base_color[2] = appearance.base_color.z;
+            material.roughness = appearance.roughness;
+            if (appearance.override_detail) {
+                material.normal_texture = appearance.normal_texture;
+                material.base_color_texture = appearance.base_color_texture;
+                material.normal_scale = appearance.normal_scale;
+            }
+            break;
+        }
+        GpuDrawUniforms du{};
+        du.model = item.model;
+        du.prev_model = item.model;
+        if (track_motion) {
+            const std::uint64_t key = std::bit_cast<std::uint64_t>(scene.draw_entities[i]);
+            const auto prev = prev_models_.find(key);
+            if (prev != prev_models_.end()) {
+                du.prev_model = prev->second;
+            }
+            next_prev_models.emplace(key, item.model);
+        }
+        // Normals transform by the inverse-transpose (see pbr_forward.vert). A degenerate
+        // (zero-scale) model has no inverse — fall back to the model matrix rather than feed
+        // NaNs to the whole draw.
+        const float det = core::determinant(item.model);
+        du.normal_matrix =
+            std::fabs(det) > 1e-12f ? core::transpose(core::inverse(item.model)) : item.model;
+        du.base_color[0] = material.base_color[0];
+        du.base_color[1] = material.base_color[1];
+        du.base_color[2] = material.base_color[2];
+        du.base_color[3] = material.base_color[3];
+        du.params[0] = material.metallic;
+        du.params[1] = material.roughness;
+        du.params[2] = material.normal_scale;
+        du.params[3] = material.occlusion_strength;
+        du.emissive[0] = material.emissive[0];
+        du.emissive[1] = material.emissive[1];
+        du.emissive[2] = material.emissive[2];
+        du.emissive[3] = material.alpha_cutoff;
+        if (surface.kind != SurfaceKind::Ordinary) {
+            // Reuse the existing draw ABI's unused world-motion lanes: kind/liquid/depth.
+            // SSR already accepts RGB F0 via its metallic endpoint, so the fragment writes
+            // that representation for this specular lobe and adds transmission separately.
+            const float liquid = surface.kind == SurfaceKind::Frost ? 0.f : surface.liquid_fraction;
+            du.motion_params[1] = static_cast<float>(surface.kind);
+            du.motion_params[2] = liquid;
+            du.motion_params[3] = surface.thickness;
+            du.emissive[0] = static_cast<float>(std::fmod(surface.seconds, 4096.0));
+            du.emissive[1] = geometry && geometry->oval ? 1.f : 0.f;
+            du.emissive[2] = surface.override_detail ? 1.f : 0.f;
+            du.emissive[3] = 0;
+            if (geometry && geometry->vertex_count == meshes_.get(item.mesh).vertex_count &&
+                geometry->vertex_count == (geometry->oval ? 2049u : 1089u) &&
+                geometry->half_x > 0 && geometry->half_z > 0 && std::fabs(det) > 1e-12f) {
+                auto vertices = phase_surface_vertices(
+                    *geometry, item.model, liquid, surface.seconds, surface.thickness);
+                const auto key = std::bit_cast<std::uint64_t>(scene.draw_entities[i]);
+                const auto previous = surface_previous_vertices_.find(key);
+                const auto stream =
+                    graph.push_frame_data(vertices.data(), vertices.size() * sizeof(MeshVertex));
+                next_surface_vertices[key] = vertices;
+                // Deformation velocity: the velocity pass already understands previous local
+                // position in the normal lanes. Actual history avoids TAA smearing the waves.
+                for (std::size_t v = 0; v < vertices.size(); ++v) {
+                    const auto& old = previous != surface_previous_vertices_.end() &&
+                                              previous->second.size() == vertices.size()
+                                          ? previous->second[v]
+                                          : vertices[v];
+                    vertices[v].nx = old.px;
+                    vertices[v].ny = old.py;
+                    vertices[v].nz = old.pz;
+                }
+                const auto velocity =
+                    graph.push_frame_data(vertices.data(), vertices.size() * sizeof(MeshVertex));
+                if (stream.buffer.is_valid() && velocity.buffer.is_valid()) {
+                    item.vertex_override = stream.buffer;
+                    item.vertex_override_offset = stream.offset;
+                    item.velocity_vertex_override = velocity.buffer;
+                    item.velocity_vertex_override_offset = velocity.offset;
+                    du.motion_params[0] = 1;
+                }
+            }
+        }
+        // Water and ice sheets are drawn AFTER the opaque scene (the water pass), because they
+        // refract it. The flag only routes: a frame that cannot run that pass leaves it unused.
+        if (surface.kind == SurfaceKind::Water || surface.kind == SurfaceKind::Ice) {
+            frame_draws_[i].flags |= DrawItem::Water;
+        }
+        // Route this draw to the alpha-testing depth pipeline (m16.4). A nonzero cutoff is exactly
+        // what "this material masks" means -- the same single float the shader branches on, so the
+        // CPU and GPU cannot disagree about which draws are masked.
+        if (material.alpha_cutoff > 0.0f) {
+            frame_draws_[i].flags |= DrawItem::AlphaMasked;
+        }
+        if (material.double_sided) {
+            frame_draws_[i].flags |= DrawItem::DoubleSided;
+        }
+        if (material.clamp_uv) {
+            frame_draws_[i].flags |= DrawItem::ClampUv;
+        } // 0 = no masking; see PbrMaterialDesc
+        std::memcpy(
+            &draw_staging_[static_cast<std::size_t>(i) * kDrawUniformStride], &du, sizeof(du));
+        // Resolve each slot to its map or the correct fallback, so record_draws never branches on
+        // presence: the normal slot falls back to the flat-normal texel, every other slot to white.
+        const auto pick = [](rhi::TextureHandle map, rhi::TextureHandle fallback) {
+            return map.is_valid() ? map : fallback;
+        };
+        frame_base_color_[i] = pick(material.base_color_texture, white_);
+        frame_metallic_roughness_[i] = pick(material.metallic_roughness_texture, white_);
+        frame_normal_[i] = pick(material.normal_texture, flat_normal_);
+        frame_occlusion_[i] = pick(material.occlusion_texture, white_);
+        frame_emissive_[i] = pick(material.emissive_texture, white_);
+        if (track_shadow_casters) {
+            detail::ShadowCasterRecord caster;
+            caster.entity = std::bit_cast<std::uint64_t>(scene.draw_entities[i]);
+            caster.mesh = item.mesh;
+            caster.first_index = item.first_index;
+            caster.index_count = item.index_count;
+            caster.model = item.model;
+            caster.flags = frame_draws_[i].flags;
+            caster.alpha_factor = material.base_color[3];
+            caster.alpha_cutoff = material.alpha_cutoff;
+            caster.base_color_texture = frame_base_color_[i];
+            caster.vertex_override = item.vertex_override;
+            caster.vertex_override_offset = item.vertex_override_offset;
+            // A deformed stream need not fit the registry's rest bounds. Until its producer
+            // supplies conservative bounds, invalidate all local maps instead of guessing.
+            caster.bounds_known = !item.vertex_override.is_valid();
+            const auto& mesh = meshes_.get(item.mesh);
+            transform_aabb(
+                item.model, mesh.local_min, mesh.local_max, caster.bounds.min, caster.bounds.max);
+            shadow_casters_->frame.push_back(caster);
+        }
+    }
+    if (track_shadow_casters) {
+        // Camera culling partitions this full list; it never deletes offscreen casters. Keys
+        // include entity generations/subranges, so camera-driven reorder cannot dirty a lamp.
+        shadow_casters_->tracker.update(
+            shadow_casters_->frame,
+            [&](const WorldAabb& region) { local_shadows_.invalidate(region); },
+            [&] { local_shadows_.invalidate_all(); });
+    }
+    surface_previous_vertices_ = std::move(next_surface_vertices);
+    if (draw_count > 0)
+        device_.write_buffer(draw_ubos_[ubo_slot_], draw_staging_.data(), draw_staging_.size());
+    if (motion_vectors_enabled_) {
+        prev_models_ = std::move(next_prev_models);
+    }
+
+    // The runtime SDF clipmap (m10.4b): a fourth, independent gate. `sync_sdf_instances` (m10.5a)
+    // closes the gap this brick's own comment used to name here: every entity carrying
+    // (WorldTransform, SdfRef) is now change-detection-fed into the clipmap automatically, so an
+    // empty scene (no SdfRef entities) still recomposes cheaply (clears only) whenever the camera
+    // crosses a level's own voxel boundary, and settles to zero passes the rest of the time —
+    // exactly the ADR-0032 §11 discipline every other M10 technique follows.
+    const core::Vec3 camera_pos{
+        scene.camera.position[0], scene.camera.position[1], scene.camera.position[2]};
+    if (lighting_.sdf_clipmap_enabled) {
+        sync_sdf_instances(world);
+        sdf_clipmap_.add(graph, camera_pos);
+    }
+
+    // ── The sky, resolved once and BAKED before anything reads it (m17.7b) ────────────────────
+    //
+    // This sits above the DDGI trace and the forward pass because both consume what it produces:
+    // the nine SH coefficients the forward pass shades ambient with, and the sky-view LUT a probe
+    // ray samples when it escapes. The graph derives its order from declared accesses, so these
+    // passes have to be declared first for the edges to exist at all.
+    //
+    // The SAME resolved SkyParams then feeds the background composite further down. That is the
+    // point of resolving here rather than twice: a scene lit by one sky and painted with another
+    // would be wrong in a way no screenshot could show you.
+    // (`sky_on` and `sp` are resolved earlier, before the frame uniforms upload -- see "sun vs
+    // cloud".)
     SkyInputs ski{};
     ski.view = scene.camera.view;
     ski.proj = proj_rasterized; // the matrix the depth buffer was rasterized with
@@ -864,19 +1183,6 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
         gbuffer_material =
             graph.create_texture({extent, kGbufferMaterialFormat, "scene-gbuffer-material"});
     }
-    if (use_depth_prepass)
-        depth_prepass_.add(graph, depth, data);
-    // Motion vectors (ADR-0078 step 1c): a SEPARATE pass that depth-tests Equal against the
-    // pre-pass, so it needs the pre-pass. Off, or no pre-pass: nothing is allocated or declared.
-    RGTexture velocity;
-    if (motion_vectors_enabled_ && use_depth_prepass) {
-        velocity = graph.create_texture({extent, kVelocityFormat, "scene-velocity"});
-        velocity_.add(graph, velocity, depth, data);
-    } else if (motion_vectors_enabled_ && !warned_velocity_no_prepass_) {
-        RIME_WARN("render: motion vectors need the depth pre-pass (the velocity pass depth-tests "
-                  "Equal against it) -- no velocity target this frame");
-        warned_velocity_no_prepass_ = true;
-    }
     // The M10 forward path (ADR-0032 §11 regression bridge) runs only when a feature actually has
     // something to do: shadows enabled with a directional light (m10.1 cascades) and/or spot lights
     // (m10.2), clustering enabled with point lights to cull (m10.3), or DDGI actually running
@@ -902,11 +1208,41 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // These three are declared out here because the terrain scene pass below also binds them: it
     // uses the SAME cascades as the forward pass, with no second fit and no second shadow render.
     // `shadow` stays invalid when the baseline path is taken, which the terrain block handles.
+    // THE WATER SPLIT. Water refracts the finished opaque scene, so it cannot be part of it: the
+    // opaque passes below skip Water-flagged draws and a later water pass draws only those. That
+    // pass rides the shadowed pipeline (the only one carrying the sky/SSR bindings), so the split
+    // exists only when this frame takes that path; otherwise water stays in the opaque passes and
+    // shades with the old bottom-colour proxy.
+    const bool shadowed_path = has_sun || has_local || has_clusters || has_ddgi || has_ssr ||
+                               has_sky_light || first_person_active;
+    SceneDrawData water_data = data;
+    std::size_t water_draw_count = 0;
+    if (shadowed_path) {
+        for (const DrawItem& item : data.draws)
+            water_draw_count += (item.flags & DrawItem::Water) != 0 ? 1 : 0;
+        if (water_draw_count > 0) {
+            data.skip_flags = DrawItem::Water;
+            water_data.only_flags = DrawItem::Water;
+            shadow_data.skip_flags = DrawItem::Water; // a thin sheet must not shade its own floor
+        }
+    }
+    if (use_depth_prepass)
+        depth_prepass_.add(graph, depth, data);
+    // Motion vectors (ADR-0078 step 1c): a SEPARATE pass that depth-tests Equal against the
+    // pre-pass, so it needs the pre-pass. Off, or no pre-pass: nothing is allocated or declared.
+    RGTexture velocity;
+    if (motion_vectors_enabled_ && use_depth_prepass) {
+        velocity = graph.create_texture({extent, kVelocityFormat, "scene-velocity"});
+        velocity_.add(graph, velocity, depth, data);
+    } else if (motion_vectors_enabled_ && !warned_velocity_no_prepass_) {
+        RIME_WARN("render: motion vectors need the depth pre-pass (the velocity pass depth-tests "
+                  "Equal against it) -- no velocity target this frame");
+        warned_velocity_no_prepass_ = true;
+    }
     ShadowBinding shadow{};
     LocalShadowBinding local{};
     ClusterBinding clusters{};
-    if (has_sun || has_local || has_clusters || has_ddgi || has_ssr || has_sky_light ||
-        first_person_active) {
+    if (shadowed_path) {
         // The cascade binding: the real fit when there is a sun, else a valid count-0 placeholder
         // so the shadowed pipeline's binding 7/8 is always satisfied (a spot-only scene).
         if (has_sun) {
@@ -920,7 +1256,27 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
                                       fu.dir_lights[0].direction[1],
                                       fu.dir_lights[0].direction[2]};
             // shadow_data, not data: a caster off-screen still casts into the view.
-            shadow = csm_.add(graph, depth_prepass_, shadow_data, ci, lighting_);
+            // Terrain joins the cascades as a depth-only caster, so hills shadow a low sun. It is
+            // drawn with the same LOD choice as the camera pass. Skipped when no terrain is set.
+            const core::Vec3 shadow_eye{fu.camera_pos[0], fu.camera_pos[1], fu.camera_pos[2]};
+            CascadedShadowMap::ExtraCasters terrain_casters;
+            if (terrain_pass_ != nullptr && !terrain_draws_.empty()) {
+                // TerrainPass keeps the tile/LOD boundary; convert once before the three
+                // cascade callbacks rather than rebuilding a draw list for every layer.
+                std::vector<TerrainShadowDraw> shadow_draws;
+                shadow_draws.reserve(terrain_draws_.size());
+                for (const TerrainSceneDraw& draw : terrain_draws_)
+                    shadow_draws.push_back({draw.tile, draw.lod});
+                terrain_casters = [this, shadow_eye, shadow_draws = std::move(shadow_draws)](
+                                      RenderGraph& g,
+                                      RGTexture cascades,
+                                      std::uint32_t layer,
+                                      const core::Mat4& light_vp) {
+                    terrain_pass_->add_shadow_casters(
+                        g, cascades, layer, shadow_draws, light_vp, shadow_eye);
+                };
+            }
+            shadow = csm_.add(graph, depth_prepass_, shadow_data, ci, lighting_, terrain_casters);
         } else {
             shadow = csm_.empty_binding(graph, dummy_shadow_array_);
         }
@@ -1009,6 +1365,38 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     terrain_pass_ = nullptr;
     terrain_draws_ = {};
 
+    // The water pass: snapshot the finished opaque scene (terrain included), then draw the water
+    // and ice sheets over it, refracting the snapshot. Sheets write colour, the SSR G-buffer and
+    // depth, so everything downstream (sky composite, SSR reflection, TAA) treats the surface as
+    // ordinary geometry; a velocity pass for the sheets keeps TAA from smearing their motion.
+    if (water_draw_count > 0) {
+        const RGTexture refract_color =
+            graph.create_texture({extent, kHdrFormat, "scene-hdr-refract"});
+        const RGTexture refract_depth =
+            graph.create_texture({extent, rhi::Format::R32Uint, "scene-depth-bits"});
+        forward_.add_scene_copy(graph, hdr, depth, refract_color, refract_depth);
+        forward_.add_shadowed(graph,
+                              hdr,
+                              depth,
+                              use_depth_prepass,
+                              water_data,
+                              shadow,
+                              local,
+                              clusters,
+                              ddgi_binding,
+                              sky_binding,
+                              gbuffer,
+                              gbuffer_material,
+                              nullptr,
+                              rhi::LoadOp::Load,
+                              false,
+                              "forward-pbr water",
+                              refract_color,
+                              refract_depth);
+        if (velocity.is_valid())
+            velocity_.add(graph, velocity, depth, water_data, rhi::LoadOp::Load, "velocity-water");
+    }
+
     // Sky (m17.0): composite the procedural sky into the background — the pixels the depth buffer
     // says nothing was drawn on — writing a THIRD HDR target the next stage reads. It goes here,
     // before SSR rather than after, so a reflected ray that misses the screen still finds sky
@@ -1087,6 +1475,37 @@ SceneRenderer::Output SceneRenderer::render(RenderGraph& graph,
     // validation barrier disagreement.
     if (sky_on) {
         sky_.note_skyview_state(rhi::ResourceState::ShaderRead);
+    }
+
+    if (flame_settings_.enabled && !flame_particles_.empty()) {
+        if (!flame_pass_) {
+            flame_pass_ = std::make_unique<FxParticlePass>(device_, 368, FxBlendMode::Flame);
+            (void)flame_pass_->set_frames_in_flight(
+                static_cast<std::uint32_t>(frame_ubos_.size() - 1));
+        }
+        FxView flame_view{};
+        flame_view.view_proj = fu.view_proj;
+        flame_view.right = {
+            scene.camera.view.at(0, 0), scene.camera.view.at(0, 1), scene.camera.view.at(0, 2)};
+        flame_view.up = {
+            scene.camera.view.at(1, 0), scene.camera.view.at(1, 1), scene.camera.view.at(1, 2)};
+        // Emissive flame is composited before alpha smoke, so a dense plume attenuates it.
+        // Neither pass writes depth or changes authored lights, geometry, or game state.
+        flame_pass_->add(graph, tonemap_src, depth, flame_particles_, flame_view, flame_settings_);
+    }
+    if (smoke_settings_.enabled && !smoke_particles_.empty()) {
+        if (!smoke_pass_) {
+            smoke_pass_ = std::make_unique<FxParticlePass>(device_, 4096, FxBlendMode::SmokeAlpha);
+            (void)smoke_pass_->set_frames_in_flight(
+                static_cast<std::uint32_t>(frame_ubos_.size() - 1));
+        }
+        FxView smoke_view{};
+        smoke_view.view_proj = fu.view_proj;
+        smoke_view.right = {
+            scene.camera.view.at(0, 0), scene.camera.view.at(0, 1), scene.camera.view.at(0, 2)};
+        smoke_view.up = {
+            scene.camera.view.at(1, 0), scene.camera.view.at(1, 1), scene.camera.view.at(1, 2)};
+        smoke_pass_->add(graph, tonemap_src, depth, smoke_particles_, smoke_view, smoke_settings_);
     }
 
     // Preserve world radiance BEFORE first-person colour overwrites it. A 1x collimated sight

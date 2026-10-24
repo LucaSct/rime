@@ -445,7 +445,16 @@ solve_simplex(SupportVertex* verts, float* lambda, int& count, core::Vec3& close
             const core::Vec3 e1 = verts[1].w - verts[0].w;
             const core::Vec3 e2 = verts[2].w - verts[0].w;
             const core::Vec3 e3 = verts[3].w - verts[0].w;
-            const bool degenerate = std::fabs(core::dot(core::cross(e1, e2), e3)) <= kTinyVol;
+            // A scalar triple product subtracts products whose rounding error scales with
+            // |e1| |e2| |e3|. An absolute volume floor can accept a flat simplex as solid:
+            // the collapse fixtures leave ~1e-8 of float residue for metre-sized coplanar
+            // edges, then all four noisy face tests claim the origin is inside despite a
+            // centimetre separating plane. Treat volumes within their arithmetic noise as
+            // degenerate and search the faces instead; the stall polish resolves any lost
+            // progress in double. This changes no geometric contact/touch tolerance.
+            const float scale2 = core::dot(e1, e1) * core::dot(e2, e2) * core::dot(e3, e3);
+            const bool degenerate = std::fabs(core::dot(core::cross(e1, e2), e3)) <=
+                                    kTinyVol + kDegenerateRel * std::sqrt(scale2);
 
             bool evaluated = false;
             best.dist2 = 0.0f;

@@ -1,0 +1,52 @@
+{
+  "implementation_commit": "a1f26763ac980753e0798f887f5ef14befe0b5e8",
+  "parent_commit": "f9371dea7b81c543dfac2fa1fad150a58471e412",
+  "recorded_utc": "2026-10-18T16:37:14.195105+00:00",
+  "source_sha256": {
+    "CMakeLists.txt": "10e1b61703bff9a2b3000fb05258660592e88ff2944f8f6d38b776d76410170f",
+    "engine/app/CMakeLists.txt": "1e010827281502fb4938ea193dd95bc2c627621ae8ce3398854c097d0a72493a",
+    "engine/app/editor_host_app.cpp": "076a0c21c5343619e2157763ac228080cade72bdc52665aab38fe4a3c927aa83",
+    "engine/render/include/rime/render/scene_renderer.hpp": "b0026acc09293320266083dfb78e959476b32ae89ee05655b105ad148ce2b0f1",
+    "engine/render/src/scene_renderer.cpp": "fef1a6e19e375515b6b15e876393589dae59c82c845f539b8e4679a42c12fb19",
+    "engine/vfx_scene/CMakeLists.txt": "5a477ad108363b5a4d59a17e7de24b52bd00c14f436f7b483cd13df18b8b517f",
+    "engine/vfx_scene/include/rime/vfx_scene/components.hpp": "0908aaff59034355be2ee07c77d9f6b460a0819b0f06e8270975ad3e01f05765",
+    "engine/vfx_scene/include/rime/vfx_scene/effects.hpp": "d030bb7fe3cab964261ae0da4e0bdc2929abdecbf72b77338c9a0713e9df9e2a",
+    "engine/vfx_scene/src/effects.cpp": "40d2c304ee5276af4777d3bd14e0e15916a28326ad627cbd49a31e0c929756ac",
+    "engine/worldkit/CMakeLists.txt": "118baba88100f98dd6a628476dbdfabb47a1aba4e6a48c02c0abaa2d34463bd9",
+    "engine/worldkit/src/profile.cpp": "1bf1385159b37d305f2f98a95a5ab20e307a77ea5e99760c3c4f32c829349749",
+    "tests/CMakeLists.txt": "773ad06986d33ee04e3672bb41126830d3f31ef3ce50da4bb47bc2f1b1a99ab8",
+    "tests/render/fx_particle_test.cpp": "3fc1f78ede169a617ec7562edf6c3fd355e80505131c6352099053743107a5e4",
+    "tests/vfx_scene/CMakeLists.txt": "0ebe0af201086ff131ec374c8ec350cfd212080c88a25cf7ac5554150b95b354",
+    "tests/vfx_scene/effects_test.cpp": "d72af9ad5730874bdd60be17bf2f5f54416c09150704d777246ef77ab6f42f21",
+    "tools/editor/src/main.rs": "b0a473916b5d88d951a6d397f368909975bc9289df525f2211d67bf46f5fb01b",
+    "tools/editor/src/smoke.rs": "484d53d7fcfc711b40ba32c352ba5b9987852fb168604af2c4e651f39c89f43a"
+  },
+  "binary_sha256": {
+    "build/release/bin/rime-engine": "8e998b1e2c5f86d8076379cb0b3e67346bd54d9af11aca8734a1aca938426dc9",
+    "tools/target/debug/editor": "0eacf3c4b5596ab146966e17a39ea40f54367ec836b683877663d13d20956412"
+  },
+  "vulkan_driver": "/usr/share/vulkan/icd.d/lvp_icd.json",
+  "ctest": {
+    "passed": 89,
+    "total": 90,
+    "exit_code": 8,
+    "inherited_failure": "the_block_headless: same three locality/collapse claims",
+    "seconds": 382.23
+  },
+  "adapter_asan_ubsan": {
+    "cases": 6,
+    "assertions": 442,
+    "passed": true,
+    "scope": "new adapter + test TU + VFX dust/plume/fire instrumented; other linked modules ordinary optimized archives"
+  },
+  "live_viewport": {
+    "ticks": 12,
+    "lit_ticks": 12,
+    "spawned_particles": 8,
+    "cleared_on_stop": 8,
+    "invalid_sources": 0,
+    "cap_drops": 0
+  },
+  "native_hardware_capacity": "not measured; M18 gate remains open",
+  "review": "complete diff self-review; no independent premium consultation"
+}

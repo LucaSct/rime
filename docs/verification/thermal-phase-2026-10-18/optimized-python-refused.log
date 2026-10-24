@@ -1,0 +1,7 @@
+Traceback (most recent call last):
+  File "/home/next/projects/rime/tests/fluids/verify_phase_change.py", line 173, in <module>
+    main()
+    ~~~~^^
+  File "/home/next/projects/rime/tests/fluids/verify_phase_change.py", line 88, in main
+    raise RuntimeError("Exact verification requires assertions; disable -O/PYTHONOPTIMIZE")
+RuntimeError: Exact verification requires assertions; disable -O/PYTHONOPTIMIZE

@@ -1,0 +1,134 @@
+# Rime scene v1 (.rscene) — reflection-serialized world. Human-diffable; hand-edit or regenerate.
+rime_scene 1
+
+entity 0 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 1 y 1.5 z 4 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::Camera 0x42cdb0b7ddc97dbc {
+    fov_y 0.9
+    z_near 0.1
+    z_far 500
+    active true
+  }
+}
+
+entity 1 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 10 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::DirectionalLight 0x0279ad2e8762ff9a {
+    color_r 1
+    color_g 0.95
+    color_b 0.9
+    intensity 3
+  }
+}
+
+entity 2 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshRef 0xa2a14d16cfd75985 {
+    mesh 0
+  }
+  rime::render::MaterialRef 0xc6b4f8ca9fd52bed {
+    material 0
+  }
+}
+
+entity 3 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 1 y 0 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::ecs::Parent 0x0356f6d334903659 {
+    value @2
+  }
+  rime::render::MeshRef 0xa2a14d16cfd75985 {
+    mesh 1
+  }
+  rime::render::MaterialRef 0xc6b4f8ca9fd52bed {
+    material 1
+  }
+}
+
+entity 4 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::fluids_scene::ThermalCell 0x7cb777a70bc2a09e {
+    mass_kg 1
+    temperature_kelvin 283.15
+    liquid_mass_fraction 1
+    material { melting_kelvin 273.15 solid_heat_capacity_j_kg_k 2052 liquid_heat_capacity_j_kg_k 4179 latent_heat_j_kg 333500 minimum_kelvin 253.15 maximum_kelvin 313.15 }
+    enabled true
+  }
+}
+
+entity 5 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::fluids_scene::ThermalCell 0x7cb777a70bc2a09e {
+    mass_kg 1
+    temperature_kelvin 273.15
+    liquid_mass_fraction 0
+    material { melting_kelvin 273.15 solid_heat_capacity_j_kg_k 2052 liquid_heat_capacity_j_kg_k 4179 latent_heat_j_kg 333500 minimum_kelvin 253.15 maximum_kelvin 313.15 }
+    enabled true
+  }
+}
+
+entity 6 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::fluids_scene::ThermalContact 0x18d39fc49bdadba7 {
+    first @4
+    second @5
+    conductance_w_k 100
+    enabled true
+  }
+}
+
+entity 7 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::fluids_scene::ThermalSource 0xbf24625798e720cb {
+    cell @5
+    power_watts 500000
+    enabled true
+  }
+}

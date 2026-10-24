@@ -64,36 +64,52 @@
 // This sample is that demo.
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "authored_environment.hpp"
+#include "play_building_support.hpp"
+#include "play_city.hpp"
+#include "play_effects.hpp"
 #include "play_environment.hpp"
 #include "play_input.hpp"
 #include "play_sunset.hpp"
 #include "play_viewmodel.hpp"
 #include "play_weapon_fx.hpp"
+#include "play_weapon_policy.hpp"
 #include "play_world.hpp"
+#include "player_spawn.hpp"
 #include "rime/app/application.hpp"
+#include "rime/app/content_root.hpp"
 #include "rime/assets/asset_server.hpp"
 #include "rime/assets/cooked_reader.hpp"
 #include "rime/assets/manifest.hpp"
 #include "rime/assets/sdf_asset.hpp"
+#include "rime/audio/destruction_voicer.hpp"
 #include "rime/audio/mixer.hpp"
+#include "rime/audio/sink.hpp"
+#include "rime/audio/wav.hpp"
 #include "rime/blockkit/block.hpp"
 #include "rime/blockkit/palette.hpp"
 #include "rime/blockkit/role.hpp"
+#include "rime/core/diagnostics/log.hpp"
 #include "rime/core/diagnostics/perf_report.hpp"
 #include "rime/core/diagnostics/profile.hpp"
 #include "rime/core/diagnostics/work_ledger.hpp"
@@ -146,10 +162,17 @@
 #ifndef RIME_VIEWMODEL_COOKED_DIR
 #define RIME_VIEWMODEL_COOKED_DIR "viewmodel-cooked"
 #endif
+#ifndef RIME_BLOCK_AUDIO_DIR
+#define RIME_BLOCK_AUDIO_DIR "audio"
+#endif
 
 namespace {
 
 using namespace rime;
+std::filesystem::path g_viewmodel_content = RIME_VIEWMODEL_COOKED_DIR;
+// Recorded sound effects (CC0, see assets/audio/ATTRIBUTION.md). Missing is fine: the bank falls
+// back to the engine's synthetic defaults and says so once.
+std::filesystem::path g_audio_content = RIME_BLOCK_AUDIO_DIR;
 
 // ── The scenario ────────────────────────────────────────────────────────────────────────────────
 
@@ -198,6 +221,17 @@ std::uint64_t g_ticks = kDefaultTicks;
 // --ppm <file>: write the intact frame the render claims are made about, so a human can look at the
 // thing the counters are describing.
 std::string g_ppm;
+bool g_effects_preview = false;
+bool g_network_impairment = false;
+bool g_mute = false;
+
+// --audio-wav <file>: write the exact stereo mixdown the mixer produced during the run, plus
+// <file>.csv with one row per tick (voices started, voices alive, block peak). CI is deaf and a
+// buzz is a property of the WAVEFORM, so this is how a collapse gets measured and then listened to.
+std::string g_audio_wav;
+// --audio-weapons <dir>: render each weapon firing three times to <dir>/weapon-N.wav and exit. No
+// GPU, no scene, no device: the same bank, mixer and call helper the game uses.
+std::string g_audio_weapons;
 
 // --island-profile: per-island solve TIMING (#311). Off by default because it reads a clock once
 // per active island -- off the per-constraint path and tiny, but not free, so A RUN TAKEN WITH THIS
@@ -220,8 +254,8 @@ bool g_island_profile = false;
 // tidiness: `ecs::component_schema_hash` goes into `NetDriver::Config`, and two peers that
 // registered different sets refuse to connect. Both peers calling one function cannot disagree.
 void register_all(ecs::World& world) {
-    (void)worldkit::register_engine_components(world);
-    blockkit::register_blockkit_components(world); // the game's own, layered on the engine's
+    block_play::register_block_components(
+        world); // engine + game + PlayerSpawn, shared with the host
 }
 
 // How many debris bodies are still LIVE (not frozen by the C6 budget). The roster is append-only,
@@ -405,6 +439,17 @@ struct Peer {
     std::unordered_map<std::uint64_t, destruction::PatternId> patterns;
     MeasuredScene measured;
 
+    // The play-only city (play_city.hpp): 24 more buildings and destructible lamps and barriers.
+    // Set by Demo::start BEFORE patterns are registered, and only for the generated scene -- a
+    // `--scene` run keeps exactly the level it was handed.
+    bool city = false;
+    bool city_patterns = false;
+
+    // The map's authored player spawn, resolved once in stand_up after the transforms exist
+    // (player_spawn.hpp). `None` for every map without an enabled marker, which keeps the old
+    // west-viewpoint default; copied data, so it outlives structural changes to `world`.
+    block_play::SpawnResolution spawn;
+
     // HAND THE PHYSICS A JOB SYSTEM (m17.5). Without this pointer `PhysicsWorld` takes the
     // sequential island solve — same answer, one thread — and it had been taking it here since the
     // demo was written: each peer owned a job system and spent it only on
@@ -458,6 +503,12 @@ struct Peer {
                 (void)leaves->register_pattern(id, *asset, meshes);
             }
         }
+        // The city's two generated patterns ride the same seam (null leaves/meshes on a server).
+        if ((city || city_patterns) &&
+            !block_play::city::register_patterns(destruction, physics, patterns, leaves, meshes)) {
+            std::fprintf(stderr, "99-the-block: physics rejected a city pattern\n");
+            return false;
+        }
         return true;
     }
 
@@ -510,6 +561,9 @@ struct Peer {
             blockkit::BlockParams params;
             params.ground_material = ground_material;
             (void)blockkit::assemble(authoring, params);
+            if (city) {
+                (void)block_play::city::expand(authoring);
+            }
             if (!scene::load_scene_from_string(world, scene::save_scene_to_string(authoring)).ok) {
                 std::fprintf(stderr,
                              "99-the-block: the block's own scene file did not load back\n");
@@ -517,6 +571,28 @@ struct Peer {
             }
         }
         (void)blockkit::derive_world_transforms(world);
+
+        // THE AUTHORED SPAWN, resolved before anything gameplay-side starts. An enabled marker that
+        // cannot be honoured stops the run here with the reason: starting the player at the old
+        // default instead would hide an author's mistake. Both peers resolve (same file, same
+        // answer); only the server announces it, so the line appears once.
+        spawn = block_play::resolve_player_spawn(world);
+        if (spawn.status == block_play::SpawnStatus::Refused) {
+            std::fprintf(stderr,
+                         "99-the-block: refusing player spawn (%zu enabled): %s\n",
+                         spawn.enabled_count,
+                         spawn.reason.c_str());
+            return false;
+        }
+        if (spawn.status == block_play::SpawnStatus::Valid && own_destructibles) {
+            std::printf("99-the-block: authored player spawn: capsule centre (%.3f, %.3f, %.3f) m, "
+                        "yaw %.4f rad, pitch %.4f rad\n",
+                        static_cast<double>(spawn.placement.capsule_centre.x),
+                        static_cast<double>(spawn.placement.capsule_centre.y),
+                        static_cast<double>(spawn.placement.capsule_centre.z),
+                        static_cast<double>(spawn.placement.yaw),
+                        static_cast<double>(spawn.placement.pitch));
+        }
 
         // THE GROUND, from the scene rather than from a formula (m17.8). It used to be a static box
         // built here, before the load, from `BlockParams` — half-extent 44 against a drawn surface
@@ -616,8 +692,13 @@ struct ServerPeer : Peer {
     // `GameplayServer` deliberately refuses to make on a game's behalf.
     ecs::Entity spawn_avatar(net::SessionId) {
         core::Transform placement;
-        placement.translation = blockkit::west_viewpoint(blockkit::BlockParams{});
-        placement.translation.y = character.half_height + character.radius;
+        if (spawn.status == block_play::SpawnStatus::Valid) {
+            // Authored: the marker IS the capsule centre, so no height adjustment.
+            placement.translation = spawn.placement.capsule_centre;
+        } else {
+            placement.translation = blockkit::west_viewpoint(blockkit::BlockParams{});
+            placement.translation.y = character.half_height + character.radius;
+        }
 
         physics::RigidBody body;
         body.motion = static_cast<std::uint32_t>(physics::MotionType::Kinematic);
@@ -687,11 +768,21 @@ struct ClientPeer : Peer {
 
     [[nodiscard]] core::Transform camera_transform() const {
         gameplay::FirstPersonView v = view;
-        v.eye_height =
-            config.half_height * 0.8f; // eyes near the top of the capsule, not its centre
+        v.eye_height = block_play::play_eye_height(config);
         return gameplay::eye_transform(v, eye_anchor());
     }
 };
+
+void push_loose_hit(physics::PhysicsWorld& world,
+                    physics::BodyId body,
+                    core::Vec3 point,
+                    core::Vec3 impulse) {
+    // Impulse at contact supplies both translation and torque. Clamp momentum rather than
+    // velocity, preserving mass/inertia response; PhysicsWorld rejects dead or immovable ids.
+    const float magnitude = core::length(impulse);
+    if (std::isfinite(magnitude) && magnitude > 0)
+        world.apply_impulse(body, impulse * (std::min(magnitude, 25.0f) / magnitude), point);
+}
 
 // One process, both peers, a lossy wire between them. In-process and deterministic
 // (ScriptedNetwork) rather than real sockets, because the demo's claim is about COMPOSITION at
@@ -708,6 +799,9 @@ struct Session {
     ServerPeer server;
     ClientPeer client;
     block_play::PlayWorld* play_world = nullptr; // owned by Demo; active in --play/--world-smoke
+    // Owned by Demo; non-null ONLY in --play. The authored/headless/perf paths never set it, so
+    // they run exactly as before. Stepped on the authoritative peer just before its update.
+    block_play::PlayBuildingSupport* building_support = nullptr;
     bool world_stopped = false;
 
     std::uint64_t now_ms = 0;
@@ -915,7 +1009,64 @@ struct Session {
         total_ops = 0;
     }
 
-    explicit Session(std::uint64_t seed) : network(seed, {kLossRate, 0.0f, kOneWayMs, kOneWayMs}) {
+    using HitSurface = block_play::PlayWeaponFx::Surface;
+    std::array<HitSurface, 64> shot_surfaces{};
+
+    [[nodiscard]] HitSurface hit_surface(physics::BodyId body, core::Vec3 point) {
+        // Classify authored roles, not colors sampled from a rendered frame. Resolve detached
+        // debris back to its source slab so a metal lamp stays metal after it falls over.
+        destruction::InstanceId source{};
+        for (std::size_t i = 0; i < server.destruction.debris_count(); ++i)
+            if (server.destruction.debris_body(i) == body) {
+                source = server.destruction.debris_source(i);
+                break;
+            }
+        HitSurface surface = HitSurface::Soil; // untagged streamed heightfield
+        server.world.query<blockkit::SlabRole>().for_each([&](ecs::Entity e,
+                                                              const blockkit::SlabRole& role) {
+            const auto* handle = server.world.get<physics::RigidBodyHandle>(e);
+            const auto* instance = server.world.get<destruction::DestructibleInstanceRef>(e);
+            const bool same_instance =
+                instance && ((source.is_valid() && instance->instance == source.index) ||
+                             server.destruction.body_of({instance->instance, 0}) == body);
+            if (!(handle && handle->body == body) && !same_instance)
+                return;
+            using namespace blockkit::slab_kind;
+            switch (role.kind) {
+                case kWall:
+                case kHalfWall:
+                case kSideWall:
+                    surface = role.tint == 1   ? HitSurface::Brick
+                              : role.tint == 0 ? HitSurface::Concrete
+                                               : HitSurface::Plaster;
+                    break;
+                case kLampMast:
+                case kLampHead:
+                    surface = HitSurface::Metal;
+                    break;
+                case kCrate:
+                case kTimber:
+                    surface = HitSurface::Wood;
+                    break;
+                // The playable street's outer strips are dressed as grass/path at |z|>14.4,
+                // sharing the same solid slab. This is a cosmetic surface override only.
+                case kStreet:
+                    surface = std::abs(point.z) > 14.4f ? HitSurface::Soil : HitSurface::Concrete;
+                    break;
+                default:
+                    surface = HitSurface::Concrete;
+                    break;
+            }
+        });
+        return surface;
+    }
+
+    explicit Session(std::uint64_t seed, bool impaired)
+        : network(seed,
+                  {impaired ? kLossRate : 0.0f,
+                   0.0f,
+                   impaired ? kOneWayMs : 0u,
+                   impaired ? kOneWayMs : 0u}) {
         // Both peers solve on the SAME job system (m17.5) — see Peer::use_jobs.
         server.use_jobs(jobs);
         client.use_jobs(jobs);
@@ -939,9 +1090,28 @@ struct Session {
                              std::uint64_t ground_material) {
         // A rifle, not a demolition charge: cooked parts stand at 1.0 health, so the damage number
         // is expressed against that scale and a building takes sustained fire rather than one shot.
+        server.weapon.eye_height = block_play::play_eye_height(server.character);
         server.weapon.damage = 0.34f;
         server.weapon.damage_radius = 0.35f;
         server.weapon.cooldown_ticks = server.weapon.automatic ? 6 : 3;
+
+        // Saved city maps do not trigger generation. Inspect only their content identities so
+        // both peers register the same procedural patterns before binding strict-loaded entities.
+        if (!scene_path.empty()) {
+            ecs::World authored;
+            register_all(authored);
+            const auto loaded = scene::load_scene_file(authored, std::filesystem::path(scene_path));
+            if (!loaded.ok) {
+                std::fprintf(stderr, "city scene: %s\n", loaded.error.c_str());
+                return false;
+            }
+            bool city_pattern = false;
+            authored.query<destruction::Destructible>().for_each([&](ecs::Entity, const auto& d) {
+                city_pattern |= d.asset == block_play::city::kLampAsset ||
+                                d.asset == block_play::city::kBarrierAsset;
+            });
+            server.city_patterns = client.city_patterns = city_pattern;
+        }
 
         // The server is GPU-free by construction — it never draws, so it never registers leaf
         // meshes. Only the client does, and that asymmetry is the point of m13.2d's null-registry
@@ -1057,7 +1227,11 @@ struct Session {
         }
 
         if (play_world) {
+            // Recovery returns to the SAME place the avatar started: the authored marker when the
+            // map has one, otherwise the old west spawn.
             const core::Vec3 spawn = [&] {
+                if (server.spawn.status == block_play::SpawnStatus::Valid)
+                    return server.spawn.placement.capsule_centre;
                 core::Vec3 p = blockkit::west_viewpoint(blockkit::BlockParams{});
                 p.y = server.character.half_height + server.character.radius;
                 return p;
@@ -1186,7 +1360,12 @@ struct Session {
 
                 // The weapon → destruction glue: the consumer's job, kept out of the engine so that
                 // `gameplay_net` never links `destruction` (ADR-0035 §3).
+                std::size_t surface_index = 0;
                 for (const gameplay_net::ShotEvent& shot : server.gameplay.shots()) {
+                    if (surface_index < shot_surfaces.size())
+                        shot_surfaces[surface_index++] = shot.did_hit
+                                                             ? hit_surface(shot.body, shot.point)
+                                                             : HitSurface::Concrete;
                     ++shots_fired;
                     if (!shot.did_hit) {
                         continue; // a miss is still an event — a tracer and a report, no damage
@@ -1203,11 +1382,15 @@ struct Session {
                     if (!instance.is_valid() ||
                         server.destruction.part_from_child(instance, shot.child) ==
                             destruction::kInvalidPartIndex) {
-                        continue; // the street, or rubble — not a standing destructible
+                        push_loose_hit(server.physics, shot.body, shot.point, shot.impulse);
+                        continue; // static street is a no-op; live rubble wakes and moves
                     }
                     server.destruction.apply_damage(
                         instance, shot.point, shot.damage_radius, shot.damage, shot.impulse);
                     ++damage_ops;
+                }
+                if (building_support != nullptr) {
+                    building_support->step(server.destruction);
                 }
                 server.destruction.update(server.physics);
                 last_server_ms = server_watch.elapsed_ms();
@@ -1403,7 +1586,57 @@ struct Session {
         }
         return alive;
     }
+
+    // DAMAGE OPS STILL IN FLIGHT, server -> client: put on the wire by the authority and not yet
+    // RESOLVED by the client. Resolved means one of two things, and both are final: the op was
+    // applied (the client now HOLDS it — `ops_applied` counts at `apply_next_batch`, not at
+    // arrival), or it was dropped as unmapped (it will never be held, and saying "still coming"
+    // about it would be a lie). Arrival alone is neither, which is replication.md's invariant
+    // applied to a debug readout: a decoded op sitting in the client's queue is still in flight.
+    //
+    // Deliberately NOT counted as in flight: ops the server refused to send (backpressure) and ops
+    // it could not address. Those were never on the wire, so they are lost rather than late, and
+    // if they matter the hashes will differ with nothing in flight — which is exactly the case
+    // the HUD must call DIVERGED rather than excuse as "syncing".
+    //
+    // In-process only: it reads both peers' counters, which a real client cannot. So can the
+    // `peers` row it serves, which compares both peers' hashes in the first place.
+    [[nodiscard]] std::uint64_t destruction_ops_in_flight() const {
+        const auto& dc = client.destruction_net_client;
+        const std::uint64_t sent = server.destruction_net_server.ops_sent();
+        const std::uint64_t resolved = dc.ops_applied() + dc.ops_dropped_unmapped();
+        return sent > resolved ? sent - resolved : 0;
+    }
 };
+
+// WHAT THE `peers` HUD ROW MAY CLAIM, and why it has three answers rather than two.
+//
+// The row compares the two in-process peers' `shared_state_hash` on every render frame. That
+// comparison is only meaningful when the client has had the chance to hold everything the server
+// committed. Measured on city-v2 (oct21-desync): during a collapse the authority commits new damage
+// ops on EVERY tick for 10-20 s, the client applies each batch one tick later (zero impairment) or
+// 3-21 ticks later (--network-impairment), and so the hashes differ on every one of those ticks —
+// while agreeing on every tick where nothing was in flight (0 exceptions in ~4,500 ticks). A
+// two-state row printed "DIVERGED" for that whole window: it was comparing peers mid-flight.
+//
+// So "different hashes" splits on whether anything is still in flight. Syncing = the client is
+// behind by a measurable number of ops; DIVERGED = nothing is in flight and the hashes still
+// differ, which no amount of waiting will fix. Kept as one function so the HUD and the headless
+// `--desync-check` cannot disagree about which is which.
+enum class PeerSync { InSync, Syncing, Diverged };
+
+[[nodiscard]] PeerSync classify_peer_sync(const Session& s, std::uint64_t* in_flight = nullptr) {
+    const bool agree = destruction_net::shared_state_hash(
+                           s.client.world, s.client.replicator->map(), s.client.destruction) ==
+                       destruction_net::shared_state_hash(
+                           s.server.world, s.server.replicator->map(), s.server.destruction);
+    const std::uint64_t pending = s.destruction_ops_in_flight();
+    if (in_flight != nullptr)
+        *in_flight = pending;
+    if (agree)
+        return PeerSync::InSync;
+    return pending > 0 ? PeerSync::Syncing : PeerSync::Diverged;
+}
 
 // ── The scripted tape ───────────────────────────────────────────────────────────────────────────
 //
@@ -1610,6 +1843,7 @@ struct Visuals {
     render::MeshRegistry meshes;
     render::MaterialRegistry materials;
     destruction_render::PartLeafRenderer leaves;
+    block_play::AuthoredEnvironment authored_environment;
     render::SceneRenderer renderer;
     std::unique_ptr<render::SceneRenderer> scope_renderer;
     render::text::HudRenderer hud;
@@ -1634,7 +1868,8 @@ struct Visuals {
     std::uint64_t spot_maps_total = 0; // rendered + reused
 
     explicit Visuals(rhi::Device& device)
-        : meshes(device), renderer(device, meshes, materials), hud(device, render::kLdrFormat) {
+        : meshes(device), authored_environment(&device), renderer(device, meshes, materials),
+          hud(device, render::kLdrFormat) {
         // ── THE WHOLE M10 STACK, ON (m13.L) ──────────────────────────────────────────────────────
         //
         // It was not, and that is worth writing down rather than quietly fixing. m13.5 set
@@ -1657,11 +1892,12 @@ struct Visuals {
         // it is a different scene (the m13.2d note).
         lighting.clustered_enabled = true;
 
-        // The sun, through cascades. Three at 2048 over a 44 m street: the near cascade covers the
-        // block the player is standing in, the far one the end of the road.
+        // The sun needs local detail even while the terrain camera sees several kilometres.
+        // Spend the three maps on the nearby city instead of stretching the first over 500 m.
         lighting.shadows_enabled = true;
         lighting.cascade_count = 3;
         lighting.shadow_map_resolution = 2048;
+        lighting.shadow_max_distance = 160.0f;
 
         // The 36 street spots and interior points. NOTE THE CAP, because it bites here and is not
         // this brick's to fix: `kMaxLocalShadows = 8` (settings.hpp:25), so 8 of 36 cast shadows
@@ -1794,15 +2030,320 @@ struct Visuals {
 // ONE object for all three modes, because three modes that each build the world their own way is
 // three things to keep in step and only one of them is ever run by CI. What differs between the
 // modes is where the input comes from and who owns the loop — never what is standing there.
+constexpr audio::SoundId kGunReport = audio::sound::kUserBase;
+constexpr audio::SoundId kBulletImpact = kGunReport + 3;
+// One id past the last impact material: the empty-magazine click.
+constexpr audio::SoundId kDryClick =
+    kBulletImpact + static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Count);
+
+// Load every `<stem>_<n>.wav` (n = 0,1,2...) in `dir` as variants of `id`, replacing whatever the
+// bank held there. Returns how many loaded; zero leaves the id untouched so a missing or partial
+// asset directory degrades to the synthetic sound rather than to silence.
+std::size_t load_recordings(audio::SoundBank& bank,
+                            audio::SoundId id,
+                            const std::filesystem::path& dir,
+                            const std::string& stem) {
+    audio::SoundBank loaded;
+    std::size_t count = 0;
+    for (unsigned n = 0;; ++n) {
+        const auto path = dir / (stem + "_" + std::to_string(n) + ".wav");
+        if (!std::filesystem::exists(path))
+            break;
+        if (!loaded.add_variant_from_wav(id, path)) {
+            // path::c_str() is wchar_t* on Windows, so passing it to a "%s" is a real format
+            // mismatch there (C4477) and prints garbage even where it compiles. Narrow it first.
+            const std::string shown = path.string();
+            std::fprintf(stderr, "play audio: refused %s (not 48 kHz mono PCM)\n", shown.c_str());
+            break;
+        }
+        ++count;
+    }
+    if (count == 0)
+        return 0;
+    bank.clear(id);
+    for (std::size_t v = 0; v < count; ++v) {
+        audio::Sound sound;
+        const auto samples = loaded.samples(id, v);
+        sound.samples.assign(samples.begin(), samples.end());
+        bank.add_variant(id, std::move(sound));
+    }
+    return count;
+}
+
+audio::SoundBank play_sound_bank() {
+    auto bank = audio::SoundBank::engine_defaults();
+    // RECORDINGS FIRST. Real masonry, real rifles: each id gets several variants (the mixer picks
+    // one at random and jitters its pitch a few percent, so automatic fire and a falling wall are
+    // never one buffer repeated). The synthetic code below stays as the fallback and for the sounds
+    // that are not tonal anyway (bullet impacts, the dry click).
+    std::size_t recorded = 0;
+    recorded += load_recordings(bank, audio::sound::kImpactConcrete, g_audio_content, "impact");
+    recorded += load_recordings(bank, audio::sound::kPartBreak, g_audio_content, "break");
+    recorded += load_recordings(bank, audio::sound::kDebrisSettle, g_audio_content, "settle");
+    recorded += load_recordings(bank, audio::sound::kCollapse, g_audio_content, "collapse");
+    recorded += load_recordings(bank, audio::sound::kRumble, g_audio_content, "rumble");
+    static const char* const kWeaponStem[3] = {"gun_scar", "gun_m4", "gun_sniper"};
+    for (unsigned weapon = 0; weapon < 3; ++weapon)
+        recorded +=
+            load_recordings(bank, kGunReport + weapon, g_audio_content, kWeaponStem[weapon]);
+    static bool announced = false;
+    if (!announced) {
+        announced = true;
+        std::printf("play audio: %zu recordings from %s%s\n",
+                    recorded,
+                    g_audio_content.string().c_str(),
+                    recorded == 0 ? " (none found: synthetic fallback sounds)" : "");
+    }
+    // Pitch jitter, retrigger windows and reverb sends for the destruction ids.
+    bank.apply_destruction_policy();
+    // A gun report is sent into the reverb: the tail is what makes it an outdoor shot. The send is
+    // about -6 dB below the dry report (0.45; the sniper a little more, its crack carries further).
+    // The first tuning sent at 0.9 with a 1.4 s decay and the owner heard "too much echo": past
+    // roughly half the dry level the tail stops reading as distance and starts reading as a hall.
+    // Rifles retrigger freely (cyclic rate is ~85 ms apart, far outside any window that matters);
+    // +-3 % pitch keeps back-to-back shots from being one sample repeated.
+    for (unsigned weapon = 0; weapon < 3; ++weapon)
+        bank.set_class(kGunReport + weapon, {0.03f, 0.0f, weapon == 2 ? 0.6f : 0.45f, 1.5f, 0});
+    // Bullet strikes are short noise transients and stay synthetic (they are not tonal, except the
+    // metal ping, which is a 35 ms ring and is meant to ring). A touch of reverb, a little jitter.
+    for (unsigned material = 0;
+         material < static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Count);
+         ++material)
+        bank.set_class(kBulletImpact + material, {0.05f, 0.0f, 0.08f, 2.0f, 0});
+    if (recorded == 0) {
+        // Fallback synthesis, only when no recordings were found.
+        for (unsigned weapon = 0; weapon < 3; ++weapon) {
+            auto report =
+                audio::noise_burst(.24f, .72f, weapon == 2 ? 23.0f : 32.0f, 0x706u + weapon);
+            audio::mix_into(
+                report, audio::decaying_sine(.24f, weapon == 2 ? 85.0f : 130.0f, 35), .55f);
+            bank.set(kGunReport + weapon, std::move(report));
+        }
+        for (unsigned material = 0;
+             material < static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Count);
+             ++material) {
+            const bool metal =
+                material == static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Metal);
+            const bool water =
+                material == static_cast<unsigned>(block_play::PlayWeaponFx::Surface::Water);
+            auto impact = audio::noise_burst(.18f,
+                                             metal   ? .85f
+                                             : water ? .08f
+                                                     : .24f,
+                                             water ? 20.0f : 45.0f,
+                                             0x173u + material);
+            if (metal)
+                audio::mix_into(impact, audio::decaying_sine(.18f, 2300, 28), .35f);
+            bank.set(kBulletImpact + material, std::move(impact));
+        }
+    }
+    // Dry click: a very short bright noise tick plus a high, fast-dying sine -- the hammer
+    // falling on an empty chamber. Built once like the other one-shots.
+    auto click = audio::noise_burst(.05f, .6f, 90.0f, 0x2c1u);
+    audio::mix_into(click, audio::decaying_sine(.05f, 1800, 120), .35f);
+    bank.set(kDryClick, std::move(click));
+    return bank;
+}
+
+// The one place a weapon report is started, shared by the game and the --audio-weapons render so
+// the offline WAV and the shot the player hears cannot disagree about what a shot is.
+//
+// That invariant covers the REPORT itself — bank, variant, pitch jitter and gain. Early
+// reflections are not part of the shot, they are part of the room, so they are added only when a
+// physics world is passed. The --audio-weapons render deliberately has no scene (it fires into
+// silence half a metre from the listener), passes no world, and renders the dry report, which is
+// exactly what an offline weapon reference should be.
+//
+// GEOMETRIC EARLY REFLECTIONS (image-source method, ADR-0035 / M13):
+// A gunshot in a street is not one sound. The report leaves the muzzle, hits the nearest hard
+// surfaces, and comes back 30-200 ms later as a handful of distinct slaps — which is most of what
+// tells a player whether they are in an alley, a courtyard or an open field. Each boundary is
+// modelled as a VIRTUAL SOURCE: mirror the shooter across the reflecting plane, and the echo is
+// simply that image source heard directly. For a plane through point p with normal n,
+//   image = s - 2*dot(s - p, n)*n,
+// and the echo's extra travel is (|image - listener| - |s - listener|) / 343 m/s.
+//
+// WHY A FAN AND NOT THE WORLD AXES: the first version of this cast six rays along +-X, +-Z, +Y and
+// the aim. Measured in --environment-smoke at the shooter's spawn (-6, 1.3, 0), all six missed on
+// every shot: a 36-direction sweep found 11 usable walls, but the four cardinal azimuths happened
+// to land in the gaps between buildings, because the block is not aligned to the world axes. Six
+// rays in fixed world directions sample a room the way four fence posts sample a field. A fan of
+// kReflectionFan azimuths at 30 degrees, plus straight down, has no preferred direction and finds
+// the same walls whichever way the geometry is turned.
+//
+// WHY SORTED BY DELAY: the mixer admits the first kMaxEarlyReflections and counts the rest as
+// dropped, so the order here decides which echoes survive the cap. Earliest-first keeps the
+// nearest surfaces, which are both the loudest and the ones that localise the space.
+void play_gun_shot(audio::Mixer& mixer,
+                   unsigned weapon,
+                   core::Vec3 at,
+                   const physics::PhysicsWorld* physics = nullptr,
+                   core::Vec3 aim_direction = {0.0f, 0.0f, -1.0f}) {
+    if (!physics) {
+        mixer.play(kGunReport + weapon, at, .85f);
+        return;
+    }
+    (void)aim_direction; // the fan has no preferred direction; a room sounds the same either way
+
+    constexpr std::size_t kReflectionFan = 12;   // azimuths, 30 degrees apart
+    constexpr float kMaxReflectionRange = 40.0f; // metres; past this the echo is too late anyway
+    constexpr float kSpeedOfSound = 343.0f;      // m/s, dry air at 20 C
+    constexpr float kMinExcessDelay = 0.030f;    // below this the echo fuses with the direct sound
+    constexpr float kMaxExcessDelay = 0.200f;    // past this it belongs to the late reverb tail
+
+    const core::Vec3 s = at;
+    const core::Vec3 listener = mixer.listener().position;
+    const float direct_distance = core::length(s - listener);
+
+    // One more than the fan so the straight-down ground bounce always gets a slot. All of these go
+    // to the mixer, which caps at kMaxEarlyReflections and counts the overflow, so the drop is
+    // never silent.
+    std::array<audio::EarlyReflection, kReflectionFan + 1> reflections;
+    std::size_t refl_count = 0;
+
+    const auto consider = [&](core::Vec3 dir) {
+        physics::Ray ray{s, dir, kMaxReflectionRange};
+        physics::RayHit hit{};
+        if (!physics->raycast(ray, hit, {}))
+            return;
+        const core::Vec3 image = s - 2.0f * core::dot(s - hit.point, hit.normal) * hit.normal;
+        const float image_distance = core::length(image - listener);
+        if (image_distance <= 1.0e-4f)
+            return;
+        const float excess_delay = (image_distance - direct_distance) / kSpeedOfSound;
+        if (excess_delay < kMinExcessDelay || excess_delay > kMaxExcessDelay)
+            return;
+        // The mixer attenuates every voice by the distance from its own position, and a
+        // reflection's position IS the image source — so the mixer's 1/d law over the MIRRORED
+        // path length already is this echo's path attenuation. Applying distance here too would
+        // square it. What the caller owns is the one thing the mixer cannot know: how much of the
+        // sound the boundary swallowed. 0.5 is a broadband mid-absorptive surface (concrete,
+        // brick) — about half the pressure returns.
+        //
+        // A distance-RATIO law cannot work in a first-person game at all: the player's own report
+        // starts AT the listener (a smoke claim asserts shot.origin equals the camera eye to one
+        // millimetre), so any gain proportional to the direct distance is a gain of zero, and
+        // every echo of your own weapon would be silent.
+        constexpr float kWallAbsorption = 0.5f;
+        if (refl_count < reflections.size())
+            reflections[refl_count++] = audio::EarlyReflection{
+                .position = image,
+                .delay_seconds = excess_delay,
+                .gain = kWallAbsorption,
+            };
+    };
+
+    for (std::size_t i = 0; i < kReflectionFan; ++i) {
+        const float theta =
+            static_cast<float>(i) * (6.283185307f / static_cast<float>(kReflectionFan));
+        consider({std::cos(theta), 0.0f, std::sin(theta)});
+    }
+    consider({0.0f, -1.0f, 0.0f}); // the ground: always there, and the one surface never missed
+
+    std::sort(reflections.begin(),
+              reflections.begin() + static_cast<std::ptrdiff_t>(refl_count),
+              [](const audio::EarlyReflection& a, const audio::EarlyReflection& b) {
+                  return a.delay_seconds < b.delay_seconds;
+              });
+
+    mixer.play_with_reflections(
+        kGunReport + weapon, at, .85f, std::span{reflections.data(), refl_count});
+}
+
+class PlayAudioOutput {
+public:
+    static constexpr std::size_t kSamples = (audio::kSampleRate / 60) * 2;
+
+    ~PlayAudioOutput() {
+        if (worker_.joinable()) {
+            worker_.request_stop();
+            ready_.notify_one();
+            worker_.join();
+            std::printf("play audio: %llu blocks delivered, %llu dropped, %llu underruns\n",
+                        static_cast<unsigned long long>(delivered_),
+                        static_cast<unsigned long long>(dropped_),
+                        static_cast<unsigned long long>(sink_->underruns()));
+        }
+    }
+
+    void start() {
+        sink_ = audio::open_audio_sink(audio::kSampleRate);
+        if (!sink_) {
+            std::printf("play audio: no output device available; mixer remains active\n");
+            return;
+        }
+        active_ = true;
+        std::printf("play audio: %s output enabled\n", sink_->backend_name());
+        // Producer/consumer queue: AudioSink::write is a blocking device-clock operation. Keep
+        // it off the simulation thread, with at most three ticks of latency. On overload discard
+        // the oldest queued block so current gunfire never trails a long backlog of rubble noise.
+        worker_ = std::jthread([this](std::stop_token stop) {
+            while (!stop.stop_requested()) {
+                std::array<float, kSamples> block{};
+                {
+                    std::unique_lock lock(mutex_);
+                    ready_.wait(lock, [&] { return count_ != 0 || stop.stop_requested(); });
+                    if (stop.stop_requested())
+                        break;
+                    block = queue_[read_];
+                    read_ = (read_ + 1) % queue_.size();
+                    --count_;
+                }
+                if (!sink_->write(block)) {
+                    std::lock_guard lock(mutex_);
+                    active_ = false;
+                    std::fprintf(stderr, "play audio: device write failed; output disabled\n");
+                    break;
+                }
+                ++delivered_;
+            }
+        });
+    }
+
+    void submit(std::span<const float> samples) {
+        std::lock_guard lock(mutex_);
+        if (!active_ || samples.size() != kSamples)
+            return;
+        if (count_ == queue_.size()) {
+            read_ = (read_ + 1) % queue_.size();
+            --count_;
+            ++dropped_;
+        }
+        auto& destination = queue_[(read_ + count_) % queue_.size()];
+        std::copy(samples.begin(), samples.end(), destination.begin());
+        ++count_;
+        ready_.notify_one();
+    }
+
+private:
+    std::unique_ptr<audio::AudioSink> sink_;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::array<std::array<float, kSamples>, 3> queue_{};
+    std::size_t read_ = 0, count_ = 0;
+    std::uint64_t delivered_ = 0, dropped_ = 0;
+    bool active_ = false;
+    std::jthread worker_;
+};
+
 struct Demo {
     app::Application app;
-    Session session{0x13B10Cull};
+    Session session;
     std::unique_ptr<block_play::PlayEnvironment> environment;
+    std::unique_ptr<block_play::PlayEffects> effects;
+    std::vector<render::GpuParticle> smoke_particles;
+    ecs::Entity fire_light = ecs::kNullEntity;
+    bool effects_visible = true;
+    block_play::city::Dresser city_dresser; // per-part lamp/barrier look, fed by sync() each tick
     std::unique_ptr<Visuals> visuals;
     std::unique_ptr<block_play::PlayWorld> play_world;
+    std::unique_ptr<block_play::PlayBuildingSupport> building_support;
+    bool building_support_enabled = false; // set by run_play only
     std::unique_ptr<block_play::PlayViewmodel> viewmodel;
     std::unique_ptr<block_play::PlayWeaponFx> weapon_fx;
     bool shot_presented = false;
+    std::array<std::uint32_t, 3> weapon_rounds{};
+    std::vector<render::GpuParticle> combined_weapon_smoke;
     bool streamed_world = false;
     bool environment_enabled = false; // the playable art layer, also exercised without weapon art
     bool development_hud = true;
@@ -1830,18 +2371,58 @@ struct Demo {
     // exactly how that check stops meaning anything.
     static constexpr std::size_t kSettleRounds = 8;
 
-    // m13.4 measured 0.35 against 10-destructible-wall's 43 voices from 18 events. A collapsing
-    // city block is an order of magnitude past that — nearly a thousand events — and at 0.35 the
-    // mixdown peaks at 1.05 and clips. The gain is a property of the SCENE's density, not a
-    // constant of the engine, so it is set here where the density is known.
+    // m13.4 measured 0.35 against 10-destructible-wall's 43 voices from 18 events, and the city
+    // block's thousand-event collapse forced it down to 0.12 -- a hack that made every gunshot
+    // quiet to keep one pile-up from clipping. The pile-up is now handled where it belongs: the
+    // DestructionVoicer thins hundreds of events into a few voices, the destruction group is
+    // capped, and a limiter holds the master at -1 dBFS (0.891). With those in place the gain can
+    // be set for the SOUNDS, not for the worst case.
     static audio::MixerConfig block_mix() {
         audio::MixerConfig c;
-        c.master_gain = 0.12f;
+        c.master_gain = 1.0f;
+        c.limiter = true;
+        c.limiter_ceiling = 0.891f;    // -1 dBFS
+        c.reverb_decay_seconds = 1.1f; // was 1.4 s: a shorter outdoor tail (owner: "too much echo")
         return c;
     }
 
-    audio::Mixer mixer{audio::SoundBank::engine_defaults(), block_mix()};
+    audio::Mixer mixer{play_sound_bank(), block_mix()};
+    audio::DestructionVoicer destruction_voicer;
+    PlayAudioOutput audio_output;
     audio::MixStats audio_stats{};
+
+    // Offline capture for --audio-wav (see g_audio_wav): every rendered block, and a per-tick row.
+    struct AudioTickRow {
+        std::uint64_t started = 0; // voices started this tick (MixStats::voices_started delta)
+        std::uint32_t alive = 0;   // voices still sounding after the render
+        float peak = 0.0f;         // largest |sample| of this tick's block
+        std::uint32_t breaks = 0, collapses = 0, settles = 0; // destruction events heard this tick
+    };
+
+    std::vector<float> audio_capture;
+    std::vector<AudioTickRow> audio_rows;
+    std::uint64_t audio_started_before = 0;
+
+    // Write the capture (if --audio-wav asked for one). Called once at the end of a run.
+    void flush_audio_capture() const {
+        if (g_audio_wav.empty() || audio_capture.empty())
+            return;
+        (void)audio::write_wav(g_audio_wav, audio_capture, audio::kSampleRate, 2);
+        if (std::FILE* f = std::fopen((g_audio_wav + ".csv").c_str(), "w")) {
+            std::fprintf(f, "tick,started,alive,peak,breaks,collapses,settles\n");
+            for (std::size_t i = 0; i < audio_rows.size(); ++i)
+                std::fprintf(f,
+                             "%zu,%llu,%u,%.4f,%u,%u,%u\n",
+                             i,
+                             static_cast<unsigned long long>(audio_rows[i].started),
+                             audio_rows[i].alive,
+                             static_cast<double>(audio_rows[i].peak),
+                             audio_rows[i].breaks,
+                             audio_rows[i].collapses,
+                             audio_rows[i].settles);
+            std::fclose(f);
+        }
+    }
 
     // Pose the camera from the SCENE rather than from the player.
     //
@@ -1862,9 +2443,15 @@ struct Demo {
     // block goes (F calls fire_charge()).
     bool scripted_charge = true;
 
-    explicit Demo(const app::AppConfig& cfg) : app(cfg) {}
+    // Proof/perf sessions explicitly retain the deterministic impaired wire. Interactive play
+    // opts in with --network-impairment; removing fake WAN delay does not bypass the protocol.
+    explicit Demo(const app::AppConfig& cfg, bool impaired = true)
+        : app(cfg), session(0x13B10Cull, impaired) {}
 
     [[nodiscard]] bool start(const std::filesystem::path& cooked, std::string_view scene_path) {
+        // The city is the PLAYABLE street: the environment layer on a generated scene. Headless,
+        // perf and the authored `--scene` path never set it, so they stay byte-identical.
+        session.server.city = session.client.city = environment_enabled && scene_path.empty();
         if (app.device() != nullptr) {
             visuals = std::make_unique<Visuals>(*app.device());
         }
@@ -1895,7 +2482,9 @@ struct Demo {
                 return false;
             }
             session.play_world = play_world.get();
-            const core::Vec3 spawn = blockkit::west_viewpoint(blockkit::BlockParams{});
+            const core::Vec3 spawn = session.server.spawn.status == block_play::SpawnStatus::Valid
+                                         ? session.server.spawn.placement.capsule_centre
+                                         : blockkit::west_viewpoint(blockkit::BlockParams{});
             if (!play_world->prepare(session.server.world,
                                      session.server.destruction,
                                      session.client.world,
@@ -1908,8 +2497,33 @@ struct Demo {
                 return false;
             }
         }
+        if (building_support_enabled) {
+            building_support = std::make_unique<block_play::PlayBuildingSupport>();
+            const bool loaded = building_support->register_cooked_dir(cooked);
+            const bool built =
+                loaded && building_support->build(session.server.world, session.server.destruction);
+            const auto& bs = building_support->stats();
+            std::fprintf(stderr,
+                         "99-the-block: building support: loaded=%d all_supported=%d buildings=%u "
+                         "quarantined=%u nodes=%u roots=%u bond_edges=%u contact_edges=%u "
+                         "unreachable=%u missing_geometry=%u\n",
+                         loaded ? 1 : 0,
+                         built ? 1 : 0,
+                         bs.buildings,
+                         bs.quarantined_buildings,
+                         bs.nodes,
+                         bs.roots,
+                         bs.bond_edges,
+                         bs.contact_edges,
+                         bs.initial_unreachable_parts,
+                         bs.missing_geometry);
+            session.building_support = building_support.get();
+        }
         if (visuals) {
             visuals->dress(session.client.world);
+            if (session.client.city) {
+                city_dresser.init(visuals->palette, visuals->materials, visuals->meshes);
+            }
             if (visuals->camera == ecs::kNullEntity) {
                 std::fprintf(stderr, "99-the-block: the block's scene carries no camera\n");
                 return false;
@@ -1953,6 +2567,14 @@ struct Demo {
                 // Settle now, before any measured frame: the chain is asynchronous and the cost of
                 // waiting for it belongs to start-up, not to the frame-time distribution.
                 const std::size_t rounds = bridge->settle(session.client.world, kSettleRounds);
+                // Hand the renderer the bridge's per-submesh material sets, as the editor host
+                // does. A cooked MESH carries its own material table (one material per submesh,
+                // ADR-0039 ruling 1); without the registry the renderer has no way to look those
+                // up, so an imported prop's geometry draws but every submesh falls back to the
+                // palette's flat white (measured on the M16 Blender props, 2026-10-22). The
+                // pointer is to a bridge member, stable for the bridge's lifetime, so setting it
+                // once is enough — the registry fills in as later settles resolve more meshes.
+                visuals->renderer.set_material_sets(bridge->material_sets());
                 const auto& st = bridge->material_asset_stats();
 
                 // THE ORDER OF THESE THREE CHECKS MATTERS, and it was wrong. A device without BC
@@ -2025,10 +2647,21 @@ struct Demo {
             visuals->renderer.set_lighting(lighting);
         }
         if (environment_enabled && visuals) {
+            combined_weapon_smoke.reserve(block_play::AuthoredEnvironment::smoke_capacity +
+                                          block_play::PlayWeaponFx::kDustSlots);
             weapon_fx = std::make_unique<block_play::PlayWeaponFx>(
                 *app.device(), visuals->meshes, visuals->materials);
             if (!weapon_fx->initialize())
                 return false;
+        }
+        if (g_effects_preview && environment_enabled && visuals) {
+            // Scripted presentation sources, deliberately opt-in while M18 is over budget.
+            // Their particles and light never decide damage, ignition or gameplay visibility.
+            effects = std::make_unique<block_play::PlayEffects>(core::Vec3{4, .25f, -1.5f});
+            render::PointLight light{};
+            light.intensity = 0;
+            fire_light = session.client.world.spawn_with(ecs::WorldTransform{}, light);
+            smoke_particles.reserve(block_play::PlayEffects::kParticleCapacity);
         }
         if (viewmodel_enabled) {
             if (!visuals)
@@ -2038,17 +2671,16 @@ struct Demo {
             // clean clone simply has no cook to load. That is a normal state, not a defect: drop
             // the hands and say why. Art that IS present but fails to load is the opposite case --
             // a real fault -- and stays fatal below, so the two can never be confused.
-            if (!std::filesystem::exists(std::filesystem::path(RIME_VIEWMODEL_COOKED_DIR) /
-                                         "manifest.txt")) {
+            if (!std::filesystem::exists(g_viewmodel_content / "manifest.txt")) {
                 std::fprintf(stderr,
                              "99-the-block: no cooked viewmodel under %s -- running without the "
                              "held weapon (see samples/99-the-block/assets/viewmodel/README.md)\n",
-                             RIME_VIEWMODEL_COOKED_DIR);
+                             g_viewmodel_content.string().c_str());
                 viewmodel_enabled = false;
                 return true;
             }
             viewmodel = std::make_unique<block_play::PlayViewmodel>();
-            if (!viewmodel->load(RIME_VIEWMODEL_COOKED_DIR,
+            if (!viewmodel->load(g_viewmodel_content,
                                  session.jobs,
                                  *app.device(),
                                  visuals->meshes,
@@ -2065,6 +2697,13 @@ struct Demo {
                 *app.device(), visuals->meshes, visuals->materials);
             visuals->scope_renderer->set_frames_in_flight(app.frames_in_flight());
             visuals->seed_field(*visuals->scope_renderer, session.client.world);
+            if (effects) {
+                render::FxSettings settings{};
+                settings.enabled = effects_visible;
+                settings.max_particles = block_play::PlayEffects::kParticleCapacity;
+                visuals->scope_renderer->set_smoke_particles(smoke_particles, settings);
+            }
+            visuals->authored_environment.apply_to(*visuals->scope_renderer);
         }
     }
 
@@ -2077,7 +2716,9 @@ struct Demo {
             return false;
         ensure_scope_renderer();
         auto& optical = *visuals->scope_renderer;
-        optical.set_lighting(visuals->renderer.lighting());
+        auto scope_lighting = visuals->renderer.lighting();
+        scope_lighting.shadow_caster_culling = true;
+        optical.set_lighting(scope_lighting);
         optical.set_sky(visuals->renderer.sky());
         const bool taa = optical.taa_resolve_enabled();
         optical.set_taa_resolve_enabled(false);
@@ -2104,30 +2745,143 @@ struct Demo {
         return true;
     }
 
+    bool water_intersection(core::Vec3 origin, core::Vec3 direction, core::Vec3& hit) {
+        if (!environment || !visuals)
+            return false;
+        bool found = false;
+        float nearest = core::length(hit - origin);
+        // Cosmetic water sheets have no solid collider. Intersect their local plane before
+        // the physics hit, inside an ellipse inscribed in their mesh bounds. The conservative
+        // footprint avoids splashes in dry bounding-box corners of the irregular shoreline.
+        session.client.world.query<ecs::WorldTransform, render::MeshRef, render::MaterialRef>()
+            .for_each([&](ecs::Entity,
+                          const ecs::WorldTransform& pose,
+                          const render::MeshRef& mesh,
+                          const render::MaterialRef& material) {
+                if (material.material != environment->water_material() ||
+                    !visuals->meshes.contains(mesh.mesh))
+                    return;
+                const auto inverse = core::inverse(core::to_matrix(pose.value));
+                const auto local = core::transform_point(inverse, origin);
+                const auto ray = core::transform_vector(inverse, direction);
+                if (ray.y >= -1e-5f)
+                    return;
+                const float t = -local.y / ray.y;
+                if (t < 0 || t >= nearest)
+                    return;
+                const auto at = local + ray * t;
+                const auto& shape = visuals->meshes.get(mesh.mesh);
+                const float rx = (shape.local_max.x - shape.local_min.x) * .42f;
+                const float rz = (shape.local_max.z - shape.local_min.z) * .42f;
+                if (rx <= 0 || rz <= 0)
+                    return;
+                const float x = (at.x - (shape.local_max.x + shape.local_min.x) * .5f) / rx;
+                const float z = (at.z - (shape.local_max.z + shape.local_min.z) * .5f) / rz;
+                if (x * x + z * z > 1)
+                    return;
+                nearest = t;
+                hit = origin + direction * t;
+                found = true;
+            });
+        return found;
+    }
+
+    [[nodiscard]] core::Transform render_camera_transform() const {
+        auto eye = session.client.camera_transform();
+        if (viewmodel && viewmodel_enabled) {
+            // Presentation-only view punch: compose a small local rotation onto a COPY of the
+            // eye. Both the parent camera and the optical pose inherit it, while the input tape
+            // and authoritative hitscan continue to use the untouched simulation view.
+            const auto kick = viewmodel->recoil_rotation();
+            eye.rotation = eye.rotation * core::quat_from_euler(kick.x * .35f, kick.y * .10f, 0);
+        }
+        return eye;
+    }
+
+    // The shared live-input seam is also exercised by the accepted-shot smoke proof.
+    void step_play(gameplay::CharacterInput input) {
+        if (viewmodel) {
+            // This local play session owns one authoritative weapon. Selection configures
+            // its existing trigger contract; it does not invent a replicated inventory.
+            block_play::configure_selected_weapon(
+                session.server.weapon,
+                static_cast<block_play::PlayWeaponMotion::Weapon>(viewmodel->selected()));
+            // GameplayServer reads the avatar component, not the spawn template above.
+            // Updating only that template would leave an already-spawned sniper automatic.
+            for (const auto avatar : session.server.avatars)
+                if (auto* weapon = session.server.world.get<gameplay::WeaponConfig>(avatar))
+                    block_play::configure_selected_weapon(
+                        *weapon,
+                        static_cast<block_play::PlayWeaponMotion::Weapon>(viewmodel->selected()));
+            input = block_play::filter_busy_fire(
+                input, viewmodel->busy(), session.server.weapon.fire_bit);
+            // Empty magazine: the pull produces no shot (so no recoil, tracer or report, all of
+            // which hang off an accepted shot), clicks once and starts the reload. The busy
+            // filter above already owns the trigger during a reload, so there is one click.
+            const auto trigger = viewmodel->ammo().filter_trigger(
+                input, viewmodel->weapon(), viewmodel->busy(), session.server.weapon.fire_bit);
+            input = trigger.input;
+            if (trigger.dry_fire) {
+                mixer.play(kDryClick, session.client.camera_transform().translation, .7f);
+                (void)viewmodel->begin_ammo_reload();
+            }
+        }
+        step_sim(gameplay_net::to_input_command(input));
+    }
+
     // One simulation tick, plus everything downstream of it that is not drawing.
     void step_sim(const replication::InputCommand& intent) {
         session.tick(intent);
+        if (visuals)
+            (void)visuals->authored_environment.tick(session.client.world, session.tick_index, kDt);
+        if (effects)
+            (void)effects->tick(
+                session.tick_index, session.client.destruction.events(), static_cast<float>(kDt));
         // Session::tick has joined both jobs: these are accepted authoritative shots, including
         // misses. Rejected cooldown inputs produce neither recoil nor visual feedback.
+        std::size_t surface_index = 0;
         for (const auto& shot : session.server.gameplay.shots()) {
+            auto surface = surface_index < session.shot_surfaces.size()
+                               ? session.shot_surfaces[surface_index]
+                               : block_play::PlayWeaponFx::Surface::Concrete;
+            ++surface_index;
             if (session.server.avatars.empty() ||
                 shot.shooter_entity != session.server.avatars.front())
                 continue;
             shot_presented = true;
+            // One round per accepted shot, counted per tick (never per render frame).
+            if (viewmodel)
+                (void)viewmodel->ammo().consume(viewmodel->weapon());
             if (weapon_fx) {
                 const auto eye = session.client.camera_transform();
                 const auto muzzle =
                     viewmodel ? viewmodel->muzzle_world(eye) : shot.origin + shot.direction * .5f;
+                auto hit = shot.did_hit
+                               ? shot.point
+                               : shot.origin + shot.direction * session.server.weapon.range;
+                const bool water = water_intersection(shot.origin, shot.direction, hit);
+                if (water)
+                    surface = block_play::PlayWeaponFx::Surface::Water;
+                const unsigned weapon =
+                    viewmodel ? static_cast<unsigned>(viewmodel->selected()) : 0;
+                weapon_fx->set_flash_size(block_play::PlayWeaponFx::kWeaponFlashSize[weapon]);
+                const unsigned stride = weapon == 0 ? 3 : 4;
+                const bool tracer = weapon != 2 && weapon_rounds[weapon]++ % stride == 0;
                 weapon_fx->fire(shot.origin,
                                 shot.direction,
                                 muzzle,
-                                shot.did_hit
-                                    ? shot.point
-                                    : shot.origin + shot.direction * session.server.weapon.range,
-                                shot.did_hit,
-                                shot.normal,
+                                hit,
+                                shot.did_hit || water,
+                                water ? core::Vec3{0, 1, 0} : shot.normal,
                                 shot.body,
-                                &session.server.physics);
+                                &session.server.physics,
+                                surface,
+                                tracer);
+                play_gun_shot(mixer, weapon, shot.origin, &session.server.physics, shot.direction);
+                if (shot.did_hit || water)
+                    mixer.play(kBulletImpact + static_cast<unsigned>(surface), hit, .65f);
+                if (!viewmodel || !viewmodel->scoped())
+                    weapon_fx->queue_case();
             }
         }
         if (session.world_stopped) {
@@ -2152,38 +2906,60 @@ struct Demo {
         listener.orientation = eye.rotation;
         mixer.set_listener(listener);
         using K = destruction::DestructionEventKind;
+        std::uint32_t tick_breaks = 0, tick_collapses = 0, tick_settles = 0;
         for (const destruction::DestructionEvent& e : session.client.destruction.events()) {
             // Events carry a world-space AABB rather than a point — the affected part or island —
             // so the sound is placed at its centre, as 10-destructible-wall does.
             const core::Vec3 at{(e.world_bounds.min.x + e.world_bounds.max.x) * 0.5f,
                                 (e.world_bounds.min.y + e.world_bounds.max.y) * 0.5f,
                                 (e.world_bounds.min.z + e.world_bounds.max.z) * 0.5f};
+            // The voicer, not the mixer, decides how many of these become sounds: a charge makes
+            // ~360 events in one tick, which as 360 voices was the "vibrator" buzz (see
+            // audio::DestructionVoicer). Every event still counts toward `audio_events`.
             switch (e.kind) {
                 case K::PartDied:
-                    mixer.play(audio::sound::kPartBreak, at, std::min(1.0f, e.magnitude));
+                    destruction_voicer.add(
+                        audio::DestructionKind::PartBroken, at, std::min(1.0f, e.magnitude));
+                    ++tick_breaks;
                     ++audio_events;
                     break;
                 case K::IslandDetached:
-                    mixer.play(audio::sound::kCollapse, at, 1.0f);
+                    destruction_voicer.add(audio::DestructionKind::IslandDetached, at, 1.0f);
+                    ++tick_collapses;
                     ++audio_events;
                     break;
                 case K::DebrisSettled:
-                    // Quiet on purpose: a settle per chunk is dozens of events, and at full gain
-                    // they would drown out the break that caused them.
-                    mixer.play(audio::sound::kDebrisSettle, at, 0.35f);
+                    // Never an impact: settling only quiets the bed (see the voicer).
+                    destruction_voicer.add(audio::DestructionKind::DebrisSettled, at, 0.35f);
+                    ++tick_settles;
                     ++audio_events;
                     break;
                 default:
                     break;
             }
         }
+        destruction_voicer.update(mixer, kDt);
         // Render one tick's worth of audio so the mixer's voices actually age and retire. CI is
-        // deaf, so the samples go nowhere — but a mixer that is never rendered would report a voice
-        // count that only ever grows, and the "voices retire" claim would be untested here.
+        // deaf, so only interactive play submits to the device — a mixer never rendered reports a
+        // voice count that only ever grows, and the "voices retire" claim would be untested here.
         static std::vector<float> scratch(
             static_cast<std::size_t>(static_cast<double>(audio::kSampleRate) * kDt) * 2u, 0.0f);
         mixer.render(scratch);
+        audio_output.submit(scratch);
         audio_stats = mixer.stats();
+        if (!g_audio_wav.empty()) {
+            AudioTickRow row;
+            row.started = audio_stats.voices_started - audio_started_before;
+            audio_started_before = audio_stats.voices_started;
+            row.alive = static_cast<std::uint32_t>(audio_stats.voices_active);
+            row.breaks = tick_breaks;
+            row.collapses = tick_collapses;
+            row.settles = tick_settles;
+            for (const float v : scratch)
+                row.peak = std::max(row.peak, std::fabs(v));
+            audio_rows.push_back(row);
+            audio_capture.insert(audio_capture.end(), scratch.begin(), scratch.end());
+        }
 
         // DRESS WHATEVER JUST ARRIVED, before the leaves are built from it.
         //
@@ -2203,6 +2979,10 @@ struct Demo {
         if (visuals) {
             visuals->leaf_stats = visuals->leaves.update(
                 session.client.world, session.client.destruction, session.client.physics);
+            if (city_dresser.ready()) {
+                (void)city_dresser.sync(
+                    session.client.world, session.client.destruction, visuals->leaves);
+            }
         }
     }
 
@@ -2210,6 +2990,74 @@ struct Demo {
         charge_fired = true;
         const blockkit::BlockParams p;
         (void)detonate(session, p.hero_south, hero_charge(p));
+    }
+
+    // AIMED CHARGE for --play. fire_charge() above targets the authored hero corner of the
+    // generated block, which is empty ground on an authored city scene, so F did nothing there.
+    // Here the charge goes where the player looks: a ray from the eye finds the first
+    // surface within reach, and the blast is offered to EVERY destructible instance, because an
+    // authored scene has no SlabRole building index. apply_damage tests each part against the
+    // radius, so far-away instances cost a bounds check and stay intact. Returns false (nothing
+    // detonated) when the ray hits nothing, so a charge thrown at the sky is not spent.
+    bool fire_charge_aimed(float reach = 60.0f) {
+        const core::Transform eye = session.client.camera_transform();
+        const core::Vec3 forward = core::rotate(eye.rotation, core::Vec3{0, 0, -1});
+        // Aim against the CLIENT's replica (what the player sees), excluding the player's own
+        // capsule or the ray stops at distance ~0. Only the hit POINT crosses to the server, as
+        // a world position, so the two worlds' differing BodyIds never meet.
+        physics::QueryFilter filter;
+        filter.exclude = session.client.local_body();
+        physics::RayHit hit{};
+        if (!session.client.physics.raycast({eye.translation, forward, reach}, hit, filter)) {
+            RIME_INFO(
+                "play: aimed charge: ray from ({:.1f}, {:.1f}, {:.1f}) hit nothing within {} m",
+                eye.translation.x,
+                eye.translation.y,
+                eye.translation.z,
+                reach);
+            return false;
+        }
+        charge_fired = true;
+        {
+            // DIAGNOSTIC: the same ray on the SERVER world, and which destructible instance (if
+            // any) owns the body it strikes.
+            physics::RayHit shit{};
+            const bool sh =
+                session.server.physics.raycast({eye.translation, forward, reach}, shit, {});
+            std::size_t owner = static_cast<std::size_t>(-1);
+            for (std::size_t i = 0; sh && i < session.server.destruction.instance_count(); ++i)
+                if (session.server.destruction.body_of(
+                        destruction::InstanceId{static_cast<std::uint32_t>(i), 0}) == shit.body)
+                    owner = i;
+            RIME_INFO("play: server ray hit={} dist={:.1f} body={} owning_instance={} of {}",
+                      sh,
+                      shit.distance,
+                      shit.body.index,
+                      static_cast<long long>(owner),
+                      session.server.destruction.instance_count());
+        }
+        Charge charge;
+        // Pull the centre back off the surface so the blast straddles the wall instead of
+        // sitting on its face, where half the sphere would be wasted in open air.
+        charge.at = hit.point - forward * 0.5f;
+        charge.radius = 4.0f; // a breach, not the whole-building hero blow-out (11 m)
+        // Walk the destruction world's own instance table, as the bullet path does.
+        auto& destruction = session.server.destruction;
+        const std::size_t offered = destruction.instance_count();
+        for (std::size_t i = 0; i < offered; ++i)
+            destruction.apply_damage(destruction::InstanceId{static_cast<std::uint32_t>(i), 0},
+                                     charge.at,
+                                     charge.radius,
+                                     charge.damage,
+                                     {0.0f, charge.impulse * 0.3f, 0.0f});
+        RIME_INFO("play: aimed charge at ({:.1f}, {:.1f}, {:.1f}), {:.1f} m away, offered to {} "
+                  "destructible instances",
+                  charge.at.x,
+                  charge.at.y,
+                  charge.at.z,
+                  hit.distance,
+                  offered);
+        return true;
     }
 
     // Pose the camera from the PREDICTED player and draw the client's world. `ctx.world` is the
@@ -2220,13 +3068,77 @@ struct Demo {
             return;
         }
         ecs::World& world = session.client.world;
+        smoke_particles.clear();
+        if (effects) {
+            smoke_particles.clear();
+            const auto fire = effects_visible ? effects->light() : std::nullopt;
+            auto* light = world.get<render::PointLight>(fire_light);
+            auto* transform = world.get<ecs::WorldTransform>(fire_light);
+            if (light && transform) {
+                light->intensity = fire ? fire->intensity * 6.0f : 0;
+                if (fire) {
+                    transform->value.translation = fire->position;
+                    light->color_r = fire->color.x;
+                    light->color_g = fire->color.y;
+                    light->color_b = fire->color.z;
+                    light->radius = fire->radius * 4.0f;
+                }
+                world.mark_changed<ecs::WorldTransform>(fire_light);
+                world.mark_changed<render::PointLight>(fire_light);
+            }
+            if (effects_visible) {
+                for (const auto& particle : effects->field().particles()) {
+                    render::GpuParticle p{};
+                    p.position_size[0] = particle.position.x;
+                    p.position_size[1] = particle.position.y;
+                    p.position_size[2] = particle.position.z;
+                    p.position_size[3] = particle.size;
+                    // Approximate incident light at the billboard centre. This shares the fire
+                    // light's hue/range; it is not volumetric scattering or self-shadowing.
+                    float warm = 0;
+                    if (fire) {
+                        const float range = fire->radius * 4.0f;
+                        const float falloff = std::max(
+                            0.0f, 1.0f - core::length(particle.position - fire->position) / range);
+                        warm = falloff * falloff * fire->intensity * .35f;
+                    }
+                    p.color_alpha[0] = .12f + warm;
+                    p.color_alpha[1] = .13f + warm * .35f;
+                    p.color_alpha[2] = .14f + warm * .08f;
+                    const float life = particle.age / particle.lifetime;
+                    p.color_alpha[3] = .45f * std::min(particle.age * 6, 1.0f) * (1 - life);
+                    smoke_particles.push_back(p);
+                }
+            }
+            render::FxSettings settings{};
+            settings.enabled = effects_visible;
+            settings.max_particles = block_play::PlayEffects::kParticleCapacity;
+            visuals->renderer.set_smoke_particles(smoke_particles, settings);
+            if (visuals->scope_renderer)
+                visuals->scope_renderer->set_smoke_particles(smoke_particles, settings);
+        }
+        visuals->authored_environment.publish(
+            world, smoke_particles, visuals->renderer, visuals->scope_renderer.get());
         if (weapon_fx) {
             weapon_fx->advance(static_cast<float>(ctx.frame_dt));
-            weapon_fx->pose(world, &session.server.physics);
+            // Merge AFTER authored publication, retaining its full budget. Bullet dust owns a
+            // separate fixed pool and must not displace scripted smoke or overwrite fire smoke.
+            const auto& authored = visuals->authored_environment.snapshot();
+            const auto base = authored.override_smoke
+                                  ? authored.smoke_span()
+                                  : std::span<const render::GpuParticle>(smoke_particles);
+            combined_weapon_smoke.assign(base.begin(), base.end());
+            weapon_fx->append_smoke(combined_weapon_smoke);
+            render::FxSettings settings{};
+            settings.enabled = true;
+            settings.max_particles = block_play::AuthoredEnvironment::smoke_capacity +
+                                     block_play::PlayWeaponFx::kDustSlots;
+            visuals->renderer.set_smoke_particles(combined_weapon_smoke, settings);
+            if (visuals->scope_renderer)
+                visuals->scope_renderer->set_smoke_particles(combined_weapon_smoke, settings);
         }
         if (auto* tf = world.get<ecs::WorldTransform>(visuals->camera)) {
-            tf->value =
-                use_authored_camera ? visuals->authored_camera : session.client.camera_transform();
+            tf->value = use_authored_camera ? visuals->authored_camera : render_camera_transform();
         }
         if (play_world) {
             // --world-gpu-smoke pins the camera at a far, deterministic pose; live play and
@@ -2243,11 +3155,29 @@ struct Demo {
             play_world->mark_drawn();
         }
         if (viewmodel && viewmodel_enabled) {
-            const core::Transform eye = session.client.camera_transform();
+            const core::Transform eye = render_camera_transform();
             viewmodel->observe_camera(eye.translation);
             visuals->renderer.set_first_person_draws(viewmodel->pose(eye),
                                                      viewmodel->identity_epoch());
             visuals->renderer.set_first_person_deformations(viewmodel->deformations());
+            if (weapon_fx) {
+                // Pose the gun before its live flash. Fixed-tick shot positions lag the
+                // predicted camera during movement; only accepted world paths stay there.
+                const auto direction = core::rotate(eye.rotation, core::Vec3{0, 0, -1});
+                const auto right = core::rotate(eye.rotation, core::Vec3{1, 0, 0});
+                const auto up = core::rotate(eye.rotation, core::Vec3{0, 1, 0});
+                const auto velocity = session.client.predictor.seeded()
+                                          ? session.client.predictor.state().velocity
+                                          : core::Vec3{};
+                const auto muzzle = viewmodel->muzzle_world(eye);
+                const block_play::PlayWeaponFx::ViewPose view{eye.translation,
+                                                              direction,
+                                                              muzzle,
+                                                              muzzle - direction * .32f +
+                                                                  right * .075f - up * .025f,
+                                                              velocity};
+                weapon_fx->pose(world, &session.server.physics, &view);
+            }
             if (viewmodel->scoped()) {
                 // Each optical view owns its history. The main camera is never mutated,
                 // and both views read the same replicated world and streamed terrain.
@@ -2261,7 +3191,11 @@ struct Demo {
                 visuals->last_scope_ldr = {};
                 if (feed_visible) {
                     auto& optical = *visuals->scope_renderer;
-                    optical.set_lighting(visuals->renderer.lighting());
+                    auto scope_lighting = visuals->renderer.lighting();
+                    // Measured wins belong to the narrow optical view: the main cascades
+                    // enclose this entire city, so their per-draw tests only add CPU cost.
+                    scope_lighting.shadow_caster_culling = true;
+                    optical.set_lighting(scope_lighting);
                     optical.set_sky(visuals->renderer.sky());
                     if (play_world)
                         optical.set_terrain_draws(play_world->pass(), play_world->draws());
@@ -2303,6 +3237,8 @@ struct Demo {
                 visuals->renderer.set_first_person_scope({}, viewmodel->lens(), params);
             }
         }
+        if (weapon_fx && (!viewmodel || !viewmodel_enabled))
+            weapon_fx->pose(world, &session.server.physics);
         visuals->renderer.reset_cull_stats();
         visuals->last_ldr = visuals->renderer.render(*ctx.graph, world, ctx.extent, true).ldr;
         visuals->cull = visuals->renderer.cull_stats();
@@ -2327,14 +3263,27 @@ struct Demo {
             return; // keep every aiming sight clear of the development statistics panel
 
         if (player_help && viewmodel) {
-            constexpr std::array names{"1 SCAR-H | RMB: holographic sight | LMB: fire",
-                                       "2 M4A1 | RMB: iron sights | LMB: fire",
-                                       "3 MSR / PM II | hold RMB: 5x scope | LMB: fire"};
+            constexpr std::array names{"1 SCAR-H | RMB: sight | hold LMB: fire | R: reload",
+                                       "2 M4A1 | RMB: sight | hold LMB: fire | R: reload",
+                                       "3 MSR / PM II | RMB: scope | click LMB: fire | R: reload"};
             hud.text(st::kPadding,
                      static_cast<float>(ctx.extent.height) - 24.0f,
                      names[static_cast<unsigned>(viewmodel->selected())],
                      st::kAccent,
                      14.0f);
+            // rounds / capacity, right above the hint; red-ish while empty, amber while reloading.
+            const auto weapon = viewmodel->weapon();
+            char ammo_text[32];
+            std::snprintf(ammo_text,
+                          sizeof(ammo_text),
+                          viewmodel->reloading() ? "%u / %u  RELOADING" : "%u / %u",
+                          viewmodel->ammo().rounds(weapon),
+                          block_play::PlayAmmo::capacity(weapon));
+            hud.text(st::kPadding,
+                     static_cast<float>(ctx.extent.height) - 48.0f,
+                     ammo_text,
+                     viewmodel->ammo().empty(weapon) ? st::kWarn : st::kText,
+                     22.0f);
         }
         constexpr float kW = 300.0f;
         const float h = st::kPadding * 2.0f + st::kLineHeight * 7.4f;
@@ -2374,21 +3323,60 @@ struct Demo {
         row("debris", buf, st::kText);
         std::snprintf(buf, sizeof(buf), "%zu", visuals->leaf_stats.leaves_live);
         row("leaves", buf, st::kText);
-        // The convergence claim, on screen: the two hashes are the peers agreeing or not.
-        // With a play_world the server instantiated block physics BEFORE terrain tiles, so the two
-        // peers' BodyIds differ though their destruction facts agree: compare content, not handles.
-        const bool agree = session.play_world
-                               ? session.client.destruction.replicated_content_hash() ==
-                                     session.server.destruction.replicated_content_hash()
-                               : session.client.destruction.state_hash() ==
-                                     session.server.destruction.state_hash();
-        row("peers", agree ? "in sync" : "DIVERGED", agree ? st::kText : st::kWarn);
+        // Compare by wire identity, just like the headless convergence proof. Local instance
+        // allocation order can differ as well as BodyIds: dropping handles from a local-order
+        // hash still falsely labels an undamaged city as divergent. Differing hashes read
+        // "syncing" while damage ops are still in flight and DIVERGED only once nothing is —
+        // see classify_peer_sync for the measurement that made the two-state row a lie.
+        std::uint64_t in_flight = 0;
+        switch (classify_peer_sync(session, &in_flight)) {
+            case PeerSync::InSync:
+                row("peers", "in sync", st::kText);
+                break;
+            case PeerSync::Syncing:
+                // The count is shown so a number that never drains is visible: "syncing" is a
+                // claim with a cause, not a place for a stuck channel to hide.
+                std::snprintf(
+                    buf, sizeof(buf), "syncing %llu", static_cast<unsigned long long>(in_flight));
+                row("peers", buf, st::kLabel);
+                break;
+            case PeerSync::Diverged:
+                row("peers", "DIVERGED", st::kWarn);
+                break;
+        }
         std::snprintf(buf, sizeof(buf), "%zu", mixer.voice_count());
         row("voices", buf, st::kText);
     }
 };
 
 // ── --headless: M13's "done when", as a CI-gated self-check ─────────────────────────────────────
+// --audio-weapons: each weapon fires three shots, 1.5 s apart, half a metre in front of the
+// listener, i.e. at the muzzle, mixed through the same bank, mixer and call helper as the game.
+// Offline, deterministic, no device.
+int render_weapon_demo(const std::filesystem::path& dir) {
+    std::filesystem::create_directories(dir);
+    const char* names[3] = {"scar", "m4", "sniper"};
+    for (unsigned weapon = 0; weapon < 3; ++weapon) {
+        audio::Mixer mixer{play_sound_bank(), Demo::block_mix()};
+        std::vector<float> all;
+        std::vector<float> block(static_cast<std::size_t>(audio::kSampleRate / 60) * 2u);
+        for (unsigned tick = 0; tick < 60u * 7u; ++tick) {
+            if (tick == 0 || tick == 90 || tick == 180)
+                play_gun_shot(mixer, weapon, {0.0f, 0.0f, -0.5f});
+            mixer.render(block);
+            all.insert(all.end(), block.begin(), block.end());
+        }
+        const auto path = dir / (std::string("weapon-") + names[weapon] + ".wav");
+        if (!audio::write_wav(path, all, audio::kSampleRate, 2))
+            return 1;
+        std::printf("audio-weapons: %s peak %.3f clipped %llu\n",
+                    path.string().c_str(),
+                    static_cast<double>(mixer.stats().peak),
+                    static_cast<unsigned long long>(mixer.stats().clipped_samples));
+    }
+    return 0;
+}
+
 int run_headless(const std::filesystem::path& cooked, std::string_view scene_path) {
     app::AppConfig cfg{};
     cfg.gpu = true; // a device if there is one; the sim half runs either way
@@ -2396,6 +3384,14 @@ int run_headless(const std::filesystem::path& cooked, std::string_view scene_pat
     cfg.tick_hz = 60.0;
 
     Demo demo(cfg);
+
+    // Writes the --audio-wav capture however run_headless returns.
+    struct CaptureFlush {
+        Demo& d;
+
+        ~CaptureFlush() { d.flush_audio_capture(); }
+    } capture_flush{demo};
+
     const bool has_device = demo.app.device() != nullptr;
     if (!has_device) {
         std::fprintf(stderr,
@@ -3653,6 +4649,86 @@ int run_perf(const std::filesystem::path& cooked,
     return result.ok() ? 0 : 1;
 }
 
+// The city plate and the streamed terrain around it must be one continuous walkable surface.
+// The proof itself lives in PlayWorld::prove_plate_boundary (play_world.cpp); this only feeds it
+// the server's avatar and prints the numbers. It runs LAST in the smoke that calls it because it
+// drives `collision.plan` with its own ticks, which a ticking session would then have to outrun.
+bool plate_boundary_check(Demo& demo, const char* tag) {
+    if (!demo.play_world || demo.session.server.avatars.empty()) {
+        std::fprintf(stderr, "%s: plate-boundary proof has no play world or avatar\n", tag);
+        return false;
+    }
+    const ecs::Entity avatar = demo.session.server.avatars.front();
+    const auto* character = demo.session.server.world.get<gameplay::CharacterConfig>(avatar);
+    const auto* body = demo.session.server.world.get<physics::RigidBodyHandle>(avatar);
+    if (!character || !body) {
+        std::fprintf(stderr, "%s: plate-boundary proof has no avatar config or body\n", tag);
+        return false;
+    }
+    const bool verbose = std::getenv("RIME_PLATE_REPORT") != nullptr;
+    const auto r = demo.play_world->prove_plate_boundary(
+        *character, body->body, demo.session.tick_index + 1, verbose ? stdout : nullptr);
+    std::printf("%s: plate boundary: %u perimeter samples (%u uncovered, %u no-hit), plate top "
+                "%.3f m, terrain collision gap max %.3f m at (%.1f, %.1f), rendered gap max "
+                "%.3f m, rendered-vs-collision %.4f m, step-up %.2f m; walk-on N/E/S/W "
+                "%d/%d/%d/%d (best approach %.1f/%.1f/%.1f/%.1f of 25 m)\n",
+                tag,
+                r.samples,
+                r.uncovered,
+                r.no_hit,
+                r.plate_top,
+                r.max_collision_gap,
+                r.worst_x,
+                r.worst_z,
+                r.max_render_gap,
+                r.max_render_vs_collision,
+                character->step_height,
+                r.walked[0],
+                r.walked[1],
+                r.walked[2],
+                r.walked[3],
+                r.walk_progress[0],
+                r.walk_progress[1],
+                r.walk_progress[2],
+                r.walk_progress[3]);
+    if (!r.ok) {
+        std::fprintf(stderr, "%s: FAILED plate boundary is not walkable\n", tag);
+    }
+    // Water census. The street looks wet because its asphalt is a glossy, reflective material, NOT
+    // because a water surface covers it; the only water meshes are the 7 authored puddles and one
+    // pond, each a few metres across at a fixed y that no terrain function touches. This pins
+    // that: raising the terrain under the plate edge must not add or grow a water surface.
+    bool water_ok = true;
+    if (demo.environment) {
+        unsigned count = 0;
+        float biggest = 0.0f, area = 0.0f;
+        demo.session.client.world
+            .query<render::SurfaceGeometry, render::MaterialRef, ecs::WorldTransform>()
+            .for_each([&](const render::SurfaceGeometry& g,
+                          const render::MaterialRef& m,
+                          const ecs::WorldTransform&) {
+                if (m.material != demo.environment->water_material())
+                    return;
+                ++count;
+                biggest = std::max({biggest, g.half_x, g.half_z});
+                area += 3.14159265f * g.half_x * g.half_z;
+            });
+        std::printf("%s: water census: %u surfaces, largest half-extent %.2f m, total oval area "
+                    "%.1f m^2 (street plate is %.0f m^2)\n",
+                    tag,
+                    count,
+                    biggest,
+                    area,
+                    (demo.play_world->plate().max_x - demo.play_world->plate().min_x) *
+                        (demo.play_world->plate().max_z - demo.play_world->plate().min_z));
+        water_ok = count == 8 && biggest <= 7.0f && area < 250.0f;
+        if (!water_ok)
+            std::fprintf(
+                stderr, "%s: FAILED a water surface grew beyond the authored puddles\n", tag);
+    }
+    return r.ok && water_ok;
+}
+
 // The streamed-world proof uses the same Demo, Session tick and collision setup as live play.
 // It keeps the charge disabled so the travelling floor, rather than rubble, is what it measures.
 int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
@@ -3842,10 +4918,13 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
           "100m/s control traversed hundreds of negative metres");
     check(min_client_x < stress_start - 280.0f && min_visual_x < stress_start - 280.0f,
           "client predicted and visual control traversed negative terrain");
-    const core::Vec3 remote{min_x, 60.0f, 0.0f};
+    // Start above the tallest terrain the u16 height encoding can express (252 m): the distant
+    // ranges (assets::apply_procedural_backdrop) are real collision now, so the old 60 m origin
+    // could sit inside a hill. The assertion is unchanged: the ray must still hit terrain.
+    const core::Vec3 remote{min_x, 300.0f, 0.0f};
     physics::RayHit remote_hit;
     check(demo.session.server.physics.raycast(
-              physics::Ray{remote, {0.0f, -1.0f, 0.0f}, 120.0f}, remote_hit, statics),
+              physics::Ray{remote, {0.0f, -1.0f, 0.0f}, 400.0f}, remote_hit, statics),
           "negative-coordinate terrain answers a physics ray");
     physics::RayHit missing_hit;
     check(!demo.session.server.physics.raycast(
@@ -3898,6 +4977,7 @@ int run_world_smoke(const std::filesystem::path& cooked, std::string_view scene_
                 min_predicted_gap,
                 min_visual_gap,
                 max_visual_offset);
+    okay = plate_boundary_check(demo, "world-smoke") && okay;
     return okay ? 0 : 1;
 }
 
@@ -4105,6 +5185,12 @@ int run_world_gpu_smoke(const std::filesystem::path& cooked, std::string_view sc
 int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
     constexpr std::uint32_t kW = 640;
     constexpr std::uint32_t kH = 360;
+    // Hip framing bands, as fractions of the frame (see HIP FRAMING below). Measured on the RTX
+    // 3060 at 2026-10-21: arms 3.2-4.4 %, arms+weapon 11.4-15.9 % (pixels changed by >= 30/765,
+    // which under-counts dark sleeves over dark ground). The old floating-gun framing put the
+    // arms at 0 %; the upper bounds catch a viewmodel that swallows the screen.
+    constexpr std::array<float, 2> kHipArmCoverage{.02f, .12f};
+    constexpr std::array<float, 2> kHipModelCoverage{.08f, .35f};
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kW, kH};
@@ -4126,8 +5212,7 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     // does. This check has to come BEFORE start(), because start() treats absent art as benign and
     // quietly clears viewmodel_enabled -- without this the proof below would read a frame with no
     // model in it and still call every claim satisfied.
-    if (!std::filesystem::exists(std::filesystem::path(RIME_VIEWMODEL_COOKED_DIR) /
-                                 "manifest.txt")) {
+    if (!std::filesystem::exists(g_viewmodel_content / "manifest.txt")) {
         std::fprintf(stderr, "viewmodel-smoke: no cooked viewmodel art -- skipped\n");
         return std::getenv("RIME_REQUIRE_VIEWMODEL") != nullptr ? 1 : 0;
     }
@@ -4143,8 +5228,10 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     // -- in which the sun contributes so little that killing every shadow in the frame moves 1.39%
     // of pixels by at most 10/255, against 19.8% and 99/255 in the block's own headless view. A
     // weapon is lit by whatever the player is standing in, so the proof has to stand there too.
-    play_sunset::apply(demo.session.server.world);
-    play_sunset::apply(demo.session.client.world);
+    if (scene_path.empty()) {
+        play_sunset::apply(demo.session.server.world);
+        play_sunset::apply(demo.session.client.world);
+    } // Saved maps own their lighting: Run must not silently replace an editor's sun edits.
     demo.session.client.view.yaw = play_sunset::kViewYaw;
     demo.session.client.view.pitch = play_sunset::kViewPitch;
     if (auto* camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera)) {
@@ -4166,6 +5253,25 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
             okay = false;
         }
     };
+    // Compare the ray with the actual client camera using the SAME capsule anchor: network
+    // smoothing can legitimately separate client/server positions, but never their eye offsets.
+    gameplay::CharacterState eye_state{};
+    eye_state.position = demo.session.client.eye_anchor();
+    gameplay::CharacterInput eye_input{};
+    eye_input.pressed = gameplay::kActionFire;
+    const auto eye_aim = gameplay::character_aim(eye_state, eye_input, demo.session.server.weapon);
+    gameplay::ShotResult eye_shot{};
+    (void)gameplay::step_weapon({},
+                                eye_input,
+                                demo.session.server.weapon,
+                                eye_aim,
+                                demo.session.server.physics,
+                                {},
+                                &eye_shot);
+    check(eye_shot.fired &&
+              core::length(eye_shot.shot.origin -
+                           demo.session.client.camera_transform().translation) <= .001f,
+          "shot origin equals camera eye to one millimetre at the same capsule pose");
     check(demo.visuals->scope_renderer && !demo.visuals->scope_renderer->taa_history_allocated(),
           "scope loading primes resources without retaining a stale aiming image");
     const auto capture = [&]() {
@@ -4426,7 +5532,7 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
     check(demo.viewmodel->identity_epoch() > initial_epoch &&
               demo.viewmodel->selected_draw_count() > 0,
           "M4 swap invalidates first-person history and draws");
-    check(meshes == 8 && materials >= 2 && textures >= 4 &&
+    check(meshes == 11 && materials >= 2 && textures >= 4 &&
               demo.viewmodel->resident_meshes() == meshes &&
               demo.viewmodel->resident_materials() == materials &&
               demo.viewmodel->resident_textures() == textures,
@@ -4531,6 +5637,633 @@ int run_viewmodel_smoke(const std::filesystem::path& cooked, std::string_view sc
         write_ppm((g_ppm + ".target-scoped.ppm").c_str(), scoped_target, kW, kH);
     }
     (void)demo.session.client.world.despawn(target_entity);
+    // Replay an accepted shot through the actual optic/arm pose. The angular witness is
+    // independent of translation: a moving ocular alone cannot prove muzzle rise. A second
+    // identical input sequence must reproduce every pose, including the hashed yaw/roll.
+    const auto scoped_recoil = [&]() {
+        std::array<core::Mat4, 37> poses{};
+        demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+        demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Sniper);
+        demo.viewmodel->set_aiming(true);
+        demo.viewmodel->advance(1.0f, {}, false);
+        for (std::size_t i = 0; i < poses.size(); ++i) {
+            if (i != 0)
+                demo.viewmodel->advance(1.0f / 60.0f, {}, i == 1);
+            (void)demo.viewmodel->pose(eye_pose);
+            poses[i] = demo.viewmodel->optic_world();
+            check(!demo.viewmodel->cycling() && !demo.viewmodel->take_case_ejection(),
+                  "scoped recoil never starts the deferred bolt or extracts a case");
+            const auto& arms = demo.viewmodel->arm_stats();
+            check(arms.valid_input && arms.clamped_targets == 0,
+                  "scoped recoil keeps both arm targets reachable");
+        }
+        return poses;
+    };
+    const auto shot_poses = scoped_recoil();
+    const auto replay_poses = scoped_recoil();
+    const auto optic_angle = [&](const core::Mat4& pose) {
+        const auto a = core::transform_vector(shot_poses.front(), {0, 0, -1});
+        const auto b = core::transform_vector(pose, {0, 0, -1});
+        return std::atan2(core::length(core::cross(a, b)), core::dot(a, b));
+    };
+    float peak_angle = 0.0f;
+    for (std::size_t i = 0; i < shot_poses.size(); ++i) {
+        peak_angle = std::max(peak_angle, optic_angle(shot_poses[i]));
+        check(core::approx_eq(shot_poses[i], replay_poses[i], 1e-6f),
+              "identical scoped shot inputs reproduce the same optic pose");
+    }
+    const float recovery_angle = optic_angle(shot_poses.back());
+    const float recovery_position = core::length(core::transform_point(shot_poses.back(), {}) -
+                                                 core::transform_point(shot_poses.front(), {}));
+    check(peak_angle > .00872665f,
+          "accepted scoped shot kicks optic axis by more than 0.5 degrees");
+    check(recovery_angle < .00174533f && recovery_position < .001f && demo.viewmodel->busy() &&
+              !demo.viewmodel->cycling() && demo.viewmodel->aim_fraction() > .99f &&
+              demo.viewmodel->scope_feed_visible(eye_pose),
+          "scoped optic recovers within 0.1 degrees and 1 mm by 0.6 seconds, bolt still deferred");
+    std::printf("viewmodel-smoke: scoped recoil peak %.6f rad, at 0.6 s %.6f rad / %.6f m\n",
+                peak_angle,
+                recovery_angle,
+                recovery_position);
+    // The render helper is the same seam used by the parent camera and the scoped optic.
+    // Sample every weapon's full recovery, and independently observe the immutable aim vector.
+    for (const auto weapon : {block_play::PlayViewmodel::Weapon::Scar,
+                              block_play::PlayViewmodel::Weapon::M4,
+                              block_play::PlayViewmodel::Weapon::Sniper}) {
+        demo.viewmodel->select(weapon);
+        demo.viewmodel->set_aiming(true);
+        demo.viewmodel->advance(1.0f, {}, false);
+        const auto simulation_view = demo.session.client.view;
+        const auto aim = gameplay::look_direction(simulation_view);
+        float peak_pitch = 0, recovered_pitch = 0;
+        for (unsigned frame = 0; frame < 36; ++frame) {
+            demo.viewmodel->advance(kDt, {}, frame == 0);
+            const auto rendered =
+                core::rotate(demo.render_camera_transform().rotation, core::Vec3{0, 0, -1});
+            recovered_pitch = std::abs(std::asin(rendered.y) - std::asin(aim.y));
+            peak_pitch = std::max(peak_pitch, recovered_pitch);
+            check(core::length(gameplay::look_direction(demo.session.client.view) - aim) == 0 &&
+                      demo.session.client.view.yaw == simulation_view.yaw &&
+                      demo.session.client.view.pitch == simulation_view.pitch,
+                  "view punch never changes simulation aim");
+        }
+        check(peak_pitch > .001f && recovered_pitch < .001f,
+              "render camera pitch kicks and recovers by 0.6 seconds for every weapon");
+        std::printf("viewmodel-smoke: camera weapon %u peak %.6f recovery %.6f rad\n",
+                    static_cast<unsigned>(weapon),
+                    peak_pitch,
+                    recovered_pitch);
+    }
+    demo.viewmodel->set_aiming(false);
+    demo.viewmodel->advance(0.0f, {}, false);
+    check(demo.viewmodel->cycling() && !demo.viewmodel->take_case_ejection(),
+          "scope release starts the deferred bolt exactly once");
+    demo.viewmodel->advance(block_play::PlayWeaponMotion::kExtractionSeconds, {}, false);
+    check(demo.viewmodel->take_case_ejection() && !demo.viewmodel->take_case_ejection(),
+          "deferred scoped bolt emits exactly one case at extraction");
+    demo.viewmodel->advance(2.0f, {}, false);
+    // Sweep every frame of each action through the REAL rig before any image is read. One
+    // rendered sample can say only that a claim failed; this says which term and when. The arm
+    // solve and the weapon pose are camera-local, so pose() with an identity camera needs no GPU
+    // and measures exactly what render() hands the renderer.
+    //
+    // The deltas are against the idle pose solved immediately before the action, NOT against
+    // the bind mesh: PlayArmIk's max_vertex_displacement is measured from bind on every solve,
+    // so it is already large at idle (the rig is re-seated on the shoulder) and cannot by itself
+    // show that an action moved anything. The idle CONTROL sweep -- the same clock with no
+    // action -- must read zero, which proves the action deltas are motion and not noise.
+    using VmWeapon = block_play::PlayViewmodel::Weapon;
+    const auto weapon_name = [](VmWeapon w) {
+        return w == VmWeapon::Scar ? "SCAR" : w == VmWeapon::M4 ? "M4" : "MSR";
+    };
+
+    struct ActionSweep {
+        int frames = 0, busy = 0, invalid = 0, clamped = 0;
+        float first_clamp = -1.0f; // seconds into the action
+        float wrist_miss[2]{};     // requested-vs-reached wrist, metres; above zero only if clamped
+        float min_skin = 1e9f, arm_delta = 0.0f, muzzle_delta = 0.0f;
+        // The reach limiter's own record: frames it shortened a hand path, the smallest share of
+        // the authored path kept, and the longest hand travel actually applied (weapon metres).
+        int limited = 0;
+        int cut_frames = 0;    // frames with a sleeve's open cut end inside the viewport
+        int elbow_frames = 0;  // frames with either elbow joint inside the viewport
+        float elbow_depth = 0; // deepest elbow joint inside the bottom edge, half-heights
+        int contact_frames = 0;
+        float contact_gap = 0;
+        float retained[2]{1.0f, 1.0f}, hand_travel[2]{};
+    };
+
+    const auto sweep = [&](float seconds, bool fire_first, float measure_from) {
+        ActionSweep r;
+        const core::Transform camera{};
+        (void)demo.viewmodel->pose(camera);
+        std::vector<render::MeshVertex> idle;
+        if (!demo.viewmodel->deformations().empty()) {
+            const auto v = demo.viewmodel->deformations().front().current;
+            idle.assign(v.begin(), v.end());
+        }
+        const auto idle_muzzle = demo.viewmodel->muzzle_world(camera);
+        constexpr float dt = 1.0f / 60.0f;
+        for (; static_cast<float>(r.frames) * dt < seconds; ++r.frames) {
+            demo.viewmodel->advance(dt, {}, fire_first && r.frames == 0);
+            const float t = static_cast<float>(r.frames + 1) * dt; // action time after advance
+            r.busy += demo.viewmodel->busy() ? 1 : 0;
+            (void)demo.viewmodel->pose(camera);
+            const auto& st = demo.viewmodel->arm_stats();
+            if (demo.viewmodel->magazine_grasped()) {
+                ++r.contact_frames;
+                r.contact_gap = std::max(r.contact_gap, demo.viewmodel->magazine_contact_gap());
+            }
+            r.invalid += st.valid_input ? 0 : 1;
+            if (st.clamped_targets != 0) {
+                ++r.clamped;
+                if (r.first_clamp < 0.0f)
+                    r.first_clamp = t;
+            }
+            for (unsigned side = 0; side < 2; ++side)
+                r.wrist_miss[side] = std::max(r.wrist_miss[side], st.wrist_position_error[side]);
+            r.min_skin = std::min(r.min_skin, st.max_vertex_displacement);
+            // The identity camera makes world space camera space: project with the parent FOV.
+            {
+                const float tan_y = std::tan(.5f * parent_fov);
+                const float tan_x = tan_y * static_cast<float>(kW) / static_cast<float>(kH);
+                bool cut_visible = false;
+                for (const auto& p : demo.viewmodel->sleeve_cuts_world())
+                    cut_visible = cut_visible || (p.z < 0.0f && std::abs(p.x) <= -p.z * tan_x &&
+                                                  std::abs(p.y) <= -p.z * tan_y);
+                r.cut_frames += cut_visible ? 1 : 0;
+                bool elbow_visible = false;
+                for (const auto& p : demo.viewmodel->elbows_world())
+                    elbow_visible = elbow_visible || (p.z < 0.0f && std::abs(p.x) <= -p.z * tan_x &&
+                                                      std::abs(p.y) <= -p.z * tan_y);
+                r.elbow_frames += elbow_visible ? 1 : 0;
+                // How far the deepest elbow sits INSIDE the bottom edge, as a share of the frame's
+                // half-height (0 = outside). The frame edge is |y| = tan_y * depth, so the share
+                // is 1 - |y| / (tan_y * depth) for a joint below the centre line.
+                for (const auto& p : demo.viewmodel->elbows_world())
+                    if (p.z < 0.0f && std::abs(p.x) <= -p.z * tan_x &&
+                        std::abs(p.y) <= -p.z * tan_y)
+                        r.elbow_depth =
+                            std::max(r.elbow_depth, 1.0f - std::abs(p.y) / (-p.z * tan_y));
+            }
+            const auto& reach = demo.viewmodel->reach_stats();
+            r.limited += reach.retained[0] < 1.0f || reach.retained[1] < 1.0f ? 1 : 0;
+            for (unsigned side = 0; side < 2; ++side) {
+                r.retained[side] = std::min(r.retained[side], reach.retained[side]);
+                r.hand_travel[side] = std::max(r.hand_travel[side], reach.applied_offset[side]);
+            }
+            if (t < measure_from || demo.viewmodel->deformations().empty())
+                continue;
+            const auto v = demo.viewmodel->deformations().front().current;
+            for (std::size_t i = 0; i < std::min(v.size(), idle.size()); ++i)
+                r.arm_delta = std::max(r.arm_delta,
+                                       core::length(core::Vec3{v[i].px - idle[i].px,
+                                                               v[i].py - idle[i].py,
+                                                               v[i].pz - idle[i].pz}));
+            r.muzzle_delta = std::max(
+                r.muzzle_delta, core::length(demo.viewmodel->muzzle_world(camera) - idle_muzzle));
+        }
+        return r;
+    };
+    const auto report_sweep = [&](const char* what, VmWeapon w, const ActionSweep& r) {
+        std::printf("viewmodel-smoke: %s %s sweep %d frames, busy %d, invalid %d, clamped %d "
+                    "(first %.3f s), wrist miss L %.2f R %.2f mm, min bind skin %.4f m, arm "
+                    "delta %.4f m, muzzle delta %.4f m; reach-limited %d frames, path kept L %.3f "
+                    "R %.3f, hand travel L %.4f R %.4f m, sleeve cut in view %d frames\n",
+                    weapon_name(w),
+                    what,
+                    r.frames,
+                    r.busy,
+                    r.invalid,
+                    r.clamped,
+                    r.first_clamp,
+                    r.wrist_miss[0] * 1000.0f,
+                    r.wrist_miss[1] * 1000.0f,
+                    r.min_skin,
+                    r.arm_delta,
+                    r.muzzle_delta,
+                    r.limited,
+                    r.retained[0],
+                    r.retained[1],
+                    r.hand_travel[0],
+                    r.hand_travel[1],
+                    r.cut_frames);
+    };
+    for (const auto weapon : {VmWeapon::Scar, VmWeapon::M4, VmWeapon::Sniper}) {
+        demo.viewmodel->select(weapon == VmWeapon::M4 ? VmWeapon::Scar : VmWeapon::M4);
+        demo.viewmodel->select(weapon);
+        demo.viewmodel->set_aiming(false);
+        demo.viewmodel->advance(1.0f, {}, false);
+        const auto limits = demo.viewmodel->reach_limits();
+        std::printf("viewmodel-smoke: %s measured reach L %.4f..%.4f R %.4f..%.4f m\n",
+                    weapon_name(weapon),
+                    limits[0][0],
+                    limits[0][1],
+                    limits[1][0],
+                    limits[1][1]);
+        const auto control = sweep(.5f, false, 0.0f);
+        report_sweep("idle-control", weapon, control);
+        check(control.busy == 0 && control.invalid == 0 && control.clamped == 0 &&
+                  control.arm_delta < 1e-6f && control.muzzle_delta < 1e-6f &&
+                  control.limited == 0 && control.hand_travel[0] == 0.0f &&
+                  control.hand_travel[1] == 0.0f,
+              "idle control sweep reads no action motion");
+        check(demo.viewmodel->begin_reload(), "idle weapon accepts a swept reload");
+        const float reload_seconds = weapon == VmWeapon::Sniper
+                                         ? block_play::PlayWeaponMotion::kSniperReloadSeconds
+                                         : block_play::PlayWeaponMotion::kRifleReloadSeconds;
+        const auto reload = sweep(reload_seconds + .2f, false, 0.0f);
+        report_sweep("reload", weapon, reload);
+        check(reload.invalid == 0 && reload.clamped == 0,
+              "every reload frame keeps both hands on reachable, valid targets");
+        check(control.cut_frames == 0 && reload.cut_frames == 0,
+              "no reload frame shows a sleeve's open cut end");
+        // Only forearms and hands may enter from the bottom. At rest no elbow joint is in frame at
+        // all. During a reload or bolt the arms are working and a joint may graze the bottom edge:
+        // the budget is 18 % of the frame's half-height (about 97 px at 1080p). Measured per weapon
+        // and printed below; a tighter bound fails because lowering the shoulders any further
+        // leaves the support hand unable to reach the magazine well (reach-limited, clamped).
+        std::printf("viewmodel-smoke: %s elbow depth inside bottom edge: idle %.3f reload %.3f\n",
+                    weapon_name(weapon),
+                    control.elbow_depth,
+                    reload.elbow_depth);
+        check(control.elbow_frames == 0,
+              "no idle frame shows an elbow: only forearms and hands are in frame");
+        check(reload.elbow_depth <= .18f,
+              "no reload frame lets an elbow more than 18 % of the half-height into the frame");
+        std::printf("viewmodel-smoke: %s magazine contact %d frames, max gap %.3f mm\n",
+                    weapon_name(weapon),
+                    reload.contact_frames,
+                    reload.contact_gap * 1000);
+        check(reload.contact_frames > 30 && reload.contact_gap < 1e-4f,
+              "support wrist follows the detached magazine throughout grasp and reseating");
+        check(reload.busy >= static_cast<int>(reload_seconds * 60.0f) - 1 &&
+                  !demo.viewmodel->busy() && reload.arm_delta > .03f && reload.muzzle_delta > .05f,
+              "the swept reload moves both the weapon and the skinned arms, then ends");
+        // Non-vacuity of the reach limiter: a path shortened to nothing would satisfy the reach
+        // claim above by never moving the hand. The support hand must still travel 3 cm or more
+        // along its authored path toward the magazine, ON TOP of following the lowered gun.
+        check(reload.hand_travel[0] >= .03f,
+              "the support hand still visibly reaches toward the magazine within arm reach");
+    }
+    // The bolt is measured after the main spring kick has settled (its envelope is under 1%
+    // by 0.4 s), so the right hand's reach and pull dominate the motion. Sniper is
+    // still selected and idle after the loop above.
+    {
+        const auto bolt = sweep(block_play::PlayWeaponMotion::kBoltSeconds + .1f, true, .4f);
+        report_sweep("bolt", VmWeapon::Sniper, bolt);
+        check(bolt.invalid == 0 && bolt.clamped == 0,
+              "every bolt frame keeps both hands on reachable, valid targets");
+        check(bolt.cut_frames == 0, "no bolt frame shows a sleeve's open cut end");
+        check(bolt.elbow_depth <= .18f,
+              "no bolt frame lets an elbow more than 18 % into the frame");
+        check(bolt.busy >=
+                      static_cast<int>(block_play::PlayWeaponMotion::kBoltSeconds * 60.0f) - 1 &&
+                  !demo.viewmodel->busy() && bolt.arm_delta > .03f && bolt.hand_travel[1] >= .03f &&
+                  demo.viewmodel->take_case_ejection() && !demo.viewmodel->take_case_ejection(),
+              "the swept bolt moves the skinned right arm, ends, and ejects exactly one case");
+    }
+    // Exercise actions through the real rig and uploaded deformation stream. The pure timeline
+    // tests cannot detect a reload that advances correctly but never reaches rendered vertices.
+    for (const auto weapon : {block_play::PlayViewmodel::Weapon::Scar,
+                              block_play::PlayViewmodel::Weapon::M4,
+                              block_play::PlayViewmodel::Weapon::Sniper}) {
+        demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+        demo.viewmodel->select(weapon);
+        demo.viewmodel->set_aiming(false);
+        demo.viewmodel->advance(1.0f, {}, false);
+        demo.app.run_frames(48);
+        const auto idle_action = capture();
+        check(demo.viewmodel->begin_reload(), "idle weapon accepts a reload action");
+        demo.viewmodel->advance(.8f, {}, false);
+        const auto reload_action = capture();
+        const auto& arms = demo.viewmodel->arm_stats();
+        // Project the real action wrist and weapon with the viewport camera used by the
+        // rendered frame. Image differences alone also pass when the action leaves the screen.
+        const auto projected_action = [&]() {
+            const auto& vp = demo.visuals->renderer.view_proj_unjittered();
+            const auto in_lower_view = [&](core::Vec3 world, float max_x) {
+                const auto clip = vp * core::Vec4{world.x, world.y, world.z, 1.0f};
+                if (!(clip.w > 0.0f))
+                    return false;
+                const float x = clip.x / clip.w;
+                const float y = clip.y / clip.w;
+                std::printf("viewmodel-smoke: %s reload projected x %.3f y %.3f depth %.3f m\n",
+                            weapon_name(weapon),
+                            x,
+                            y,
+                            clip.w);
+                // Vulkan's projection flips Y: positive NDC Y is below the screen centre.
+                return std::isfinite(x) && std::isfinite(y) && std::abs(x) < max_x && y > -.45f &&
+                       y < .92f;
+            };
+            // Reference reloads can put the muzzle outside the frame. The magazine and actual
+            // manipulating hand are the action that must remain visible.
+            return in_lower_view(demo.viewmodel->magazine_contact_world(), .9f) &&
+                   in_lower_view(demo.viewmodel->wrist_world()[0], .9f);
+        };
+        bool framed_action = projected_action();
+        unsigned phase = 0;
+        for (const float step : {.45f, .45f}) {
+            demo.viewmodel->advance(step, {}, false);
+            const auto phase_pixels = capture();
+            if (!g_ppm.empty())
+                write_ppm((g_ppm + "." + weapon_name(weapon) + "-reload-phase-" +
+                           std::to_string(++phase) + ".ppm")
+                              .c_str(),
+                          phase_pixels,
+                          kW,
+                          kH);
+            framed_action = framed_action && projected_action();
+        }
+        // Every term of the claim below, so a failure names itself instead of needing a rerun.
+        std::printf("viewmodel-smoke: %s rendered reload: reloading %d, valid %d, clamped %u, "
+                    "bind skin %.4f m, wrist miss L %.2f R %.2f mm, changed %zu px\n",
+                    weapon_name(weapon),
+                    demo.viewmodel->reloading() ? 1 : 0,
+                    arms.valid_input ? 1 : 0,
+                    static_cast<unsigned>(arms.clamped_targets),
+                    arms.max_vertex_displacement,
+                    arms.wrist_position_error[0] * 1000.0f,
+                    arms.wrist_position_error[1] * 1000.0f,
+                    static_cast<std::size_t>(changed(idle_action, reload_action)));
+        check(demo.viewmodel->reloading() && arms.valid_input && arms.clamped_targets == 0 &&
+                  arms.max_vertex_displacement > .001f && changed(idle_action, reload_action) > 100,
+              "reload visibly moves the actual weapon and reachable skinned arms");
+        check(framed_action,
+              "reload magazine and support wrist stay in the lower viewport across the action");
+        if (!g_ppm.empty())
+            write_ppm((g_ppm + (weapon == VmWeapon::Sniper ? ".sniper-reload.ppm"
+                                : weapon == VmWeapon::M4   ? ".m4-reload.ppm"
+                                                           : ".scar-reload.ppm"))
+                          .c_str(),
+                      reload_action,
+                      kW,
+                      kH);
+        demo.viewmodel->advance(3.0f, {}, false);
+        check(!demo.viewmodel->busy(), "reload finishes in elapsed time");
+    }
+    demo.viewmodel->advance(.35f, {}, true);
+    const auto bolt_action = capture();
+    check(demo.viewmodel->cycling() && demo.viewmodel->arm_stats().valid_input &&
+              demo.viewmodel->arm_stats().clamped_targets == 0 &&
+              demo.viewmodel->take_case_ejection() && !demo.viewmodel->take_case_ejection(),
+          "accepted sniper shot reaches bolt extraction with exactly one case");
+    if (!g_ppm.empty())
+        write_ppm((g_ppm + ".sniper-bolt.ppm").c_str(), bolt_action, kW, kH);
+    check(demo.visuals->renderer.rejected_first_person_deformations() == 0 &&
+              demo.viewmodel->resident_meshes() == meshes &&
+              demo.viewmodel->resident_materials() == materials &&
+              demo.viewmodel->resident_textures() == textures,
+          "actions reuse resident resources and valid deformation uploads");
+    // HIP FRAMING. The owner's complaint was a floating gun: at the hip neither hand nor
+    // forearm was in frame. Measure the ARMS' OWN pixels by rendering each settled hip pose twice,
+    // once with the arm draws withheld; the difference is exactly what the arms and hands add
+    // after the weapon occludes them. A frame without any viewmodel bounds the whole model.
+    // Three structural claims ride alongside: each hand is visible where its wrist projects, the
+    // sleeves' open cut ends (the authored arms stop above the elbow) project outside the
+    // viewport, and no upper arm or forearm passes through the weapon.
+    {
+        const auto in_view = [&](core::Vec3 world, core::Vec2* ndc) {
+            const auto& vp = demo.visuals->renderer.view_proj_unjittered();
+            const auto clip = vp * core::Vec4{world.x, world.y, world.z, 1.0f};
+            if (!(clip.w > 0.0f))
+                return false;
+            const float x = clip.x / clip.w, y = clip.y / clip.w;
+            if (ndc)
+                *ndc = {x, y};
+            return std::abs(x) <= 1.0f && std::abs(y) <= 1.0f;
+        };
+        const auto cuts_in_view = [&]() {
+            std::size_t visible = 0;
+            for (const auto& p : demo.viewmodel->sleeve_cuts_world())
+                visible += in_view(p, nullptr) ? 1u : 0u;
+            return visible;
+        };
+        demo.viewmodel_enabled = false;
+        demo.app.run_frames(48);
+        const auto empty = capture();
+        demo.viewmodel_enabled = true;
+        for (const auto weapon : {VmWeapon::Scar, VmWeapon::M4, VmWeapon::Sniper}) {
+            demo.viewmodel->select(weapon == VmWeapon::M4 ? VmWeapon::Scar : VmWeapon::M4);
+            demo.viewmodel->select(weapon);
+            demo.viewmodel->set_aiming(false);
+            demo.viewmodel->advance(2.0f, {}, false);
+            demo.app.run_frames(48);
+            const auto with_arms = capture();
+            const auto wrists = demo.viewmodel->hand_world();
+            const auto elbows_now = demo.viewmodel->elbows_world();
+            const std::size_t elbows_visible = (in_view(elbows_now[0], nullptr) ? 1u : 0u) +
+                                               (in_view(elbows_now[1], nullptr) ? 1u : 0u);
+            const std::size_t cuts = demo.viewmodel->sleeve_cuts_world().size();
+            const std::size_t cuts_visible = cuts_in_view();
+            const std::size_t intrusions = demo.viewmodel->limb_weapon_intrusions(.03f, .07f);
+            // HIP DIRECTION. The owner's second complaint: "too much angle ... holds the weapon
+            // weirdly sideways". Perspective makes any gun held to one side look diagonal, so the
+            // proof measures the weapon itself, in true camera metres: the bore must point within
+            // 8 degrees of the view direction (a few degrees of toe-in toward the crosshair is
+            // allowed), the sights must be within 8 degrees of camera up (no sideways cant), and
+            // the firing wrist must sit in the lower-right box where a hip-held grip belongs.
+            const auto angle_deg = [](core::Vec3 a, core::Vec3 b) {
+                const float c = core::dot(a, b) / (core::length(a) * core::length(b));
+                return std::acos(std::clamp(c, -1.0f, 1.0f)) * 57.29578f;
+            };
+            const float bore_deg = angle_deg(demo.viewmodel->bore_camera(), {0, 0, -1});
+            const float up_deg = angle_deg(demo.viewmodel->up_camera(), {0, 1, 0});
+            const core::Vec3 fire_wrist = demo.viewmodel->wrist_camera()[1];
+            std::printf("viewmodel-smoke: %s hip direction: bore %.2f deg, up %.2f deg, firing "
+                        "wrist camera (%.3f %.3f %.3f)\n",
+                        weapon_name(weapon),
+                        bore_deg,
+                        up_deg,
+                        fire_wrist.x,
+                        fire_wrist.y,
+                        fire_wrist.z);
+            check(bore_deg <= 8.0f, "the hip bore axis points within 8 degrees of forward");
+            check(up_deg <= 8.0f, "the hip weapon's sights are within 8 degrees of camera up");
+            // The box is each weapon's MEASURED firing wrist +/- 2 cm per axis (camera metres),
+            // not one loose box around all three: the MSR's carry sits 4 cm nearer the eye.
+            {
+                constexpr std::array<core::Vec3, 3> kFireWrist{
+                    {{.15f, -.30f, -.50f}, {.15f, -.30f, -.50f}, {.15f, -.30f, -.46f}}};
+                const auto& want = kFireWrist[weapon == VmWeapon::Scar ? 0
+                                              : weapon == VmWeapon::M4 ? 1
+                                                                       : 2];
+                check(std::abs(fire_wrist.x - want.x) <= .02f &&
+                          std::abs(fire_wrist.y - want.y) <= .02f &&
+                          std::abs(fire_wrist.z - want.z) <= .02f,
+                      "the firing wrist sits in the lower-right hip box");
+            }
+            // HIP SIGHT LINE AND SUPPORT ARM. Three framing claims measured on THIS settled pose
+            // (elbows, hands and sight all read before any later frame moves the rig):
+            //  - the sights sit at or below the frame's middle, so the hip gun reads as carried
+            //    low rather than shouldered (y measured from the top, as a share of the height;
+            //    the MSR's tall scope may ride higher);
+            //  - the support forearm enters from the LEFT of the bottom edge: the line elbow ->
+            //    hand, extended in ndc to y = +1 (a projected line is a line), crosses at x <=
+            //    -0.14. A forearm entering mid-frame means the arm comes from under the gun, not
+            //    the side;
+            //  - the support elbow joint itself is outside the viewport.
+            {
+                const auto project = [&](core::Vec3 world) {
+                    const auto clip = demo.visuals->renderer.view_proj_unjittered() *
+                                      core::Vec4{world.x, world.y, world.z, 1.0f};
+                    // Behind the eye counts as off-screen (never a false "inside").
+                    if (!(clip.w > 0.0f))
+                        return core::Vec2{2.0f, 2.0f};
+                    return core::Vec2{clip.x / clip.w, clip.y / clip.w};
+                };
+                const auto entry_x = [&](core::Vec3 elbow, core::Vec3 hand) {
+                    const auto e = project(elbow), h = project(hand);
+                    const float t = std::abs(e.y - h.y) > 1e-6f ? (1.0f - h.y) / (e.y - h.y) : 0.0f;
+                    return h.x + (e.x - h.x) * t;
+                };
+                const float sight_from_top =
+                    .5f * (project(demo.viewmodel->sight_world()).y + 1.0f);
+                const float entry_left = entry_x(elbows_now[0], wrists[0]);
+                const float entry_right = entry_x(elbows_now[1], wrists[1]);
+                const auto elbow_left = project(elbows_now[0]);
+                const auto elbow_right = project(elbows_now[1]);
+                const float sight_floor = weapon == VmWeapon::Sniper ? .44f : .54f;
+                std::printf("viewmodel-smoke: %s hip sight %.3f of the height from the top (floor "
+                            "%.2f), forearm entry x L %.3f R %.3f, elbow ndc L (%.3f %.3f) R "
+                            "(%.3f %.3f)\n",
+                            weapon_name(weapon),
+                            sight_from_top,
+                            sight_floor,
+                            entry_left,
+                            entry_right,
+                            elbow_left.x,
+                            elbow_left.y,
+                            elbow_right.x,
+                            elbow_right.y);
+                check(sight_from_top >= sight_floor,
+                      "the hip sights sit low in the frame (SCAR-H/M4A1 >= 0.54, MSR >= 0.44 of "
+                      "the height from the top)");
+                check(entry_left <= -.14f,
+                      "the support forearm enters the bottom edge left of centre (ndc x <= -0.14)");
+                check(std::abs(elbow_left.x) > 1.0f || elbow_left.y > 1.0f,
+                      "the support elbow is outside the viewport at the settled hip");
+            }
+            demo.viewmodel->set_draw_arms(false);
+            demo.app.run_frames(48);
+            const auto without_arms = capture();
+            demo.viewmodel->set_draw_arms(true);
+            const auto arm_pixels = changed(without_arms, with_arms);
+            const auto model_pixels = changed(empty, with_arms);
+            // Per-hand visibility: arm pixels within 24 px (at 640x360) of the projected wrist.
+            std::array<std::size_t, 2> hand_pixels{};
+            for (unsigned side = 0; side < 2; ++side) {
+                core::Vec2 ndc{};
+                if (!in_view(wrists[side], &ndc) || with_arms.size() != without_arms.size() ||
+                    with_arms.size() != static_cast<std::size_t>(kW) * kH * 4)
+                    continue;
+                const int cx = static_cast<int>((ndc.x * .5f + .5f) * kW);
+                const int cy = static_cast<int>((ndc.y * .5f + .5f) * kH);
+                for (int y = std::max(0, cy - 24); y < std::min<int>(kH, cy + 24); ++y)
+                    for (int x = std::max(0, cx - 24); x < std::min<int>(kW, cx + 24); ++x) {
+                        if ((x - cx) * (x - cx) + (y - cy) * (y - cy) > 24 * 24)
+                            continue;
+                        const auto q = (static_cast<std::size_t>(y) * kW + x) * 4;
+                        int d = 0;
+                        for (int c = 0; c < 3; ++c)
+                            d += std::abs(int(with_arms[q + c]) - int(without_arms[q + c]));
+                        hand_pixels[side] += d >= 30 ? 1u : 0u;
+                    }
+            }
+            // Walking bob and a recoil kick must not lift a sleeve cut into view either.
+            std::size_t moving_cut_frames = 0;
+            float moving_elbow_depth = 0.0f; // deepest elbow inside the frame while walking/firing
+            for (int frame = 0; frame < 90; ++frame) {
+                demo.viewmodel->advance(1.0f / 60.0f, {4, 0, 2}, frame % 20 == 0);
+                (void)demo.viewmodel->pose(demo.session.client.camera_transform());
+                moving_cut_frames += cuts_in_view() != 0 ? 1u : 0u;
+                for (const auto& e : demo.viewmodel->elbows_world()) {
+                    core::Vec2 ndc{};
+                    if (in_view(e, &ndc))
+                        moving_elbow_depth = std::max(moving_elbow_depth, 1.0f - std::abs(ndc.y));
+                }
+            }
+            demo.viewmodel->advance(2.0f, {}, false);
+            const float frame_pixels = static_cast<float>(kW) * kH;
+            std::printf(
+                "viewmodel-smoke: %s hip framing: arms %.1f%% of frame, arms+weapon %.1f%%, "
+                "hand pixels L %zu R %zu, sleeve cut verts in view %zu / %zu (moving "
+                "frames %zu), limb-weapon intrusions %zu\n",
+                weapon_name(weapon),
+                100.0f * static_cast<float>(arm_pixels) / frame_pixels,
+                100.0f * static_cast<float>(model_pixels) / frame_pixels,
+                hand_pixels[0],
+                hand_pixels[1],
+                cuts_visible,
+                cuts,
+                moving_cut_frames,
+                intrusions);
+            if (!g_ppm.empty()) {
+                write_ppm(
+                    (g_ppm + "." + weapon_name(weapon) + "-hip.ppm").c_str(), with_arms, kW, kH);
+                write_ppm((g_ppm + "." + weapon_name(weapon) + "-hip-noarms.ppm").c_str(),
+                          without_arms,
+                          kW,
+                          kH);
+            }
+            check(arm_pixels > static_cast<std::size_t>(frame_pixels * kHipArmCoverage[0]) &&
+                      arm_pixels < static_cast<std::size_t>(frame_pixels * kHipArmCoverage[1]),
+                  "hip arms and hands cover a bounded band of the frame");
+            check(model_pixels > static_cast<std::size_t>(frame_pixels * kHipModelCoverage[0]) &&
+                      model_pixels < static_cast<std::size_t>(frame_pixels * kHipModelCoverage[1]),
+                  "hip arms, hands and weapon together cover a bounded band of the frame");
+            check(hand_pixels[0] >= 300 && hand_pixels[1] >= 300,
+                  "both hands are visible at their projected centres at the hip");
+            check(cuts >= 16 && cuts_visible == 0 && moving_cut_frames == 0,
+                  "the sleeves' open cut ends stay outside the viewport at the hip");
+            std::printf("viewmodel-smoke: %s hip elbows in view: settled %zu, deepest while "
+                        "walking/firing %.3f of half-height\n",
+                        weapon_name(weapon),
+                        elbows_visible,
+                        moving_elbow_depth);
+            check(elbows_visible == 0 && moving_elbow_depth <= .18f,
+                  "both elbows are outside the viewport at the settled hip and within 18 % of its "
+                  "bottom edge while walking and firing");
+            check(intrusions == 0, "no upper arm or forearm passes through the weapon at the hip");
+        }
+    }
+    // Use the SAME live tick seam as --play, through its real transport and GameplayServer.
+    // A pure WeaponConfig test cannot catch configuring the spawn template while the live
+    // avatar keeps its old automatic component. Disable damage only after the visual proofs.
+    for (const auto avatar : demo.session.server.avatars)
+        if (auto* weapon = demo.session.server.world.get<gameplay::WeaponConfig>(avatar)) {
+            weapon->damage = 0;
+            weapon->impulse = 0;
+        }
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::M4);
+    demo.viewmodel->select(block_play::PlayViewmodel::Weapon::Sniper);
+    const auto live_tick = [&](bool held, bool pressed) {
+        gameplay::CharacterInput input{};
+        input.pitch = 1.3f; // skyward; this witness must not collapse the already-verified scene
+        input.held = held ? gameplay::kActionFire : 0;
+        input.pressed = pressed ? gameplay::kActionFire : 0;
+        demo.step_play(input);
+        demo.viewmodel->advance(1.0f / 60.0f, {}, demo.shot_presented);
+        demo.shot_presented = false;
+    };
+    const auto accepted_before = demo.session.shots_fired;
+    for (int i = 0; i < 120; ++i)
+        live_tick(true, i == 0);
+    check(demo.session.shots_fired == accepted_before + 1,
+          "live sniper accepts only one shot while the trigger stays held for two seconds");
+    for (unsigned i = 0; i < Demo::kSettleRounds; ++i)
+        live_tick(false, false);
+    for (unsigned i = 0; i < Demo::kSettleRounds; ++i)
+        live_tick(true, i == 0);
+    check(demo.session.shots_fired == accepted_before + 2,
+          "a fresh sniper press after cooldown accepts the next shot");
+    demo.viewmodel->advance(2.0f, {}, false);
+    check(demo.viewmodel->begin_reload(), "live sniper starts a reload after bolt completion");
+    for (int i = 0; i < 60; ++i)
+        live_tick(true, i == 0);
+    check(demo.viewmodel->reloading() && demo.session.shots_fired == accepted_before + 2,
+          "live reload blocks held and pressed fire through the server transport");
     demo.app.finish_gpu();
     return okay ? 0 : 1;
 }
@@ -4731,6 +6464,22 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         demo.step_sim(gameplay_net::to_input_command(trigger));
     check(demo.session.shots_fired == shots_before + 1 && demo.shot_presented,
           "live transport accepts one shot and refuses the consecutive cooldown input");
+    // EARLY REFLECTIONS (M13.4). The shot above went through the live path, so the image-source
+    // fan in play_gun_shot has run against the real street. Assert the echoes exist, because
+    // every gate this feature had was a mixer unit test: the mixer was provably correct while the
+    // caller handed it nothing at all, and the whole suite stayed green.
+    //
+    // SENSITIVITY CONTROL, measured 2026-10-23 rather than asserted here: the first version cast
+    // six rays along +-X, +-Z, +Y and the aim, and this counter read 0 — all 24 casts over 4
+    // shots missed, because the cardinal azimuths fall in the gaps between these buildings. So a
+    // non-zero reading here is a real signal, not a scene that cannot help passing. The paired
+    // control for the mixer half is the bit-identity case in tests/audio/mixer_test.cpp.
+    const auto mix = demo.mixer.stats();
+    check(mix.reflections_started > 0,
+          "a gunshot in the street produces discrete early reflections");
+    std::printf("environment-smoke: early reflections started %llu dropped %llu\n",
+                static_cast<unsigned long long>(mix.reflections_started),
+                static_cast<unsigned long long>(mix.reflections_dropped));
     demo.app.run_frames(1);
     const auto fired =
         read_rgba8(*demo.app.device(), demo.app.graph()->physical(demo.visuals->last_ldr), kW, kH);
@@ -4760,11 +6509,1028 @@ int run_environment_smoke(const std::filesystem::path& cooked, std::string_view 
         demo.step_sim(gameplay_net::to_input_command(trigger));
     check(demo.session.shots_fired == automatic_before + 3,
           "held trigger fires three accepted rounds in 18 ticks, then release stops fire");
+
+    // ── PlayWeaponFx invariants, on a throwaway ECS world + physics world ──────────────────────
+    // The pixel checks above prove something drew; they cannot tell a camera-following flash from
+    // an orphaned one, or prove a case actually falls. This block drives a second, isolated
+    // PlayWeaponFx instance (so it cannot perturb the live demo world/entity-pool checks already
+    // run above) against real WorldTransform/MeshRef/PointLight state and a real raycast, reusing
+    // the live app's device and the demo's visuals registries as the spec asks rather than opening
+    // a second GPU mesh registry for two low-poly shapes nobody else needs.
+    {
+        ecs::World fx_world;
+        ecs::register_transform_components(fx_world);
+        render::register_render_components(fx_world);
+
+        // A minimal physics world: one static floor for the casing raycast and one static target
+        // for the impact decal's body-relative anchor. No network, no bodies the real scene owns.
+        physics::PhysicsWorld fx_physics;
+        physics::BodyDesc floor_desc{};
+        floor_desc.motion = physics::MotionType::Static;
+        floor_desc.shape.type = physics::ShapeType::Box;
+        floor_desc.shape.half_extents = {50.0f, 0.5f, 50.0f};
+        floor_desc.position = {0.0f, -0.5f, 0.0f};
+        const auto floor_body = fx_physics.create_body(floor_desc);
+        physics::BodyDesc target_desc{};
+        target_desc.motion = physics::MotionType::Static;
+        target_desc.shape.type = physics::ShapeType::Box;
+        target_desc.shape.half_extents = {1.0f, 1.0f, 1.0f};
+        target_desc.position = {4.0f, 1.0f, 0.0f};
+        const auto target_body = fx_physics.create_body(target_desc);
+        check(floor_body.is_valid() && target_body.is_valid(),
+              "weapon fx probe: isolated bodies created");
+        physics::BodyDesc rubble{};
+        rubble.shape.type = physics::ShapeType::Box;
+        rubble.shape.half_extents = {.2f, .2f, .2f};
+        rubble.mass = 5;
+        rubble.position = {10, 2, 0};
+        const auto rubble_body = fx_physics.create_body(rubble);
+        push_loose_hit(fx_physics, rubble_body, {10, 2.1f, 0}, {250, 0, 0});
+        physics::BodyState pushed{};
+        check(fx_physics.get_body_state(rubble_body, pushed) &&
+                  std::abs(pushed.linear_velocity.x - 5) < .001f &&
+                  core::length(pushed.angular_velocity) > .01f,
+              "bullet impulse wakes dynamic rubble with bounded momentum and contact torque");
+        physics::BodyState static_before{}, static_after{};
+        const bool static_read = fx_physics.get_body_state(target_body, static_before);
+        push_loose_hit(fx_physics, target_body, {4, 1, 0}, {250, 0, 0});
+        check(static_read && fx_physics.get_body_state(target_body, static_after) &&
+                  core::length(static_after.linear_velocity - static_before.linear_velocity) == 0,
+              "bullet impulse leaves static scenery immovable");
+
+        // Materials are the stable key into a known entity's role: fire()/pose() assign
+        // material_ids_[0..4] to flash/tracer/spark/impact/case respectively (play_weapon_fx.cpp),
+        // and MaterialRegistry::add is a plain push_back, so the five ids this fresh instance mints
+        // are exactly the next five indices after whatever the live demo already registered. That
+        // is read off material.hpp's `add`, not guessed, and it is the "helper via ECS snapshot"
+        // the spec allows in place of exposing new API purely for this test.
+        const auto first_fx_material =
+            static_cast<render::MaterialId>(demo.visuals->materials.size());
+        block_play::PlayWeaponFx fx(
+            *demo.app.device(), demo.visuals->meshes, demo.visuals->materials);
+        check(fx.initialize(), "weapon fx probe: isolated instance initializes");
+        const render::MaterialId flash_mat = first_fx_material + 0;
+        const render::MaterialId tracer_mat = first_fx_material + 1;
+        const render::MaterialId spark_mat = first_fx_material + 2;
+        const render::MaterialId impact_mat = first_fx_material + 3;
+        const render::MaterialId case_mat = first_fx_material + 4;
+
+        // Find the one active entity wearing a given material, if any -- a query over the fixed
+        // pool rather than reaching into PlayWeaponFx's private Shot/Impact/Case arrays, which the
+        // spec asks to avoid touching.
+        auto find_by_material = [&](render::MaterialId wanted) {
+            ecs::Entity found{};
+            fx_world.query<ecs::WorldTransform, render::MeshRef, render::MaterialRef>().for_each(
+                [&](ecs::Entity e,
+                    ecs::WorldTransform&,
+                    render::MeshRef& mesh,
+                    render::MaterialRef& mat) {
+                    if (mat.material == wanted && mesh.mesh != render::kInvalidMeshId)
+                        found = e;
+                });
+            return found;
+        };
+        auto transform_of = [&](ecs::Entity e) {
+            auto* t = fx_world.get<ecs::WorldTransform>(e);
+            return t ? t->value.translation : core::Vec3{std::nanf(""), 0, 0};
+        };
+        auto finite3 = [](core::Vec3 v) {
+            return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+        };
+        const auto inverse_safe_effects = [&]() {
+            bool safe = true;
+            fx_world.query<ecs::WorldTransform, render::MeshRef>().for_each(
+                [&](ecs::Entity, ecs::WorldTransform& transform, render::MeshRef& mesh) {
+                    if (mesh.mesh == render::kInvalidMeshId)
+                        return;
+                    // The renderer computes inverse-transpose normal matrices. Keep this
+                    // checked-build contract visible in Release too: millimetre geometry is
+                    // valid, but a tiny instance determinant trips the inverse's guard.
+                    const float det = core::determinant(core::to_matrix(transform.value));
+                    safe &= std::isfinite(det) && std::abs(det) > core::kEpsilon;
+                });
+            return safe;
+        };
+
+        block_play::PlayWeaponFx::ViewPose view_a{};
+        view_a.eye = {0, 1.2f, -4};
+        view_a.direction = {1, 0, 0.1f};
+        view_a.muzzle = {0.2f, 1.1f, -3.9f};
+        view_a.ejection_point = {-0.05f, 1.05f, -3.95f};
+        view_a.velocity = {2, 0, 0}; // the player's own motion, carried into the case's launch
+
+        // One accepted shot that both hits a surface (spark + impact) and names the target body,
+        // posed once under view_a.
+        fx.fire(view_a.eye,
+                view_a.direction,
+                view_a.muzzle,
+                {4, 1.0f, 0},
+                true,
+                {-1, 0, 0},
+                target_body,
+                &fx_physics);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        check(inverse_safe_effects(), "weapon fx probe: shot transforms satisfy checked inverse");
+        const auto flash_a = find_by_material(flash_mat);
+        const auto flash_pos_a = transform_of(flash_a);
+        const auto tracer_pos_a = transform_of(find_by_material(tracer_mat));
+        const auto impact_pos_a = transform_of(find_by_material(impact_mat));
+        const auto scar_entity = find_by_material(impact_mat);
+        const auto* scar_mesh_ref = fx_world.get<render::MeshRef>(scar_entity);
+        const auto* scar_pose = fx_world.get<ecs::WorldTransform>(scar_entity);
+        check(scar_mesh_ref && scar_pose &&
+                  demo.visuals->meshes.get(scar_mesh_ref->mesh).local_min.z ==
+                      demo.visuals->meshes.get(scar_mesh_ref->mesh).local_max.z &&
+                  core::dot(core::rotate(scar_pose->value.rotation, core::Vec3{0, 0, 1}),
+                            core::Vec3{-1, 0, 0}) > .999f,
+              "scar geometry is flat and faces the hit normal");
+        check(demo.visuals->materials.get(tracer_mat).emissive[0] > 1,
+              "accepted tracer uses emissive radiance");
+        check(flash_a != ecs::Entity{} && finite3(transform_of(flash_a)),
+              "weapon fx probe: flash entity is live under the first view pose");
+        check(fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount,
+              "weapon fx probe: the first pose binds exactly the fixed resident pool");
+
+        ecs::Entity muzzle_light{};
+        fx_world.query<ecs::WorldTransform, render::PointLight>().for_each(
+            [&](ecs::Entity e, ecs::WorldTransform& at, render::PointLight& light) {
+                if (light.intensity > 0 && core::length(at.value.translation - flash_pos_a) < 1.21f)
+                    muzzle_light = e;
+            });
+        check(muzzle_light.is_valid(), "weapon fx probe: a live light accompanies the flash");
+        // Change only the view at a fixed shot age. Advancing time here would also move the
+        // tracer along its world path, confounding camera motion with projectile presentation.
+        block_play::PlayWeaponFx::ViewPose view_b = view_a;
+        view_b.eye.x += 0.3f;
+        view_b.muzzle = {0.5f, 1.15f, -3.85f};
+        view_b.direction = {1, 0, 0.2f};
+        fx.pose(fx_world, &fx_physics, &view_b);
+        const auto flash_pos_b = transform_of(find_by_material(flash_mat));
+        const auto tracer_pos_b = transform_of(find_by_material(tracer_mat));
+        const auto impact_pos_b = transform_of(find_by_material(impact_mat));
+        const float flash_moved = core::length(flash_pos_b - flash_pos_a);
+        check(flash_moved > 0.1f,
+              "weapon fx probe: flash follows the moved view pose within one 16 ms frame");
+        check(core::length(tracer_pos_b - tracer_pos_a) < 1e-4f,
+              "weapon fx probe: accepted tracer world path is unaffected by the view move");
+        check(core::length(impact_pos_b - impact_pos_a) < 1e-4f,
+              "weapon fx probe: accepted impact world position is unaffected by the view move");
+        // The light is deliberately led down the bore (see PlayWeaponFx::pose): sitting on the
+        // flash it lit the first-person forearms ~50x harder than a wall, which at 1080p read as
+        // orange burnt-through holes in the sleeve. So it must follow the flash along the CURRENT
+        // view direction, by at least 0.5 m (the proof that fails if the lead is removed) and at
+        // most 1.2 m (so a wall in front of the muzzle is still lit from its front side).
+        {
+            const auto lead = transform_of(muzzle_light) - flash_pos_b;
+            const auto bore = core::normalize(view_b.direction);
+            check(core::length(lead) >= 0.5f && core::length(lead) <= 1.21f &&
+                      core::length(core::cross(lead, bore)) < 1e-3f,
+                  "weapon fx probe: the live light follows the flash, led 0.5-1.2 m down the bore");
+        }
+        fx.advance(.005f);
+        fx.pose(fx_world, &fx_physics, &view_b);
+        const auto travelled = transform_of(find_by_material(tracer_mat)) - tracer_pos_b;
+        const auto accepted_path = core::normalize(core::Vec3{4, 1, 0} - view_a.muzzle);
+        check(core::dot(travelled, accepted_path) > 1.0f &&
+                  core::length(core::cross(travelled, accepted_path)) < 1e-4f,
+              "weapon fx probe: elapsed time advances the tracer along its accepted world path");
+
+        // Case ejection: one queued case, posed under a view with real velocity/ejection data. Its
+        // first pose must land exactly at the ejection point with a velocity that carries the
+        // player's own motion (view->velocity), not just the weapon's local kick. Deliberately the
+        // FIRST case this isolated instance ever ejects: every case entity shares `case_mat` (all
+        // 32 ring slots do), so `find_by_material` can only name ONE of them unambiguously while
+        // exactly one is active -- this must run before the overflow stress below puts several
+        // more into flight.
+        fx.queue_case();
+        fx.pose(fx_world, &fx_physics, &view_a);
+        check(inverse_safe_effects(), "weapon fx probe: case transforms satisfy checked inverse");
+        const auto case_entity = find_by_material(case_mat);
+        check(case_entity != ecs::Entity{} &&
+                  core::length(transform_of(case_entity) - view_a.ejection_point) < 1e-4f,
+              "weapon fx probe: a queued case is ejected at the view's ejection point");
+        const float start_height = transform_of(case_entity).y;
+        const float floor_top = floor_desc.position.y + floor_desc.shape.half_extents.y;
+        float min_height = start_height;
+        // Fall under gravity, bounce once off the floor, then settle -- never sink through it. The
+        // view's +2.2 m/s vertical kick (play_weapon_fx.cpp's `pose`) makes it rise ~0.25 m before
+        // falling, so a worked trajectory (v0=2.2, g=9.81, drop to y=0 from y=1.05) puts first
+        // contact at ~0.74 s and the settle a few tenths later; 100 ticks at 16 ms (1.6 s) covers
+        // both bounces with margin and stays well under kCaseLifetime's 3 s, so age never expires
+        // the mesh before it settles.
+        bool saw_descent = false, saw_rise_after_floor = false;
+        for (int tick = 0; tick < 100; ++tick) {
+            fx.advance(0.016f);
+            fx.pose(fx_world, &fx_physics, &view_a);
+            const float y = transform_of(case_entity).y;
+            saw_descent |= y < start_height - 0.02f;
+            min_height = std::min(min_height, y);
+            if (y > min_height + 0.002f && min_height < start_height - 0.02f)
+                saw_rise_after_floor = true; // the one visible bounce
+        }
+        check(saw_descent, "weapon fx probe: the ejected case falls under gravity");
+        check(min_height > floor_top - 0.01f,
+              "weapon fx probe: the case never sinks through the floor");
+        check(saw_rise_after_floor,
+              "weapon fx probe: the case bounces once off the floor before settling");
+        const auto settled_height = transform_of(case_entity).y;
+        fx.advance(0.1f);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        check(
+            std::fabs(transform_of(case_entity).y - settled_height) < 1e-4f,
+            "weapon fx probe: a settled case stays at rest rather than sinking through the floor");
+
+        // Pool growth: fire far past the ring size, and queue far past the case ring size WITHOUT a
+        // valid-view pose to drain it (the 2-arg `pose()` overload -- no view at all, the
+        // documented fallback for "old callers"). `queue_case()` clamps at kCaseSlots rather than
+        // growing, and neither overflow may add a single entity/mesh/material to the fixed pool.
+        for (std::size_t i = 0; i < block_play::PlayWeaponFx::kSlots * 3; ++i)
+            fx.fire(view_a.eye, view_a.direction, view_a.muzzle, {4, 1, 0}, false);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        for (std::size_t i = 0; i < block_play::PlayWeaponFx::kCaseSlots * 2; ++i)
+            fx.queue_case();
+        fx.pose(fx_world, &fx_physics); // no view: queued cases stay queued, not ejected
+        check(fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount,
+              "weapon fx probe: burst overflow and a flooded, undrained case queue grow no pool");
+
+        // Expiry: run the clock past every shot lifetime and re-pose; the flash/tracer/spark
+        // entities must drop back to kInvalidMeshId rather than keep showing a stale pose. (This
+        // valid-view pose also drains the queue above -- harmless, nothing after this reads a case
+        // by material again.)
+        fx.advance(block_play::PlayWeaponFx::kSparkLifetime + 0.01f);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        check(find_by_material(flash_mat) == ecs::Entity{} &&
+                  find_by_material(tracer_mat) == ecs::Entity{} &&
+                  find_by_material(spark_mat) == ecs::Entity{},
+              "weapon fx probe: expired shot parts hide their mesh");
+
+        // Invalid dt/view handling: neither may propagate a NaN into any posed transform. advance()
+        // guards dt with isfinite()+>0 (negative/zero/NaN are all no-ops); a NaN view fails
+        // pose()'s own `valid_view` check and falls back to each shot's recorded muzzle/direction
+        // instead.
+        fx.advance(std::nanf(""));
+        fx.advance(-1.0f);
+        fx.advance(0.0f);
+        block_play::PlayWeaponFx::ViewPose bad_view = view_a;
+        bad_view.eye.x = std::nanf("");
+        fx.pose(fx_world, &fx_physics, &bad_view);
+        bool any_nan = false;
+        fx_world.query<ecs::WorldTransform>().for_each(
+            [&](ecs::WorldTransform& t) { any_nan |= !finite3(t.value.translation); });
+        check(!any_nan, "weapon fx probe: a NaN view/dt never reaches a posed WorldTransform");
+
+        // Surface responses share the bounded path but must differ in both dust and light.
+        // A quiet interval isolates each material; metal/water must never emit masonry dust.
+        using Surface = block_play::PlayWeaponFx::Surface;
+        const auto resource_count = demo.visuals->materials.size();
+        for (const auto surface : {Surface::Concrete,
+                                   Surface::Brick,
+                                   Surface::Plaster,
+                                   Surface::Soil,
+                                   Surface::Metal,
+                                   Surface::Water}) {
+            fx.advance(block_play::PlayWeaponFx::kDustLifetime + .1f);
+            fx.pose(fx_world, &fx_physics, &view_a);
+            fx.fire(view_a.eye,
+                    view_a.direction,
+                    view_a.muzzle,
+                    {4, 1, 0},
+                    true,
+                    {-1, 0, 0},
+                    target_body,
+                    &fx_physics,
+                    surface,
+                    false);
+            fx.pose(fx_world, &fx_physics, &view_a);
+            std::vector<render::GpuParticle> dust;
+            fx.append_smoke(dust);
+            const bool dusty = surface != Surface::Metal && surface != Surface::Water;
+            check(dusty ? !dust.empty() : dust.empty(),
+                  "masonry and soil produce dust; metal sparks and water splash do not");
+            if (surface == Surface::Brick || surface == Surface::Soil)
+                check(!dust.empty() && dust.front().color_alpha[0] > dust.front().color_alpha[2],
+                      "brick and soil dust carry warm material color");
+            unsigned lights = 0;
+            fx_world.query<render::PointLight>().for_each(
+                [&](const render::PointLight& light) { lights += light.intensity > 0 ? 1u : 0u; });
+            check(lights == (surface == Surface::Metal ? 2u : 1u),
+                  "only metal impacts add spark lighting beyond the muzzle light");
+            check(inverse_safe_effects(), "every surface effect has a valid normal matrix");
+        }
+        for (unsigned i = 0; i < 100; ++i)
+            fx.fire(view_a.eye,
+                    view_a.direction,
+                    view_a.muzzle,
+                    {4, 1, 0},
+                    true,
+                    {-1, 0, 0},
+                    target_body,
+                    &fx_physics,
+                    Surface::Brick,
+                    false);
+        fx.pose(fx_world, &fx_physics, &view_a);
+        std::vector<render::GpuParticle> dust;
+        fx.append_smoke(dust);
+        check(dust.size() <= block_play::PlayWeaponFx::kDustSlots &&
+                  fx_world.entity_count() == block_play::PlayWeaponFx::kEntityCount &&
+                  demo.visuals->materials.size() == resource_count,
+              "sustained impacts keep particle, entity and material pools bounded");
+        fx.advance(1.0f);
+        dust.clear();
+        fx.append_smoke(dust);
+        check(!dust.empty(), "impact dust still drifts one second after the hit");
+        fx.advance(block_play::PlayWeaponFx::kDustLifetime);
+        dust.clear();
+        fx.append_smoke(dust);
+        check(dust.empty(), "impact dust fully expires");
+
+        std::printf("environment-smoke: weapon fx probe flash-move %.3f m / case fall %.3f m, "
+                    "min height %.3f\n",
+                    static_cast<double>(flash_moved),
+                    static_cast<double>(start_height - min_height),
+                    static_cast<double>(min_height));
+    }
+    okay = plate_boundary_check(demo, "environment-smoke") && okay;
     return okay ? 0 : 1;
 }
 
 // ── --play: walk around it ──────────────────────────────────────────────────────────────────────
-int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
+// A separate opt-in proof freezes simulation while toggling its presentation. It exercises the
+// same consumer/render path as play; the existing environment proof keeps its original inputs.
+int run_effects_smoke(const std::filesystem::path& cooked, std::string_view scene_path) {
+    constexpr std::uint32_t width = 640, height = 360;
+    app::AppConfig cfg{};
+    cfg.gpu = true;
+    cfg.render_extent = {width, height};
+    g_effects_preview = true;
+    Demo demo(cfg);
+    demo.scripted_charge = false;
+    demo.streamed_world = true;
+    demo.environment_enabled = true;
+    demo.development_hud = false;
+    if (!demo.app.device())
+        return std::getenv("RIME_REQUIRE_VULKAN") ? 1 : 0;
+    if (!demo.start(cooked, scene_path) || !demo.effects)
+        return 1;
+    play_sunset::apply(demo.session.client.world);
+    play_sunset::apply(demo.session.server.world);
+    demo.use_authored_camera = true;
+    gameplay::FirstPersonView view{};
+    view.eye_height = 0;
+    view.yaw = play_sunset::kViewYaw;
+    view.pitch = -.03f;
+    demo.visuals->authored_camera = gameplay::eye_transform(view, {-6, 1.85f, 0});
+    demo.visuals->renderer.set_taa_resolve_enabled(false);
+    std::vector<double> smoke_gpu_ms;
+    demo.app.on_frame_timings(
+        [&](std::uint64_t, std::span<const render::RenderGraph::PassTiming> timings) {
+            for (const auto& timing : timings)
+                if (timing.name == "fx-smoke")
+                    smoke_gpu_ms.push_back(timing.gpu_ms);
+        });
+    demo.app.on_render([&](app::FrameContext& ctx) { demo.render(ctx); });
+    for (int i = 0; i < 180; ++i)
+        demo.step_sim({});
+    const auto capture = [&]() {
+        demo.app.run_frames(24);
+        auto pixels = read_rgba8(
+            *demo.app.device(), demo.app.graph()->physical(demo.visuals->last_ldr), width, height);
+        demo.app.finish_gpu();
+        return pixels;
+    };
+    const auto server_hash = demo.session.server.physics.world_hash();
+    const auto client_hash = demo.session.client.physics.world_hash();
+    demo.effects_visible = false;
+    const auto off = capture();
+    const auto control = capture();
+    demo.effects_visible = true;
+    const auto on = capture();
+    std::sort(smoke_gpu_ms.begin(), smoke_gpu_ms.end());
+    if (!smoke_gpu_ms.empty())
+        std::printf("effects-smoke: diagnostic GPU fx-smoke %zu frames p50 %.6f p99 %.6f ms\n",
+                    smoke_gpu_ms.size(),
+                    smoke_gpu_ms[smoke_gpu_ms.size() / 2],
+                    smoke_gpu_ms.back());
+    const auto difference = [&](const auto& a, const auto& b) {
+        std::size_t n = 0;
+        if (a.size() != width * height * 4 || b.size() != a.size())
+            return n;
+        for (std::size_t i = 0; i < a.size(); i += 4) {
+            int d = 0;
+            for (unsigned c = 0; c < 3; ++c)
+                d = std::max(d, std::abs(static_cast<int>(a[i + c]) - b[i + c]));
+            n += d > 5 ? 1u : 0u;
+        }
+        return n;
+    };
+    const auto changed = difference(on, control), drift = difference(off, control);
+    const auto& particles = demo.effects->field();
+    const bool okay = changed > drift + 100 && particles.count() > 0 &&
+                      particles.count() <= block_play::PlayEffects::kParticleCapacity &&
+                      demo.visuals->renderer.smoke_particles_dropped() == 0 &&
+                      demo.session.server.physics.world_hash() == server_hash &&
+                      demo.session.client.physics.world_hash() == client_hash;
+    std::printf("effects-smoke: changed=%zu drift=%zu live=%zu requested=%llu spawned=%llu "
+                "capacity-drops=%llu render-drops=%llu state-unchanged=%d result=%s\n",
+                changed,
+                drift,
+                particles.count(),
+                static_cast<unsigned long long>(particles.stats().requested_particles),
+                static_cast<unsigned long long>(particles.stats().spawned_particles),
+                static_cast<unsigned long long>(particles.stats().dropped_capacity),
+                static_cast<unsigned long long>(demo.visuals->renderer.smoke_particles_dropped()),
+                demo.session.server.physics.world_hash() == server_hash &&
+                    demo.session.client.physics.world_hash() == client_hash,
+                okay ? "PASS" : "FAIL");
+    if (!g_ppm.empty()) {
+        write_ppm((g_ppm + ".off.ppm").c_str(), control, width, height);
+        write_ppm((g_ppm + ".on.ppm").c_str(), on, width, height);
+    }
+    return okay ? 0 : 1;
+}
+
+// ── Shimmer trace (diagnosis, env-gated: RIME_SHIMMER_TRACE=<csv path>) ─────────────────────────
+// The owner reported tree shadows on walls and ground that "shimmer" while the camera only turns
+// or strafes. Shadow-map probes at fixed world points were stable, so the change must enter later,
+// on the SCREEN. This measures it there: a scripted, frame-indexed camera path (so every
+// configuration is rendered from IDENTICAL poses -- a mouse-driven sweep never repeats), after each
+// frame the LDR output is read back and fixed WORLD points are reprojected with the frame's own
+// unjittered view-projection to pixels; the 15x15 mean luma around each is one CSV column.
+// A point whose world position never changes but whose pixel value does is exactly "shimmer".
+// RIME_SHIMMER_OFF is a comma list that disables candidate stages one at a time:
+//   taa, jitter, ssr, ddgi, shadows (control: removes the signal), gifade, clouds.
+void run_shimmer_trace(Demo& demo, const char* csv_path) {
+    constexpr std::uint32_t kW = kWidth, kH = kHeight;
+    const std::string off = std::getenv("RIME_SHIMMER_OFF") ? std::getenv("RIME_SHIMMER_OFF") : "";
+    const auto has = [&](const char* t) {
+        return ("," + off + ",").find(std::string(",") + t + ",") != std::string::npos;
+    };
+    auto& r = demo.visuals->renderer;
+    auto lighting = r.lighting();
+    if (has("ssr"))
+        lighting.ssr_enabled = false;
+    if (has("ddgi"))
+        lighting.ddgi_enabled = false;
+    if (has("shadows"))
+        lighting.shadows_enabled = false;
+    if (has("gifade"))
+        lighting.ddgi_volume_fade = false;
+    // Diagnostic knobs for the DDGI field:
+    // RIME_SHIMMER_DDGI="hyst=0.97,spacing=2,count=16,rays=64,dist=20".
+    if (const char* knobs = std::getenv("RIME_SHIMMER_DDGI")) {
+        const std::string k = knobs;
+        const auto get = [&](const char* key, float fallback) {
+            const auto at = ("," + k).find(std::string(",") + key + "=");
+            return at == std::string::npos
+                       ? fallback
+                       : static_cast<float>(std::atof(k.c_str() + at + std::strlen(key) + 1));
+        };
+        lighting.ddgi_hysteresis = get("hyst", lighting.ddgi_hysteresis);
+        lighting.ddgi_probe_spacing = get("spacing", lighting.ddgi_probe_spacing);
+        lighting.ddgi_max_trace_distance = get("dist", lighting.ddgi_max_trace_distance);
+        lighting.ddgi_rays_per_probe =
+            static_cast<std::uint32_t>(get("rays", float(lighting.ddgi_rays_per_probe)));
+        const auto c = static_cast<std::uint32_t>(get("count", 0));
+        if (c != 0)
+            lighting.ddgi_probe_count_x = lighting.ddgi_probe_count_y =
+                lighting.ddgi_probe_count_z = c;
+    }
+    r.set_lighting(lighting);
+    if (has("jitter"))
+        r.set_temporal_jitter_enabled(false);
+    if (has("taa"))
+        r.set_taa_resolve_enabled(false);
+    if (has("clouds")) {
+        auto sky = r.sky();
+        sky.clouds_enabled = false;
+        r.set_sky(sky);
+    }
+    // Sensitivity control for the shadow probe (RIME_SHIMMER_SUN_NUDGE_DEG): turn the one sun by a
+    // known small angle about world Y, so a probe that claims "stable to 5e-5" can be shown to
+    // MOVE when the world really does move by this much.
+    if (const char* nudge = std::getenv("RIME_SHIMMER_SUN_NUDGE_DEG")) {
+        const core::Quat dq = core::quat_from_axis_angle(
+            {0, 1, 0}, static_cast<float>(std::atof(nudge)) * 0.0174532925f);
+        for (ecs::World* w : {&demo.session.server.world, &demo.session.client.world})
+            w->query<render::DirectionalLight>().for_each(
+                [&](ecs::Entity e, render::DirectionalLight&) {
+                    if (auto* lt = w->get<ecs::LocalTransform>(e))
+                        lt->value.rotation = dq * lt->value.rotation;
+                    if (auto* wt = w->get<ecs::WorldTransform>(e))
+                        wt->value.rotation = dq * wt->value.rotation;
+                });
+    }
+    std::vector<core::Vec3> pts;
+    for (float y : {2.0f, 3.8f, 5.2f})
+        for (float z : {-6.0f, -8.0f, -10.0f})
+            pts.push_back({11.84f, y, z});
+    for (float x : {6.0f, 7.5f, 8.5f, 9.5f, 10.5f, 11.2f})
+        for (float z : {-4.5f, -6.0f, -8.0f, -10.0f, -12.0f, -15.0f})
+            pts.push_back({x, 0.012f, z});
+    const char* env_pitch = std::getenv("RIME_SHIMMER_PITCH");
+    const float pitch = env_pitch ? static_cast<float>(std::atof(env_pitch)) : 0.4475f;
+    const bool flip = std::getenv("RIME_SHIMMER_FLIPY") != nullptr;
+    constexpr float kBaseYaw = -0.6435f;
+    constexpr int kWarm = 200, kStatic = 120, kYaw = 240, kStrafe = 120;
+    std::FILE* csv = std::fopen(csv_path, "w");
+    if (csv == nullptr)
+        return;
+    std::fprintf(csv, "frame,phase,yaw,x");
+    for (std::size_t i = 0; i < pts.size(); ++i)
+        std::fprintf(csv, ",p%zu_luma,p%zu_u,p%zu_v", i, i, i);
+    std::fprintf(csv, "\n");
+    const auto project = [&](const core::Mat4& vp, core::Vec3 p, double& u, double& v) {
+        const core::Vec4 c = vp * core::Vec4{p.x, p.y, p.z, 1.0f};
+        if (c.w <= 0.05f)
+            return false;
+        u = (c.x / c.w * .5 + .5) * kW;
+        v = (c.y / c.w * .5 + .5) * kH;
+        if (flip)
+            v = kH - v;
+        return u >= 8 && v >= 8 && u < kW - 8 && v < kH - 8;
+    };
+    const int total = kWarm + kStatic + kYaw + kStrafe;
+    for (int f = 0; f < total; ++f) {
+        const int t = f - kWarm;
+        float yaw = kBaseYaw,
+              x = std::getenv("RIME_SHIMMER_X0")
+                      ? static_cast<float>(std::atof(std::getenv("RIME_SHIMMER_X0")))
+                      : 9.0f;
+        int phase = 0;
+        if (t >= kStatic && t < kStatic + kYaw) {
+            phase = 1;
+            yaw += 0.2f * std::sin(6.2831853f * static_cast<float>(t - kStatic) / 120.0f);
+        } else if (t >= kStatic + kYaw) {
+            phase = 2;
+            x += 0.75f *
+                 (1.0f - std::cos(6.2831853f * static_cast<float>(t - kStatic - kYaw) / 120.0f));
+        }
+        gameplay::FirstPersonView v{};
+        v.yaw = yaw;
+        v.pitch = pitch;
+        v.eye_height = 0.0f;
+        demo.visuals->authored_camera = gameplay::eye_transform(v, {x, 1.6f, -5.0f});
+        demo.use_authored_camera = true;
+        demo.app.run_frames(1);
+        if (t < 0)
+            continue;
+        const rhi::TextureHandle tex = demo.app.graph()->physical(demo.visuals->last_ldr);
+        const auto px = read_rgba8(*demo.app.device(), tex, kW, kH);
+        const core::Mat4 vp = r.view_proj_unjittered();
+        std::fprintf(csv, "%d,%d,%.5f,%.4f", t, phase, double(yaw), double(x));
+        auto marked = px;
+        for (std::size_t i = 0; i < pts.size(); ++i) {
+            double u = -1, vv = -1, luma = -1;
+            if (project(vp, pts[i], u, vv)) {
+                const int cx = static_cast<int>(u), cy = static_cast<int>(vv);
+                double sum = 0;
+                // 15x15 window: a 3x3 mean follows individual brick/mortar texels as the point
+                // slides by a sub-pixel, which is texture aliasing, not lighting shimmer.
+                for (int dy = -7; dy <= 7; ++dy)
+                    for (int dx = -7; dx <= 7; ++dx) {
+                        const std::uint8_t* q =
+                            &px[(static_cast<std::size_t>(cy + dy) * kW + (cx + dx)) * 4];
+                        sum += 0.2126 * q[0] + 0.7152 * q[1] + 0.0722 * q[2];
+                    }
+                luma = sum / 225.0;
+                for (int d = -6; d <= 6; ++d) {
+                    auto* a = &marked[(static_cast<std::size_t>(cy) * kW +
+                                       std::clamp(cx + d, 0, int(kW) - 1)) *
+                                      4];
+                    auto* b =
+                        &marked[(static_cast<std::size_t>(std::clamp(cy + d, 0, int(kH) - 1)) * kW +
+                                 cx) *
+                                4];
+                    a[0] = b[0] = 255;
+                    a[1] = a[2] = b[1] = b[2] = 0;
+                }
+            } else {
+                u = vv = -1;
+            }
+            std::fprintf(csv, ",%.3f,%.1f,%.1f", luma, u, vv);
+        }
+        std::fprintf(csv, "\n");
+        if (t == 0 || t == kStatic + 60)
+            write_ppm(
+                (std::string(csv_path) + (t == 0 ? ".f0.ppm" : ".f1.ppm")).c_str(), marked, kW, kH);
+    }
+    std::fclose(csv);
+    demo.app.finish_gpu();
+}
+
+// ── --desync-check: the `peers` row must not call a replica mid-flight DIVERGED ─────────────────
+//
+// The owner saw the play HUD read "peers DIVERGED" after an aimed charge and after rifle fire. This
+// is the headless form of that session on a city map: 20 rifle hits that reach destructible parts,
+// then an aimed charge, then 60 ticks of aftermath, then the authority's LOCAL DAMAGE GATE closes
+// (DestructionWorld::set_local_damage_enabled) and the sim runs on until nothing has been in flight
+// for 30 ticks, within a fixed 300-tick budget. Every tick is classified exactly as the HUD
+// classifies it.
+//
+// Why a gate rather than "wait until the authority goes quiet", which is what this used to do: the
+// length of that wait is set by a chaotic fracture cascade, so it was a different test on every
+// platform -- 982 s here, 2862 s on the slower runner, >3600 s on windows-latest, same commit. The
+// gate turns it into a bounded one (18 s here) WITHOUT weakening a claim: the cascade's ops up to
+// the gate are real, in flight, and must all be held; what is given up is only coverage of a
+// collapse settling naturally, which none of the claims below was ever about.
+//
+// What it asserts, and why each is there:
+//   - the HUD never says DIVERGED. The peers really are in sync whenever nothing is in flight
+//     (measured: 0 exceptions), so a DIVERGED here is either a false alarm or a real divergence,
+//     and both are failures;
+//   - the HUD DID say "syncing" — the sensitivity half: a run that never had anything in flight
+//     never exercised the case the row exists to get right, and would pass vacuously;
+//   - the gate held (the authority committed nothing after it -- the sensitivity control for the
+//     gate itself: with the call removed, 1414 ops land after the gate tick and this fails), and
+//     the client then held every published op within the budget;
+//   - the peers agree once nothing is in flight;
+//   - a CONTROL: one damage op committed on the server and never published must then read
+//     DIVERGED. Without it, a classifier that answered "syncing" to everything would pass too.
+//
+// It also prints how many ticks the PRE-FIX row (hashes compared alone) would have shown DIVERGED,
+// which is the number that answers the owner's report.
+struct PeerPartDigest {
+    std::uint32_t parts = 0;
+    std::uint32_t alive = 0;
+    std::uint64_t health = 0;
+    std::uint64_t composition = 0;
+    bool operator==(const PeerPartDigest&) const = default;
+};
+
+// The shared_state_hash, kept apart per destructible so a disagreement can be NAMED: which NetId,
+// and whether it is the alive bits, the healths or the rubble's composition that differ.
+std::map<std::uint64_t, PeerPartDigest> peer_digest(const ecs::World& world,
+                                                    const replication::NetIdMap& map,
+                                                    const destruction::DestructionWorld& d) {
+    std::map<std::uint64_t, PeerPartDigest> out;
+    map.for_each([&](replication::NetId id, ecs::Entity e) {
+        const auto* ref = world.get<destruction::DestructibleInstanceRef>(e);
+        if (ref == nullptr || ref->instance == destruction::kUnboundInstance)
+            return;
+        const destruction::InstanceId inst{ref->instance, 0};
+        PeerPartDigest g;
+        g.parts = d.instance_part_count(inst);
+        for (std::uint32_t p = 0; p < g.parts; ++p) {
+            g.alive += d.part_alive(inst, p) ? 1u : 0u;
+            const float h = d.part_health(inst, p);
+            std::uint32_t b = 0;
+            std::memcpy(&b, &h, sizeof(b));
+            g.health = (g.health ^ b) * 1099511628211ull + p;
+        }
+        g.composition = destruction_net::debris_composition_hash(d, inst);
+        out[(std::uint64_t(id.index) << 32) | id.generation] = g;
+    });
+    return out;
+}
+
+void print_peer_difference(const Session& s) {
+    const auto a = peer_digest(s.server.world, s.server.replicator->map(), s.server.destruction);
+    const auto b = peer_digest(s.client.world, s.client.replicator->map(), s.client.destruction);
+    std::size_t only_server = 0, only_client = 0, differ = 0;
+    for (const auto& [k, g] : a) {
+        const auto it = b.find(k);
+        if (it == b.end()) {
+            ++only_server;
+            continue;
+        }
+        if (it->second == g)
+            continue;
+        if (differ++ == 0)
+            std::printf("  first diff: netid %u/%u parts %u/%u alive %u/%u health %s "
+                        "composition %s (server/client)\n",
+                        unsigned(k >> 32),
+                        unsigned(k & 0xffffffffu),
+                        g.parts,
+                        it->second.parts,
+                        g.alive,
+                        it->second.alive,
+                        g.health == it->second.health ? "same" : "DIFF",
+                        g.composition == it->second.composition ? "same" : "DIFF");
+    }
+    for (const auto& entry : b)
+        only_client += a.count(entry.first) == 0 ? 1u : 0u;
+    std::printf(
+        "  instances : server %zu client %zu, only-server %zu only-client %zu, differ %zu\n",
+        a.size(),
+        b.size(),
+        only_server,
+        only_client,
+        differ);
+}
+
+bool write_city_scene(const std::filesystem::path& cooked, const std::string& path);
+
+int run_desync_check(const std::filesystem::path& cooked, std::string_view scene_arg) {
+    // No --scene: author the city to a scratch file, the same way --write-city does, so CTest
+    // runs this on the playable map without a checked-in scene.
+    std::string scene_path(scene_arg);
+    std::filesystem::path scratch;
+    if (scene_path.empty()) {
+        scratch = std::filesystem::temp_directory_path() /
+                  ("rime-desync-city-" +
+                   std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                   ".rscene");
+        std::filesystem::remove(scratch);
+        if (!write_city_scene(cooked, scratch.string()))
+            return 1;
+        scene_path = scratch.string();
+    }
+
+    struct RemoveScratch {
+        std::filesystem::path path;
+
+        ~RemoveScratch() {
+            std::error_code ignored;
+            if (!path.empty())
+                std::filesystem::remove(path, ignored);
+        }
+    } remove_scratch{scratch};
+
+    app::AppConfig cfg{};
+    cfg.gpu = false; // the sim and both peers only; the HUD's classification is a sim question
+    cfg.tick_hz = 60.0;
+    Demo demo(cfg, g_network_impairment);
+    demo.scripted_charge = false;
+    demo.streamed_world = true;
+    demo.building_support_enabled = true; // --play's collapse source, so its op stream too
+    demo.session.server.weapon.automatic = true;
+    if (!demo.start(cooked, scene_path))
+        return 1;
+    Session& s = demo.session;
+    gameplay::CharacterInput look{};
+    if (s.client.spawn.status == block_play::SpawnStatus::Valid) {
+        look.yaw = s.client.spawn.placement.yaw;
+        look.pitch = s.client.spawn.placement.pitch;
+    }
+    for (int i = 0; i < 30; ++i)
+        demo.step_sim(gameplay_net::to_input_command(look));
+    std::printf("99-the-block --desync-check: impairment %s\n",
+                g_network_impairment ? "ON" : "OFF");
+
+    // Aim at a standing part of a destructible, as seen on the CLIENT replica (what a player
+    // sees). Swept around the spawn; `skip_current` moves on once a line has stopped damaging
+    // anything (its part broke away as rubble, which a bullet only pushes).
+    const auto aim = [&](bool skip_current) {
+        for (int pi = 0; pi < 4; ++pi) {
+            for (int yi = skip_current ? 1 : 0; yi < 48; ++yi) {
+                const float yaw = look.yaw + float(yi) * (6.2831853f / 48.0f);
+                const float pitch = 0.1f - 0.1f * float(pi);
+                s.client.view.yaw = yaw;
+                s.client.view.pitch = pitch;
+                const core::Transform eye = s.client.camera_transform();
+                const core::Vec3 fwd = core::rotate(eye.rotation, core::Vec3{0, 0, -1});
+                physics::QueryFilter f;
+                f.exclude = s.client.local_body();
+                physics::RayHit hit{};
+                if (!s.client.physics.raycast({eye.translation, fwd, 120.0f}, hit, f) ||
+                    hit.distance < 4.0f)
+                    continue;
+                for (std::size_t i = 0; i < s.client.destruction.instance_count(); ++i) {
+                    const destruction::InstanceId id{static_cast<std::uint32_t>(i), 0};
+                    if (s.client.destruction.body_of(id) != hit.body)
+                        continue;
+                    const std::uint32_t part = s.client.destruction.part_from_child(id, hit.child);
+                    if (part == destruction::kInvalidPartIndex ||
+                        !s.client.destruction.part_alive(id, part))
+                        continue;
+                    look.yaw = yaw;
+                    look.pitch = pitch;
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+    if (!aim(false)) {
+        std::fprintf(stderr, "desync-check: FAILED no destructible within reach of the spawn\n");
+        return 1;
+    }
+
+    std::uint64_t tick = 0, syncing_ticks = 0, diverged_ticks = 0, hash_differs = 0;
+    std::uint64_t peak_in_flight = 0, behind_run = 0, longest_behind_run = 0;
+    const bool trace = std::getenv("RIME_DESYNC_TRACE") != nullptr;
+    const auto step = [&](const gameplay::CharacterInput& in, const char* phase) {
+        demo.step_sim(gameplay_net::to_input_command(in));
+        ++tick;
+        std::uint64_t in_flight = 0;
+        const PeerSync state = classify_peer_sync(s, &in_flight);
+        hash_differs += state != PeerSync::InSync ? 1u : 0u; // what the pre-fix row compared
+        syncing_ticks += state == PeerSync::Syncing ? 1u : 0u;
+        if (std::string_view(phase) != "control")
+            diverged_ticks += state == PeerSync::Diverged ? 1u : 0u;
+        peak_in_flight = std::max(peak_in_flight, in_flight);
+        behind_run = in_flight > 0 ? behind_run + 1 : 0;
+        longest_behind_run = std::max(longest_behind_run, behind_run);
+        if (trace)
+            std::printf(
+                "T %llu %s state=%d in_flight=%llu sent=%llu\n",
+                static_cast<unsigned long long>(tick),
+                phase,
+                static_cast<int>(state),
+                static_cast<unsigned long long>(in_flight),
+                static_cast<unsigned long long>(s.server.destruction_net_server.ops_sent()));
+        if (state == PeerSync::Diverged && diverged_ticks == 1 &&
+            std::string_view(phase) != "control") {
+            std::printf("  DIVERGED first at tick %llu (%s):\n",
+                        static_cast<unsigned long long>(tick),
+                        phase);
+            print_peer_difference(s);
+        }
+        return in_flight;
+    };
+
+    // 20 rifle hits that reach a destructible part (not shots, not hits on loose rubble).
+    constexpr std::uint64_t kRifleHits = 20;
+    const std::uint64_t ops0 = s.damage_ops;
+    std::uint64_t last_hit_tick = 0, hits_seen = 0;
+    for (int i = 0; i < 2400 && s.damage_ops - ops0 < kRifleHits; ++i) {
+        gameplay::CharacterInput fire = look;
+        fire.held = gameplay::kActionFire;
+        fire.pressed = (i % 2 == 0) ? gameplay::kActionFire : 0;
+        step(fire, "rifle");
+        if (s.damage_ops - ops0 != hits_seen) {
+            hits_seen = s.damage_ops - ops0;
+            last_hit_tick = tick;
+        } else if (tick - last_hit_tick > 60) {
+            (void)aim(true);
+            last_hit_tick = tick;
+        }
+    }
+    const std::uint64_t rifle_hits = s.damage_ops - ops0;
+
+    // The aimed charge, through the same function F calls in --play.
+    (void)aim(false);
+    for (int i = 0; i < 10; ++i)
+        step(look, "turn");
+    s.client.view.yaw = look.yaw;
+    s.client.view.pitch = look.pitch;
+    const std::uint64_t sent_before_charge = s.server.destruction_net_server.ops_sent();
+    const bool charged = demo.fire_charge_aimed();
+    const std::uint64_t charge_tick = tick;
+
+    // Let the charge's immediate aftermath run, then stop NEW local damage. The next tick's
+    // destruction update replaces committed_ops before publish, so no pre-gate batch can leak
+    // through after this point. The client must hold the published stream within a fixed budget.
+    constexpr std::uint64_t kAftermath = 60, kSettledTicks = 30, kSettleBudget = 300;
+    for (std::uint64_t i = 0; i < kAftermath; ++i)
+        step(look, "aftermath");
+    s.server.destruction.set_local_damage_enabled(false);
+    const std::uint64_t gate_tick = tick;
+    std::uint64_t settle_ticks = 0, settled_run = 0, committed_after_gate = 0;
+    while (settle_ticks < kSettleBudget && settled_run < kSettledTicks) {
+        const std::uint64_t in_flight = step(look, "drain");
+        ++settle_ticks;
+        committed_after_gate += s.server.destruction.committed_ops().size();
+        settled_run = in_flight == 0 ? settled_run + 1 : 0;
+    }
+    const bool settled = settled_run >= kSettledTicks;
+    std::uint64_t end_in_flight = 0;
+    const PeerSync end_state = classify_peer_sync(s, &end_in_flight);
+    // The session's numbers, before the control below adds ticks of its own.
+    const std::uint64_t session_ticks = tick, session_syncing = syncing_ticks,
+                        session_differs = hash_differs;
+    const std::uint64_t suppressed_at_session_end = s.server.destruction.suppressed_local_ops();
+
+    std::printf("  rifle     : %llu hits on destructible parts (%llu shots)\n",
+                static_cast<unsigned long long>(rifle_hits),
+                static_cast<unsigned long long>(s.shots_fired));
+    std::printf("  charge    : %s at tick %llu\n",
+                charged ? "detonated" : "HIT NOTHING",
+                static_cast<unsigned long long>(charge_tick));
+    std::printf("  drain     : gate at tick %llu, settled in %llu tick(s) at tick %llu (%s); "
+                "committed after gate %llu, suppressed local ops %llu\n",
+                static_cast<unsigned long long>(gate_tick),
+                static_cast<unsigned long long>(settle_ticks),
+                static_cast<unsigned long long>(session_ticks),
+                settled ? "settled" : "BUDGET EXHAUSTED",
+                static_cast<unsigned long long>(committed_after_gate),
+                static_cast<unsigned long long>(suppressed_at_session_end));
+    std::printf(
+        "  ops       : sent %llu (%llu before the charge), applied %llu, dropped %llu, "
+        "refused %llu, unaddressable %llu\n",
+        static_cast<unsigned long long>(s.server.destruction_net_server.ops_sent()),
+        static_cast<unsigned long long>(sent_before_charge),
+        static_cast<unsigned long long>(s.client.destruction_net_client.ops_applied()),
+        static_cast<unsigned long long>(s.client.destruction_net_client.ops_dropped_unmapped()),
+        static_cast<unsigned long long>(s.server.destruction_net_server.ops_refused()),
+        static_cast<unsigned long long>(s.server.destruction_net_server.ops_unaddressable()));
+    std::printf("  hud       : %llu ticks — syncing %llu, DIVERGED %llu; the pre-fix row would "
+                "have read DIVERGED on %llu; peak in flight %llu ops, longest run %llu ticks\n",
+                static_cast<unsigned long long>(session_ticks),
+                static_cast<unsigned long long>(session_syncing),
+                static_cast<unsigned long long>(diverged_ticks),
+                static_cast<unsigned long long>(session_differs),
+                static_cast<unsigned long long>(peak_in_flight),
+                static_cast<unsigned long long>(longest_behind_run));
+    if (end_state != PeerSync::InSync)
+        print_peer_difference(s);
+
+    // CONTROL: a real divergence must still read DIVERGED. Kill one standing part on the
+    // authority OUTSIDE the tick: the next tick's update replaces `committed_ops()` before anything
+    // publishes it, so the client can never hold that op. The part is found the way the player
+    // finds one (a ray onto a standing part), so it exists on both peers. Then let the authority go
+    // settle with the local gate closed again before classifying.
+    std::size_t control_ops = 0;
+    PeerSync control_state = PeerSync::InSync;
+    std::uint64_t control_ticks = 0, control_settled_run = 0;
+    bool control_settled = false;
+    if (aim(false)) {
+        s.client.view.yaw = look.yaw;
+        s.client.view.pitch = look.pitch;
+        const core::Transform eye = s.client.camera_transform();
+        physics::QueryFilter f;
+        f.exclude = s.client.local_body();
+        physics::RayHit hit{};
+        if (s.client.physics.raycast(
+                {eye.translation, core::rotate(eye.rotation, core::Vec3{0, 0, -1}), 120.0f},
+                hit,
+                f)) {
+            auto& d = s.server.destruction;
+            // This deliberate out-of-tick divergence must bypass the session's local gate.
+            d.set_local_damage_enabled(true);
+            for (std::size_t i = 0; i < d.instance_count(); ++i)
+                d.apply_damage(destruction::InstanceId{static_cast<std::uint32_t>(i), 0},
+                               hit.point,
+                               0.5f,
+                               50.0f,
+                               {});
+            d.update(s.server.physics);
+            control_ops = d.committed_ops().size();
+            d.set_local_damage_enabled(false);
+        }
+        // Give the control at least 60 ticks for the injected break, plus a consecutive
+        // no-in-flight window; exhausting the same fixed budget invalidates its verdict.
+        while (control_ticks < kSettleBudget &&
+               (control_ticks < 60 || control_settled_run < kSettledTicks)) {
+            const std::uint64_t in_flight = step(look, "control");
+            ++control_ticks;
+            control_settled_run = in_flight == 0 ? control_settled_run + 1 : 0;
+        }
+        control_settled = control_ticks >= 60 && control_settled_run >= kSettledTicks;
+        control_state = classify_peer_sync(s);
+    }
+    bool okay = true;
+    const auto check = [&](bool condition, const char* label) {
+        std::printf("  [%s] %s\n", condition ? " ok " : "FAIL", label);
+        okay = okay && condition;
+    };
+    check(rifle_hits >= kRifleHits, "20 rifle hits reached destructible parts");
+    check(charged && s.server.destruction_net_server.ops_sent() > sent_before_charge,
+          "the aimed charge detonated and the authority published damage");
+    check(session_syncing > 0, "the HUD showed 'syncing' (ops were in flight; not vacuous)");
+    check(diverged_ticks == 0, "the HUD never showed DIVERGED during the session");
+    check(settled, "the client held every published op within kSettleBudget ticks of the gate");
+    check(committed_after_gate == 0,
+          "the gate held: the authority committed no new damage after it");
+    check(end_state == PeerSync::InSync && end_in_flight == 0,
+          "the peers agree once nothing is in flight");
+    std::printf("  control   : %zu op(s) committed and never published; %llu tick(s), %s -> %s\n",
+                control_ops,
+                static_cast<unsigned long long>(control_ticks),
+                control_settled ? "settled" : "BUDGET EXHAUSTED",
+                control_state == PeerSync::Diverged  ? "DIVERGED"
+                : control_state == PeerSync::Syncing ? "syncing"
+                                                     : "in sync");
+    check(control_settled && control_ops > 0 && control_state == PeerSync::Diverged,
+          "control: an op the client never receives reads DIVERGED");
+    std::printf("99-the-block --desync-check: %s\n", okay ? "PASSED" : "FAILED");
+    return okay ? 0 : 1;
+}
+
+// The city map, authored and strictly re-loaded: --write-city's body, shared with --desync-check.
+bool write_city_scene(const std::filesystem::path& cooked, const std::string& path) {
+    ecs::World authored;
+    register_all(authored);
+    blockkit::BlockParams params;
+    if (const auto text = platform::read_file(cooked / "manifest.txt")) {
+        if (const auto manifest = assets::Manifest::parse(
+                {reinterpret_cast<const char*>(text->data()), text->size()}))
+            params.ground_material = blockkit::ground_material_id(*manifest);
+    }
+    (void)blockkit::assemble(authored, params);
+    const auto expanded = block_play::city::expand(authored);
+    // A saved city owns its environment. The editor and full runtime both consume this
+    // Sky and authored directional light; no runtime-only preset overwrites the file.
+    render::Sky sky;
+    sky.intensity = .06f; // calibrated scene exposure: physical sky light must not wash out the map
+    (void)authored.spawn_with(sky);
+    if (!scene::save_scene_file(authored, path))
+        return false;
+    ecs::World loaded;
+    register_all(loaded);
+    const auto result = scene::load_scene_file(loaded, path);
+    if (!result.ok || result.skipped_components || loaded.entity_count() != authored.entity_count())
+        return false;
+    std::printf("city authored: %zu entities, %u added buildings, %u lamps, %u barriers; "
+                "strict reload 0 skipped\n",
+                authored.entity_count(),
+                expanded.buildings_added,
+                expanded.lamps,
+                expanded.barriers);
+    return true;
+}
+
+int run_play(const std::filesystem::path& cooked, std::string_view scene_path, unsigned frames) {
     app::AppConfig cfg{};
     cfg.gpu = true;
     cfg.render_extent = {kWidth, kHeight};
@@ -4777,10 +7543,26 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     // unsupported surfaces retain FIFO. This changes presentation, not simulation cadence.
     cfg.vsync = false;
 
-    Demo demo(cfg);
+    Demo demo(cfg, g_network_impairment);
+
+    // Writes the --audio-wav capture however run_play returns, exactly as run_headless does.
+    // Without this the flag parses, the per-tick rows accumulate, and nothing is ever written:
+    // the ONLY mode that flushed the capture was --headless, which fires no weapon at all, so
+    // there was no way to hear a gunshot -- or its early reflections -- outside the engine.
+    struct PlayCaptureFlush {
+        Demo& d;
+
+        ~PlayCaptureFlush() { d.flush_audio_capture(); }
+    } play_capture_flush{demo};
+
+    std::printf("play network: impairment %s (one-way %u ms, loss %.0f%%)\n",
+                g_network_impairment ? "ON" : "OFF",
+                g_network_impairment ? kOneWayMs : 0,
+                g_network_impairment ? double(kLossRate * 100) : 0.0);
     demo.scripted_charge = false; // interactive: wait for F, not the tape
     demo.session.server.weapon.automatic = true;
     demo.streamed_world = true;
+    demo.building_support_enabled = true;
     demo.environment_enabled = true;
     demo.viewmodel_enabled = true;
     demo.player_help = true;
@@ -4795,16 +7577,25 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     // PLAY-ONLY evening preset (play_sunset.hpp): turn the one authored sun ahead of the player on
     // both peers, and face the live view down the street at it. Done before the live intent is
     // built below, so the first frame already looks at the sun.
-    play_sunset::apply(demo.session.server.world);
-    play_sunset::apply(demo.session.client.world);
-    demo.session.client.view.yaw = play_sunset::kViewYaw;
-    demo.session.client.view.pitch = play_sunset::kViewPitch;
+    if (scene_path.empty()) {
+        play_sunset::apply(demo.session.server.world);
+        play_sunset::apply(demo.session.client.world);
+    } // Saved maps own their lighting: Run must not silently replace an editor's sun edits.
+    // The initial look: the authored spawn's heading when the map has one, else the sun-facing
+    // preset. Decided once, here, and read back below so the handshake input cannot disagree.
+    if (demo.session.client.spawn.status == block_play::SpawnStatus::Valid) {
+        demo.session.client.view.yaw = demo.session.client.spawn.placement.yaw;
+        demo.session.client.view.pitch = demo.session.client.spawn.placement.pitch;
+    } else {
+        demo.session.client.view.yaw = play_sunset::kViewYaw;
+        demo.session.client.view.pitch = play_sunset::kViewPitch;
+    }
     if (auto* camera = demo.session.client.world.get<render::Camera>(demo.visuals->camera)) {
         // The outer 8x8 LOD5 square guarantees at least 4 km of ground around the eye,
         // including immediately before a recenter. Show several kilometres of that cover.
         play_sunset::configure_camera(*camera);
     }
-    if (demo.visuals) {
+    if (demo.visuals && scene_path.empty()) {
         // The sky's solar radiance is not coupled to the light's colour, so match it here and
         // lower the exposure for a sun-facing view (see play_sunset::sky).
         demo.visuals->renderer.set_sky(play_sunset::sky(Visuals::authored_sky()));
@@ -4818,13 +7609,34 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     if (demo.viewmodel) {
         // Complete the local startup handshake before warming its replicated render scene.
         gameplay::CharacterInput idle{};
-        idle.yaw = play_sunset::kViewYaw;
-        idle.pitch = play_sunset::kViewPitch;
+        idle.yaw = demo.session.client.view.yaw;
+        idle.pitch = demo.session.client.view.pitch;
         for (unsigned i = 0; i < 30; ++i)
             demo.step_sim(gameplay_net::to_input_command(idle));
         if (!demo.warm_scope_view())
             return 1;
     }
+    if (demo.session.server.spawn.status == block_play::SpawnStatus::Valid &&
+        !demo.session.server.avatars.empty() && demo.session.client.predictor.seeded()) {
+        // A resolved marker alone does not prove the server placed its avatar there or that
+        // the client received it. Observe both live poses after the existing startup handshake.
+        const auto* authoritative = demo.session.server.world.get<gameplay::CharacterState>(
+            demo.session.server.avatars.front());
+        const auto predicted = demo.session.client.eye_anchor();
+        if (authoritative)
+            std::printf("99-the-block: authored player ready: authority (%.3f, %.3f, %.3f), "
+                        "predicted (%.3f, %.3f, %.3f), look (%.4f, %.4f)\n",
+                        double(authoritative->position.x),
+                        double(authoritative->position.y),
+                        double(authoritative->position.z),
+                        double(predicted.x),
+                        double(predicted.y),
+                        double(predicted.z),
+                        double(demo.session.client.view.yaw),
+                        double(demo.session.client.view.pitch));
+    }
+    if (!g_mute && demo.app.windowed())
+        demo.audio_output.start(); // smoke/headless paths never open a device
     gameplay::InputBindings bindings{};
 
     if (demo.app.windowed()) {
@@ -4840,19 +7652,18 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
         const platform::CursorMode cursor =
             demo.app.window()->set_cursor_mode(platform::CursorMode::Locked);
         bindings.look_requires_drag = gameplay::look_requires_drag_for(cursor);
-        std::printf(
-            "99-the-block: presenting in a window.\n"
-            "  WASD move · %s to look · HOLD LEFT MOUSE for automatic fire\n"
-            "  1 SCAR-H · 2 M4A1 · 3 MSR / Schmidt & Bender PM II\n"
-            "  Hold Q or RIGHT MOUSE to aim (also while dragging) · F detonates · ESC exits\n",
-            bindings.look_requires_drag
-                // Not "this display cannot lock": at startup the pointer is usually not
-                // over the window yet, and on Wayland that alone is enough to refuse. The
-                // scheme switches by itself the moment the lock is granted, so the text
-                // says what is true now and what will change rather than diagnosing the
-                // platform from one early answer.
-                ? "hold RIGHT-DRAG (free look engages if the cursor locks)"
-                : "MOVE THE MOUSE");
+        std::printf("99-the-block: presenting in a window.\n"
+                    "  WASD move · %s to look · LEFT MOUSE fires (rifles hold, sniper click)\n"
+                    "  1 SCAR-H · 2 M4A1 · 3 MSR / Schmidt & Bender PM II\n"
+                    "  Q / RIGHT MOUSE aims · R reload animation · F detonates · ESC exits\n",
+                    bindings.look_requires_drag
+                        // Not "this display cannot lock": at startup the pointer is usually not
+                        // over the window yet, and on Wayland that alone is enough to refuse. The
+                        // scheme switches by itself the moment the lock is granted, so the text
+                        // says what is true now and what will change rather than diagnosing the
+                        // platform from one early answer.
+                        ? "hold RIGHT-DRAG (free look engages if the cursor locks)"
+                        : "MOVE THE MOUSE");
     } else {
         std::printf("99-the-block: no display available; running the script headless instead.\n");
     }
@@ -4861,14 +7672,17 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
     // and the tick run at different rates, so the tick reads the latest fold rather than doing its
     // own — which is also what keeps the yaw the mover receives the one the player is looking
     // along.
+    rhi::Extent2D play_extent = cfg.render_extent;
     block_play::PlayInput live;
     bool quit = false;
     const float look_sensitivity = demo.session.client.view.sensitivity;
 
     demo.app.add_sim_stage(app::Application::SimStage::PreSim, [&](ecs::World&, double) {
-        demo.step_sim(gameplay_net::to_input_command(live.tick()));
+        auto input = live.tick();
+        demo.step_play(input);
     });
     demo.app.on_render([&](app::FrameContext& ctx) {
+        play_extent = ctx.extent;
         // The look scheme follows the cursor mode the window ACTUALLY holds, every frame. It is
         // live state: the lock is granted when the pointer enters, and dropped again whenever the
         // window loses focus (a background app must not keep the pointer). Deciding once at startup
@@ -4889,7 +7703,7 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
             demo.app.request_quit();
         }
         if (demo.session.client.devices.key_pressed(platform::Key::F)) {
-            demo.fire_charge();
+            (void)demo.fire_charge_aimed();
         }
         if (demo.viewmodel) {
             // map_frame_input has already folded this frame's events and applied mouse motion.
@@ -4902,21 +7716,35 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path) {
                                       : core::Vec3{};
             demo.viewmodel->advance(
                 static_cast<float>(ctx.frame_dt), velocity, demo.shot_presented);
+            if (demo.weapon_fx && demo.viewmodel->take_case_ejection())
+                demo.weapon_fx->queue_case();
             demo.shot_presented = false;
         }
         demo.render(ctx);
     });
 
-    if (demo.app.windowed()) {
-        (void)demo.app.run();
+    if (const char* trace = std::getenv("RIME_SHIMMER_TRACE")) {
+        run_shimmer_trace(demo, trace);
+    } else if (demo.app.windowed()) {
+        if (frames)
+            demo.app.run_frames(static_cast<int>(frames));
+        else
+            (void)demo.app.run();
     } else {
-        demo.app.run_frames(static_cast<int>(g_ticks));
+        demo.app.run_frames(static_cast<int>(frames ? frames : g_ticks));
     }
     std::printf("99-the-block: %llu frames, %llu ticks%s\n",
                 static_cast<unsigned long long>(demo.app.frame_index()),
                 static_cast<unsigned long long>(demo.app.tick_count()),
                 quit ? " (ESC)" : "");
     demo.app.finish_gpu(); // first-person resources retire before Visuals and their registries
+    if (!g_ppm.empty() && demo.visuals && demo.visuals->last_ldr.is_valid()) {
+        const auto pixels = read_rgba8(*demo.app.device(),
+                                       demo.app.graph()->physical(demo.visuals->last_ldr),
+                                       play_extent.width,
+                                       play_extent.height);
+        write_ppm(g_ppm.c_str(), pixels, play_extent.width, play_extent.height);
+    }
     return 0;
 }
 
@@ -4930,15 +7758,44 @@ int main(int argc, char** argv) {
         WorldSmoke,
         WorldGpuSmoke,
         ViewmodelSmoke,
-        EnvironmentSmoke
+        EnvironmentSmoke,
+        EffectsSmoke,
+        DesyncCheck
     } mode = Mode::Headless;
     PerfOptions perf{};
+    unsigned play_frames = 0;
+    std::string write_city;
+    std::filesystem::path content_override;
+    bool explicit_mode = false;
+    bool scene_info = false;
     std::filesystem::path cooked = RIME_BLOCK_COOKED_DIR;
     std::string scene_path; // --scene: run a scene someone authored, not the generated one (m14.4)
 
     for (int i = 1; i < argc; ++i) {
         const std::string_view a(argv[i]);
-        if (a == "--headless") {
+        if (a == "--help" || a == "-h") {
+            std::printf("the_block --play [--scene file.rscene] [--frames N] [--ppm file.ppm]\n"
+                        "          [--network-impairment] [--mute]\n"
+                        "          --content dir | --cooked dir --viewmodel-content dir\n"
+                        "          --write-city new-file.rscene | --scene-info | --headless\n"
+                        "A copied development bundle starts windowed play with no arguments.\n"
+                        "WASD move, mouse look, left mouse fire, Q/right mouse aim, R reload, "
+                        "1/2/3 weapons, Esc quit.\n");
+            return 0;
+        }
+        if (a == "--play" || a == "--headless" || a == "--perf" || a == "--world-smoke" ||
+            a == "--world-gpu-smoke" || a == "--viewmodel-smoke" || a == "--environment-smoke" ||
+            a == "--effects-smoke" || a == "--desync-check")
+            explicit_mode = true;
+        if (a == "--scene-info") {
+            scene_info = true;
+        } else if (a == "--write-city" && i + 1 < argc) {
+            write_city = argv[++i];
+        } else if (a == "--content" && i + 1 < argc) {
+            content_override = argv[++i];
+        } else if (a == "--viewmodel-content" && i + 1 < argc) {
+            g_viewmodel_content = argv[++i];
+        } else if (a == "--headless") {
             mode = Mode::Headless;
         } else if (a == "--play") {
             mode = Mode::Play;
@@ -4950,10 +7807,31 @@ int main(int argc, char** argv) {
             mode = Mode::ViewmodelSmoke;
         } else if (a == "--environment-smoke") {
             mode = Mode::EnvironmentSmoke;
+        } else if (a == "--effects-smoke") {
+            mode = Mode::EffectsSmoke;
+        } else if (a == "--desync-check") {
+            mode = Mode::DesyncCheck;
+        } else if (a == "--network-impairment") {
+            g_network_impairment = true;
+        } else if (a == "--mute") {
+            g_mute = true;
+        } else if (a == "--audio-wav" && i + 1 < argc) {
+            g_audio_wav = argv[++i];
+        } else if (a == "--audio-content" && i + 1 < argc) {
+            g_audio_content = argv[++i];
+        } else if (a == "--audio-weapons" && i + 1 < argc) {
+            g_audio_weapons = argv[++i];
+        } else if (a == "--effects-preview") {
+            g_effects_preview = true;
         } else if (a == "--perf") {
             mode = Mode::Perf;
         } else if (a == "--frames" && i + 1 < argc) {
             perf.frames = std::atoi(argv[++i]);
+            if (perf.frames < 1 || perf.frames > 1000000) {
+                std::fprintf(stderr, "--frames must be 1..1000000\n");
+                return 2;
+            }
+            play_frames = static_cast<unsigned>(perf.frames);
         } else if (a == "--pipelined" && i + 1 < argc) {
             // Checked as a SIGNED int before the cast. `--pipelined -1` used to become 4294967295,
             // which is not merely a big ring: `in_flight_.size() >= headless_in_flight_` is then
@@ -4994,6 +7872,73 @@ int main(int argc, char** argv) {
         }
     }
 
+    if (!g_audio_weapons.empty())
+        return render_weapon_demo(g_audio_weapons);
+
+    if (!write_city.empty()) {
+        if (std::filesystem::exists(write_city)) {
+            std::fprintf(stderr, "city generator refuses to overwrite %s\n", write_city.c_str());
+            return 2;
+        }
+        return write_city_scene(cooked, write_city) ? 0 : 1;
+    }
+    // A moved development binary must find its own content, never silently use the checkout's
+    // compiled directories. In-tree tools retain their existing defaults and self-check mode.
+    std::error_code content_error;
+    const auto executable = platform::executable_path();
+    const bool in_tree =
+        std::filesystem::equivalent(executable.parent_path(), RIME_GAME_BINARY_DIR, content_error);
+    if (!content_override.empty() || !in_tree) {
+        app::ContentSearch search;
+        search.explicit_dir = content_override;
+        search.required = "city.rscene";
+        const auto root = app::resolve_content_root(search);
+        if (!root.ok) {
+            std::fprintf(stderr, "%s\n", app::describe_content_failure(root).c_str());
+            return 2;
+        }
+        cooked = root.dir / "block";
+        g_viewmodel_content = root.dir / "viewmodels";
+        if (std::filesystem::exists(root.dir / "audio"))
+            g_audio_content = root.dir / "audio";
+        if (scene_path.empty())
+            scene_path = (root.dir / "city.rscene").string();
+        if (!explicit_mode)
+            mode = Mode::Play;
+        std::printf("city content: %s\n", root.dir.string().c_str());
+    }
+
+    if (scene_info) {
+        if (scene_path.empty()) {
+            std::fprintf(stderr, "--scene-info needs --scene or bundle content\n");
+            return 2;
+        }
+        ecs::World authored;
+        register_all(authored);
+        const auto loaded = scene::load_scene_file(authored, scene_path);
+        if (!loaded.ok || loaded.skipped_components) {
+            std::fprintf(stderr, "scene-info strict load failed: %s\n", loaded.error.c_str());
+            return 2;
+        }
+        Peer peer;
+        authored.query<destruction::Destructible>().for_each([&](ecs::Entity, const auto& d) {
+            peer.city_patterns |= d.asset == block_play::city::kLampAsset ||
+                                  d.asset == block_play::city::kBarrierAsset;
+        });
+        // Exercise the actual game's pattern registration and strict stand-up, without a device
+        // or a chaotic collapse threshold. The same measured digest is printed by live startup.
+        if (!peer.register_patterns(cooked) ||
+            !peer.stand_up(destruction::Authority::Local, true, scene_path, 0))
+            return 2;
+        std::printf("city scene-info: %zu entities, %zu destructibles, digest 0x%016llx, "
+                    "city-patterns=%d, no GPU\n",
+                    peer.measured.entities,
+                    peer.measured.destructibles,
+                    static_cast<unsigned long long>(peer.measured.placement_digest),
+                    peer.city_patterns);
+        return 0;
+    }
+
     if (mode == Mode::Perf) {
         // A short probe run (scripts/perf.sh uses --frames 12) must not try to fire the charge
         // after the run has ended, nor demand a collapse window it cannot fill.
@@ -5002,7 +7947,7 @@ int main(int argc, char** argv) {
         return run_perf(cooked, scene_path, perf);
     }
     if (mode == Mode::Play) {
-        return run_play(cooked, scene_path);
+        return run_play(cooked, scene_path, play_frames);
     }
     if (mode == Mode::WorldSmoke) {
         return run_world_smoke(cooked, scene_path);
@@ -5015,6 +7960,12 @@ int main(int argc, char** argv) {
     }
     if (mode == Mode::EnvironmentSmoke) {
         return run_environment_smoke(cooked, scene_path);
+    }
+    if (mode == Mode::DesyncCheck) {
+        return run_desync_check(cooked, scene_path);
+    }
+    if (mode == Mode::EffectsSmoke) {
+        return run_effects_smoke(cooked, scene_path);
     }
     return run_headless(cooked, scene_path);
 }

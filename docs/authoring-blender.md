@@ -213,9 +213,108 @@ what it is supposed to: the derived index was excluded, the authored ones surviv
 (`occlusion_tex` resolved to 0). If you want AO, bind the same image to BOTH slots in Blender — §2
 says so, and this is what it looks like when you do not.
 
+### Three-asset scene proof: .blend → export_gltf.py → rime cook → props.rscene
+
+The workflow was verified end to end across three distinct CC0 `.blend` assets from Poly Haven:
+`Barrel_02` (industrial plastic drum), `wooden_crate_02` (shipping crate), and `painted_wooden_bench`
+(rustic furniture).
+
+#### 1. Build-time fetch and automated export (`assets/tools/fetch_props.py`)
+Rather than committing 11.5 MB of binary GLBs to git history, the assets are downloaded and exported
+at build time via `assets/tools/fetch_props.py`:
+```bash
+python3 assets/tools/fetch_props.py
+```
+The script queries the Poly Haven API (`https://api.polyhaven.com/files/<id>`), cryptographically
+verifies every downloaded `.blend` and texture file against pinned SHA-256 digests, caches downloads
+under `build/asset-cache/`, and invokes headless Blender using `assets/tools/export_gltf.py`:
+```bash
+blender -b <file.blend> --python-exit-code 1 --python assets/tools/export_gltf.py -- <out.glb>
+```
+The export script enforces the authoring rules from §§ 1–3:
+- Strips non-mesh entities (cameras, lights, empties).
+- Evaluates and bakes modifier stacks (`bpy.ops.object.convert(target='MESH')`).
+- Joins multi-part geometry into a single object per asset (ADR-0039 single-object rule).
+- Bakes object transforms into vertex data (`transform_apply`).
+- Prunes extraneous UV sets to keep exactly UV0.
+- Demotes 32-bit float EXR textures to 8-bit byte buffers (cook v1 requirement).
+- Exports standard Y-up GLBs with vertex normals and texcoords.
+
+Source GLB footprints (produced locally in `assets/src/props/`, gitignored):
+- `Barrel_02.glb`: 2,884,852 bytes (~2.88 MB)
+- `wooden_crate_02.glb`: 4,173,116 bytes (~4.17 MB)
+- `painted_wooden_bench.glb`: 4,449,868 bytes (~4.45 MB)
+- **Total export size**: 11.5 MB (comfortably within the 25 MB budget; reproducible byte-for-byte).
+
+#### 2. Cooked asset sizes (uncompressed vs `--bc`)
+Each prop was cooked with `rime cook assets/src/props --out cooked` and `--bc`:
+
+| Asset | Submesh / Primitive | Cooked Mesh (`.rmesh`) | Material (`.rmat`) | Textures (`.rtex` x3: ORM, base colour, normal) | Textures with `--bc` (BC7) | Total cooked (`--bc`) |
+|---|---|---|---|---|---|---|
+| `Barrel_02` | 1 submesh | 124,304 B | 124 B | 3 × 5,592,620 B (16.78 MB) | 3 × 1,398,344 B (4.20 MB) | ~4.32 MB |
+| `wooden_crate_02` | 1 submesh | 240,560 B | 124 B | 3 × 5,592,620 B (16.78 MB) | 3 × 1,398,344 B (4.20 MB) | ~4.44 MB |
+| `painted_wooden_bench` | 1 submesh | 40,136 B | 124 B | 3 × 5,592,620 B (16.78 MB) | 3 × 1,398,344 B (4.20 MB) | ~4.24 MB |
+
+Every 1024² texture compresses from 5,592,620 bytes (uncompressed RGBA8 with complete mip chain) to
+exactly 1,398,344 bytes under BC7 — an exact **4.00× reduction**.
+
+#### 3. Scene placement (`samples/m16-blender-props/props.rscene`)
+The assets were placed in an authored 7-entity `.rscene` featuring a camera, directional light,
+player spawn, ground surface with street material, and three `rime::render::MeshAsset` entities
+referencing the cooked mesh content hashes (`bd6bb2b55ec1faf5`, `ef870996039b3b01`, `c3d6b979d3317dda`).
+
+#### 4. Editor viewport verification
+In the editor host (`editor-gui` and headless smoke `ed2.png`):
+- All three props render with their full cooked PBR textures out of the box.
+- Asset bridge settles in 4 rounds (`asset settle took 4 round(s); 3 material(s) resolved, 0 pending`).
+- Texturing works immediately because `engine/app/editor_host_app.cpp:510` registers the material sets:
+  ```cpp
+  renderer.set_material_sets(bridge.material_sets());
+  ```
+
+#### 5. Runtime note: registering material sets (`set_material_sets`)
+In `samples/99-the-block/main.cpp:2462-2464`, `run_play` settles the asset server but omits
+the call to `visuals->renderer.set_material_sets(bridge->material_sets());`. As specified in
+`engine/render/include/rime/render/scene_renderer.hpp:583-584`, the renderer defaults to null
+material sets (falling back to entity-level `MaterialRef`). Consequently, props render with correct
+geometry and transforms but draw untextured white (`game-as-is.png`). Adding that single line
+supplies the `MaterialSetRegistry` and restores full PBR texturing in the standalone game
+(`game-one-line.png`).
+
 ## 8. The first thing to make
 
 A **trim sheet** for one building kit: one 2048² sheet with window frames, sills, cornices, pipes
 and vents as horizontal strips, and a couple of 1024² tiling wall surfaces. It is the highest-leverage
 texture in this whole document — one sheet textures a town — and it exercises every part of the
 contract above: density, ORM packing, +Y normals, one UV set, and clamped sampling on the sheet.
+
+---
+
+## 9. What does not survive the export: mask-driven procedural materials (m16.10)
+
+The contract above assumes a material whose maps are **bound to PBR slots**: an image in
+`baseColorTexture`, an image in `metallicRoughnessTexture`, and so on. Blender lets you build a
+material that computes its colour instead — a **trim sheet** where a mask selects between tinted
+layers inside the node graph, with no single image that *is* the base colour. glTF has no way to
+express that, so the exporter picks whichever image is nearest the base-colour slot and the result
+is wrong in a way that looks like a renderer bug.
+
+**Measured on Poly Haven's `overhead_crane` (2026-10-23).** Its `overhead_crane_trim` material
+exports with `baseColorTexture` → image 1, which is `overhead_crane_trim_mask`. The mask is a
+selection map, not an albedo, so the crane renders as saturated mask noise. Nothing in the chain
+reports an error: the fetch verifies, Blender exits 0, `rime cook` cooks six textures and two
+materials, the mesh resolves, and the renderer draws exactly what it was given. Evidence:
+`reports/rime-oct23-big-assets/crane-mask-bug.png`.
+
+**How to spot it before you cook.** Open the `.blend` and look at the material's Base Color input.
+If it is a texture node, you are fine. If it is a Mix / ColorRamp / Map Range fed by a `*_mask`
+image, the asset needs baking first.
+
+**The fix is to bake, not to patch the exporter.** In Blender, bake the node graph down to a flat
+base-colour image (Cycles → Bake → Diffuse, colour only), bind that to Base Color, and export. A
+heuristic in `export_gltf.py` that rejected images named `*_mask` would only move the failure: the
+asset would then export with *no* base colour at all, which is not better.
+
+The three m16.9 props and the three m16.10 assets that do work (`covered_car`,
+`old_military_compressor`, `dutch_ship_large_01`) all use straight texture-to-slot chains. A trim
+sheet is the first thing in this repo that does not.

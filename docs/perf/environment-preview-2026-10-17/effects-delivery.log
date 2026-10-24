@@ -1,0 +1,6 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+effects-smoke: diagnostic GPU fx-smoke 24 frames p50 0.004096 p99 0.382976 ms
+effects-smoke: changed=4052 drift=0 live=72 requested=72 spawned=72 capacity-drops=0 render-drops=0 state-unchanged=1 result=PASS
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/effects-delivery.off.ppm
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/effects-delivery.on.ppm

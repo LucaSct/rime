@@ -1,0 +1,53 @@
+-- Using Conan toolchain: /home/next/projects/rime/build/release/conan_toolchain.cmake
+-- Conan toolchain: Defining architecture flag: -m64
+-- Conan toolchain: C++ Standard 20 with extensions OFF
+-- The CXX compiler identification is GNU 16.2.1
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: /usr/bin/c++ - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- Conan: Component target declared 'fmt::fmt'
+-- Conan: Component target declared 'libjpeg-turbo::jpeg-static'
+-- Conan: Component target declared 'libjpeg-turbo::turbojpeg-static'
+-- Conan: Target declared 'libjpeg-turbo::libjpeg-turbo'
+-- Conan: Target declared 'LZ4::lz4_static'
+-- Conan: Component target declared 'libsvtav1::encoder'
+-- Conan: Target declared 'libsvtav1::libsvtav1'
+-- Conan: Target declared 'dav1d::dav1d'
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Success
+-- Found Threads: TRUE
+-- Found X11: /usr/include
+-- Looking for XOpenDisplay in /usr/lib/libX11.so;/usr/lib/libXext.so
+-- Looking for XOpenDisplay in /usr/lib/libX11.so;/usr/lib/libXext.so - found
+-- Looking for gethostbyname
+-- Looking for gethostbyname - found
+-- Looking for connect
+-- Looking for connect - found
+-- Looking for remove
+-- Looking for remove - found
+-- Looking for shmat
+-- Looking for shmat - found
+-- Looking for IceConnectionNumber in ICE
+-- Looking for IceConnectionNumber in ICE - found
+-- Found PkgConfig: /usr/bin/pkg-config (found version "3.0.7")
+-- Checking for module 'wayland-client'
+--   Found wayland-client, version 1.26.0
+-- Checking for module 'wayland-cursor'
+--   Found wayland-cursor, version 1.26.0
+-- Checking for module 'xkbcommon'
+--   Found xkbcommon, version 1.13.2
+-- The C compiler identification is GNU 16.2.1
+-- Detecting C compiler ABI info
+-- Detecting C compiler ABI info - done
+-- Check for working C compiler: /usr/bin/cc - skipped
+-- Detecting C compile features
+-- Detecting C compile features - done
+-- rime_audio: ALSA sink enabled
+-- Conan: Target declared 'doctest::doctest'
+-- Rime: RIME_SANITIZER=off
+-- Rime 0.0.1 — Targets: rime_core, rime_platform, rime_rhi, rime_ecs, rime_physics, rime_assets, rime_destruction, rime_audio, rime_vfx, rime_fluids, rime_render, rime_stream, rime_editorhost, rime_scene, rime_app, rime_net, rime_replication, rime_destruction_net, rime_gameplay, rime_gameplay_net, rime_destruction_render, rime_blockkit, rime_capi, rime_hello.
+-- Configuring done (0.7s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/next/reports/rime-collapse-scaling-2026-10-17/environment-cpu-build

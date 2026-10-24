@@ -1,0 +1,10 @@
+[1/10] Building CXX object engine/blockkit/CMakeFiles/rime_blockkit.dir/src/palette.cpp.o
+[2/10] Linking CXX static library lib/librime_blockkit.a
+[3/10] Linking CXX executable bin/rime-blockgen
+[4/10] Linking CXX executable bin/the_block
+[5/10] Linking CXX executable bin/block_standup_test
+[6/10] Linking CXX executable bin/the-block-host
+[7/10] Linking CXX executable bin/rime_worldkit_tests
+[8/10] Linking CXX executable bin/block_render_test
+[9/10] Building CXX object tests/blockkit/CMakeFiles/blockkit_test.dir/blockkit_test.cpp.o
+[10/10] Linking CXX executable bin/blockkit_test

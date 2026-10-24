@@ -1,0 +1,6 @@
+In file included from /home/next/projects/rime/tests/rhi/descriptor_cache_test.cpp:26:
+In file included from /home/next/.conan2/p/docte2fe58cbe17539/p/include/doctest/doctest.h:499:
+/usr/bin/../lib64/gcc/x86_64-pc-linux-gnu/16/../../../../include/c++/16/ciso646:49:6: warning: "<ciso646> is not a standard header since C++20, use <version> to detect implementation-specific macros" [-W#warnings]
+   49 | #    warning "<ciso646> is not a standard header since C++20, use <version> to detect implementation-specific macros"
+      |      ^
+1 warning generated.

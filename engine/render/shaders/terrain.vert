@@ -109,6 +109,33 @@ layout(location = 1) out vec2 v_local;
 // the neighbour is coarser, which no distance formula in the fragment stage would know about.
 layout(location = 2) out vec3 v_lod;
 
+// Smooth SHADING normal, from central differences of the heightfield ("heightfield normals").
+//
+// A triangle's face normal is constant, so shading from it paints every facet a flat tone and the
+// terrain looks like cut paper. The surface the heights DESCRIBE is smooth, and its slope at a
+// sample is the central difference of its neighbours:  n = normalize(-dh/dx, 1, -dh/dz)  with
+// dh/dx = (h[i+1] - h[i-1]) / (2 cell_x).  Computed per vertex and interpolated, so a facet
+// shades as a ramp between its corners' slopes. The fragment stage keeps the FACE normal for the
+// shadow-bias offset, since bias must follow the triangle that is actually rasterised.
+// Neighbours are clamped at the tile border (one-sided there), a small slope error on the
+// outermost row only. Uses this tile's own samples at every LOD level, so a coarser tile shades
+// from its own coarser heights, which is what its geometry shows.
+layout(location = 3) out vec3 v_normal;
+
+float height_at(int i, int j, int last) {
+    const float q = texelFetch(heightfield, ivec2(clamp(i, 0, last), clamp(j, 0, last)), 0).r * 65535.0;
+    return pc.grid.z * q;
+}
+
+vec3 smooth_normal(int i, int j) {
+    const int last = int(pc.grid.w) - 1;
+    const float dx = (height_at(i + 1, j, last) - height_at(i - 1, j, last)) /
+                     (float(min(i + 1, last) - max(i - 1, 0)) * pc.grid.x);
+    const float dz = (height_at(i, j + 1, last) - height_at(i, j - 1, last)) /
+                     (float(min(j + 1, last) - max(j - 1, 0)) * pc.grid.y);
+    return normalize(vec3(-dx, 1.0, -dz));
+}
+
 const int kLodEnabled = 16; // kTerrainPushLodEnabled
 
 // m19.8d2: the dequantised height of sample (i, j) in WORLD metres, for the LOD path.
@@ -136,6 +163,7 @@ void main() {
     // triangle list ignores it.
     gl_PointSize = 1.0;
     v_local = vec2(float(i) * pc.grid.x, float(j) * pc.grid.y);
+    v_normal = smooth_normal(int(i), int(j));
 
     if ((pc.lod_tile.z & kLodEnabled) == 0) {
         // ── The m19.3 path, unchanged: a tile on its own, placed by its own origin. ──────────

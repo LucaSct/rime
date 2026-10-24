@@ -38,11 +38,16 @@ rime_add_test(rime_render_tests
     pick_test.cpp
     gizmo_test.cpp
     shadow_test.cpp
+    shadow_motion_test.cpp
+    shadow_caster_tracker_test.cpp
+    shadow_stability_test.cpp
+    shadow_transition_test.cpp
     local_shadow_test.cpp
     clustered_test.cpp
     sdf_clipmap_test.cpp
     ddgi_test.cpp
     ddgi_history_test.cpp
+    ddgi_surface_query_test.cpp
     gi_thesis_test.cpp
     gbuffer_test.cpp
     ssr_test.cpp
@@ -56,6 +61,7 @@ rime_add_test(rime_render_tests
     frame_scratch_test.cpp
     render_transform_test.cpp
     draw_path_test.cpp
+    material_binding_cache_test.cpp
     viewer_frame_graph_test.cpp)
 
 # rime::vfx joins the link for the fx1a coverage-delta proof: the CPU sim is the input the
@@ -78,6 +84,7 @@ target_compile_definitions(rime_render_tests
 rime_add_shaders(rime_render_tests
     ${CMAKE_SOURCE_DIR}/engine/render/shaders/fullscreen.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/first_person_depth_probe.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/shadow_transition_probe.frag
     ${CMAKE_SOURCE_DIR}/engine/render/shaders/ddgi_remap.comp
     ${CMAKE_SOURCE_DIR}/tests/rhi/shaders/pushconst.vert
     ${CMAKE_SOURCE_DIR}/tests/rhi/shaders/pushconst.frag

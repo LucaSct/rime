@@ -279,6 +279,9 @@ void RenderGraph::declare_access(std::uint32_t resource, rhi::ResourceState stat
         case rhi::ResourceState::DepthTarget:
             r.usage |= rhi::TextureUsage::DepthStencil;
             break;
+        case rhi::ResourceState::DepthReadOnly:
+            r.usage |= rhi::TextureUsage::DepthStencil | rhi::TextureUsage::Sampled;
+            break;
         case rhi::ResourceState::ShaderRead:
             r.usage |= rhi::TextureUsage::Sampled;
             break;
@@ -373,9 +376,17 @@ void RenderGraph::add_raster_pass(std::string_view name, const RasterPassDesc& d
         declare_access(c.texture.index, rhi::ResourceState::ColorTarget, true);
     }
     if (p.has_depth) {
-        declare_access(p.depth.texture.index, rhi::ResourceState::DepthTarget, !p.depth.read_only);
+        declare_access(p.depth.texture.index,
+                       p.depth.read_only ? rhi::ResourceState::DepthReadOnly
+                                         : rhi::ResourceState::DepthTarget,
+                       !p.depth.read_only);
     }
     for (const RGTexture& t : desc.sampled) {
+        // Coalesce simultaneous depth-test and sampled reads into one state. Two successive
+        // declarations would transition to ShaderRead and then back on begin_rendering, leaving
+        // the descriptor's promised layout inconsistent with the actual attachment layout.
+        if (p.has_depth && p.depth.read_only && t.index == p.depth.texture.index)
+            continue;
         declare_access(t.index, rhi::ResourceState::ShaderRead, false);
     }
     for (const RGTexture& t : desc.storage) {
@@ -673,7 +684,8 @@ void RenderGraph::execute(rhi::CommandBuffer& cmd) {
                 continue;
             }
             const bool attachment = a.state == rhi::ResourceState::ColorTarget ||
-                                    a.state == rhi::ResourceState::DepthTarget;
+                                    a.state == rhi::ResourceState::DepthTarget ||
+                                    a.state == rhi::ResourceState::DepthReadOnly;
             if (attachment) {
                 r.state = a.state; // begin_rendering will transition; keep our tracking honest
                 continue;
@@ -704,6 +716,7 @@ void RenderGraph::execute(rhi::CommandBuffer& cmd) {
                 da.target = resources_[pass.depth.texture.index].physical;
                 da.load_op = pass.depth.load;
                 da.store_op = pass.depth.store;
+                da.read_only = pass.depth.read_only;
                 da.clear_depth = pass.depth.clear_depth;
                 da.clear_stencil = pass.depth.clear_stencil;
                 da.layer =

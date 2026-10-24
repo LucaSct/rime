@@ -1,0 +1,3 @@
+partial-publication rejected 1 AssertionError: partial publication on refusal/no-op
+lost-receipt rejected 1 AssertionError
+tick-allocation rejected 1 AssertionError: advance allocated memory

@@ -1,0 +1,18 @@
+{
+  "implementation_commit": "9d50cb843226b93180b9de98457b27056afe3f09",
+  "source_sha256": {
+    "engine/fluids/include/rime/fluids/thermal_contact.hpp": "e4519f8aad84a8fa896425796190b2cd4f6db64b049dc51a1f8602c13e9da910",
+    "engine/fluids/src/thermal_contact.cpp": "a72a3ae63b0945e995e57031038f97c7e0d9a8e8e139fe1f3f94318ed549d2a5",
+    "tests/fluids/thermal_contact_test.cpp": "8f9f15f45714fda4382ac28e5562612884e7217193ba84969041be10d82f67b3",
+    "tests/fluids/verify_thermal_contact.py": "ff13167a1c0030b4d7e9a2d4422b3d7f4778b9b44afd65bd87c574b59532e345",
+    "engine/fluids/src/phase_change.cpp": "1aa5ef75a0cf9940d3b61b47a3eb01b7eef88964b78613aee623121b1628baeb",
+    "engine/fluids/include/rime/fluids/phase_change.hpp": "98f2beb4bc21f201ae221ed3efd1ab5836fbc4c2d9da9f04a392174b308560bb"
+  },
+  "artifact_sha256": {
+    "build/release/lib/librime_fluids.a": "53a875c283088a6ae7a2093c4124522f614054a125763d840c70c48c75791c33",
+    "build/release/bin/rime_fluids_tests": "d4acc08c7250a48ca0260ea5424820958db3128249085b5288ff5fd6933993d3",
+    "/home/next/reports/rime-thermal-exchange-2026-10-18/libthermal-clang.a": "28c705009e1b45f9e08c8d7c16c0c1148425a0d63b6cdc1cfdbf14f5e0bc06a5",
+    "/home/next/reports/rime-thermal-exchange-2026-10-18/asan-tests": "383c4cfe22aa116a2bb6fb10f1e5a22fbb8d10d239da073b3ab5db87683ff6ed",
+    "/home/next/reports/rime-thermal-exchange-2026-10-18/sdk-contact/build/thermal_contact_sdk": "d7945035168dd737b815100eb371f862666adcab985ed2e5e10ee7fa641c44c7"
+  }
+}

@@ -1,0 +1,5 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+courtyard: 2160 thermal ticks, 0 refused, 119 particles, 3 phase surfaces

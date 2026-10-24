@@ -1,0 +1,26 @@
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+phase pixel proof: ice 0.423309 vs liquid 0.063166 radiance; neighbor, Stop/empty and stale generation exact
+===============================================================================
+[doctest] test cases:    3 |    3 passed | 0 failed | 0 skipped
+[doctest] assertions: 4783 | 4783 passed | 0 failed |
+[doctest] Status: SUCCESS!
+
+=================================================================
+==2519619==ERROR: LeakSanitizer: detected memory leaks
+
+Direct leak of 256 byte(s) in 1 object(s) allocated from:
+    #0 0x7fa9d2d89451  (/usr/lib/libasan.so.8+0x189451) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7ba9cdb7dafe  (<unknown module>)
+
+Indirect leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7fa9d2d8aa21 in calloc (/usr/lib/libasan.so.8+0x18aa21) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7ba9cdecc398  (<unknown module>)
+
+Indirect leak of 56 byte(s) in 1 object(s) allocated from:
+    #0 0x7fa9d2d8aa21 in calloc (/usr/lib/libasan.so.8+0x18aa21) (BuildId: 9984d9525c58ce2da97a0c6855b72ef802ee1bbe)
+    #1 0x7ba9cdecc380  (<unknown module>)
+
+SUMMARY: AddressSanitizer: 368 byte(s) leaked in 3 allocation(s).

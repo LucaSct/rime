@@ -1,0 +1,53 @@
+{
+  "scope": "Actual current authored city-v2, native RTX3060 --perf,3frames,warmup0,1280x720. Counts only, no native timing/FPS/performance gate qualification.",
+  "rows": [
+    {
+      "invocation": 0,
+      "draws": 36,
+      "attempts": 180,
+      "issues": 12,
+      "filter": 2,
+      "match": 0,
+      "caster": 0
+    },
+    {
+      "invocation": 1,
+      "draws": 36,
+      "attempts": 180,
+      "issues": 12,
+      "filter": 2,
+      "match": 0,
+      "caster": 0
+    },
+    {
+      "invocation": 2,
+      "draws": 36,
+      "attempts": 180,
+      "issues": 12,
+      "filter": 2,
+      "match": 0,
+      "caster": 0
+    }
+  ],
+  "aggregate": {
+    "invocations": 3,
+    "draws": 108,
+    "attempts": 540,
+    "issues": 36
+  },
+  "unconditional_attachment_calls": 540,
+  "actual_attachment_calls": 36,
+  "avoided_cpu_attachment_calls": 504,
+  "avoided_fraction": 0.9333333333333333,
+  "trace_truncated": false,
+  "product_source_unchanged": {
+    "/home/next/projects/rime/engine/render/src/passes.cpp": true,
+    "/home/next/projects/rime/engine/render/src/material_binding_cache.hpp": true,
+    "/home/next/projects/rime/samples/99-the-block/city-v2.rscene": true
+  },
+  "linked_inputs_unchanged": true,
+  "log_sha256": "bd1453a22faa61ff59956fcf49905d0f028fa8bdc8317e28d02062075c9823a1",
+  "instrumented_perf_json_sha256": "eb1913261009762454629d901a1fff346c78d0080f68fd69f34ab2a92bc22623",
+  "execution_gate_exit": 1,
+  "interpretation": "Reduction in CPU material texture/sampler attachment calls; GPU draw counts,descriptor-set bindings and native speedup were not compared. Current authored camera submits36textured draws/frame; this is not the standard default-city600frame workload."
+}

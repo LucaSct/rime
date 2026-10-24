@@ -1,0 +1,26 @@
+{
+  "city-full": {
+    "max_mean_row_step": 0.0412104950980392,
+    "row": 374,
+    "mean_above": 0.14452488970588234,
+    "mean_below": 0.18573538480392154
+  },
+  "bias-full": {
+    "max_mean_row_step": 0.0006447549019607812,
+    "row": 376,
+    "mean_above": 0.14613538357843137,
+    "mean_below": 0.14678013848039215
+  },
+  "city-no-ssr": {
+    "max_mean_row_step": 0.04680219607843142,
+    "row": 374,
+    "mean_above": 0.0894765870098039,
+    "mean_below": 0.13627878308823532
+  },
+  "bias-no-ssr": {
+    "max_mean_row_step": 0.00027377205882353484,
+    "row": 376,
+    "mean_above": 0.09110075980392156,
+    "mean_below": 0.09137453186274509
+  }
+}

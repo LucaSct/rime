@@ -1,0 +1,15 @@
+{
+  "model": "claude-fable-5-1",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Independent read-only consultation. Provide your OWN proposal, not feedback on an unseen implementation. Do not call tools or write code/files. We are building a small C++20 CPU reference for temperature-driven water freezing/melting in a game engine. One fixed, well-mixed mass; approximate fresh water at fixed ambient pressure, constant heat capacities, no conduction, transport, evaporation, expansion, geometry, physics forces or network authority yet. Existing water solver is separate. Need temperature and liquid MASS fraction from thermal state, signed heat and power/dt inputs, explicit invalid/range/numerical refusal, atomic failure, zero-input invariance, energy accounting and falsifiable latent-heat sensitivity control. Example defaults: melting 273.15 K, solid cp 2052 and liquid cp 4179 J/(kg K), fusion 333500 J/kg; declared model interval 253.15 to 313.15 K. Parameters/mass are immutable for a sample. We own implementation and locally verify every suggestion. No third-party source import. Keep response under 650 words. Propose the smallest physically coherent state, initialization (including ambiguous temperature exactly at melting), update and result contract. Identify likely future coupling traps and choose six decisive tests, with numeric witnesses. Clearly distinguish mass fraction from volume fraction and an equilibrium reference from a spatial freezing simulation."
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "reasoning_effort": "low",
+  "max_tokens": 8000
+}

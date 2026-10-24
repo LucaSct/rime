@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.25)
+project(thermal_sdk_consumer LANGUAGES CXX)
+find_package(rime CONFIG REQUIRED)
+add_executable(thermal_consumer main.cpp)
+target_compile_features(thermal_consumer PRIVATE cxx_std_20)
+target_link_libraries(thermal_consumer PRIVATE rime::fluids_scene rime::editorhost)

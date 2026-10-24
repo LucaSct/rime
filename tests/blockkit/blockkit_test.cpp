@@ -272,6 +272,37 @@ TEST_CASE("blockkit: the palette covers every role it is handed") {
     // No prop got a mesh, because none could be uploaded.
     CHECK(stats.meshed == 0);
 
+    SUBCASE("static timber survives save and reconstructs without cooked destruction") {
+        const auto timber = world.spawn();
+        (void)world.add_component(timber, ecs::LocalTransform{});
+        (void)world.add_component(
+            timber, blockkit::SlabRole{blockkit::kNoBuilding, 0, blockkit::slab_kind::kTimber, 0});
+        CHECK_FALSE(blockkit::slab_kind::is_destructible(blockkit::slab_kind::kTimber));
+        auto uploaded = palette;
+        uploaded.unit_cube = 42; // Stand in for the drawing peer's registry; no GPU used here.
+        CHECK(blockkit::apply_palette(world, uploaded).missing == 0);
+        REQUIRE(world.get<render::MeshRef>(timber) != nullptr);
+        REQUIRE(world.get<render::MaterialRef>(timber) != nullptr);
+        CHECK(world.get<render::MeshRef>(timber)->mesh == uploaded.unit_cube);
+        CHECK(world.get<render::MaterialRef>(timber)->material == palette.crate);
+        const auto saved = scene::save_scene_to_string(world);
+        CHECK(saved.find("rime::render::MeshRef") == std::string::npos);
+        CHECK(saved.find("rime::render::MaterialRef") == std::string::npos);
+        ecs::World reopened;
+        register_block_components(reopened);
+        REQUIRE(scene::load_scene_from_string(reopened, saved).ok);
+        CHECK(blockkit::apply_palette(reopened, uploaded).missing == 0);
+        std::size_t boards = 0;
+        reopened.query<blockkit::SlabRole, render::MeshRef>().for_each(
+            [&](const blockkit::SlabRole& role, const render::MeshRef& mesh) {
+                if (role.kind == blockkit::slab_kind::kTimber) {
+                    CHECK(mesh.mesh == uploaded.unit_cube);
+                    ++boards;
+                }
+            });
+        CHECK(boards == 1);
+    }
+
     SUBCASE("the ground storey wears the band and the storeys above wear the facade") {
         std::size_t banded = 0;
         std::size_t faced = 0;
@@ -303,6 +334,41 @@ TEST_CASE("blockkit: the palette covers every role it is handed") {
         CHECK(again.materialed == stats.materialed);
         CHECK(again.missing == 0);
         CHECK(materials.size() == palette.material_count); // no ids minted on a second pass
+    }
+
+    SUBCASE("saving a prepared viewport retains roles and excludes registry indices") {
+        std::size_t excluded = 0;
+        const std::string saved = scene::save_scene_to_string(world, &excluded);
+        CHECK(excluded == geometry_roles);
+        CHECK(saved.find("rime::render::MaterialRef") == std::string::npos);
+        CHECK(saved.find("rime::render::MeshRef") == std::string::npos);
+        ecs::World reopened;
+        register_block_components(reopened);
+        const auto loaded = scene::load_scene_from_string(reopened, saved);
+        REQUIRE(loaded.ok);
+        CHECK(loaded.skipped_components == 0);
+        const auto rebuilt = blockkit::apply_palette(reopened, palette);
+        CHECK(rebuilt.materialed == stats.materialed);
+        CHECK(rebuilt.missing == 0);
+    }
+
+    SUBCASE("an authored material survives deriving a prop mesh") {
+        // Adding the derived tag relocates the archetype. The palette must read authored
+        // intent before that edit, never keep a component pointer across structural change.
+        const auto prop = world.spawn_with(
+            blockkit::SlabRole{blockkit::kNoBuilding, 0, blockkit::slab_kind::kKerb, 0},
+            render::MaterialAsset{123});
+        auto with_mesh = palette;
+        with_mesh.unit_cube = 17; // a non-invalid registry id; no GPU dereference in the palette
+        const auto applied = blockkit::apply_palette(world, with_mesh);
+        CHECK(applied.authored == 1);
+        REQUIRE(world.get<render::MaterialAsset>(prop) != nullptr);
+        CHECK(world.get<render::MaterialAsset>(prop)->asset == 123);
+        CHECK(world.get<render::MaterialRef>(prop) == nullptr);
+        REQUIRE(world.get<render::MeshRef>(prop) != nullptr);
+        CHECK(world.get<render::MeshRef>(prop)->mesh == 17);
+        const auto saved = scene::save_scene_to_string(world);
+        CHECK(saved.find("rime::render::MeshRef") == std::string::npos);
     }
 }
 

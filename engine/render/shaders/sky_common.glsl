@@ -27,6 +27,8 @@ layout(std140, set = 0, binding = 2) uniform SkyParams {
     vec4 horizon;        // rgb horizon colour, a = ground/below-horizon darkening
     vec4 cloud;          // x coverage [0,1], y density, z altitude (m), w scale (1/m)
     vec4 wind;           // xy scrolling offset (m), z cloud sharpness, w = enabled flag
+    vec4 aerial_rayleigh; // rgb Rayleigh extinction at sea level (1/m, already x density), w scale height (m)
+    vec4 aerial_mie;      // rgb Mie extinction at sea level (1/m, already x density), w scale height (m)
 }
 sky;
 
@@ -86,6 +88,25 @@ float sky_sun_disc_mask(vec3 dir) {
 vec3 sky_sun_disc_radiance(vec3 dir, float source_scale) {
     return max(sky.sun_radiance.rgb, vec3(0.0)) * max(sky.zenith.a, 0.0) * source_scale *
            sky_sun_disc_mask(dir) * 12.0;
+}
+
+// The sun disc, calibrated against the direct light instead of an eyeballed multiplier.
+//
+// Radiometry: a source of radiance L subtending solid angle omega delivers irradiance E = L*omega
+// (for a small disc). The sky LUT and the DirectionalLight are both driven by the same solar
+// irradiance E = sun_radiance * intensity * kSceneSolarScale, so the disc that PRODUCES that
+// irradiance has L = E / (pi r^2). That is why enlarging the disc (a bigger r reads better on a
+// 1280x720 frame) now DIMS it: area x radiance stays constant, so the visible sun can never
+// disagree with the light it stands for. The true value is far above anything a display can show
+// (the disc tonemaps to flat white either way), so it is clamped to a finite HDR ceiling to keep
+// FP16 targets, TAA neighbourhood clamps and bloom out of overflow territory.
+const float kSunDiscMaxRadiance = 4000.0;
+vec3 sky_sun_disc_radiance_physical(vec3 dir) {
+    const float r = max(sky.sun_radiance.a, 1e-4);
+    const vec3 irradiance =
+        max(sky.sun_radiance.rgb, vec3(0.0)) * max(sky.zenith.a, 0.0) * kSceneSolarScale;
+    const vec3 radiance = min(irradiance / (3.14159265358979 * r * r), vec3(kSunDiscMaxRadiance));
+    return radiance * sky_sun_disc_mask(dir);
 }
 
 // `disc_scale` scales the sun's OWN DISC, and it is 1.0 for the background picture and 0.0 for
@@ -156,6 +177,17 @@ vec2 clouds(vec3 dir) {
     float toward_sun = fbm(p + sky.sun_dir.xz * 2.4);
     float lit = clamp(1.15 - (toward_sun - n) * 1.8, 0.35, 1.25);
     return vec2(cov, lit);
+}
+
+// How much of the sun's light survives the cloud deck along `dir` (1 = clear, kCloudLeak = fully
+// covered). ONE function feeds both the visible disc (sky.frag) and -- mirrored in sky.cpp, which
+// carries a CPU port of the same fBm -- the DirectionalLight's radiance, so a cloud drifting over
+// the sun dims the disc and the shadows/lighting together instead of only painting over the disc.
+// Thick cloud is never perfectly opaque to the sun: a little direct light still leaks through, and
+// the floor also stops the lit scene from going to black the instant coverage reaches one.
+const float kCloudLeak = 0.12;
+float sky_sun_cloud_transmittance(vec3 dir) {
+    return mix(1.0, kCloudLeak, clouds(dir).x);
 }
 
 // The WHOLE sky along `dir` -- the gradient, the sun, and the cloud layer composited over them.

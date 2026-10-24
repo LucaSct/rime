@@ -766,3 +766,43 @@ The test now requires positive cumulative evidence for every phase of each of th
 in both sequential and worker runs, over 120 measured steps. It retains per-step accounting and
 hash checks, and rejects each missing phase in sensitivity controls. Temporarily suppressing the
 actual store timer also failed the test; production timing was restored unchanged.
+
+## Wavefront-ordered SSE velocity sweep — bit-identical, `sim.block` p99 -10 % (2026-10-22)
+
+`engine/physics/src/wavefront.hpp` (`52f7c94`) level-schedules a large island's (>= 32 constraints)
+Gauss–Seidel velocity sweep so constraints at the same depth share no dynamic body, then solves up
+to four of them at once in SSE2 with the same operations in the same dependency order as the scalar
+sweep. It is a cost knob, not a quality knob: `PhysicsWorld::set_wavefront_solve_enabled(false)`
+restores the scalar sweep and the bits do not move. arm64 keeps the scalar sweep (no NEON port yet).
+
+**Bit-identity, measured:** `solver_bench` step-1/last hashes `1b569ff2922fa200` /
+`fd45cbc431cce188` from both arms; all 120 `contact_bench --fixed-world` step hashes identical
+across arms; and `tests/physics/stats_test.cpp` ("wavefront velocity sweep is bit-identical…")
+compares `world_hash()` on **every** step of a knocked-over 64-box heap, with the wide path
+running on 116 of 120 steps. Its sensitivity control: scaling one wide-lane normal impulse by
+1.0000001f splits the hash at step 4.
+
+**Interleaved A/B, same tree, the knob compiled off vs on** (Release, unpinned, RTX 3060,
+`--perf --frames 600`). Because the change is bit-identical the workload is the same in both arms
+— every run's ledger reads `parts.alive_end 1110`, `debris.peak_live 782` — so, unlike tier 2
+above, this sample CAN price it:
+
+| pair | scalar `sim.block` p50 / p99 / max | wavefront p50 / p99 / max | p99 delta |
+|---|---|---|---|
+| 1 | 3.101 / 5.387 / 6.412 | 2.612 / **4.678** / 4.986 | -13.2 % |
+| 2 | 2.887 / 5.266 / 6.363 | 2.460 / **4.741** / 5.114 | -10.0 % |
+| 3 | 2.881 / 5.226 / 6.057 | 2.827 / **4.731** / 5.145 | -9.5 % |
+
+`--perf` prints no p95 for `sim.block`. `solver_bench` (five alternating pairs, median of medians):
+velocity 5 723 -> **2 108 us** (2.7x), whole solve 7 508 -> 3 840 us, 1.488 -> **0.548 us per
+constraint**. `contact_bench --fixed-world --workers 0` medians 3.81 vs 3.83 ms — narrowphase,
+untouched by this change, so it is the in-sitting control and it did not move.
+
+**What this is not.** It is not a gate-7 closure: the run was unpinned and the box was not quiet
+(another project's `ctest` and a viewmodel smoke were running throughout — interleaving spreads that
+over both arms, and the delta held its sign and size in all three pairs). Gate 7 needs the pinned,
+owner-present run described above. And **the scalar arm was already under 6.000 ms** — 5.23–5.39
+against 8.533 on 2026-10-11 — so the drop below budget on this probe came from work landed between those trees (which commits,
+and how much each, was not measured here), not from this brick; this brick adds ~0.6 ms of p99
+margin on top. The
+max (one frame) now also sits under 6.000, where the scalar arm's did not.

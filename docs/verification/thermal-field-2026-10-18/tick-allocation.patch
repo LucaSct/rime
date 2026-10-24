@@ -1,0 +1,4 @@
+--- original
++++ tick-allocation
+@@ -105,0 +106 @@
++    work_journal_.shrink_to_fit();

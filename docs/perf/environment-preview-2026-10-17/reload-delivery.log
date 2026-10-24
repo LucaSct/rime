@@ -1,0 +1,63 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+99-the-block: held-scar-h.glb topology original=23255 body=22103 magazine=1152 fnv64=4c74aa9179600eba
+99-the-block: held-m4a1.glb topology original=21555 body=20891 magazine=664 fnv64=57fbe42330511e32
+99-the-block: held-msr.glb topology original=12194 body=11276 magazine=918 fnv64=c50f3118a2bb7efa
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.scar.ppm
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.m4.ppm
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.scar-aim.ppm
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.m4-aim.ppm
+viewmodel-smoke: physical ocular apparent magnification 5.00255x
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.sniper.ppm
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.optical.ppm
+viewmodel-smoke: eye in optic -0.000000 0.000000 0.050000
+viewmodel-smoke: grip error 0.000000 m, angle 0.000000 rad, skin motion 0.618608 m
+viewmodel-smoke: optical transmission control changes 71120 / 71177 lens pixels
+viewmodel-smoke: SCAR coverage 11908 px, M4 swap 13415 px, baseline drift 755 px, SCAR drift 920 px, removal residual 0 px, meshes/materials/textures 11/28/23
+viewmodel-smoke: rendered target 10 -> 52 pixels (5.200x); eye relief 50 mm
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.target-direct.ppm
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.target-scoped.ppm
+viewmodel-smoke: SCAR measured reach L 0.0044..0.5130 R 0.0044..0.5130 m
+viewmodel-smoke: SCAR idle-control sweep 30 frames, busy 0, invalid 0, clamped 0 (first -1.000 s), wrist miss L 0.00 R 0.00 mm, min bind skin 0.4931 m, arm delta 0.0000 m, muzzle delta 0.0000 m; reach-limited 0 frames, path kept L 1.000 R 1.000, hand travel L 0.0000 R 0.0000 m
+viewmodel-smoke: SCAR reload sweep 144 frames, busy 132, invalid 0, clamped 0 (first -1.000 s), wrist miss L 0.00 R 0.00 mm, min bind skin 0.3798 m, arm delta 0.3936 m, muzzle delta 0.4999 m; reach-limited 0 frames, path kept L 1.000 R 1.000, hand travel L 0.1729 R 0.0000 m
+viewmodel-smoke: SCAR magazine contact 66 frames, max gap 0.000 mm
+viewmodel-smoke: M4 measured reach L 0.0044..0.5130 R 0.0044..0.5130 m
+viewmodel-smoke: M4 idle-control sweep 30 frames, busy 0, invalid 0, clamped 0 (first -1.000 s), wrist miss L 0.00 R 0.00 mm, min bind skin 0.5133 m, arm delta 0.0000 m, muzzle delta 0.0000 m; reach-limited 0 frames, path kept L 1.000 R 1.000, hand travel L 0.0000 R 0.0000 m
+viewmodel-smoke: M4 reload sweep 144 frames, busy 132, invalid 0, clamped 0 (first -1.000 s), wrist miss L 0.00 R 0.00 mm, min bind skin 0.3373 m, arm delta 0.3524 m, muzzle delta 0.3489 m; reach-limited 0 frames, path kept L 1.000 R 1.000, hand travel L 0.1457 R 0.0000 m
+viewmodel-smoke: M4 magazine contact 66 frames, max gap 0.000 mm
+viewmodel-smoke: MSR measured reach L 0.0044..0.5130 R 0.0044..0.5130 m
+viewmodel-smoke: MSR idle-control sweep 30 frames, busy 0, invalid 0, clamped 0 (first -1.000 s), wrist miss L 0.00 R 0.00 mm, min bind skin 0.6098 m, arm delta 0.0000 m, muzzle delta 0.0000 m; reach-limited 0 frames, path kept L 1.000 R 1.000, hand travel L 0.0000 R 0.0000 m
+viewmodel-smoke: MSR reload sweep 180 frames, busy 168, invalid 0, clamped 0 (first -1.000 s), wrist miss L 0.00 R 0.00 mm, min bind skin 0.6098 m, arm delta 0.3827 m, muzzle delta 0.4647 m; reach-limited 0 frames, path kept L 1.000 R 1.000, hand travel L 0.2398 R 0.0000 m
+viewmodel-smoke: MSR magazine contact 84 frames, max gap 0.000 mm
+viewmodel-smoke: MSR bolt sweep 72 frames, busy 66, invalid 0, clamped 0 (first -1.000 s), wrist miss L 0.00 R 0.00 mm, min bind skin 0.5734 m, arm delta 0.1207 m, muzzle delta 0.0752 m; reach-limited 0 frames, path kept L 1.000 R 1.000, hand travel L 0.0000 R 0.1181 m
+viewmodel-smoke: SCAR reload projected x 0.070 y 0.288 depth 0.417 m
+viewmodel-smoke: SCAR reload projected x 0.070 y 0.288 depth 0.417 m
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.SCAR-reload-phase-1.ppm
+viewmodel-smoke: SCAR reload projected x 0.124 y 0.779 depth 0.437 m
+viewmodel-smoke: SCAR reload projected x 0.124 y 0.779 depth 0.437 m
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.SCAR-reload-phase-2.ppm
+viewmodel-smoke: SCAR reload projected x 0.085 y 0.265 depth 0.415 m
+viewmodel-smoke: SCAR reload projected x 0.085 y 0.265 depth 0.415 m
+viewmodel-smoke: SCAR rendered reload: reloading 1, valid 1, clamped 0, bind skin 0.4011 m, wrist miss L 0.00 R 0.00 mm, changed 39074 px
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.scar-reload.ppm
+viewmodel-smoke: M4 reload projected x 0.130 y 0.254 depth 0.338 m
+viewmodel-smoke: M4 reload projected x 0.130 y 0.254 depth 0.338 m
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.M4-reload-phase-1.ppm
+viewmodel-smoke: M4 reload projected x 0.203 y 0.905 depth 0.342 m
+viewmodel-smoke: M4 reload projected x 0.203 y 0.905 depth 0.342 m
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.M4-reload-phase-2.ppm
+viewmodel-smoke: M4 reload projected x 0.142 y 0.221 depth 0.338 m
+viewmodel-smoke: M4 reload projected x 0.142 y 0.221 depth 0.338 m
+viewmodel-smoke: M4 rendered reload: reloading 1, valid 1, clamped 0, bind skin 0.3438 m, wrist miss L 0.00 R 0.00 mm, changed 42119 px
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.m4-reload.ppm
+viewmodel-smoke: MSR reload projected x 0.854 y 0.110 depth 0.315 m
+viewmodel-smoke: MSR reload projected x 0.843 y 0.110 depth 0.318 m
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.MSR-reload-phase-1.ppm
+viewmodel-smoke: MSR reload projected x 0.769 y 0.757 depth 0.319 m
+viewmodel-smoke: MSR reload projected x 0.769 y 0.757 depth 0.319 m
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.MSR-reload-phase-2.ppm
+viewmodel-smoke: MSR reload projected x 0.755 y 0.866 depth 0.320 m
+viewmodel-smoke: MSR reload projected x 0.755 y 0.866 depth 0.320 m
+viewmodel-smoke: MSR rendered reload: reloading 1, valid 1, clamped 0, bind skin 0.6576 m, wrist miss L 0.00 R 0.00 mm, changed 59732 px
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.sniper-reload.ppm
+  wrote /home/next/reports/rime-reload-environment-2026-10-17/reload-delivery.sniper-bolt.ppm

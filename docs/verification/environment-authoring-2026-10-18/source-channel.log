@@ -1,0 +1,5 @@
+editor-host: editor host listening on /tmp/rime-editor-1190639-1792341153887099814.sock (4 entities)
+editor: smoke/fire schema, disabled defaults and typed edit/undo/redo verified
+[INFO] editorhost: saved 5 entities to /home/next/reports/rime-environment-authoring-2026-10-18/authored-effects.rscene (1894 bytes) (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:1149)
+editor-host: editor session closed (5 entities)
+editor <-> engine OK: 28 schema types, 4 entities, 2 assets browsed; typed field edit 0 -> 1 applied and confirmed via snapshot; pick answered honestly (no viewport => miss); saved 5 entities to /home/next/reports/rime-environment-authoring-2026-10-18/authored-effects.rscene (1894 bytes); clean shutdown

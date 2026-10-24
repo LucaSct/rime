@@ -43,3 +43,9 @@ if ty == MessageType::Other(EditorMessage::Schema.to_code()) {
 }
 conn.send_editor(EditorMessage::SetComponent, &edit.encode())?;  // push an edit back
 ```
+
+The optional `thermal::ThermalPreview` (`0x020A`) carries bounded read-only
+fixed-cell diagnostics separately from authored blobs. Its shared fixture is
+checked by `tests/fluids_scene/preview_test.cpp` and Rust's thermal unit tests;
+it is not emitted by the older stream fixture generator. See the
+[wire layout and correlation rules](../../docs/design/thermal-preview-wire.md).

@@ -1,0 +1,17 @@
+{
+  "model": "gpt-6-astra",
+  "effort": "high",
+  "route": "codex exec, OpenAI provider, ChatGPT authentication",
+  "sandbox": "read-only",
+  "devpass_api_calls": 0,
+  "questions": [
+    "actual hot paths and next safe optimization",
+    "future representation, interaction and authority"
+  ],
+  "tokens_reported_by_cli": [
+    61041,
+    96110
+  ],
+  "token_metric_note": "CLI totals are not an itemized API bill; no dollar charge inferred",
+  "pricing_reference": "https://developers.openai.com/api/docs/models/gpt-6-astra"
+}

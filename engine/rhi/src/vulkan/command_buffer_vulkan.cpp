@@ -7,6 +7,8 @@
 // expresses src/dst stage+access in one place and is what ADR-0007 standardizes on.
 
 #include <algorithm>
+#include <cstdint>
+#include <type_traits>
 
 #include "vulkan/vulkan_backend.hpp"
 
@@ -18,7 +20,8 @@ namespace rime::rhi {
 VulkanCommandBuffer::~VulkanCommandBuffer() {
     // Pools still owned here mean this encoder was never submitted (the submission paths strip
     // them via release_descriptor_pools), so no GPU work references their sets — recycling is
-    // safe.
+    // safe. The descriptor-set cache goes first: it names sets inside these pools.
+    drop_descriptor_cache();
     for (VkDescriptorPool pool : pools_)
         device_.recycle_descriptor_pool(pool);
     // The timestamp query pool is encoder-owned so read_timestamps works after submission while
@@ -267,7 +270,10 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
             // color transition above: reuse must order against prior writes — that is exactly
             // the pre-pass -> forward-pass handoff, where the second pass LOADS the depth the
             // first one stored (hence READ in the destination access too).
-            const VkImageLayout layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            const auto depth_state =
+                to_vk(info.depth_stencil->read_only ? ResourceState::DepthReadOnly
+                                                    : ResourceState::DepthTarget);
+            const VkImageLayout layout = depth_state.layout;
             const bool fresh = dtex->layout == VK_IMAGE_LAYOUT_UNDEFINED;
             transition_image(cmd_,
                              dtex->image,
@@ -276,10 +282,8 @@ void VulkanCommandBuffer::begin_rendering(const RenderingInfo& info) {
                              fresh ? VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT
                                    : VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                              fresh ? VkAccessFlags2{0} : VK_ACCESS_2_MEMORY_WRITE_BIT,
-                             VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
-                                 VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
-                             VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                                 VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                             depth_state.stages,
+                             depth_state.access,
                              aspect_for(dtex->format));
             dtex->layout = layout;
 
@@ -400,8 +404,12 @@ void VulkanCommandBuffer::bind_texture(std::uint32_t binding,
     // Sampling normally promises SHADER_READ_ONLY_OPTIMAL; an image living in GENERAL (a storage
     // image a dispatch just wrote) is sampled in GENERAL instead — valid, and it saves the
     // caller a transition the render graph will later own (ADR-0019).
-    pb.layout = tex->layout == VK_IMAGE_LAYOUT_GENERAL ? VK_IMAGE_LAYOUT_GENERAL
-                                                       : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    // Sampling an attached read-only depth image must promise the attachment's exact layout;
+    // advertising SHADER_READ_ONLY here would disagree with dynamic rendering at draw time.
+    pb.layout = tex->layout == VK_IMAGE_LAYOUT_GENERAL ||
+                        tex->layout == VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL
+                    ? tex->layout
+                    : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     bindings_dirty_ = true;
 }
 
@@ -427,6 +435,7 @@ void VulkanCommandBuffer::bind_uniform_buffer(std::uint32_t binding,
     pb.used = true;
     pb.type = BindingType::UniformBuffer;
     pb.buffer = b->buffer;
+    pb.buffer_size = b->size;
     pb.offset = offset;
     pb.range = size == 0 ? VK_WHOLE_SIZE : size; // 0 = "through the end of the buffer"
     bindings_dirty_ = true;
@@ -530,6 +539,7 @@ void VulkanCommandBuffer::dispatch(std::uint32_t gx, std::uint32_t gy, std::uint
                    "pass");
         return;
     }
+    ++stats_.draws;
     flush_bindings();
     vkCmdDispatch(cmd_, gx, gy, gz);
 
@@ -576,6 +586,65 @@ VkDescriptorSet VulkanCommandBuffer::allocate_transient_set(VkDescriptorSetLayou
     return VK_NULL_HANDLE;
 }
 
+namespace {
+
+// A Vulkan handle as 64 key bits and back. Non-dispatchable handles are pointers on 64-bit
+// targets and uint64_t typedefs on 32-bit ones; the cache key must not care which.
+template <typename H> [[nodiscard]] std::uint64_t handle_bits(H h) noexcept {
+    if constexpr (std::is_pointer_v<H>)
+        return static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(h));
+    else
+        return static_cast<std::uint64_t>(h);
+}
+
+template <typename H> [[nodiscard]] H handle_from_bits(std::uint64_t v) noexcept {
+    if constexpr (std::is_pointer_v<H>)
+        return reinterpret_cast<H>(static_cast<std::uintptr_t>(v));
+    else
+        return static_cast<H>(v);
+}
+
+// Hash-combine (boost's golden-ratio form) plus a murmur3 finaliser so the low bits that pick
+// the bucket depend on every input bit. Collisions are harmless — every hit is confirmed against
+// the full key — they only cost a miss.
+[[nodiscard]] std::uint64_t hash_mix(std::uint64_t h, std::uint64_t v) noexcept {
+    return h ^ (v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2));
+}
+
+[[nodiscard]] std::uint64_t hash_finish(std::uint64_t h) noexcept {
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    return h;
+}
+
+} // namespace
+
+void VulkanCommandBuffer::drop_descriptor_cache() noexcept {
+    if (cache_)
+        device_.recycle_descriptor_cache(std::move(cache_));
+    // One line per encoder, and only when asked for: this is an A/B instrument, not a log.
+    // Counts only — no handles or addresses.
+    if (device_.descriptor_stats_enabled() && !stats_emitted_ &&
+        (stats_.draws > 0 || stats_.binds > 0)) {
+        stats_emitted_ = true;
+        RIME_INFO("rhi.vk.descriptors: cache={} draws={} binds={} dynamic_binds={} "
+                  "allocations={} updates={} hits={} misses={} evictions={} static_fallback={} "
+                  "pools={}",
+                  cache_enabled_ ? "on" : "off",
+                  stats_.draws,
+                  stats_.binds,
+                  stats_.dynamic_binds,
+                  stats_.allocations,
+                  stats_.updates,
+                  stats_.hits,
+                  stats_.misses,
+                  stats_.evictions,
+                  stats_.static_fallback,
+                  pools_.size());
+    }
+}
+
 void VulkanCommandBuffer::flush_bindings() {
     if (!bindings_dirty_ || current_pipeline_ == nullptr)
         return;
@@ -584,81 +653,209 @@ void VulkanCommandBuffer::flush_bindings() {
     if (p->set_layout == VK_NULL_HANDLE)
         return; // pipeline declares no bindings; nothing to bake
 
-    // One transient set per (draw × pipeline-layout) — never reused, never individually freed;
-    // the whole pool resets when this encoder's submission finishes. This trades a tiny
-    // allocation per draw (cheap: pool bump allocation) for the freedom to change any binding
-    // between draws, which is exactly what per-draw UBO slices need. If profiling ever shows set
-    // churn dominating, caching identical sets is a contained optimization behind this seam.
-    const VkDescriptorSet set = allocate_transient_set(p->set_layout);
-    if (set == VK_NULL_HANDLE)
-        return;
+    // ADR-0020 baked one transient set per (draw × pipeline-layout) — never reused, never
+    // individually freed, the whole pool reset when the encoder's submission finishes — and noted
+    // that if set churn ever dominated, caching identical sets was a contained optimisation
+    // behind this seam. The city profile showed exactly that (allocate + update on ~6.8k draws),
+    // so this is that optimisation (VulkanDescriptorCache has the design). The pool model is
+    // unchanged: a cache hit merely re-binds a set this encoder already wrote, and a miss is the
+    // old path. With RIME_VK_DESCRIPTOR_CACHE=0 every flush is a miss and nothing is promoted to
+    // dynamic, which is the ADR-0020 path verbatim.
 
-    // Fixed-size scratch keyed by the pipeline's declared bindings: infos must outlive the
-    // vkUpdateDescriptorSets call, and a fixed array keeps flush allocation-free.
-    std::array<VkDescriptorBufferInfo, kMaxBindings> buffer_infos{};
-    std::array<VkDescriptorImageInfo, kMaxBindings> image_infos{};
-    std::array<VkWriteDescriptorSet, kMaxBindings> writes{};
-    std::uint32_t write_count = 0;
+    // ── 1. Canonicalise the pending bindings into a key (fixed-size scratch: no heap) ──────────
+    // key[k] is the payload of the k-th usable declared binding, src[k] the index into
+    // p->bindings it came from. Built from the ACTIVE fields of each binding kind only.
+    using Slot = VulkanDescriptorCache::Slot;
+    std::array<Slot, kMaxBindings> key{};
+    std::array<std::uint8_t, kMaxBindings> src{};
+    std::array<std::uint32_t, kMaxDynamicUniforms> dyn_offsets{};
+    std::uint32_t count = 0;
 
-    for (const BindingDesc& b : p->bindings) {
+    for (std::size_t i = 0; i < p->bindings.size(); ++i) {
+        const BindingDesc& b = p->bindings[i];
         if (b.binding >= kMaxBindings) {
             RIME_ERROR("rhi: pipeline declares binding {} beyond kMaxBindings ({})",
                        b.binding,
                        kMaxBindings);
             continue;
         }
+        if (count == kMaxBindings)
+            break;   // unreachable: binding numbers are unique and < kMaxBindings
+        Slot slot{}; // all zero = "declared but not attached": written as nothing, as before
         const PendingBinding& pb = pending_[b.binding];
         if (!pb.used || pb.type != b.type) {
             RIME_ERROR("rhi: draw with declared binding {} not attached (or wrong kind) — call "
                        "bind_texture / bind_uniform_buffer first",
                        b.binding);
-            continue;
+        } else {
+            switch (b.type) {
+                case BindingType::UniformBuffer:
+                case BindingType::StorageBuffer:
+                    slot = {handle_bits(pb.buffer), pb.offset, pb.range};
+                    break;
+                case BindingType::CombinedImageSampler:
+                    slot = {handle_bits(pb.view),
+                            handle_bits(pb.sampler),
+                            static_cast<std::uint64_t>(pb.layout)};
+                    break;
+                case BindingType::StorageImage:
+                    // Storage access requires GENERAL; no sampler. Encoded explicitly rather
+                    // than trusting pb.sampler, so a stale field cannot split the key.
+                    slot = {handle_bits(pb.view),
+                            0,
+                            static_cast<std::uint64_t>(VK_IMAGE_LAYOUT_GENERAL)};
+                    break;
+            }
+            // A promoted (dynamic) uniform buffer: move the offset out of the descriptor and into
+            // the bind. Only when that is provably the same bytes — an EXPLICIT range (a
+            // VK_WHOLE_SIZE descriptor resolves to "size - base offset" when written, so base 0
+            // plus a dynamic offset would reach past the end), an offset a uint32 dynamic offset
+            // can carry, the device's offset alignment, and the slice inside the buffer. Anything
+            // else keeps the original (offset, range) in the descriptor with a dynamic offset of
+            // 0: exactly what the uncached path writes, invalid calls included, so a caller bug
+            // gets the same pixels and the same validation message it always did.
+            const std::int8_t d = p->dynamic_index[i];
+            if (d >= 0) {
+                const VkDeviceSize align = device_.min_uniform_offset_alignment();
+                const bool as_dynamic = pb.range != VK_WHOLE_SIZE && pb.offset <= UINT32_MAX &&
+                                        (align == 0 || pb.offset % align == 0) &&
+                                        pb.range <= pb.buffer_size &&
+                                        pb.offset <= pb.buffer_size - pb.range;
+                if (as_dynamic) {
+                    slot.b = 0;
+                    dyn_offsets[static_cast<std::size_t>(d)] =
+                        static_cast<std::uint32_t>(pb.offset);
+                } else {
+                    ++stats_.static_fallback;
+                }
+            }
         }
-        VkWriteDescriptorSet& w = writes[write_count];
-        w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        w.dstSet = set;
-        w.dstBinding = b.binding;
-        w.descriptorCount = 1;
-        w.descriptorType = to_vk(b.type);
-        switch (b.type) {
-            case BindingType::UniformBuffer: {
-                VkDescriptorBufferInfo& bi = buffer_infos[write_count];
-                bi.buffer = pb.buffer;
-                bi.offset = pb.offset;
-                bi.range = pb.range;
-                w.pBufferInfo = &bi;
-                break;
-            }
-            case BindingType::CombinedImageSampler: {
-                VkDescriptorImageInfo& ii = image_infos[write_count];
-                ii.sampler = pb.sampler;
-                ii.imageView = pb.view;
-                ii.imageLayout = pb.layout; // SHADER_READ_ONLY, or GENERAL for storage-written
-                w.pImageInfo = &ii;
-                break;
-            }
-            case BindingType::StorageBuffer: {
-                VkDescriptorBufferInfo& bi = buffer_infos[write_count];
-                bi.buffer = pb.buffer;
-                bi.offset = pb.offset;
-                bi.range = pb.range;
-                w.pBufferInfo = &bi;
-                break;
-            }
-            case BindingType::StorageImage: {
-                VkDescriptorImageInfo& ii = image_infos[write_count];
-                ii.sampler = VK_NULL_HANDLE;
-                ii.imageView = pb.view;
-                ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL; // storage access requires GENERAL
-                w.pImageInfo = &ii;
-                break;
-            }
-        }
-        ++write_count;
+        key[count] = slot;
+        src[count] = static_cast<std::uint8_t>(i);
+        ++count;
     }
-    if (write_count > 0)
-        vkUpdateDescriptorSets(device_.vk_device(), write_count, writes.data(), 0, nullptr);
-    vkCmdBindDescriptorSets(cmd_, p->bind_point, p->layout, 0, 1, &set, 0, nullptr);
+
+    // ── 2. Look the key up in the encoder's set cache ────────────────────────────────────────
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    VulkanDescriptorCache::Entry* fill = nullptr; // where a miss will be remembered
+    std::uint64_t hash = 0;
+    if (cache_enabled_) {
+        if (!cache_)
+            cache_ = device_.acquire_descriptor_cache(); // a pooled table: not a per-draw alloc
+        VulkanDescriptorCache& c = *cache_;
+        hash = hash_mix(0, handle_bits(p->set_layout));
+        for (std::uint32_t k = 0; k < count; ++k)
+            hash = hash_mix(hash_mix(hash_mix(hash, key[k].a), key[k].b), key[k].c);
+        hash = hash_finish(hash);
+        VulkanDescriptorCache::Entry* ways =
+            &c.entries[(hash & (VulkanDescriptorCache::kBuckets - 1)) *
+                       VulkanDescriptorCache::kWays];
+        ++c.clock;
+        for (std::uint32_t w = 0; w < VulkanDescriptorCache::kWays; ++w) {
+            VulkanDescriptorCache::Entry& e = ways[w];
+            if (e.generation == c.generation && e.hash == hash && e.layout == p->set_layout &&
+                e.count == count && std::equal(key.begin(), key.begin() + count, e.slots.begin())) {
+                set = e.set;
+                e.last_use = c.clock;
+                ++stats_.hits;
+                break;
+            }
+        }
+        if (set == VK_NULL_HANDLE) {
+            ++stats_.misses;
+            // Victim: an empty way if there is one, else the least recently used. Evicting only
+            // forgets the set — it stays valid in its pool for every command already recorded.
+            fill = &ways[0];
+            for (std::uint32_t w = 0; w < VulkanDescriptorCache::kWays; ++w) {
+                VulkanDescriptorCache::Entry& e = ways[w];
+                if (e.generation != c.generation) {
+                    fill = &e;
+                    break;
+                }
+                if (e.last_use < fill->last_use)
+                    fill = &e;
+            }
+        }
+    }
+
+    // ── 3. Miss (or cache off): allocate one set and write it — once, never again ────────────
+    if (set == VK_NULL_HANDLE) {
+        set = allocate_transient_set(p->set_layout);
+        if (set == VK_NULL_HANDLE)
+            return;
+        ++stats_.allocations;
+
+        // Infos must outlive the vkUpdateDescriptorSets call; fixed arrays keep this
+        // allocation-free.
+        std::array<VkDescriptorBufferInfo, kMaxBindings> buffer_infos{};
+        std::array<VkDescriptorImageInfo, kMaxBindings> image_infos{};
+        std::array<VkWriteDescriptorSet, kMaxBindings> writes{};
+        std::uint32_t write_count = 0;
+        for (std::uint32_t k = 0; k < count; ++k) {
+            const Slot& slot = key[k];
+            if (slot == Slot{})
+                continue; // declared but not attached (already reported above)
+            const std::size_t i = src[k];
+            const BindingDesc& b = p->bindings[i];
+            VkWriteDescriptorSet& w = writes[write_count];
+            w.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            w.dstSet = set;
+            w.dstBinding = b.binding;
+            w.descriptorCount = 1;
+            w.descriptorType = p->vk_types[i]; // the EFFECTIVE type: may be UNIFORM_BUFFER_DYNAMIC
+            switch (b.type) {
+                case BindingType::UniformBuffer:
+                case BindingType::StorageBuffer: {
+                    VkDescriptorBufferInfo& bi = buffer_infos[write_count];
+                    bi.buffer = handle_from_bits<VkBuffer>(slot.a);
+                    bi.offset = slot.b;
+                    bi.range = slot.c;
+                    w.pBufferInfo = &bi;
+                    break;
+                }
+                case BindingType::CombinedImageSampler:
+                case BindingType::StorageImage: {
+                    VkDescriptorImageInfo& ii = image_infos[write_count];
+                    ii.sampler = handle_from_bits<VkSampler>(slot.b); // null for storage images
+                    ii.imageView = handle_from_bits<VkImageView>(slot.a);
+                    // SHADER_READ_ONLY, or GENERAL for storage images / storage-written sampling
+                    ii.imageLayout = static_cast<VkImageLayout>(slot.c);
+                    w.pImageInfo = &ii;
+                    break;
+                }
+            }
+            ++write_count;
+        }
+        if (write_count > 0) {
+            vkUpdateDescriptorSets(device_.vk_device(), write_count, writes.data(), 0, nullptr);
+            ++stats_.updates;
+        }
+
+        if (fill != nullptr) {
+            if (fill->generation == cache_->generation)
+                ++stats_.evictions;
+            fill->generation = cache_->generation;
+            fill->hash = hash;
+            fill->last_use = cache_->clock;
+            fill->layout = p->set_layout;
+            fill->set = set;
+            fill->count = count;
+            std::copy_n(key.begin(), count, fill->slots.begin());
+        }
+    }
+
+    // ── 4. Bind. Always — a pipeline switch or a new dynamic offset needs it even on a hit ────
+    vkCmdBindDescriptorSets(cmd_,
+                            p->bind_point,
+                            p->layout,
+                            0,
+                            1,
+                            &set,
+                            p->dynamic_count,
+                            p->dynamic_count > 0 ? dyn_offsets.data() : nullptr);
+    ++stats_.binds;
+    if (p->dynamic_count > 0)
+        ++stats_.dynamic_binds;
 }
 
 void VulkanCommandBuffer::push_constants(const void* data,
@@ -705,6 +902,7 @@ void VulkanCommandBuffer::draw(std::uint32_t vertex_count,
                                std::uint32_t instance_count,
                                std::uint32_t first_vertex,
                                std::uint32_t first_instance) {
+    ++stats_.draws;
     flush_bindings(); // bake pending resource attachments into this draw's descriptor set
     vkCmdDraw(cmd_, vertex_count, instance_count, first_vertex, first_instance);
 }
@@ -714,6 +912,7 @@ void VulkanCommandBuffer::draw_indexed(std::uint32_t index_count,
                                        std::uint32_t first_index,
                                        std::int32_t vertex_offset,
                                        std::uint32_t first_instance) {
+    ++stats_.draws;
     flush_bindings();
     vkCmdDrawIndexed(cmd_, index_count, instance_count, first_index, vertex_offset, first_instance);
 }
@@ -743,6 +942,7 @@ void VulkanCommandBuffer::draw_indexed_indirect(BufferHandle buffer,
         RIME_ERROR("rhi: draw_indexed_indirect range exceeds the indirect buffer");
         return;
     }
+    ++stats_.draws;
     flush_bindings();
     vkCmdDrawIndexedIndirect(cmd_, b->buffer, offset, draw_count, actual_stride);
 }

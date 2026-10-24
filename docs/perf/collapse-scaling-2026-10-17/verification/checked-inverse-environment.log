@@ -1,0 +1,5 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+environment-smoke: textures 100752 px / static 0; water reflections 1099/1099 / static 0; clouds 223334; trees 26 grass 3466 puddles 7 ponds 1
+environment-smoke: accepted firing feedback 6678 pixels / drift 0; fixed resident pool
+environment-smoke: weapon fx probe flash-move 0.308 m / case fall 1.046 m, min height 0.004

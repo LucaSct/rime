@@ -326,6 +326,41 @@ TEST_CASE("stream input: the latency echo latches the most recent TIMED input") 
     CHECK(translator.last_client_us() == 2'000'000);
 }
 
+TEST_CASE("stream input: release starts a fresh pointer baseline without losing diagnostics") {
+    StreamInputTranslator translator;
+    std::vector<Event> events;
+    InputEvent move;
+    move.kind = InputEvent::Kind::PointerMove;
+    move.x = 100;
+    move.y = 200;
+    move.seq = 42;
+    move.client_us = 12345;
+    REQUIRE(dispatch_input_message(MessageType::Input, wire(move), translator, events) ==
+            InputDispatch::Applied);
+    move.x += 15;
+    move.y -= 10;
+    events.clear();
+    REQUIRE(dispatch_input_message(MessageType::Input, wire(move), translator, events) ==
+            InputDispatch::Applied);
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].mouse_move.dx == 15.0f);
+    CHECK(events[0].mouse_move.dy == -10.0f);
+    events.clear();
+    translator.release_all(events);
+    CHECK(events.empty());
+    move.x = 5000;
+    move.y = -4000;
+    move.seq = 0;
+    move.client_us = 0;
+    REQUIRE(dispatch_input_message(MessageType::Input, wire(move), translator, events) ==
+            InputDispatch::Applied);
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].mouse_move.dx == 0.0f);
+    CHECK(events[0].mouse_move.dy == 0.0f);
+    CHECK(translator.last_seq() == 42);
+    CHECK(translator.last_client_us() == 12345);
+}
+
 TEST_CASE("stream input: a non-Input message is left to the caller") {
     StreamInputTranslator translator;
     std::vector<Event> events;

@@ -1,0 +1,4 @@
+--- original
++++ partial-publication
+@@ -123,0 +124 @@
++                cells_.swap(work_);

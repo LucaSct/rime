@@ -1,0 +1,2 @@
+{"before": [45.63117, 3.9483187, 3.2291133], "playing": [52.773495, 3.9483187, 13.206255], "released": [52.773495, 3.9483187, 13.206255], "paused": [48.766747, 3.9483187, 16.074564], "restored": [45.63117, 3.9483187, 3.2291133], "after_stop": [48.150894, 3.9483187, 6.748931]}
+Real GUI + city host: Play navigation, release hold, Pause navigation, Stop restoration, post-Stop navigation and clean saved descriptions PASS

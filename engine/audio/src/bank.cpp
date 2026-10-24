@@ -7,6 +7,8 @@
 #include <cmath>
 #include <numbers>
 
+#include "rime/audio/wav.hpp"
+
 namespace rime::audio {
 namespace {
 
@@ -80,74 +82,188 @@ void mix_into(Sound& a, const Sound& b, float gain) {
     }
 }
 
+namespace {
+
+// One synthetic variant: a bright noise CRACK over a dull noise THUD.
+//
+// The body used to be a decaying sine. A sine has exactly one frequency, so every copy of it that
+// the mixer stacked reinforced the same line in the spectrum -- measured on the city collapse, 42 %
+// of the whole mix's energy sat in one 109 Hz bin, which is a hum, not rubble. A heavily low-passed
+// NOISE burst has the same "low and heavy" character but spreads its energy over a band, and two
+// copies with different seeds are uncorrelated, so they add as power (+3 dB), never as a coherent
+// pile-up (+6 dB per doubling and a pitch).
+[[nodiscard]] Sound crack_and_thud(float seconds,
+                                   float crack_cutoff,
+                                   float crack_decay,
+                                   float thud_cutoff,
+                                   float thud_decay,
+                                   float thud_gain,
+                                   std::uint32_t seed) {
+    Sound s = noise_burst(seconds, crack_cutoff, crack_decay, seed);
+    // A one-pole at a tiny coefficient is very quiet; the bank normalises afterwards, so only the
+    // balance between the layers matters. The gain is scaled up to compensate for that loss.
+    mix_into(
+        s, noise_burst(seconds, thud_cutoff, thud_decay, seed ^ 0xA5A5'0000u), thud_gain * 9.0f);
+    return s;
+}
+
+// A long, slow, low swell: the bed under a collapse. Noise through a very low one-pole (~75 Hz),
+// with an attack so it rises rather than starts, then an exponential release.
+[[nodiscard]] Sound rumble_bed(float seconds, float cutoff01, float release, std::uint32_t seed) {
+    Sound s = noise_burst(seconds, cutoff01, 0.0f, seed);
+    for (std::size_t i = 0; i < s.samples.size(); ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(kSampleRate);
+        const float attack = std::min(1.0f, t / 0.25f);
+        s.samples[i] *= attack * std::exp(-release * t);
+    }
+    return s;
+}
+
+} // namespace
+
 SoundBank SoundBank::engine_defaults() {
     SoundBank bank;
 
-    // Each of these is CRACK + BODY, the standard two-component impact recipe: a filtered noise
-    // transient that says what the material is, and a decaying tone that says how big it is. The
-    // seeds differ so two sounds playing together do not phase-cancel into one another, which is
-    // what happens when the "random" part of several impacts is literally the same waveform.
-    {
-        Sound s = noise_burst(0.18f, 0.55f, 34.0f, 0x51ED'0001u);
-        mix_into(s, decaying_sine(0.18f, 190.0f, 26.0f), 0.5f);
-        bank.set(sound::kImpactConcrete, std::move(s));
+    // Each variant is CRACK + THUD, the standard two-component impact recipe: a filtered noise
+    // transient that says what the material is, and a darker noise body that says how big it is.
+    // The seeds differ so two sounds playing together do not phase-cancel into one another, which
+    // is what happens when the "random" part of several impacts is literally the same waveform;
+    // the parameters differ a little so the variants are not four copies of one hit.
+    for (std::uint32_t v = 0; v < 4; ++v) {
+        const float k = static_cast<float>(v);
+        bank.add_variant(sound::kImpactConcrete,
+                         crack_and_thud(0.18f,
+                                        0.55f - 0.04f * k,
+                                        34.0f + 3.0f * k,
+                                        0.035f,
+                                        26.0f,
+                                        0.5f,
+                                        0x51ED'0001u + v * 0x101u));
+        // A break is longer and lower than a survivable hit -- more body, more time.
+        bank.add_variant(sound::kPartBreak,
+                         crack_and_thud(0.42f,
+                                        0.42f - 0.03f * k,
+                                        14.0f + 1.5f * k,
+                                        0.016f,
+                                        9.0f,
+                                        0.75f,
+                                        0x51ED'0002u + v * 0x101u));
+        // Rubble coming to rest: brief, bright, quiet -- mostly transient, almost no body.
+        bank.add_variant(sound::kDebrisSettle,
+                         crack_and_thud(0.13f + 0.01f * k,
+                                        0.80f - 0.08f * k,
+                                        46.0f - 3.0f * k,
+                                        0.05f,
+                                        40.0f,
+                                        0.22f,
+                                        0x51ED'0003u + v * 0x101u));
+        // A collapse is the low one, and the long one: a dull roar over two overlapping low noise
+        // bands (not two tones -- see crack_and_thud) so it reads as mass without a pitch.
+        Sound c = crack_and_thud(1.30f,
+                                 0.14f - 0.01f * k,
+                                 3.2f + 0.2f * k,
+                                 0.010f,
+                                 2.4f,
+                                 0.9f,
+                                 0x51ED'0004u + v * 0x101u);
+        mix_into(c, noise_burst(1.30f, 0.017f, 3.0f, 0x51ED'0404u + v * 0x101u), 4.0f);
+        bank.add_variant(sound::kCollapse, std::move(c));
+        bank.add_variant(
+            sound::kFootstep,
+            crack_and_thud(0.09f, 0.30f, 55.0f, 0.04f, 48.0f, 0.35f, 0x51ED'0005u + v * 0x101u));
     }
-    {
-        // A break is longer and lower than a survivable hit — more body, more time.
-        Sound s = noise_burst(0.42f, 0.42f, 14.0f, 0x51ED'0002u);
-        mix_into(s, decaying_sine(0.42f, 110.0f, 9.0f), 0.75f);
-        bank.set(sound::kPartBreak, std::move(s));
-    }
-    {
-        // Rubble coming to rest: brief, bright, quiet — mostly transient, almost no body.
-        Sound s = noise_burst(0.13f, 0.80f, 46.0f, 0x51ED'0003u);
-        mix_into(s, decaying_sine(0.13f, 320.0f, 40.0f), 0.22f);
-        bank.set(sound::kDebrisSettle, std::move(s));
-    }
-    {
-        // A collapse is the low one, and the long one. Two tones a fifth apart under a dull roar
-        // reads as mass rather than as a single note.
-        Sound s = noise_burst(1.30f, 0.14f, 3.2f, 0x51ED'0004u);
-        mix_into(s, decaying_sine(1.30f, 55.0f, 2.4f), 0.9f);
-        mix_into(s, decaying_sine(1.30f, 82.0f, 3.0f), 0.45f);
-        bank.set(sound::kCollapse, std::move(s));
-    }
-    {
-        Sound s = noise_burst(0.09f, 0.30f, 55.0f, 0x51ED'0005u);
-        mix_into(s, decaying_sine(0.09f, 150.0f, 48.0f), 0.35f);
-        bank.set(sound::kFootstep, std::move(s));
-    }
+    bank.add_variant(sound::kRumble, rumble_bed(2.0f, 0.009f, 1.1f, 0x51ED'0006u));
+    bank.add_variant(sound::kRumble, rumble_bed(2.4f, 0.011f, 0.9f, 0x51ED'0106u));
 
-    // Normalize each to a known peak so a gain of 1.0 means the same loudness whatever the recipe.
-    // Without this, tuning a call site's gain would be tuning against whatever the synthesis
-    // happened to produce, and every later change to a recipe would silently re-balance the mix.
-    for (Sound& s : bank.sounds_) {
-        float peak = 0.0f;
-        for (const float v : s.samples) {
-            peak = std::max(peak, std::fabs(v));
-        }
-        if (peak > 1e-6f) {
-            const float inv = 0.9f / peak;
-            for (float& v : s.samples) {
-                v *= inv;
+    // Normalize each variant to a known peak so a gain of 1.0 means the same loudness whatever the
+    // recipe. Without this, tuning a call site's gain would be tuning against whatever the
+    // synthesis happened to produce, and every later change to a recipe would silently re-balance
+    // the mix.
+    for (Entry& e : bank.entries_) {
+        for (Sound& s : e.variants) {
+            float peak = 0.0f;
+            for (const float v : s.samples) {
+                peak = std::max(peak, std::fabs(v));
+            }
+            if (peak > 1e-6f) {
+                const float inv = 0.9f / peak;
+                for (float& v : s.samples) {
+                    v *= inv;
+                }
             }
         }
     }
     return bank;
 }
 
+void SoundBank::apply_destruction_policy() {
+    // Impacts jitter +-5 % in pitch and +-3 dB in level, and may not restart one recording inside
+    // 40 ms (the buzz guard); a collapse is a rarer, bigger event, so its window is wider; the
+    // rumble bed is one per episode. All of them live in voice group 1 so a collapse cannot starve
+    // gunfire. Reverb sends are deliberately SMALL: the wash is for gunfire (set by the game), and
+    // a wall of masonry through a long reverb is mud.
+    set_class(sound::kImpactConcrete, {0.05f, 0.04f, 0.04f, 3.0f, 1});
+    set_class(sound::kPartBreak, {0.05f, 0.04f, 0.06f, 3.0f, 1});
+    set_class(sound::kDebrisSettle, {0.05f, 0.04f, 0.0f, 3.0f, 1});
+    set_class(sound::kCollapse, {0.05f, 0.25f, 0.10f, 2.0f, 1});
+    set_class(sound::kFootstep, {0.05f, 0.10f, 0.0f, 2.0f, 0});
+    set_class(sound::kRumble, {0.03f, 1.2f, 0.05f, 1.0f, 1});
+}
+
 void SoundBank::set(SoundId id, Sound sound) {
-    if (id >= sounds_.size()) {
-        sounds_.resize(static_cast<std::size_t>(id) + 1u);
+    clear(id);
+    add_variant(id, std::move(sound));
+}
+
+void SoundBank::add_variant(SoundId id, Sound sound) {
+    if (id >= entries_.size()) {
+        entries_.resize(static_cast<std::size_t>(id) + 1u);
     }
-    sounds_[id] = std::move(sound);
+    entries_[id].variants.push_back(std::move(sound));
+}
+
+bool SoundBank::add_variant_from_wav(SoundId id, const std::filesystem::path& path) {
+    auto wav = read_wav(path);
+    if (!wav || wav->sample_rate != kSampleRate || wav->channels != 1 || wav->samples.empty()) {
+        return false;
+    }
+    Sound s;
+    s.samples = std::move(wav->samples);
+    add_variant(id, std::move(s));
+    return true;
+}
+
+void SoundBank::clear(SoundId id) {
+    if (id < entries_.size()) {
+        entries_[id].variants.clear();
+    }
+}
+
+void SoundBank::set_class(SoundId id, const SoundClass& cls) {
+    if (id >= entries_.size()) {
+        entries_.resize(static_cast<std::size_t>(id) + 1u);
+    }
+    entries_[id].cls = cls;
+}
+
+const SoundClass& SoundBank::sound_class(SoundId id) const noexcept {
+    static const SoundClass kDefault{};
+    return id < entries_.size() ? entries_[id].cls : kDefault;
 }
 
 std::span<const float> SoundBank::samples(SoundId id) const noexcept {
-    if (id >= sounds_.size()) {
+    return samples(id, 0);
+}
+
+std::span<const float> SoundBank::samples(SoundId id, std::size_t variant) const noexcept {
+    if (id >= entries_.size() || variant >= entries_[id].variants.size()) {
         return {};
     }
-    return sounds_[id].samples;
+    return entries_[id].variants[variant].samples;
+}
+
+std::size_t SoundBank::variant_count(SoundId id) const noexcept {
+    return id < entries_.size() ? entries_[id].variants.size() : 0u;
 }
 
 } // namespace rime::audio

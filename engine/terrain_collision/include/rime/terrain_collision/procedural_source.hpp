@@ -42,6 +42,10 @@ public:
     struct Options {
         assets::ProceduralTerrainConfig config{};
         std::uint32_t max_slots = kDefaultMaxSlots; // clamped to [0, kMaxSlotsCeiling]
+        // Serve the same distant ranges the renderer draws (assets::apply_procedural_backdrop), so
+        // ground beyond 150 m is where it LOOKS to be. Off by default: the pinned golden tiles and
+        // the determinism proofs describe the plain generator.
+        bool backdrop = false;
     };
 
     struct Stats {
@@ -87,6 +91,7 @@ private:
 
     assets::ProceduralTerrainConfig config_;
     bool config_valid_ = false;
+    bool backdrop_ = false;
     std::vector<Slot> slots_;         // sized once; never grows or shrinks
     std::vector<std::uint32_t> free_; // stack of free slot indices, lowest on top at start
     Stats stats_{};

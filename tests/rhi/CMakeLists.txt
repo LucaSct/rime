@@ -32,6 +32,7 @@ rime_add_test(rime_rhi_tests
     turntable_test.cpp
     chart_offscreen_test.cpp
     ubo_test.cpp
+    descriptor_cache_test.cpp
     blend_mrt_test.cpp
     compute_test.cpp
     async_submit_test.cpp
@@ -60,6 +61,8 @@ rime_add_shaders(rime_rhi_tests
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pushconst.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ubo.vert
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/ubo.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/descriptor_cache.frag
+    ${CMAKE_CURRENT_SOURCE_DIR}/shaders/descriptor_cache.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/mrt.frag
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/fill.comp
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/pattern.comp

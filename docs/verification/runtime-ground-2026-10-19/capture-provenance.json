@@ -1,0 +1,45 @@
+{
+  "ground-city-before.mp4": {
+    "sha256": "ee8d7ccadb6049929db40273ebf79a661109ed5152cc29a0d43b8015695192a1",
+    "ffprobe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "h264",
+          "width": 1280,
+          "height": 720,
+          "r_frame_rate": "30/1"
+        }
+      ],
+      "format": {
+        "duration": "10.066667",
+        "size": "1873041"
+      }
+    }
+  },
+  "ground-city-after.mp4": {
+    "sha256": "fe1f5e6126e2f93ca68f617382c4467231e3c46591cb97199bebc1ca165ad43f",
+    "ffprobe": {
+      "programs": [],
+      "stream_groups": [],
+      "streams": [
+        {
+          "codec_name": "h264",
+          "width": 1280,
+          "height": 720,
+          "r_frame_rate": "30/1"
+        }
+      ],
+      "format": {
+        "duration": "10.066667",
+        "size": "1924345"
+      }
+    }
+  },
+  "production_source_before": "727c851",
+  "production_source_after": "b340d44",
+  "frozen_before_after": "isolated GI bias comparison before the runtime shadow-range cap",
+  "live_scene_git_blob": "aae12f8a7d6d471a732923f0b839a904f99ee4a4",
+  "preserved_courtyard_git_blob": "794da29c6968416bdebd1ee34a6f6f95e190ed8c"
+}

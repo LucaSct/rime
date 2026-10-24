@@ -155,6 +155,10 @@ void StreamInputTranslator::translate(const stream::InputEvent& event,
 }
 
 void StreamInputTranslator::release_all(std::vector<platform::Event>& out) {
+    // Focus/capture boundaries end a relative-look gesture as well as held keys. Retaining the
+    // old pointer baseline turns the first position after re-capture into a spurious large turn.
+    // Keep sequence/diagnostic counters: releasing controls must not erase the input ledger.
+    have_pointer_ = false;
     for (std::size_t i = 0; i < keys_.size(); ++i) {
         if (keys_[i]) {
             keys_[i] = false;

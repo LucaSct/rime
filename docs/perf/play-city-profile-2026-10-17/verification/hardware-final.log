@@ -1,0 +1,9 @@
+Test project /home/next/projects/rime/build/release
+    Start 85: rime_rhi_tests
+1/2 Test #85: rime_rhi_tests ...................   Passed    5.83 sec
+    Start 86: rime_render_tests
+2/2 Test #86: rime_render_tests ................   Passed   55.22 sec
+
+100% tests passed out of 2
+
+Total Test time (real) =  61.05 sec

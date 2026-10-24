@@ -51,6 +51,8 @@ struct DepthStencilAttachment {
     // one face of a point light's depth cube. 0 (the default) is the sole layer of an ordinary
     // depth image. Must be < the target's layer count.
     std::uint32_t layer = 0;
+    // Load/test and optional sampling share one read-only layout. Requires no depth/stencil writes.
+    bool read_only = false;
 };
 
 // Describes a dynamic-rendering scope. The render area defaults to the full target extent (the

@@ -1,0 +1,41 @@
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/physics/heightfield_test.cpp:1027:
+TEST CASE:  heightfield raycast: the seam rule closes a surface the per-piece root alone leaks
+
+/home/next/projects/rime/tests/physics/heightfield_test.cpp:1124: MESSAGE: seam guard firings across the five rays: 5
+
+/home/next/projects/rime/tests/physics/heightfield_test.cpp:1147: MESSAGE: rays that still hit with the seam rule disabled: 0
+
+===============================================================================
+/home/next/projects/rime/tests/physics/islands_test.cpp:230:
+TEST CASE:  validate: tumbling elongated boxes in 16 islands - parallel hash == sequential hash
+
+/home/next/projects/rime/tests/physics/islands_test.cpp:282: MESSAGE: seq: hash=2712185000588670249 max_islands_solved_parallel=0 max_active=16
+
+/home/next/projects/rime/tests/physics/islands_test.cpp:291: MESSAGE: workers=1 hash=2712185000588670249 max_islands_solved_parallel=16 max_active=16
+
+/home/next/projects/rime/tests/physics/islands_test.cpp:291: MESSAGE: workers=2 hash=2712185000588670249 max_islands_solved_parallel=16 max_active=16
+
+/home/next/projects/rime/tests/physics/islands_test.cpp:291: MESSAGE: workers=4 hash=2712185000588670249 max_islands_solved_parallel=16 max_active=16
+
+[island-profile] 24-box island, mean/step: solve 56168 ns, velocity 36311 ns, store 47 ns, sum of phases 56065 ns
+
+[island-profile] 49 bodies, 6 columns, mean over 120 steps (sequential solve)
+[island-profile]   island   bodies  constraints     solve_ns    ns_per_body
+[island-profile]        0       24           24        56168           2340
+[island-profile]        1       12           12        28024           2335
+[island-profile]        2        6            6        13912           2319
+[island-profile]        3        3            3         6003           2001
+[island-profile]        4        2            2         4007           2004
+[island-profile]        5        2            2         3420           1710
+[island-profile] serial fraction (largest island time / total) = 0.5036
+[island-profile] implied island-parallel ceiling (1 / fraction) = 1.986x
+[island-profile] per-step means: total 111534 ns, largest 56168 ns
+[island-profile] largest-island membership changed on 0 of 120 steady steps
+[island-profile] merge step: largest 24 -> 25 bodies, changed=1, prev_bodies=24
+===============================================================================
+[doctest] test cases:    193 |    193 passed | 0 failed | 0 skipped
+[doctest] assertions: 137746 | 137746 passed | 0 failed |
+[doctest] Status: SUCCESS!

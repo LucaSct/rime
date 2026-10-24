@@ -485,3 +485,91 @@ TEST_CASE("sky: clouds draw, and coverage is the knob that turns them off (m17.0
     CHECK(overcast_frac > broken_frac * 1.05f);
     CHECK(zero_frac == 0.0f);
 }
+
+TEST_CASE(
+    "sky: aerial perspective fogs distant geometry toward the sky and leaves near geometry alone") {
+    auto device = rhi::create_device({});
+    if (!device) {
+        if (vulkan_required()) {
+            FAIL("RIME_REQUIRE_VULKAN is set but no Vulkan device could be created");
+        }
+        MESSAGE("no Vulkan device available -- skipping the aerial perspective proof");
+        return;
+    }
+    MeshRegistry meshes(*device);
+    const MeshId floor = meshes.add(make_plane(8000.0f), "aerial-floor");
+    MaterialRegistry materials;
+    PbrMaterialDesc md{};
+    md.base_color[0] = md.base_color[1] = md.base_color[2] =
+        0.05f; // dark ground: haze is the signal
+    md.roughness = 0.9f;
+    const MaterialId floor_mat = materials.add(md);
+
+    // Camera 2 m up looking slightly down: the bottom rows hit the floor within a few metres, the
+    // rows just under the horizon hit it kilometres away.
+    const auto build = [&](ecs::World& world) {
+        (void)world.spawn_with(ecs::WorldTransform{}, MeshRef{floor}, MaterialRef{floor_mat});
+        core::Transform sun{};
+        sun.rotation = pitched(-kHalfPi);
+        (void)world.spawn_with(ecs::WorldTransform{sun}, DirectionalLight{1.0f, 1.0f, 1.0f, 3.0f});
+        core::Transform cam{};
+        cam.translation = {0.0f, 2.0f, 0.0f};
+        cam.rotation = pitched(0.02f);
+        (void)world.spawn_with(ecs::WorldTransform{cam}, Camera{kFovY, 0.1f, 6000.0f, true});
+    };
+
+    SceneRenderer renderer(*device, meshes, materials);
+    SkyParams off = plain_sky();
+    renderer.set_sky(off);
+    const HdrImage clear = render_hdr(*device, renderer, build);
+    SkyParams hazy = plain_sky();
+    hazy.aerial_density = 30.0f;
+    renderer.set_sky(hazy);
+    const HdrImage fogged = render_hdr(*device, renderer, build);
+
+    // The camera looks 0.02 rad up, so row kSize/2 + 3 sees the floor ~0.006 rad below the horizon,
+    // a few hundred metres out; the bottom rows look down ~30 degrees at a floor ~4 m away.
+    const Rgb far_clear = block_mean(clear, kSize / 2, kSize / 2 + 3, 2);
+    const Rgb far_fog = block_mean(fogged, kSize / 2, kSize / 2 + 3, 2);
+    const Rgb near_clear = block_mean(clear, kSize / 2, kSize - 6, 2);
+    const Rgb near_fog = block_mean(fogged, kSize / 2, kSize - 6, 2);
+    MESSAGE("far lum " << far_clear.luminance() << " -> " << far_fog.luminance() << "; near lum "
+                       << near_clear.luminance() << " -> " << near_fog.luminance());
+    // The distant floor is dimmed by transmittance and brightened by in-scattered sky light; the
+    // sky is far brighter than this grey floor, so the net effect is a clear change either way.
+    CHECK(std::abs(far_fog.luminance() - far_clear.luminance()) > 0.10f * far_clear.luminance());
+    // ...and gain blue relative to red, since air scatters short wavelengths.
+    CHECK(far_fog.b / std::max(far_fog.r, 1e-6f) > far_clear.b / std::max(far_clear.r, 1e-6f));
+    // Near geometry (a few metres of air) is essentially unchanged: under 5 percent.
+    CHECK(std::abs(near_fog.luminance() - near_clear.luminance()) <
+          0.05f * std::max(near_clear.luminance(), 1e-3f));
+}
+
+TEST_CASE("sky: the sun's cloud transmittance is smooth, bounded, and 1 without clouds") {
+    SkyParams sp{};
+    sp.sun_direction[0] = 0.3f;
+    sp.sun_direction[1] = 0.8f;
+    sp.sun_direction[2] = 0.2f;
+    sp.coverage = 0.7f;
+    sp.density = 1.0f;
+    sp.clouds_enabled = false;
+    CHECK(sky_sun_cloud_transmittance(sp, {0, 0, 0}) == 1.0f);
+    sp.clouds_enabled = true;
+    float lo = 1.0f;
+    float prev = sky_sun_cloud_transmittance(sp, {0, 0, 0});
+    float max_step = 0.0f;
+    // Walk the camera 6 km in 20 m steps: the cloud under the sun slides past (the first ~2.5 km of
+    // this field is clear). Every value must stay in [0.12, 1] and no 20 m step may move the light
+    // by more than 10 percent (smooth).
+    for (int i = 1; i <= 300; ++i) {
+        const float t = sky_sun_cloud_transmittance(sp, {static_cast<float>(i) * 20.0f, 0, 0});
+        CHECK(t >= 0.119f);
+        CHECK(t <= 1.0f);
+        lo = std::min(lo, t);
+        max_step = std::max(max_step, std::abs(t - prev));
+        prev = t;
+    }
+    MESSAGE("transmittance min over walk = " << lo << ", max 20 m step = " << max_step);
+    CHECK(lo < 0.9f); // the walk does pass under cloud at 70% coverage
+    CHECK(max_step < 0.1f);
+}

@@ -56,6 +56,13 @@ struct SkyParams {
     float sharpness = 0.28f; // the width of the noise band the cloud edge fades across
     float wind[2] = {0.0f, 0.0f};
 
+    // Aerial perspective: multiplier on the physical haze extinction applied to GEOMETRY by the
+    // sky composite. 0 (the default) disables it, so geometry passes through the composite
+    // bit-for-bit and every existing sky claim keeps holding; a game opts in per scene;
+    // 1 is the physical Earth-atmosphere optical depth, which is subtle -- a game wanting visible
+    // depth cueing over a few kilometres raises it.
+    float aerial_density = 0.0f;
+
     // Physical atmosphere inputs are deliberately a separate block from the authored sky.  The
     // former are SI-like kilometres and inverse-kilometres used by the LUT producers; the latter
     // are art-direction controls whose values are not meaningful to a density integral.
@@ -70,6 +77,13 @@ struct SkyParams {
         float ground_albedo[3] = {0.10f, 0.10f, 0.10f};
     } atmosphere{};
 };
+
+// Fraction of the sun's direct light that survives the cloud layer toward `sun_direction`, seen
+// from `camera_pos` -- the CPU twin of sky_sun_cloud_transmittance() in sky_common.glsl, so the
+// DirectionalLight can be dimmed by exactly the cloud that dims the visible disc. 1 = clear sky
+// (also when clouds are off); never below the small leak the shader documents.
+[[nodiscard]] float sky_sun_cloud_transmittance(const SkyParams& params,
+                                                const core::Vec3& camera_pos) noexcept;
 
 // What the pass needs from the frame. Kept separate from SkyParams (which is authored/tuned) so the
 // per-frame camera data has one obvious owner.

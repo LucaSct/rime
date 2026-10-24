@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -12,10 +13,12 @@
 #include <string_view>
 #include <type_traits>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "aabb_tree.hpp"
 #include "compound.hpp"
+#include "contact_bounds.hpp"
 #include "heightfield.hpp"
 #include "hull.hpp"
 #include "islands.hpp"
@@ -29,6 +32,7 @@
 #include "rime/physics/shape.hpp"
 #include "scene_query.hpp"
 #include "solver.hpp"
+#include "wavefront.hpp"
 
 // The M7.1–M7.5 world: a data-oriented body pool, a semi-implicit Euler integrator, a dual
 // dynamic-AABB-tree broadphase (M7.2), a GJK/EPA/clipping narrowphase with a persistent warm-start
@@ -53,7 +57,31 @@ namespace {
 // comfortably covers the NGS resting slop (5 mm keeps resting shapes genuinely overlapped, so
 // this is belt-and-braces against a kissing contact being culled by a rounding ulp) while still
 // culling essentially every genuinely separated child pair.
-constexpr float kChildCullMargin = 1e-3f;
+constexpr float kChildCullMargin = contact_bounds_detail::kCullMargin;
+
+using ContactClock = std::chrono::steady_clock;
+
+// A conditional scope keeps all clock reads out of the ordinary contact path. Each scope owns one
+// exclusive region; callers place neighbouring scopes around adjacent work, never nest them.
+struct ContactTimer {
+    bool enabled;
+    std::uint64_t& total;
+    ContactClock::time_point start;
+
+    ContactTimer(bool on, std::uint64_t& ns) : enabled(on), total(ns) {
+        if (enabled) {
+            start = ContactClock::now();
+        }
+    }
+
+    ~ContactTimer() {
+        if (enabled) {
+            total += static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(ContactClock::now() - start)
+                    .count());
+        }
+    }
+};
 
 } // namespace
 
@@ -139,6 +167,17 @@ struct PhysicsWorld::Impl {
     // unconditionally. One `resize` cannot drift out of sync with the pool; three mirrored edits
     // can.
     std::vector<SymMat3> inverse_inertia_world;
+    // Wavefront velocity-solve scratch (wavefront.hpp), grown and never shrunk, carrying no value
+    // between steps. Sized in step() before the island dispatch so that concurrent islands each
+    // own a disjoint slice: `wf_body_depth` by dense body, the rest by the island's constraint
+    // range (`wf_level_start` with one extra entry per island).
+    std::vector<std::uint32_t> wf_body_depth;
+    std::vector<std::uint32_t> wf_level;
+    std::vector<std::uint32_t> wf_level_start;
+    std::vector<std::uint32_t> wf_order;
+    std::vector<WideContactBatch> wf_batches;
+    bool wavefront_enabled = kWideVelocitySolveAvailable;
+    std::atomic<std::uint32_t> wavefront_islands_last{0};
     std::vector<std::uint8_t> motion;
     std::vector<float> linear_damping;
     std::vector<float> angular_damping;
@@ -209,7 +248,7 @@ struct PhysicsWorld::Impl {
     std::vector<std::uint32_t> heightfield_free_list;
 
     // Terrain fallback counters (WorldStats docs). The per-tick pair are written by the contact
-    // build (sequential — it never runs on a worker) and copied into last_stats; the query-skip
+    // build (reduced after contact workers join) and copied into last_stats; the query-skip
     // total is cumulative and ATOMIC because queries are const and may be issued from several
     // jobs at once between steps.
     mutable std::uint32_t hf_patch_merges_last = 0;
@@ -223,7 +262,7 @@ struct PhysicsWorld::Impl {
     // ⇒ solve islands sequentially — same result). `islands` is the reusable CSR partition rebuilt
     // each step; its size is one of the witnesses recorded into `last_stats` below (M7.13).
     // `sleeping_enabled` gates deactivation (on by default). None of this is touched concurrently:
-    // only the per-island solve runs on worker threads, and islands share no dynamic body.
+    // contact workers read body state; per-island solve workers share no dynamic body.
     core::JobSystem* jobs = nullptr;
     bool sleeping_enabled = true;
     IslandSet islands;
@@ -296,6 +335,33 @@ struct PhysicsWorld::Impl {
     // warm_started_last in build_contacts, so both the step() and compute_contacts() paths keep it
     // current; step()'s tail copies it into last_stats.broadphase_pairs.
     mutable std::uint32_t broadphase_pairs_last = 0;
+    bool contact_profile_enabled = false;
+    mutable ContactProfile contact_profile_last{};
+    mutable contact_bounds_detail::Cache plain_bounds;
+
+    // Retained scratch amortizes allocation across steps. Each dispatched range owns its output,
+    // counters and child poses; no worker writes another range or the previous tick's warm cache.
+    struct PosedChild {
+        const ShapeDesc* shape;
+        const ConvexHull* hull;
+        core::Vec3 pos;
+        core::Quat orient;
+        Aabb bounds;
+    };
+
+    struct alignas(64) ContactScratch {
+        std::vector<Manifold> manifolds;
+        std::vector<PosedChild> side_a, side_b;
+        std::vector<HeightfieldContact> terrain_candidates;
+        std::vector<HeightfieldPatch> terrain_patches;
+        ContactProfile profile{};
+        std::uint32_t warm = 0, patch_merges = 0, ccd_skipped = 0;
+    };
+
+    mutable std::vector<std::uint64_t> pair_keys;
+    mutable std::vector<Pair> contact_pairs;
+    mutable std::vector<ContactScratch> contact_scratch;
+    std::vector<Manifold> step_manifolds;
 
     // Simulation events (M7.9, events.hpp). step() emits contact and sleep events as a pure READ of
     // the just-solved state, in the sequential tail — so events never write body state, never
@@ -353,11 +419,14 @@ struct PhysicsWorld::Impl {
     // below, after the struct). Split in two so step() can run the solver in between: build the
     // warm-started manifolds, solve (mutating their impulses), then commit the cache from the
     // SOLVED manifolds.
-    void compute_pairs(std::vector<Pair>& out) const;
+    void compute_pairs(std::vector<Pair>& out,
+                       std::vector<std::uint64_t>& keys,
+                       bool profile = false) const;
     // `dt` > 0 enables M7.10 speculative CCD contacts for opted-in bodies; dt == 0 (the default,
     // used by the compute_contacts() inspection seam) builds only exact overlaps, unchanged from
     // M7.3.
     void build_contacts(std::vector<Manifold>& out, float dt = 0.0f) const;
+    void build_contact_range(std::span<const Pair> pairs, float dt, ContactScratch& scratch) const;
     // The compound arm of build_contacts (M7.12): one pair whose side(s) are compounds, expanded
     // into child-vs-child sub-pairs, emitting one manifold per touching child pair. Defined below
     // beside build_contacts.
@@ -368,7 +437,8 @@ struct PhysicsWorld::Impl {
                                  const CompoundShape* comp_b,
                                  float dt,
                                  std::vector<Manifold>& out,
-                                 std::uint32_t& warm) const;
+                                 std::uint32_t& warm,
+                                 ContactScratch& scratch) const;
     // The terrain arm of build_contacts (M19.1): one body (or each compound child of it) against
     // one heightfield, fanned out into per-patch manifolds. Defined beside build_contacts.
     void build_heightfield_contacts(const Pair& pr,
@@ -376,7 +446,8 @@ struct PhysicsWorld::Impl {
                                     std::uint32_t db,
                                     float dt,
                                     std::vector<Manifold>& out,
-                                    std::uint32_t& warm) const;
+                                    std::uint32_t& warm,
+                                    ContactScratch& scratch) const;
     void commit_contact_cache(const std::vector<Manifold>& manifolds) const;
 
     [[nodiscard]] AabbTree& tree_for(std::uint8_t m) noexcept {
@@ -488,58 +559,174 @@ struct PhysicsWorld::Impl {
     }
 };
 
-void PhysicsWorld::Impl::compute_pairs(std::vector<Pair>& out) const {
+void PhysicsWorld::Impl::compute_pairs(std::vector<Pair>& out,
+                                       std::vector<std::uint64_t>& keys,
+                                       bool profile) const {
     out.clear();
 
     // Every non-static body is a "mover": query both trees with its fat box. A pair (a,b) is packed
     // as (min_slot << 32 | max_slot) — a key that sorts by (a,b) — so sorting then de-duplicating
-    // yields the canonical, deterministic pair set. Dynamic–dynamic pairs are found twice (each end
-    // queries) and collapse to one; both-static pairs never appear because static bodies never
-    // query.
-    std::vector<std::uint64_t> keys;
+    // yields the canonical, deterministic pair set. Ownership by the lower slot emits each
+    // mover–mover pair once: fat-box overlap is symmetric, so the other traversal cannot discover
+    // a different candidate. Static pairs keep either slot order because only the mover queries.
+    keys.clear();
     const std::size_t n = count();
-    for (std::size_t i = 0; i < n; ++i) {
-        if (is_static(motion[i])) {
-            continue;
-        }
-        const std::uint32_t self = dense_to_slot[i];
-        const Aabb& fat = dynamic_tree.proxy_aabb(proxy[i]);
-        const auto add = [&](std::uint32_t other) {
-            if (other == self) {
-                return;
+    {
+        ContactTimer query_time(profile, contact_profile_last.pair_query_ns);
+        for (std::size_t i = 0; i < n; ++i) {
+            if (is_static(motion[i])) {
+                continue;
             }
-            const std::uint32_t a = std::min(self, other);
-            const std::uint32_t b = std::max(self, other);
-            keys.push_back((static_cast<std::uint64_t>(a) << 32) | b);
-        };
-        dynamic_tree.query(fat, add);
-        static_tree.query(fat, add);
+            const std::uint32_t self = dense_to_slot[i];
+            const Aabb& fat = dynamic_tree.proxy_aabb(proxy[i]);
+            const auto add = [&](std::uint32_t other) {
+                if (other == self) {
+                    return;
+                }
+                const std::uint32_t a = std::min(self, other);
+                const std::uint32_t b = std::max(self, other);
+                keys.push_back((static_cast<std::uint64_t>(a) << 32) | b);
+            };
+            dynamic_tree.query(fat, [&](std::uint32_t other) {
+                if (self < other)
+                    add(other);
+            });
+            static_tree.query(fat, add);
+        }
     }
 
-    std::sort(keys.begin(), keys.end());
-    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    if (profile) {
+        contact_profile_last.raw_candidate_keys = keys.size();
+    }
 
-    out.reserve(keys.size());
-    for (const std::uint64_t key : keys) {
-        const auto a = static_cast<std::uint32_t>(key >> 32);
-        const auto b = static_cast<std::uint32_t>(key & 0xFFFFFFFFu);
-        out.push_back(Pair{BodyId{a, slots[a].generation}, BodyId{b, slots[b].generation}});
+    {
+        ContactTimer canonical_time(profile, contact_profile_last.pair_canonicalize_ns);
+        std::sort(keys.begin(), keys.end());
+        keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+
+        out.reserve(keys.size());
+        for (const std::uint64_t key : keys) {
+            const auto a = static_cast<std::uint32_t>(key >> 32);
+            const auto b = static_cast<std::uint32_t>(key & 0xFFFFFFFFu);
+            out.push_back(Pair{BodyId{a, slots[a].generation}, BodyId{b, slots[b].generation}});
+        }
+    }
+    if (profile) {
+        contact_profile_last.unique_pairs = out.size();
+        contact_profile_last.duplicate_keys =
+            contact_profile_last.raw_candidate_keys - contact_profile_last.unique_pairs;
     }
 }
 
 void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) const {
     out.clear();
+    contact_profile_last = {};
 
     // Broadphase first: the candidate pairs are canonical (a.index < b.index), deterministically
     // sorted, and already exclude both-static pairs. A fat-AABB overlap is only a *candidate* — the
     // narrowphase below confirms (or rejects) each with exact geometry.
-    std::vector<Pair> pairs;
-    compute_pairs(pairs);
+    auto& pairs = contact_pairs;
+    compute_pairs(pairs, pair_keys, contact_profile_enabled);
     broadphase_pairs_last = static_cast<std::uint32_t>(pairs.size());
 
-    std::uint32_t warm = 0;
-    hf_patch_merges_last = 0;
-    hf_ccd_skipped_last = 0;
+    // The macro exists only for the external frozen-workload reference executable. Ordinary
+    // builds always use the validated margin; there is no production runtime toggle to drift.
+#if !defined(RIME_PHYSICS_UNFILTERED_CONTACTS)
+    {
+        ContactTimer bounds_time(contact_profile_enabled, contact_profile_last.plain_bounds_ns);
+        plain_bounds.begin(pairs.empty() ? 0 : slots.size());
+    }
+#endif
+
+    // Publish immutable bounds before dispatch. Lazy get() writes validity and the computed
+    // count even when two pairs share a body; read() below can safely serve every worker instead.
+#if !defined(RIME_PHYSICS_UNFILTERED_CONTACTS)
+    {
+        ContactTimer bounds_time(contact_profile_enabled, contact_profile_last.plain_bounds_ns);
+        for (const Pair& pr : pairs) {
+            const auto da = dense_of(pr.a), db = dense_of(pr.b);
+            if (da == core::kInvalidSlotIndex || db == core::kInvalidSlotIndex)
+                continue;
+            const auto* ha = hull_of(shape[da]);
+            const auto* hb = hull_of(shape[db]);
+            if (contact_bounds_detail::eligible(shape[da], ha) &&
+                contact_bounds_detail::eligible(shape[db], hb)) {
+                plain_bounds.get(pr.a.index, shape[da], position[da], orientation[da], ha);
+                plain_bounds.get(pr.b.index, shape[db], position[db], orientation[db], hb);
+            }
+        }
+    }
+#endif
+    // Deterministic range merge: every task processes a contiguous slice of the sorted pair
+    // list, preserving child/patch order inside each pair. Joining then concatenating slices in
+    // index order reproduces the serial manifold sequence exactly, regardless of work stealing.
+    // Warm-cache lookups remain const until the later commit, so scheduling changes no impulses.
+    const std::size_t ranges =
+        jobs != nullptr && pairs.size() >= 64
+            ? std::min<std::size_t>(jobs->participant_count() * 4, (pairs.size() + 31) / 32)
+            : 1;
+    if (contact_scratch.size() < ranges)
+        contact_scratch.resize(ranges);
+    const auto run_range = [&](std::size_t k) {
+        auto& scratch = contact_scratch[k];
+        scratch.manifolds.clear();
+        scratch.profile = {};
+        scratch.warm = scratch.patch_merges = scratch.ccd_skipped = 0;
+        const auto begin = pairs.size() * k / ranges;
+        const auto end = pairs.size() * (k + 1) / ranges;
+        build_contact_range(std::span<const Pair>(pairs).subspan(begin, end - begin), dt, scratch);
+    };
+    if (ranges > 1)
+        jobs->parallel_for(ranges, 1, run_range);
+    else
+        run_range(0);
+    warm_started_last = hf_patch_merges_last = hf_ccd_skipped_last = 0;
+    std::size_t total = 0;
+    for (std::size_t k = 0; k < ranges; ++k)
+        total += contact_scratch[k].manifolds.size();
+    out.reserve(total);
+    for (std::size_t k = 0; k < ranges; ++k) {
+        const auto& scratch = contact_scratch[k];
+        out.insert(out.end(), scratch.manifolds.begin(), scratch.manifolds.end());
+        warm_started_last += scratch.warm;
+        hf_patch_merges_last += scratch.patch_merges;
+        hf_ccd_skipped_last += scratch.ccd_skipped;
+        if (contact_profile_enabled) {
+            contact_profile_last.plain_pairs += scratch.profile.plain_pairs;
+            contact_profile_last.compound_pairs += scratch.profile.compound_pairs;
+            contact_profile_last.posed_children += scratch.profile.posed_children;
+            contact_profile_last.tested_child_pairs += scratch.profile.tested_child_pairs;
+            contact_profile_last.culled_child_pairs += scratch.profile.culled_child_pairs;
+            contact_profile_last.exact_narrowphase_calls += scratch.profile.exact_narrowphase_calls;
+            contact_profile_last.speculative_calls += scratch.profile.speculative_calls;
+            contact_profile_last.heightfield_pairs += scratch.profile.heightfield_pairs;
+            contact_profile_last.plain_exact_ns += scratch.profile.plain_exact_ns;
+            contact_profile_last.plain_speculative_ns += scratch.profile.plain_speculative_ns;
+            contact_profile_last.compound_pose_ns += scratch.profile.compound_pose_ns;
+            contact_profile_last.compound_midphase_ns += scratch.profile.compound_midphase_ns;
+            contact_profile_last.compound_exact_ns += scratch.profile.compound_exact_ns;
+            contact_profile_last.compound_speculative_ns += scratch.profile.compound_speculative_ns;
+            contact_profile_last.heightfield_ns += scratch.profile.heightfield_ns;
+            contact_profile_last.warmcache_ns += scratch.profile.warmcache_ns;
+            contact_profile_last.plain_bounds_tests += scratch.profile.plain_bounds_tests;
+            contact_profile_last.plain_bounds_rejected += scratch.profile.plain_bounds_rejected;
+            contact_profile_last.plain_bounds_ns += scratch.profile.plain_bounds_ns;
+        }
+    }
+    if (contact_profile_enabled) {
+#if !defined(RIME_PHYSICS_UNFILTERED_CONTACTS)
+        contact_profile_last.plain_bounds_bodies = plain_bounds.computed();
+#endif
+        contact_profile_last.produced_manifolds = out.size();
+    }
+}
+
+void PhysicsWorld::Impl::build_contact_range(std::span<const Pair> pairs,
+                                             float dt,
+                                             ContactScratch& scratch) const {
+    auto& out = scratch.manifolds;
+    auto& warm = scratch.warm;
+    auto& profile = scratch.profile;
     for (const Pair& pr : pairs) {
         const std::uint32_t da = dense_of(pr.a);
         const std::uint32_t db = dense_of(pr.b);
@@ -550,7 +737,11 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
         // Terrain first (M19.1): a heightfield is not convex, so neither the plain dispatch nor
         // the compound expansion below can take it. Two heightfields never pair (both static).
         if (shape[da].type == ShapeType::Heightfield || shape[db].type == ShapeType::Heightfield) {
-            build_heightfield_contacts(pr, da, db, dt, out, warm);
+            if (contact_profile_enabled) {
+                ++profile.heightfield_pairs;
+            }
+            ContactTimer terrain_time(contact_profile_enabled, profile.heightfield_ns);
+            build_heightfield_contacts(pr, da, db, dt, out, warm, scratch);
             continue;
         }
 
@@ -560,8 +751,15 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
         const CompoundShape* comp_a = compound_of(shape[da]);
         const CompoundShape* comp_b = compound_of(shape[db]);
         if (comp_a != nullptr || comp_b != nullptr) {
-            build_compound_contacts(pr, da, db, comp_a, comp_b, dt, out, warm);
+            if (contact_profile_enabled) {
+                ++profile.compound_pairs;
+            }
+            build_compound_contacts(pr, da, db, comp_a, comp_b, dt, out, warm, scratch);
             continue;
+        }
+
+        if (contact_profile_enabled) {
+            ++profile.plain_pairs;
         }
 
         Manifold m;
@@ -572,35 +770,69 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
         // Hull ids resolve to store pointers HERE — below the seam, above the dispatch (ADR-0027).
         const ConvexHull* ha = hull_of(shape[da]);
         const ConvexHull* hb = hull_of(shape[db]);
-        bool touching = collide_shapes(shape[da],
-                                       position[da],
-                                       orientation[da],
-                                       shape[db],
-                                       position[db],
-                                       orientation[db],
-                                       m,
-                                       ha,
-                                       hb) &&
-                        m.count != 0;
+        bool keep_exact = true;
+#if !defined(RIME_PHYSICS_UNFILTERED_CONTACTS)
+        if (contact_bounds_detail::eligible(shape[da], ha) &&
+            contact_bounds_detail::eligible(shape[db], hb)) {
+            ContactTimer bounds_time(contact_profile_enabled, profile.plain_bounds_ns);
+            const auto& a = plain_bounds.read(pr.a.index);
+            const auto& b = plain_bounds.read(pr.b.index);
+            keep_exact = overlaps(a.padded, b.tight);
+            if (contact_profile_enabled) {
+                ++profile.plain_bounds_tests;
+                if (!keep_exact)
+                    ++profile.plain_bounds_rejected;
+            }
+        }
+#endif
+        bool touching = false;
+        if (keep_exact) {
+            ContactTimer narrow_time(contact_profile_enabled, profile.plain_exact_ns);
+            if (contact_profile_enabled) {
+                ++profile.exact_narrowphase_calls;
+            }
+            touching = collide_shapes(shape[da],
+                                      position[da],
+                                      orientation[da],
+                                      shape[db],
+                                      position[db],
+                                      orientation[db],
+                                      m,
+                                      ha,
+                                      hb) &&
+                       m.count != 0;
+        }
         if (!touching) {
-            // The exact shapes do not overlap. For a CCD pair (either body opted in) inside a real
-            // step, ask whether a fast approach will close the gap THIS tick and, if so, emit a
-            // speculative contact so the solver can arrest the body at the surface (M7.10). Passed
-            // in slot order, so the speculative normal is a → b like the exact one. dt == 0 (the
-            // inspection seam) never speculates, keeping compute_contacts at its M7.3 semantics.
-            if (dt <= 0.0f || (ccd[da] == 0 && ccd[db] == 0) ||
-                !collide_speculative(shape[da],
-                                     position[da],
-                                     orientation[da],
-                                     linear_velocity[da],
-                                     shape[db],
-                                     position[db],
-                                     orientation[db],
-                                     linear_velocity[db],
-                                     dt,
-                                     m,
-                                     ha,
-                                     hb)) {
+            // The exact shapes do not overlap. For a CCD pair (either body opted in) inside a
+            // real step, ask whether a fast approach will close the gap THIS tick and, if so,
+            // emit a speculative contact so the solver can arrest the body at the surface
+            // (M7.10). Passed in slot order, so the speculative normal is a → b like the exact
+            // one. dt == 0 (the inspection seam) never speculates, keeping compute_contacts at
+            // its M7.3 semantics.
+            if (dt <= 0.0f || (ccd[da] == 0 && ccd[db] == 0)) {
+                continue;
+            }
+            if (contact_profile_enabled) {
+                ++profile.speculative_calls;
+            }
+            bool speculative;
+            {
+                ContactTimer speculative_time(contact_profile_enabled,
+                                              profile.plain_speculative_ns);
+                speculative = collide_speculative(shape[da],
+                                                  position[da],
+                                                  orientation[da],
+                                                  linear_velocity[da],
+                                                  shape[db],
+                                                  position[db],
+                                                  orientation[db],
+                                                  linear_velocity[db],
+                                                  dt,
+                                                  m,
+                                                  ha,
+                                                  hb);
+            }
+            if (!speculative) {
                 continue; // a broadphase near-miss, or too far / not approaching to matter
             }
         }
@@ -610,14 +842,16 @@ void PhysicsWorld::Impl::build_contacts(std::vector<Manifold>& out, float dt) co
         // recycled slot inheriting a dead pair's impulses. A plain pair is region (0, 0).
         const std::uint64_t pair_key =
             (static_cast<std::uint64_t>(pr.a.index) << 32) | static_cast<std::uint64_t>(pr.b.index);
-        const auto it = contact_cache.find(ContactCacheKey{pair_key, 0});
-        if (it != contact_cache.end() && it->second.gen_a == pr.a.generation &&
-            it->second.gen_b == pr.b.generation) {
-            warm += warm_start_from(it->second, m);
+        {
+            ContactTimer cache_time(contact_profile_enabled, profile.warmcache_ns);
+            const auto it = std::as_const(contact_cache).find(ContactCacheKey{pair_key, 0});
+            if (it != contact_cache.end() && it->second.gen_a == pr.a.generation &&
+                it->second.gen_b == pr.b.generation) {
+                warm += warm_start_from(it->second, m);
+            }
         }
         out.push_back(m);
     }
-    warm_started_last = warm;
 }
 
 void PhysicsWorld::Impl::build_compound_contacts(const Pair& pr,
@@ -627,7 +861,8 @@ void PhysicsWorld::Impl::build_compound_contacts(const Pair& pr,
                                                  const CompoundShape* comp_b,
                                                  float dt,
                                                  std::vector<Manifold>& out,
-                                                 std::uint32_t& warm) const {
+                                                 std::uint32_t& warm,
+                                                 ContactScratch& scratch) const {
     // Model A of ADR-0028, the narrowphase expansion: the broadphase reported ONE candidate pair
     // (compounds own a single union-bound proxy); here it fans out into child-vs-child sub-pairs.
     // A non-compound side counts as one child — its own shape at the body pose — so all four
@@ -638,14 +873,6 @@ void PhysicsWorld::Impl::build_compound_contacts(const Pair& pr,
 
     // Pose each side's children once — O(children_a + children_b), not O(children_a·children_b) —
     // caching pose, resolved hull, and the tight world bound the cull below reads.
-    struct PosedChild {
-        const ShapeDesc* shape;
-        const ConvexHull* hull;
-        core::Vec3 pos;
-        core::Quat orient;
-        Aabb bounds;
-    };
-
     // CCD (M7.10 × M7.12): a compound has no single support function (it is not convex), so
     // speculative contacts run PER CHILD — each child is convex and rides the body rigidly, so
     // its linear velocity is the body's (angular sweep ignored, exactly M7.10's documented
@@ -683,84 +910,141 @@ void PhysicsWorld::Impl::build_compound_contacts(const Pair& pr,
                 list.push_back(c);
             }
         };
-    std::vector<PosedChild> side_a;
-    std::vector<PosedChild> side_b;
-    pose_side(da, comp_a, side_a);
-    pose_side(db, comp_b, side_b);
+    auto& side_a = scratch.side_a;
+    auto& side_b = scratch.side_b;
+    side_a.clear();
+    side_b.clear();
+    {
+        ContactTimer pose_time(contact_profile_enabled, scratch.profile.compound_pose_ns);
+        pose_side(da, comp_a, side_a);
+        pose_side(db, comp_b, side_b);
+    }
+    if (contact_profile_enabled) {
+        scratch.profile.posed_children += side_a.size() + side_b.size();
+    }
 
     const std::uint64_t pair_key =
         (static_cast<std::uint64_t>(pr.a.index) << 32) | static_cast<std::uint64_t>(pr.b.index);
 
-    for (std::size_t ia = 0; ia < side_a.size(); ++ia) {
-        for (std::size_t ib = 0; ib < side_b.size(); ++ib) {
-            const PosedChild& ca = side_a[ia];
-            const PosedChild& cb = side_b[ib];
-            // The v1 midphase: a brute-force child AABB cull, right at fracture-cell counts (a
-            // child BVH is the measured-need follow-up, ADR-0028).
-            if (!overlaps(expanded(ca.bounds, kChildCullMargin), cb.bounds)) {
-                continue;
-            }
-
-            Manifold m;
-            m.a = pr.a;
-            m.b = pr.b;
-            m.child_a = static_cast<std::uint16_t>(ia);
-            m.child_b = static_cast<std::uint16_t>(ib);
-            // The children are convex, so each sub-pair runs the EXISTING per-convex-shape
-            // routines unchanged — passed in body slot order, so the normal is a → b exactly as
-            // the plain path's (contact.hpp). The solver later applies the manifold to the PARENT
-            // bodies: contact points are world-space and lever arms come from the parent COM,
-            // which is precisely what "rigidly attached child" means.
-            bool touching = collide_shapes(*ca.shape,
-                                           ca.pos,
-                                           ca.orient,
-                                           *cb.shape,
-                                           cb.pos,
-                                           cb.orient,
-                                           m,
-                                           ca.hull,
-                                           cb.hull) &&
-                            m.count != 0;
-            if (!touching) {
-                if (!ccd_pair || !collide_speculative(*ca.shape,
-                                                      ca.pos,
-                                                      ca.orient,
-                                                      linear_velocity[da],
-                                                      *cb.shape,
-                                                      cb.pos,
-                                                      cb.orient,
-                                                      linear_velocity[db],
-                                                      dt,
-                                                      m,
-                                                      ca.hull,
-                                                      cb.hull)) {
-                    continue; // this child pair is separated and not imminently closing
+    // One clock around the Cartesian loop avoids two clock reads for every cheap AABB rejection.
+    // Subtract the disjoint exact/speculative/cache scopes afterwards: the remainder prices the
+    // child-pair midphase, including its loop and manifold bookkeeping, without timing each cull.
+    std::uint64_t child_loop_ns = 0;
+    const std::uint64_t exact_before = scratch.profile.compound_exact_ns;
+    const std::uint64_t speculative_before = scratch.profile.compound_speculative_ns;
+    const std::uint64_t cache_before = scratch.profile.warmcache_ns;
+    {
+        ContactTimer child_loop_time(contact_profile_enabled, child_loop_ns);
+        for (std::size_t ia = 0; ia < side_a.size(); ++ia) {
+            for (std::size_t ib = 0; ib < side_b.size(); ++ib) {
+                const PosedChild& ca = side_a[ia];
+                const PosedChild& cb = side_b[ib];
+                // The v1 midphase: a brute-force child AABB cull, right at fracture-cell counts (a
+                // child BVH is the measured-need follow-up, ADR-0028).
+                const bool bounds_overlap =
+                    overlaps(expanded(ca.bounds, kChildCullMargin), cb.bounds);
+                if (contact_profile_enabled) {
+                    ++scratch.profile.tested_child_pairs;
+                    if (!bounds_overlap) {
+                        ++scratch.profile.culled_child_pairs;
+                    }
                 }
-            }
+                if (!bounds_overlap) {
+                    continue;
+                }
 
-            // Fold the child indices into every feature id (kFeatCompoundChild): two children
-            // touching the same other shape through identical child-local features must still
-            // carry DISTINCT ids. Applied uniformly to every pair that involves a compound —
-            // and never to plain pairs, whose id spaces stay bit-identical to M7.11 (the
-            // backward-compat contract).
-            const std::uint32_t child_fold =
-                feature_combine(feature_combine(kFeatCompoundChild, static_cast<std::uint32_t>(ia)),
-                                static_cast<std::uint32_t>(ib));
-            for (std::uint8_t k = 0; k < m.count; ++k) {
-                m.points[k].feature_id = feature_combine(child_fold, m.points[k].feature_id);
-            }
+                Manifold m;
+                m.a = pr.a;
+                m.b = pr.b;
+                m.child_a = static_cast<std::uint16_t>(ia);
+                m.child_b = static_cast<std::uint16_t>(ib);
+                // The children are convex, so each sub-pair runs the EXISTING per-convex-shape
+                // routines unchanged — passed in body slot order, so the normal is a → b exactly as
+                // the plain path's (contact.hpp). The solver later applies the manifold to the
+                // PARENT bodies: contact points are world-space and lever arms come from the parent
+                // COM, which is precisely what "rigidly attached child" means.
+                bool touching;
+                {
+                    ContactTimer narrow_time(contact_profile_enabled,
+                                             scratch.profile.compound_exact_ns);
+                    if (contact_profile_enabled) {
+                        ++scratch.profile.exact_narrowphase_calls;
+                    }
+                    touching = collide_shapes(*ca.shape,
+                                              ca.pos,
+                                              ca.orient,
+                                              *cb.shape,
+                                              cb.pos,
+                                              cb.orient,
+                                              m,
+                                              ca.hull,
+                                              cb.hull) &&
+                               m.count != 0;
+                }
+                if (!touching) {
+                    if (!ccd_pair) {
+                        continue;
+                    }
+                    if (contact_profile_enabled) {
+                        ++scratch.profile.speculative_calls;
+                    }
+                    bool speculative;
+                    {
+                        ContactTimer speculative_time(contact_profile_enabled,
+                                                      scratch.profile.compound_speculative_ns);
+                        speculative = collide_speculative(*ca.shape,
+                                                          ca.pos,
+                                                          ca.orient,
+                                                          linear_velocity[da],
+                                                          *cb.shape,
+                                                          cb.pos,
+                                                          cb.orient,
+                                                          linear_velocity[db],
+                                                          dt,
+                                                          m,
+                                                          ca.hull,
+                                                          cb.hull);
+                    }
+                    if (!speculative) {
+                        continue; // this child pair is separated and not imminently closing
+                    }
+                }
 
-            // Warm-start from this REGION's own cache entry — (pair, child_a, child_b) — so one
-            // foot of a standing compound can never inherit the other foot's impulses.
-            const ContactCacheKey key{
-                pair_key, (static_cast<std::uint32_t>(ia) << 16) | static_cast<std::uint32_t>(ib)};
-            const auto it = contact_cache.find(key);
-            if (it != contact_cache.end() && it->second.gen_a == pr.a.generation &&
-                it->second.gen_b == pr.b.generation) {
-                warm += warm_start_from(it->second, m);
+                // Fold the child indices into every feature id (kFeatCompoundChild): two children
+                // touching the same other shape through identical child-local features must still
+                // carry DISTINCT ids. Applied uniformly to every pair that involves a compound —
+                // and never to plain pairs, whose id spaces stay bit-identical to M7.11 (the
+                // backward-compat contract).
+                const std::uint32_t child_fold = feature_combine(
+                    feature_combine(kFeatCompoundChild, static_cast<std::uint32_t>(ia)),
+                    static_cast<std::uint32_t>(ib));
+                for (std::uint8_t k = 0; k < m.count; ++k) {
+                    m.points[k].feature_id = feature_combine(child_fold, m.points[k].feature_id);
+                }
+
+                // Warm-start from this REGION's own cache entry — (pair, child_a, child_b) — so one
+                // foot of a standing compound can never inherit the other foot's impulses.
+                const ContactCacheKey key{pair_key,
+                                          (static_cast<std::uint32_t>(ia) << 16) |
+                                              static_cast<std::uint32_t>(ib)};
+                {
+                    ContactTimer cache_time(contact_profile_enabled, scratch.profile.warmcache_ns);
+                    const auto it = std::as_const(contact_cache).find(key);
+                    if (it != contact_cache.end() && it->second.gen_a == pr.a.generation &&
+                        it->second.gen_b == pr.b.generation) {
+                        warm += warm_start_from(it->second, m);
+                    }
+                }
+                out.push_back(m);
             }
-            out.push_back(m);
         }
+    }
+    if (contact_profile_enabled) {
+        const std::uint64_t timed_regions =
+            (scratch.profile.compound_exact_ns - exact_before) +
+            (scratch.profile.compound_speculative_ns - speculative_before) +
+            (scratch.profile.warmcache_ns - cache_before);
+        scratch.profile.compound_midphase_ns += child_loop_ns - timed_regions;
     }
 }
 
@@ -769,7 +1053,8 @@ void PhysicsWorld::Impl::build_heightfield_contacts(const Pair& pr,
                                                     std::uint32_t db,
                                                     float dt,
                                                     std::vector<Manifold>& out,
-                                                    std::uint32_t& warm) const {
+                                                    std::uint32_t& warm,
+                                                    ContactScratch& scratch) const {
     // Which side is the terrain? Canonical pair order is by SLOT, not by shape, so it may be
     // either — and the manifold normal must point a → b whichever it is.
     const bool terrain_is_a = shape[da].type == ShapeType::Heightfield;
@@ -797,16 +1082,10 @@ void PhysicsWorld::Impl::build_heightfield_contacts(const Pair& pr,
     const std::uint64_t pair_key =
         (static_cast<std::uint64_t>(pr.a.index) << 32) | static_cast<std::uint64_t>(pr.b.index);
 
-    // KNOWN LIMITATION, named rather than fixed (M19.1): these two vectors — and each patch's
-    // own `members` — are heap-allocated per terrain pair per step. The narrowphase loop that
-    // calls this is SERIAL (`for (const Pair& pr : pairs)` in step()), so they could be hoisted to
-    // persistent `mutable` scratch on Impl with no data race; that is deliberately not done here
-    // because nothing has measured it. No shipped scene has terrain in it yet, so the cost today
-    // is zero, and ADR-0035 §2c's rule is that an optimisation arrives with its measurement. When
-    // M19's streaming brick puts terrain under a body count that matters, measure here first:
-    // the roadmap already names the every-tick narrowphase cache as the next physics hot spot.
-    std::vector<HeightfieldContact> cands;
-    std::vector<HeightfieldPatch> patches;
+    // Task-private terrain scratch retains vector capacity between pairs and steps. Patch member
+    // storage still follows group_patches' ownership; no container is shared across tasks.
+    auto& cands = scratch.terrain_candidates;
+    auto& patches = scratch.terrain_patches;
     bool any = false;
     for (std::size_t ci = 0; ci < n_children; ++ci) {
         const ShapeDesc* cs = &shape[dbody];
@@ -826,7 +1105,7 @@ void PhysicsWorld::Impl::build_heightfield_contacts(const Pair& pr,
             continue;
         }
         any = true;
-        hf_patch_merges_last += group_patches(cands, patches);
+        scratch.patch_merges += group_patches(cands, patches);
 
         const auto child16 = static_cast<std::uint16_t>(ci);
         for (const HeightfieldPatch& patch : patches) {
@@ -846,7 +1125,7 @@ void PhysicsWorld::Impl::build_heightfield_contacts(const Pair& pr,
                                       (static_cast<std::uint32_t>(m.child_a) << 16) |
                                           static_cast<std::uint32_t>(m.child_b),
                                       m.patch};
-            const auto it = contact_cache.find(key);
+            const auto it = std::as_const(contact_cache).find(key);
             if (it != contact_cache.end() && it->second.gen_a == pr.a.generation &&
                 it->second.gen_b == pr.b.generation) {
                 warm += warm_start_from(it->second, m);
@@ -874,6 +1153,9 @@ void PhysicsWorld::Impl::build_heightfield_contacts(const Pair& pr,
             }
             Manifold m;
             bool truncated = false;
+            if (contact_profile_enabled) {
+                ++scratch.profile.speculative_calls;
+            }
             if (!speculative_vs_heightfield_local(*hf,
                                                   *cs,
                                                   core::rotate(tqc, cpos - tp),
@@ -884,7 +1166,7 @@ void PhysicsWorld::Impl::build_heightfield_contacts(const Pair& pr,
                                                   m,
                                                   truncated)) {
                 if (truncated) {
-                    ++hf_ccd_skipped_last;
+                    ++scratch.ccd_skipped;
                 }
                 continue;
             }
@@ -1305,7 +1587,7 @@ void PhysicsWorld::step(float dt) {
     // contact from the swept bounds set just above.
     // The stage ADR-0035 §6 predicted would dominate at 400+ debris. This zone is what turns that
     // prediction into a measurement — or refutes it.
-    std::vector<Manifold> manifolds;
+    auto& manifolds = p.step_manifolds;
     {
         RIME_PROFILE_ZONE(p.zone(StepZone::Contacts));
         p.build_contacts(manifolds, dt);
@@ -1465,7 +1747,24 @@ void PhysicsWorld::step(float dt) {
             p.island_solve_slots[k].warm_ns = ns_of(lap);
             lap.restart();
         }
-        solve_velocities(bodies, cs, kVelocityIterations);
+        {
+            const std::uint32_t bb = isl.body_offsets[k];
+            const std::uint32_t be = isl.body_offsets[k + 1];
+            const WavefrontScratch scratch{p.wf_body_depth.data(),
+                                           p.wf_level.data() + cb,
+                                           p.wf_level_start.data() + cb + k,
+                                           p.wf_order.data() + cb,
+                                           p.wf_batches.data() + cb};
+            if (solve_island_velocities(
+                    bodies,
+                    cs,
+                    std::span<const std::uint32_t>{isl.bodies.data() + bb, be - bb},
+                    kVelocityIterations,
+                    p.wavefront_enabled,
+                    scratch)) {
+                p.wavefront_islands_last.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
         if constexpr (Profile) {
             p.island_solve_slots[k].velocity_ns = ns_of(lap);
             lap.restart();
@@ -1499,6 +1798,22 @@ void PhysicsWorld::step(float dt) {
     const auto solve_island = [&](std::size_t k) {
         solve_island_impl.template operator()<false>(k);
     };
+
+    // Size the wavefront scratch on this thread, before any island can run (see Impl). Growing
+    // only: a vector that already holds enough keeps its storage and costs nothing here.
+    p.wavefront_islands_last.store(0, std::memory_order_relaxed);
+    if (p.wavefront_enabled) {
+        const auto grow = [](auto& v, std::size_t size) {
+            if (v.size() < size) {
+                v.resize(size);
+            }
+        };
+        grow(p.wf_body_depth, p.inv_mass.size());
+        grow(p.wf_level, ordered.size());
+        grow(p.wf_level_start, ordered.size() + isl.island_count);
+        grow(p.wf_order, ordered.size());
+        grow(p.wf_batches, ordered.size());
+    }
 
     const bool profile_islands = p.island_profile_enabled;
     if (profile_islands) {
@@ -1905,7 +2220,10 @@ void PhysicsWorld::step(float dt) {
 }
 
 void PhysicsWorld::compute_pairs(std::vector<Pair>& out) const {
-    impl_->compute_pairs(out);
+    // Public read-only queries keep caller-local scratch so concurrent inspections never race.
+    // The per-step contact path supplies the world's retained buffer instead.
+    std::vector<std::uint64_t> keys;
+    impl_->compute_pairs(out, keys);
 }
 
 bool PhysicsWorld::broadphase_aabb(BodyId id, Aabb& out) const {
@@ -1980,12 +2298,41 @@ void PhysicsWorld::set_island_profile_enabled(bool enabled) noexcept {
     }
 }
 
+void PhysicsWorld::set_wavefront_solve_enabled(bool enabled) noexcept {
+    // Requesting it on a build without the wide path is a quiet no-op: the scalar sweep IS the
+    // answer the wide one reproduces, so nothing a caller could observe differs except the cost.
+    impl_->wavefront_enabled = enabled && kWideVelocitySolveAvailable;
+}
+
+bool PhysicsWorld::wavefront_solve_enabled() const noexcept {
+    return impl_->wavefront_enabled;
+}
+
+std::uint32_t PhysicsWorld::wavefront_islands_last() const noexcept {
+    return impl_->wavefront_islands_last.load(std::memory_order_relaxed);
+}
+
 bool PhysicsWorld::island_profile_enabled() const noexcept {
     return impl_->island_profile_enabled;
 }
 
 std::span<const IslandSolveCost> PhysicsWorld::island_solve_profile_last() const noexcept {
     return impl_->island_profile;
+}
+
+void PhysicsWorld::set_contact_profile_enabled(bool enabled) noexcept {
+    impl_->contact_profile_enabled = enabled;
+    if (!enabled) {
+        impl_->contact_profile_last = {};
+    }
+}
+
+bool PhysicsWorld::contact_profile_enabled() const noexcept {
+    return impl_->contact_profile_enabled;
+}
+
+const ContactProfile& PhysicsWorld::contact_profile() const noexcept {
+    return impl_->contact_profile_last;
 }
 
 std::size_t PhysicsWorld::islands_last() const noexcept {

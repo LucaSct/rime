@@ -1,0 +1,28 @@
+{
+  "parent": "a1fc1d276ef2ea3d9c98ed55b0226382cfc20fd8",
+  "sources": {
+    "engine/fluids_render/src/phase_detail.cpp": "caebedb949dccefac4089337e49f05e8468d32c5326db3d94d03476f6e96b113",
+    "engine/fluids_render/src/phase_surface.cpp": "42fea0ed9f5085c902908957efff0017b7747fd44b8d78d0a6b54936dca14f39",
+    "engine/fluids_scene/src/preview.cpp": "37d5cd055b37803b8103d12033ce01e171fabd596cf4b7f1bdc88391da60f9c5",
+    "engine/render/src/scene_renderer.cpp": "e99e4dfc8e0acb98fb2a576fa439b81f31896b41a4702b2a6e7547d8974879b9",
+    "engine/render/include/rime/render/scene_renderer.hpp": "5ce0a94d93d3f4135da447713d5a0c5955c99cdbc9bf6632feadffd8bdc7abba",
+    "engine/app/editor_host_app.cpp": "4d791112d76f22ed546c3713de3e6b61ee608ec71895f8bbd8b43f0d41aefff1",
+    "samples/thermal-courtyard/main.cpp": "638ef1bf19ebfebd606f75713999776665ad813e69d271c80db5a2dc3d967fa5",
+    "tests/fluids_render/phase_surface_test.cpp": "4b5ddf728d13825bce1904a33287934a7be4461cec96300bdf06577377981e12",
+    "tools/editor/src/gui.rs": "843b67a92b881342c43bd3ca85144d2e14c7d9ada6ebc847d57a771ae7a8aacb",
+    "tools/editor/src/gui/outliner.rs": "d8c8bc0497285beadc376965551f909bf917ed3efd69e82b9601ecaea542ab2c",
+    "tools/editor/src/gui/click_tests.rs": "2a92a91718cc1b226353caecb7debe1c9bd2c1d4a3042d942ad7b26dc2b9c47c",
+    "tools/editor/src/smoke.rs": "6f5db4075e90688fd52d33190d50cec0d6f6293b464f5229f15e7c7e18171024"
+  },
+  "binaries": {
+    "build/release/bin/thermal-courtyard": "026a4c93ba0247b38269bef5547acbdeeaa114a484f9f52b07715ca960dd429b",
+    "build/release/bin/rime_fluids_render_tests": "c825473a258687300be1e786500e9a7cde6f12f77c6d23678b39e8a74423106c",
+    "tools/target/debug/editor": "963544cd477b96e4b9e2765f2fe385a8a2803e2b72d69fe3bdcfa06c4018889b"
+  },
+  "captures": {
+    "final-native.png": "6083ff34ce38b14cd817b589fd258a463d3bce00eaaa50e2b3ab1a785680be43",
+    "gui-smoke-selected.png": "f980e4df745e2ea446099580e2cf34e0d995272d93a1729dc6c6bfabab4aee50",
+    "gui-display-menu.png": "ad2db1df66813fed6e5bdfc9eb1dc6bfe71bd865743b8ccb00744e704329b220"
+  },
+  "screenshots": "Direct captures; PPM to PNG conversion only. GUI uses our own isolated Xvfb, never the user desktop."
+}

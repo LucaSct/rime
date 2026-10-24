@@ -1,0 +1,5 @@
+[INFO] editor-host: loaded 155 entities, 317 components, 0 skipped (/home/next/projects/rime/samples/thermal-courtyard/courtyard.rscene) (/home/next/projects/rime/engine/app/editor_host_app.cpp:153)
+editor-host: editor host listening on /tmp/rime-editor-2543293-1792359722734390829.sock (155 entities)
+[INFO] editorhost: saved 155 entities to /home/next/reports/rime-thermal-courtyard-2026-10-18/editor-saved.rscene (43262 bytes) (/home/next/projects/rime/engine/editorhost/src/editor_host.cpp:1150)
+editor-host: editor session closed (155 entities)
+editor <-> engine OK: 35 schema types, 155 entities, 2 assets browsed; typed field edit 0 -> 1 applied and confirmed via snapshot; pick answered honestly (no viewport => miss); saved 155 entities to /home/next/reports/rime-thermal-courtyard-2026-10-18/editor-saved.rscene (43262 bytes); clean shutdown

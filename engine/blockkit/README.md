@@ -30,6 +30,12 @@ plus `SlabRole{building, storey, kind, tint}`, and `apply_palette()` derives the
 same split `.rdest` already makes, and it means the entire appearance of the demo is
 `palette.hpp` — re-tintable without regenerating the scene.
 
+Static timber edging uses the appended `slab_kind::kTimber` role (12), the
+palette's existing warm rough wood material and a scaled unit cube. It does not
+require a cooked destructible crate or add another material. The V2 city uses
+these boards for grounded basin sides, caps and corner posts; each board remains
+an ordinary editable entity whose renderer handles reconstruct on load.
+
 **Nine cooks, not five.** The naive prefab makes every wall the full 8 m footprint and every floor
 the full 8 × 8, which leaves 0.3 × 0.3 corner columns and a 0.15 m lip where each floor meets its
 walls. Static interpenetration is invisible while everything stands and is exactly wrong the moment

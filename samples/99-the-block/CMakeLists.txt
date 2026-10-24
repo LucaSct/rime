@@ -10,14 +10,18 @@
 # the one file whose merge mistakes are hardest to spot. A line each, and git merges them.
 add_executable(the_block
     main.cpp
+    authored_environment.cpp
     play_arm_ik.cpp
+    play_building_support.cpp
+    play_city.cpp
+    play_effects.cpp
     play_environment.cpp
     play_viewmodel.cpp
     play_weapon_fx.cpp
     play_world.cpp)
 
 target_link_libraries(the_block
-    PRIVATE rime::app
+    PRIVATE rime::app rime::app_game
             rime::worldkit
             rime::blockkit rime::ground
             rime::scene
@@ -36,22 +40,27 @@ target_link_libraries(the_block
             rime::platform
             rime::ecs
             rime::core)
+target_link_libraries(the_block PRIVATE rime::vfx rime::vfx_scene rime::fluids_render)
 
 rime_apply_common_target_options(the_block)
+# Same binary/content/provenance seam as hello-game, with a distinct development profile.
+include(${CMAKE_CURRENT_SOURCE_DIR}/bundle-metadata.cmake)
+rime_game_content(the_block ${CMAKE_CURRENT_BINARY_DIR}/city-content
+    BUNDLE_METADATA "${CITY_BUNDLE_METADATA}")
 
 # ── The demo's own editor host (m15.2) ──────────────────────────────────────────────────────────
 # The whole point of ADR-0038's §2: a game that wants its components in the editor's inspector
 # builds its own host from the engine's library and adds its module on top. Nine lines of C++, one
 # CMake target, and nothing in engine/ knows this game exists. Point the editor at it with
 # `editor --engine build/dev/bin/the-block-host`.
-add_executable(the_block_host block_host_main.cpp)
+add_executable(the_block_host block_host_main.cpp editor_preview_player.cpp play_city.cpp)
 set_target_properties(the_block_host PROPERTIES OUTPUT_NAME the-block-host)
 # rime::gameplay + rime::platform arrive with m18 Track H: the host's play-mode `PlayTick` hook
 # flies a `gameplay::FlyCamera` from the browser's input, which is this game deciding what a key
 # MEANS — the third thing ADR-0038 says a game's own host binary is for.
 target_link_libraries(the_block_host
     PRIVATE rime::editorhost_app rime::worldkit rime::blockkit rime::ecs rime::render
-            rime::destruction rime::gameplay rime::platform rime::core)
+            rime::destruction rime::destruction_render rime::gameplay rime::platform rime::core)
 rime_apply_common_target_options(the_block_host)
 
 # ── The cooked block ────────────────────────────────────────────────────────────────────────────
@@ -60,6 +69,19 @@ rime_apply_common_target_options(the_block_host)
 # or debugged without a test fixture in play. `--cooked <dir>` overrides it for a hand-run.
 set(BLOCK_DEMO_COOKED "${CMAKE_CURRENT_BINARY_DIR}/cooked")
 target_compile_definitions(the_block PRIVATE RIME_BLOCK_COOKED_DIR="${BLOCK_DEMO_COOKED}")
+
+# ── Recorded sound effects ──────────────────────────────────────────────────────────────────────
+# CC0 recordings (assets/audio/ATTRIBUTION.md): rifles, masonry impacts, collapse and rumble. The
+# in-tree binary reads them straight from the source tree (RIME_BLOCK_AUDIO_DIR); a bundled game
+# finds them in `<content root>/audio`, so they are also copied into the content directory after
+# every build. If the directory is absent the game falls back to the engine's synthetic sounds.
+set(BLOCK_AUDIO_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/assets/audio")
+target_compile_definitions(the_block PRIVATE RIME_BLOCK_AUDIO_DIR="${BLOCK_AUDIO_SOURCE}")
+add_custom_command(TARGET the_block POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${BLOCK_AUDIO_SOURCE}" "${CMAKE_CURRENT_BINARY_DIR}/city-content/audio"
+    COMMENT "Copy recorded sound effects into the bundle content directory"
+    VERBATIM)
 
 # Viewmodel content has its own manifest: the block's fracture/ground cook is deliberately
 # independent, and all non-play modes can keep using it without touching weapon art.
@@ -203,9 +225,67 @@ add_test(NAME the_block_environment_smoke COMMAND the_block --environment-smoke)
 # the matrix can produce is the sanitizer build on the slow runner, ~1160 s extrapolated, so
 # 1800 s leaves headroom without being so large that a genuine hang sits in the queue for an
 # hour. Raise it if the street grows again; the number is a measurement, not a convention.
+#
+# It grew again, and this is the re-measurement (oct24, on a05f676's parent): **714.5 s** on the
+# faster runner in Debug -- 3.8x the 189 s above -- and a CTest Timeout at 1800 s on the slower one,
+# which runs the_block_headless 3.96x slower than here (31.21 s vs 7.88 s), predicting ~2830 s. It
+# is plain CPU cost, not a stall: sampling 150 s of the run, the 32 llvmpipe worker threads used
+# 848 CPU-seconds against 185 for every engine thread together, so lavapipe rasterizing the street
+# is ~82 % of the work. 3600 covers the Debug build on the slow runner with ~27 % headroom. It does
+# NOT cover the sanitizer build there (~1.4x, ~3960 s predicted) -- the fix for that is making each
+# frame cheaper (what grew 189 -> 714 s is unmeasured), not another raise.
 set_tests_properties(the_block_environment_smoke PROPERTIES
     FIXTURES_REQUIRED block_demo_cook
+    TIMEOUT 3600)
+
+add_test(NAME the_block_effects_smoke COMMAND the_block --effects-smoke)
+set_tests_properties(the_block_effects_smoke PROPERTIES
+    FIXTURES_REQUIRED block_demo_cook
     TIMEOUT 1800)
+
+# The `peers` HUD row's honesty (oct21-desync): 20 rifle hits and an aimed charge on the generated
+# city, every tick classified as the HUD classifies it. GPU-free.
+#
+# TIMEOUT 600 -- sized from a measurement, which this test could not have until oct24. It used to
+# drain until the authority had published nothing for 600 ticks, and how long THAT takes is set by a
+# chaotic fracture cascade: 982 s on nextos, 2862 s on starbase, >3600 s on windows-latest, same
+# commit. Two successive timeout raises failed for that structural reason, not for slowness.
+#
+# Now the charge gets 60 aftermath ticks, then the authority's local damage gate closes
+# (DestructionWorld::set_local_damage_enabled) and both the session and its divergence control must
+# settle within a fixed 300 ticks -- exhausting either budget FAILS, it is not reported-and-passed.
+# The test is therefore a bounded number of ticks, and its wall clock is sizeable like any other:
+# measured 18.26 s on nextos in Debug (660 ticks: a 600-tick session plus the 60-tick control). The slowest sibling ratio in the matrix is
+# the_block_headless on macos-latest, 4.16x nextos, and windows-latest has run ~1.47x macOS; that
+# predicts ~112 s on the slowest job. 600 matches the sibling tests and leaves >5x headroom.
+#
+# NOT REGISTERED UNDER A SANITIZER, and the reason is a measurement rather than a preference. The
+# sibling timeouts above budget for "the sanitizer build on the slow runner" at roughly 3x the
+# release figure. That factor is far too small for THIS test: on PR #348 it hit the 1800 s wall on
+# the FASTER runner under ASan+UBSan, so the real factor is >8x, not ~3x -- a Debug build of a
+# CPU-bound per-tick classification loop, times ASan's own 2-3x. Raising the timeout is the wrong
+# lever, because the ASan job's own budget is timeout-minutes: 120 and it had already spent 66
+# minutes reaching this test: a 3600 s test would blow the JOB instead of the test, which is
+# strictly worse (a cancelled job reports no logs at all).
+#
+# What the exclusion costs, stated so it is not mistaken for free: this path loses ASan coverage.
+# What it does NOT cost is any claim -- the test still runs in every non-sanitizer job (both
+# self-hosted build & test jobs plus hosted Linux, macOS and Windows), so its determinism and
+# HUD-honesty assertions are fully gated. ASan's value is memory errors, and the engine code this
+# mode drives (physics step, gameplay classification, the net predictor) is exercised by the other
+# 92 tests under ASan. A bounded test can now be re-measured under ASan; nobody has done that yet.
+if(RIME_SANITIZER STREQUAL "off")
+    add_test(NAME the_block_desync_check COMMAND the_block --desync-check)
+    set_tests_properties(the_block_desync_check PROPERTIES
+        FIXTURES_REQUIRED block_demo_cook
+        TIMEOUT 600)
+else()
+    # Visible at configure time rather than silently absent -- a dropped test that announces
+    # nothing is the CMake version of a skip path without a counter.
+    message(STATUS
+        "the_block_desync_check: NOT registered (RIME_SANITIZER=${RIME_SANITIZER}); "
+        "it exceeds 1800 s under instrumentation -- see the note in samples/99-the-block/CMakeLists.txt")
+endif()
 
 # Registered only when the art is here; the binary itself skips the mode rather than failing, so
 # running it by hand on a clean clone is harmless too.
@@ -219,4 +299,13 @@ if(BLOCK_HAVE_VIEWMODEL_ART)
     add_test(NAME block_demo_cook_viewmodel
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --target the_block_viewmodel_cook)
     set_tests_properties(block_demo_cook_viewmodel PROPERTIES FIXTURES_SETUP viewmodel_cook)
+endif()
+
+# Authoring -> strict runtime parity, independent of the chaotic collapse/performance sample gates.
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME the_block_city_scene
+        COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/scripts/test_city_scene.py
+                $<TARGET_FILE:the_block>)
+    set_tests_properties(the_block_city_scene PROPERTIES FIXTURES_REQUIRED block_demo_cook)
 endif()

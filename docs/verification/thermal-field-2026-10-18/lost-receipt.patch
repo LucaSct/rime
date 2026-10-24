@@ -1,0 +1,5 @@
+--- original
++++ lost-receipt
+@@ -157 +157 @@
+-            work_journal_.push_back(op);
++            // Deliberately omit a contact receipt.

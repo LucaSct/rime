@@ -13,6 +13,13 @@
 //      draw still lands its own value. Pools now grow with demand and recycle on completion.
 //
 // Off-screen + readback, so it runs GPU-free on lavapipe in CI (the M3.3 proof pattern).
+//
+// Since the descriptor-cache brick, the Vulkan backend promotes uniform buffers to DYNAMIC
+// descriptors by default, so slices of one buffer that differ only in offset share ONE set and
+// move by dynamic offset. Both claims still hold at the pixel level — that is the point — but (2)
+// then no longer allocates 24 sets. With RIME_VK_DESCRIPTOR_CACHE=0 it does, exactly as written;
+// the cache-on capacity proof (300 DISTINCT sets, more than one pool and more than the cache) lives
+// in descriptor_cache_test.cpp.
 
 #include <doctest/doctest.h>
 
@@ -165,8 +172,9 @@ TEST_CASE("rhi uniform buffers bind per draw through declared binding layouts (A
     }
 
     SUBCASE("24 per-draw sets in one command buffer — past the old 16-set cap") {
-        // 24 one-pixel-wide scissored columns, each drawn with its own UBO slice. Every draw
-        // bakes a fresh transient set; 24 > the 16 sets the M3.5 pool could ever hand out.
+        // 24 one-pixel-wide scissored columns, each drawn with its own UBO slice. On the
+        // uncached path every draw bakes a fresh transient set; 24 > the 16 sets the M3.5 pool
+        // could ever hand out. (Cache on: one set, 24 dynamic offsets — see the file header.)
         constexpr std::uint32_t kColumns = 24;
         const std::uint32_t width = kColumns, height = 8;
 

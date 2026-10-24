@@ -1,0 +1,6 @@
+--- phase_change.cpp
++++ collapsed-mixture.cpp
+@@ -120,3 +119,0 @@
+-        if (energy > 0.0 && energy < latent_energy_j_ &&
+-            !(result.liquid_mass_fraction > 0.0 && result.liquid_mass_fraction < 1.0))
+-            return std::nullopt;

@@ -1,0 +1,14 @@
+[1/14] Building CXX object engine/blockkit/CMakeFiles/rime_blockkit.dir/src/palette.cpp.o
+[2/14] Building CXX object engine/blockkit/CMakeFiles/rime_blockkit.dir/src/block.cpp.o
+[3/14] Linking CXX static library lib/librime_blockkit.a
+[4/14] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_building_support.cpp.o
+[5/14] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_city.cpp.o
+[6/14] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_environment.cpp.o
+[7/14] Building CXX object samples/99-the-block/CMakeFiles/the_block_host.dir/block_host_main.cpp.o
+[8/14] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/play_world.cpp.o
+[9/14] Building CXX object samples/99-the-block/CMakeFiles/the_block_host.dir/play_city.cpp.o
+[10/14] Linking CXX executable bin/the-block-host
+[11/14] Building CXX object samples/99-the-block/CMakeFiles/the_block.dir/main.cpp.o
+[12/14] Linking CXX executable bin/the_block
+[13/14] Building CXX object tests/blockkit/CMakeFiles/blockkit_test.dir/blockkit_test.cpp.o
+[14/14] Linking CXX executable bin/blockkit_test

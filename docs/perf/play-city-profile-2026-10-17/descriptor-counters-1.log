@@ -1,0 +1,14 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+99-the-block: building support: loaded=1 all_supported=1 buildings=32 quarantined=0 nodes=6540 roots=728 bond_edges=12971 contact_edges=13851 unreachable=0 missing_geometry=0
+[INFO] rhi.vk.descriptors: cache=on draws=67916 binds=67916 dynamic_binds=67915 allocations=346 updates=346 hits=67570 misses=346 evictions=133 static_fallback=304 pools=2 (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:626)
+[INFO] rhi.vk.descriptors: cache=on draws=13702 binds=13702 dynamic_binds=13701 allocations=324 updates=324 hits=13378 misses=324 evictions=107 static_fallback=304 pools=2 (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:626)
+[INFO] rhi.vk.descriptors: cache=on draws=13702 binds=13702 dynamic_binds=13701 allocations=324 updates=324 hits=13378 misses=324 evictions=111 static_fallback=304 pools=2 (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:626)
+[INFO] rhi.vk.descriptors: cache=on draws=94501 binds=94501 dynamic_binds=94498 allocations=357 updates=357 hits=94144 misses=357 evictions=131 static_fallback=304 pools=2 (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:626)
+[INFO] rhi.vk.descriptors: cache=on draws=40287 binds=40287 dynamic_binds=40284 allocations=335 updates=335 hits=39952 misses=335 evictions=120 static_fallback=304 pools=2 (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:626)
+[INFO] rhi.vk.descriptors: cache=on draws=40286 binds=40286 dynamic_binds=40284 allocations=334 updates=334 hits=39952 misses=334 evictions=131 static_fallback=304 pools=2 (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:626)
+[INFO] rhi.vk.descriptors: cache=on draws=40286 binds=40286 dynamic_binds=40284 allocations=334 updates=334 hits=39952 misses=334 evictions=127 static_fallback=304 pools=2 (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:626)
+[INFO] rhi.vk.descriptors: cache=on draws=40286 binds=40286 dynamic_binds=40284 allocations=334 updates=334 hits=39952 misses=334 evictions=119 static_fallback=304 pools=2 (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:626)
+[INFO] rhi.vk.descriptors: cache=on draws=40286 binds=40286 dynamic_binds=40284 allocations=334 updates=334 hits=39952 misses=334 evictions=131 static_fallback=304 pools=2 (/home/next/projects/rime/engine/rhi/src/vulkan/command_buffer_vulkan.cpp:626)
+99-the-block: no display available; running the script headless instead.
+99-the-block: 6 frames, 6 ticks

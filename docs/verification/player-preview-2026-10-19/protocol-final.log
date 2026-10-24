@@ -1,0 +1,50 @@
+   Compiling rime-protocol v0.0.1 (/home/next/projects/rime/tools/rime-protocol)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running unittests src/lib.rs (target/debug/deps/rime_protocol-a4f4882ce613baf9)
+
+running 6 tests
+test play_control::tests::command_bytes_and_actions ... ok
+test play_control::tests::message_tags ... ok
+test play_control::tests::state_bytes_roundtrip_and_stale_ids ... ok
+test play_control::tests::inconsistent_states_refused ... ok
+test play_control::tests::truncation_extra_cap_and_utf8 ... ok
+test thermal::tests::bounded_roundtrip_and_malformed_packets ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/conformance.rs (target/debug/deps/conformance-2bfed8692f36e000)
+
+running 25 tests
+test a_reserved_frame_flag_bit_is_refused ... ok
+test asset_list_decodes_and_re_encodes_byte_exact ... ok
+test an_av1_delta_frame_carries_a_clear_keyframe_flag_byte_exact ... ok
+test component_ref_decodes_and_re_encodes_byte_exact ... ok
+test edit_result_decodes_and_re_encodes_byte_exact ... ok
+test entity_ref_carries_the_whole_u64_id ... ok
+test gizmo_state_decodes_and_re_encodes_byte_exact ... ok
+test frame_message_decodes_and_re_encodes_byte_exact ... ok
+test handshake_bytes_match_the_golden ... ok
+test input_event_decodes_and_re_encodes_byte_exact ... ok
+test message_type_and_editor_codes_are_stable ... ok
+test pick_request_decodes_and_re_encodes_byte_exact ... ok
+test lz4_frame_decodes_to_the_pixels_cpp_compressed ... ok
+test play_state_decodes_and_re_encodes_byte_exact ... ok
+test pick_result_decodes_and_re_encodes_byte_exact ... ok
+test save_result_round_trips_and_a_refusal_stays_a_refusal ... ok
+test connection_handshakes_and_exchanges_a_message ... ok
+test save_scene_round_trips_including_the_empty_path ... ok
+test scene_load_report_decodes_and_re_encodes_byte_exact ... ok
+test schema_decodes_field_layout_and_re_encodes_byte_exact ... ok
+test set_component_decodes_and_re_encodes_byte_exact ... ok
+test snapshot_decodes_structure_and_re_encodes_byte_exact ... ok
+test snapshot_components_decode_to_typed_values_and_re_encode_exact ... ok
+test spawn_entity_decodes_and_re_encodes_byte_exact ... ok
+test viewport_camera_decodes_and_re_encodes_byte_exact ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests rime_protocol
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s

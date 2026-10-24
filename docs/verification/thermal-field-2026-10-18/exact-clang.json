@@ -1,0 +1,20 @@
+{
+  "fields": 38,
+  "calls": 544,
+  "status_counts": {
+    "0": 509,
+    "1": 30,
+    "6": 2,
+    "7": 1,
+    "4": 1,
+    "5": 1
+  },
+  "verified_operations": 4057,
+  "source_product_rounding_witnesses": 1097,
+  "duration_partition_witnesses": 96,
+  "allocations_during_advances": 0,
+  "input_sha256": "be5d2ba14052020927e830f1cf56c2889766af49a35f0277903661d0c23f1973",
+  "output_sha256": "227337ec3af0a27bcdaeb43a0106ed9c9c924af5522c73c67a5b8d80f3e50985",
+  "compiler": "clang++",
+  "library_sha256": "5337f959aed14caa861d4fc9e32f507b75ed298ea9bacfcb0dd04d14e7b40eb8"
+}

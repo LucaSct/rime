@@ -1,0 +1,108 @@
+# Rime scene v1 (.rscene) — reflection-serialized world. Human-diffable; hand-edit or regenerate.
+rime_scene 1
+
+entity 0 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0.3 y 1.25 z 4.2 }
+      rotation { x -0.0784591 y 0 z 0 w 0.9969173 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::Camera 0x42cdb0b7ddc97dbc {
+    fov_y 0.87266
+    z_near 0.1
+    z_far 1000
+    active true
+  }
+}
+
+entity 1 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x -0.45377016 y 0.11087233 z 0.05701855 w 0.8823542 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::DirectionalLight 0x0279ad2e8762ff9a {
+    color_r 1
+    color_g 0.97
+    color_b 0.92
+    intensity 3.4
+  }
+}
+
+entity 2 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0.3 y 1 z 4.6 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::block_play::PlayerSpawn 0x5bb141d781156549 {
+    enabled true
+  }
+}
+
+entity 3 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MaterialAsset 0x6031d5a8e12eb6b5 {
+    asset 15518493838741827451
+  }
+  rime::ground::GroundSurface 0xd6ea82acd7add462 {
+    half_x 40
+    half_z 40
+    cells_x 20
+    cells_z 20
+    tile_metres 4
+    thickness 1
+  }
+}
+
+entity 4 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -1.3 y 0 z 0.0 }
+      rotation { x 0 y 0.2164396 z 0 w 0.976296 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 13649199587725015797
+  }
+}
+
+entity 5 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0.0 y 0 z 0.2 }
+      rotation { x 0 y -0.1736482 z 0 w 0.9848078 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 17259774636830964481
+  }
+}
+
+entity 6 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 1.5 y 0 z 0.0 }
+      rotation { x 0 y -0.258819 z 0 w 0.9659258 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 14111670415297445338
+  }
+}
+

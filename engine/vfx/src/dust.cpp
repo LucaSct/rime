@@ -24,6 +24,21 @@ namespace {
     return z ^ (z >> 31);
 }
 
+[[nodiscard]] bool finite(core::Vec3 v) noexcept {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+
+[[nodiscard]] bool valid(const EmitParams& p) noexcept {
+    return std::isfinite(p.speed) && p.speed >= 0.0f && std::isfinite(p.lift) &&
+           std::isfinite(p.gravity) && std::isfinite(p.min_lifetime) &&
+           std::isfinite(p.max_lifetime) && p.min_lifetime > 0.0f &&
+           p.max_lifetime >= p.min_lifetime && std::isfinite(p.min_size) &&
+           std::isfinite(p.max_size) && p.min_size >= 0.0f && p.max_size >= p.min_size &&
+           std::isfinite(p.growth) &&
+           (p.family == Family::ImpactDust || p.family == Family::LingeringSmoke ||
+            p.family == Family::MuzzleFlash);
+}
+
 } // namespace
 
 // ── The three families (m13.1b, ADR-0035 §5) ─────────────────────────────────────────────────
@@ -104,22 +119,36 @@ void ParticleField::emit_burst(core::Vec3 bounds_min,
                                core::Vec3 bounds_max,
                                float intensity,
                                const EmitParams& params) {
-    if (!(intensity > 0.0f)) {
+    if (!std::isfinite(intensity) || !(intensity > 0.0f) || !finite(bounds_min) ||
+        !finite(bounds_max) || bounds_max.x < bounds_min.x || bounds_max.y < bounds_min.y ||
+        bounds_max.z < bounds_min.z || !valid(params)) {
+        ++stats_.rejected_emissions;
         return;
-    }
-    if (bounds_max.x < bounds_min.x || bounds_max.y < bounds_min.y || bounds_max.z < bounds_min.z) {
-        return; // inverted/empty box — nothing to fill
     }
     const core::Vec3 center{0.5f * (bounds_min.x + bounds_max.x),
                             0.5f * (bounds_min.y + bounds_max.y),
                             0.5f * (bounds_min.z + bounds_max.z)};
+    const core::Vec3 extent = bounds_max - bounds_min;
+    if (!finite(center) || !finite(extent)) {
+        ++stats_.rejected_emissions;
+        return;
+    }
 
-    const float clamped_intensity =
-        std::min(intensity, 4.0f); // one break can't drain the whole pool
-    std::uint32_t wanted =
-        static_cast<std::uint32_t>(static_cast<float>(params.count) * clamped_intensity);
+    const float clamped_intensity = std::min(intensity, 4.0f);
+    const float float_requested = static_cast<float>(params.count) * clamped_intensity;
+    // Keep the old float multiply and truncation for ordinary calls. A rounded result at or
+    // above 2^32 cannot be cast to uint32_t; recompute only that exceptional case in double.
+    const std::uint64_t requested =
+        float_requested < 4294967296.0
+            ? static_cast<std::uint32_t>(float_requested)
+            : static_cast<std::uint64_t>(static_cast<double>(params.count) *
+                                         static_cast<double>(clamped_intensity));
     const std::uint32_t room = max_ - static_cast<std::uint32_t>(particles_.size());
-    wanted = std::min(wanted, room);
+    const std::uint32_t wanted =
+        static_cast<std::uint32_t>(std::min(requested, std::uint64_t{room}));
+    stats_.requested_particles += requested;
+    stats_.spawned_particles += wanted;
+    stats_.dropped_capacity += requested - wanted;
 
     for (std::uint32_t i = 0; i < wanted; ++i) {
         Particle p;
@@ -151,6 +180,7 @@ void ParticleField::simulate(float dt) {
         Particle p = particles_[read];
         p.age += dt;
         if (p.age >= p.lifetime) {
+            ++stats_.retired_particles;
             continue; // retired — dropped by not copying it forward
         }
         // PER-PARTICLE gravity and growth, which is what lets one field hold three families at
@@ -178,6 +208,7 @@ float ParticleField::coverage() const noexcept {
 }
 
 void ParticleField::clear() noexcept {
+    stats_.cleared_particles += particles_.size();
     particles_.clear();
 }
 

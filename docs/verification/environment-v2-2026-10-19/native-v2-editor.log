@@ -1,0 +1,38 @@
+ninja: no work to do.
+Test project /home/next/projects/rime/build/release
+      Start 26: block_demo_cook_wall_bg
+ 1/11 Test #26: block_demo_cook_wall_bg ..........   Passed    0.20 sec
+      Start 27: block_demo_cook_wall_hero
+ 2/11 Test #27: block_demo_cook_wall_hero ........   Passed    0.09 sec
+      Start 28: block_demo_cook_side_bg
+ 3/11 Test #28: block_demo_cook_side_bg ..........   Passed    0.08 sec
+      Start 29: block_demo_cook_side_hero
+ 4/11 Test #29: block_demo_cook_side_hero ........   Passed    0.11 sec
+      Start 30: block_demo_cook_floor_bg
+ 5/11 Test #30: block_demo_cook_floor_bg .........   Passed    0.09 sec
+      Start 31: block_demo_cook_floor_hero
+ 6/11 Test #31: block_demo_cook_floor_hero .......   Passed    0.08 sec
+      Start 32: block_demo_cook_half_bg
+ 7/11 Test #32: block_demo_cook_half_bg ..........   Passed    0.10 sec
+      Start 33: block_demo_cook_half_hero
+ 8/11 Test #33: block_demo_cook_half_hero ........   Passed    0.09 sec
+      Start 34: block_demo_cook_crate
+ 9/11 Test #34: block_demo_cook_crate ............   Passed    0.09 sec
+      Start 35: block_demo_cook_ground
+10/11 Test #35: block_demo_cook_ground ...........   Passed    2.34 sec
+      Start 42: block_demo_cook_viewmodel
+11/11 Test #42: block_demo_cook_viewmodel ........   Passed    0.01 sec
+
+100% tests passed out of 11
+
+Total Test time (real) =   3.29 sec
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.13s
+     Running `tools/target/debug/editor --engine /home/next/projects/rime/build/release/bin/the-block-host --scene /home/next/projects/rime/build/release/city-v2.rscene --assets /home/next/projects/rime/build/release/samples/99-the-block/cooked/manifest.txt --game /home/next/projects/rime/build/release/bin/the_block --game-arg --play --game-arg --cooked --game-arg /home/next/projects/rime/build/release/samples/99-the-block/cooked --game-arg --viewmodel-content --game-arg /home/next/projects/rime/build/release/samples/99-the-block/viewmodel-cooked`
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [1] 'AMD Ryzen 9 9950X3D 16-Core Processor (RADV RAPHAEL_MENDOCINO)' (type score 500) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: candidate [2] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[INFO] editor-host: loaded 630 entities, 1872 components, 0 skipped (/home/next/projects/rime/build/release/city-v2.rscene) (/home/next/projects/rime/engine/app/editor_host_app.cpp:153)
+[INFO] editor-host: asset settle took 3 round(s); 0 material(s) resolved, 0 pending (/home/next/projects/rime/engine/app/editor_host_app.cpp:509)
+[INFO] the-block-host: palette applied — 575 materialed, 6 meshed (+569 slab previews), 0 roles missing, 0 unknown patterns (/home/next/projects/rime/samples/99-the-block/block_host_main.cpp:137)
+editor-host: editor host + viewport on /tmp/rime-editor-gui-92772-1792410739329978182.sock (960x540, 'NVIDIA GeForce RTX 3060')

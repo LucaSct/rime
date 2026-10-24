@@ -1,0 +1,4 @@
+[INFO] editor-host: loaded 5 entities, 14 components, 0 skipped (/home/next/reports/rime-environment-authoring-2026-10-18/authored-effects.rscene) (/home/next/projects/rime/engine/app/editor_host_app.cpp:150)
+editor-host: editor host listening on /tmp/rime-editor-1190641-1792341153918881989.sock (5 entities)
+editor-host: editor session closed (5 entities)
+editor <-> engine OK: 28 schema types, 5 entities, 2 assets browsed; typed field edit 1 -> 2 applied and confirmed via snapshot; pick answered honestly (no viewport => miss); clean shutdown

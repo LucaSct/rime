@@ -21,6 +21,13 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
+// The water pass (screen-space refraction): the same shading, drawn after the opaque scene, reading
+// a copy of it. WATER_PASS_GBUFFER is the SSR-on twin and so also writes the G-buffer.
+#ifdef WATER_PASS_GBUFFER
+#define WATER_PASS
+#define WRITE_GBUFFER
+#endif
+
 #ifdef FIRST_PERSON_SDF_SPECULAR
 #define FIRST_PERSON
 #define SDF_SPECULAR_OCCLUSION
@@ -52,7 +59,9 @@ layout(std140, set = 0, binding = 1) uniform DrawUniforms {
     mat4 normal_matrix;
     vec4 base_color;
     vec4 params;   // x = metallic, y = roughness, z = normal_scale, w = occlusion_strength
-    vec4 emissive; // rgb = emissive factor (linear)
+    vec4 emissive; // ordinary: emissive; phase: seconds, oval bank, frost map present
+    mat4 prev_model;
+    vec4 motion_params; // x deformation velocity; y surface kind, z liquid, w depth metres
 } draw;
 
 layout(set = 0, binding = 2) uniform sampler2D base_color_tex;
@@ -187,6 +196,13 @@ layout(location = 2) out vec4 out_gbuffer_material;
 #endif
 
 #include "brdf.glsl"
+#ifdef WATER_PASS
+// Bindings 21/22 are the SDF variant's slots; the two variants never meet. Colour is a linear
+// sampler; depth travels as raw float bits in an R32_UINT target (the RHI has no R32_SFLOAT).
+layout(set = 0, binding = 21) uniform sampler2D water_scene_color;
+layout(set = 0, binding = 22) uniform usampler2D water_scene_depth;
+#endif
+#include "water_surface.glsl"
 
 // One point light's contribution. Factored out (m10.3) so the uniform-block loop and the clustered
 // loop are provably the same shading maths — only the source of the light data differs. The
@@ -228,39 +244,8 @@ vec3 perturb_normal(vec3 world_normal) {
     return normalize(mat3(T, B, N) * n_tangent);
 }
 
-// The sun's shadow factor at this fragment: 1 = fully lit, 0 = fully shadowed. Walk the cascades
-// coarse-to-fine and use the FIRST one the fragment projects inside — that is the tightest map that
-// still covers it (docs/math/shadow-mapping.md §2). Offset the sample point along the surface normal
-// first (normal bias) to fight self-shadowing acne at grazing sun angles, then compare with a small
-// constant depth bias. A 3×3 grid of hardware-compare taps softens the edge (PCF, §5).
-float sun_shadow(vec3 world_pos, vec3 N) {
-    uint count = uint(shadow.params.x);
-    if (count == 0u)
-        return 1.0; // shadows disabled — no modulation (kept for safety; the off path uses pbr_forward)
-
-    vec3 biased = world_pos + N * shadow.params.w;
-    for (uint c = 0u; c < count && c < 4u; ++c) {
-        vec4 lc = shadow.cascade_view_proj[c] * vec4(biased, 1.0);
-        vec3 p = lc.xyz / lc.w;         // ortho ⇒ w = 1, but the divide is harmless and general
-        vec2 uv = p.xy * 0.5 + 0.5;     // clip [-1,1] → texture [0,1] (both y-down, Vulkan)
-        // Inside this cascade's map? (a hair inside the border avoids sampling the clamped edge)
-        if (all(greaterThanEqual(uv, vec2(0.001))) && all(lessThanEqual(uv, vec2(0.999))) &&
-            p.z >= 0.0 && p.z <= 1.0) {
-            float ref = p.z - shadow.params.z;   // the receiver's light-space depth, biased toward lit
-            float step = shadow.params.y * shadow.texel.x;
-            float sum = 0.0;
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    vec2 o = vec2(float(dx), float(dy)) * step;
-                    // sampler2DArrayShadow: (u, v, layer, reference) → filtered compare result.
-                    sum += texture(shadow_map, vec4(uv + o, float(c), ref));
-                }
-            }
-            return sum / 9.0;
-        }
-    }
-    return 1.0; // past the last cascade — treat as lit rather than pop to hard shadow
-}
+// One receiver implementation keeps terrain and mesh cascade transitions consistent.
+#include "sun_shadow.glsl"
 
 // A spot light's shadow factor at this fragment: 1 = lit, 0 = shadowed. The spot is a perspective
 // shadow map (its own array layer `idx`), so unlike the ortho cascades the projection is a real
@@ -446,27 +431,44 @@ void main() {
     vec3 v = normalize(frame.camera_pos.xyz - v_world_pos);
     // ALPHA MASK (m15.6). Sample once, mask, then use the rgb. `draw.emissive.w` is the cutoff and
     // zero means "no masking" — so an opaque or blended material takes the false branch on a
-    // comparison that can never be true, and needs no shader variant. The discard is FIRST because
-    // a discarded fragment must not have written depth or run the BRDF.
+    // comparison that can never be true, and needs no shader variant. Derivative-dependent
+    // texture reads and normal filtering precede discard: a cutout must not remove helper
+    // lanes before its neighbours measure their pixel footprint. No lighting/depth writes yet.
     vec4 base_sample = texture(base_color_tex, v_uv);
     float base_alpha = draw.base_color.a * base_sample.a;
-    if (draw.emissive.w > 0.0 && base_alpha < draw.emissive.w) {
-        discard;
-    }
     vec3 albedo = draw.base_color.rgb * base_sample.rgb;
 
     vec2 mr = texture(metallic_roughness_tex, v_uv).gb;
     float metallic = draw.params.x * mr.y;
     float roughness = clamp(draw.params.y * mr.x, 0.045, 1.0);
+    const bool phase_surface = draw.motion_params.y > .5;
+    PhaseOptics optics;
+    if (phase_surface) {
+        optics = phase_optics(v_world_normal, n, v_world_tangent, v_world_pos, v_uv, v,
+                              mix(albedo, draw.base_color.rgb, step(.5, draw.emissive.z)),
+                              base_sample.rgb, roughness,
+                              draw.motion_params, draw.emissive.rgb);
+        n = optics.normal;
+        roughness = optics.roughness;
+        // The metallic endpoint is a pure specular lobe with arbitrary RGB F0. Reusing it
+        // lets direct light and the unchanged SSR resolve share water/ice's true Fresnel.
+        albedo = optics.f0;
+        metallic = 1.0;
+    }
     float alpha = roughness * roughness;
     alpha = filter_specular_alpha(n, alpha); // geometric specular AA, ADR-0078 step 1a
+    float ao_sample = texture(occlusion_tex, v_uv).r;
+    vec3 emissive_sample = texture(emissive_tex, v_uv).rgb;
+    if (draw.emissive.w > 0.0 && base_alpha < draw.emissive.w) {
+        discard;
+    }
     // The perceptual roughness of the lobe AFTER that widening. One value, computed once, read by
     // the sky-specular lookup below AND written to the G-buffer, so the SSR-on and SSR-off paths
     // read the prefiltered chain at the same level (ADR-0078 step 1e). On a flat surface
     // dFdx(n) = 0, the widening adds nothing, and this equals `roughness` exactly.
     const float lobe_roughness = sqrt(alpha);
 
-    float ao = mix(1.0, texture(occlusion_tex, v_uv).r, draw.params.w);
+    float ao = mix(1.0, ao_sample, draw.params.w);
 
     // Ambient / indirect diffuse — two mutually exclusive sources of the low-frequency "everything
     // else" light, and picking exactly one is the m10.6 integration step:
@@ -500,15 +502,28 @@ void main() {
     // the flat constant never had it — ADR-0065's addendum records the gap.)
     const vec3 diffuse_albedo = albedo * (1.0 - metallic);
     vec3 out_radiance;
+    // Diagnostic only (RIME_SHIMMER_TERM, ddgi.enabled_pad.z != 0): remember individual lighting
+    // terms so the pass can output ONE of them. With the id at 0 these are dead stores.
+    vec3 dbg_irradiance = vec3(0.0);
+    float dbg_influence = 0.0;
     if (ddgi.enabled_pad.x != 0u) {
         bool covered;
-        vec3 indirect = ddgi_sample_irradiance(v_world_pos, normalize(v_world_normal), covered);
+        const vec3 geometric_normal = normalize(v_world_normal);
+        // Query on the receiving side of the surface, as the SSR fallback does. A receiver
+        // exactly on a probe plane otherwise gives its open upper layer zero trilinear weight;
+        // a tiny surviving surface-layer weight can then normalize to a full estimate instead
+        // of using the open neighboring layer. Keep support anchored to the real surface.
+        const float surface_bias = max(0.01, ddgi.grid_origin_spacing.w * 0.025);
+        vec3 indirect = ddgi_sample_irradiance(v_world_pos + geometric_normal * surface_bias,
+                                             geometric_normal, covered);
+        dbg_irradiance = indirect;
         if (ddgi.enabled_pad.y != 0u) {
             // Coverage and radiance are separate: an accepted zero inside the core stays dark.
             // Replace ONE diffuse environment term instead of adding sky on top of measured GI.
             const vec3 fallback = sky_sh_enabled() ? sky_sh_irradiance(normalize(v_world_normal))
                                                    : frame.ambient.rgb;
             const float influence = covered ? ddgi_spatial_influence(v_world_pos, frame.camera_pos.xyz) : 0.0;
+            dbg_influence = influence;
             indirect = mix(fallback, indirect, influence);
         }
         out_radiance = indirect * diffuse_albedo * ao;
@@ -610,6 +625,18 @@ void main() {
 #endif
     }
 
+#ifndef WRITE_GBUFFER
+    // Phase sheets still need specular when DDGI supplies their diffuse environment.
+    // SSR owns the entire reflection when enabled; never add this sky fallback twice.
+    if (phase_surface && ddgi.enabled_pad.x != 0u && sky_sh_enabled()) {
+        vec3 ray = sky_specular_dominant_direction(n, reflect(-v, n), lobe_roughness);
+        vec3 sky = frame.ambient.w != 0.0 ? sky_specular_prefiltered(ray, lobe_roughness)
+                                        : texture(skyview_lut, skyview_uv_from_direction(ray)).rgb;
+        out_radiance += sky * f_schlick(max(dot(n, v), 0.0), optics.f0);
+    }
+#endif
+
+    const vec3 dbg_ambient_radiance = out_radiance; // everything above is ambient/indirect
     // The sun (light 0) is the shadow caster; its contribution is scaled by the cascade shadow
     // factor. The remaining directional lights (fill lights) are unshadowed in v1.
     float sun_factor = sun_shadow(v_world_pos, normalize(v_world_normal));
@@ -666,8 +693,43 @@ void main() {
         out_radiance += contrib * spot_shadow(i, v_world_pos, normalize(v_world_normal));
     }
 
-    out_radiance += draw.emissive.rgb * texture(emissive_tex, v_uv).rgb;
+    if (phase_surface) {
+        vec3 incident = frame.ambient.rgb;
+        if (sky_sh_enabled())
+            incident = sky_sh_irradiance(normalize(v_world_normal));
+        for (uint i = 0u; i < frame.light_counts.x && i < 4u; ++i) {
+            float nl = max(dot(normalize(v_world_normal),
+                               normalize(-frame.dir_lights[i].direction.xyz)), 0.0);
+            incident += frame.dir_lights[i].radiance.rgb * nl / kPi * (i == 0u ? sun_factor : 1.0);
+        }
+#ifdef WATER_PASS
+        // Transmitted share = (1 - F): the reflected remainder is added by the SSR resolve with
+        // the same F0, so refraction + reflection conserve energy.
+        out_radiance += water_refracted_radiance(
+                            optics, v_world_pos, normalize(v_world_normal), v, incident,
+                            sun_factor, draw.emissive.x) *
+                        (vec3(1.0) - f_schlick(max(dot(n, v), 0.0), optics.f0));
+#else
+        out_radiance += optics.transmission * incident;
+#endif
+    } else {
+        out_radiance += draw.emissive.rgb * emissive_sample;
+    }
     out_hdr = vec4(out_radiance, 1.0);
+    // Diagnostic term view (shimmer diagnosis, 2026-10-20). A uniform branch, no extra pass: the
+    // lit colour is replaced by one component so a scripted camera path can ask WHICH term moves
+    // when the camera does. 1 raw DDGI irradiance, 2 DDGI spatial influence (grey), 3 diffuse
+    // ambient (mixed indirect * albedo * ao), 4 specular ambient (zero here when SSR owns it),
+    // 5 direct lighting (final minus ambient). Ids 6-8 are read by ssr_resolve.frag.
+    if (ddgi.enabled_pad.z != 0u) {
+        const uint t = ddgi.enabled_pad.z;
+        vec3 o = vec3(0.0);
+        if (t == 1u) o = dbg_irradiance;
+        else if (t == 2u) o = vec3(dbg_influence);
+        else if (t == 3u) o = dbg_ambient_radiance;
+        else if (t == 5u) o = out_radiance - dbg_ambient_radiance;
+        out_hdr = vec4(o, 1.0);
+    }
 
 #ifdef WRITE_GBUFFER
     // Thin G-buffer for SSR (m10.7a): the shading normal `n` (already normal-mapped, world-space)

@@ -44,8 +44,9 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use rime_protocol::{
     decode_entity_ref, encode_entity_ref, entity_refs, ComponentRef, EditResult, FieldDesc,
-    FieldKind, PickResult, PlayState, SaveResult, SaveScene, SceneLoadReport, SchemaEntry,
-    SetComponent, Snapshot, SnapshotComponent, SpawnEntity,
+    FieldKind, PickResult, PlayControl, PlayControlAction, PlayControlState, PlayState, SaveResult,
+    SaveScene, SceneLoadReport, SchemaEntry, SetComponent, Snapshot, SnapshotComponent,
+    SpawnEntity,
 };
 
 use super::protocol_input::Input;
@@ -355,9 +356,11 @@ impl FakeHost {
     }
 
     fn publish_snapshot(&self) {
-        self.shared.lock().unwrap().snapshot = Snapshot {
+        let mut shared = self.shared.lock().unwrap();
+        shared.snapshot = Snapshot {
             entities: self.world.clone(),
         };
+        shared.snapshots_received += 1;
     }
 
     fn answer(&self, ok: bool, editor_id: EntityId) {
@@ -483,6 +486,8 @@ impl FakeHost {
                     Input::PointerMove { x, y } => format!("move {x},{y}"),
                     Input::PointerDown { x, y, button } => format!("down {x},{y} b{button}"),
                     Input::PointerUp { x, y, button } => format!("up {x},{y} b{button}"),
+                    Input::KeyDown { code } => format!("key down {code}"),
+                    Input::KeyUp { code } => format!("key up {code}"),
                 }),
                 Outbound::Editor { msg, payload } => {
                     self.apply(msg, &payload);
@@ -603,6 +608,11 @@ impl FakeHost {
                 };
                 self.shared.lock().unwrap().last_save = Some(result);
             }
+            // Capability and capture acknowledgements are injected explicitly by widget tests.
+            // Decode the intent, but never turn a request into an invented controller response.
+            EditorMessage::PlayControl => {
+                PlayControl::decode(payload).expect("PlayControl");
+            }
             // GizmoState is engine render state; logged, nothing to simulate.
             _ => {}
         }
@@ -622,6 +632,14 @@ impl FakeHost {
 
     fn messages(&self) -> Vec<EditorMessage> {
         self.log.iter().map(|(m, _)| *m).collect()
+    }
+
+    fn play_controls(&self) -> Vec<PlayControl> {
+        self.log
+            .iter()
+            .filter(|(msg, _)| *msg == EditorMessage::PlayControl)
+            .map(|(_, payload)| PlayControl::decode(payload).expect("PlayControl"))
+            .collect()
     }
 
     /// The world edits and commands only — without the `GizmoState` render hints and the
@@ -927,7 +945,7 @@ impl Rig {
 
     /// Where a render-extent pixel falls on screen.
     fn screen(&self, px: (f32, f32)) -> egui::Pos2 {
-        let r = self.viewport_rect();
+        let r = viewport_image_rect(self.viewport_rect(), (64, 36));
         egui::pos2(
             r.left() + px.0 / EXTENT.0 * r.width(),
             r.top() + px.1 / EXTENT.1 * r.height(),
@@ -995,8 +1013,8 @@ const SAVE: &str = "Save\tCtrl+S";
 const UNDO: &str = "Undo\tCtrl+Z";
 const REDO: &str = "Redo\tCtrl+Y";
 const ROW_CAMERA: &str = "0  Camera";
-const ROW_LIGHT: &str = "1  PointLight";
-const ROW_CRATE: &str = "2  MeshAsset";
+const ROW_LIGHT: &str = "1  Point light";
+const ROW_CRATE: &str = "2  Mesh asset";
 
 fn set_of(payload: &[u8]) -> SetComponent {
     SetComponent::decode(payload).expect("SetComponent")
@@ -1160,19 +1178,13 @@ fn a_refused_save_is_shown_with_the_engines_reason() {
 }
 
 #[test]
-fn a_refused_save_as_still_becomes_the_sessions_scene() {
-    // DOCUMENTS A DEFECT (minor): Save As adopts its path BEFORE the engine answers, so after a
-    // refusal the editor believes a scene is open at a path nothing was written to. `Save` turns
-    // on; what it sends is an empty path, which the engine resolves against what IT opened — here
-    // nothing — so the user gets a second, differently worded failure.
+fn a_refused_save_as_does_not_adopt_a_path_that_was_never_written() {
     let mut rig = Rig::new();
     rig.open_file_menu_and_type_path("/refused/x.rscene");
     rig.click("Write");
-    assert_eq!(rig.app().scene_path.as_deref(), Some("/refused/x.rscene"));
+    assert_eq!(rig.app().scene_path, None);
     rig.click("File");
-    assert!(rig.enabled(SAVE));
-    rig.click(SAVE);
-    assert!(rig.has("no scene path to save to"));
+    assert!(!rig.enabled(SAVE));
 }
 
 #[test]
@@ -1475,7 +1487,7 @@ fn two_u64_fields_in_one_component_round_trip_independently() {
     });
     rig.host.shared.lock().unwrap().schema = schema;
     rig.settle();
-    rig.click(ROW_CRATE);
+    rig.click("2  IdPair");
 
     // Each value is committed with Enter, the way a person finishes a field, before the next is typed.
     retype_field(&mut rig, "1", &A.to_string());
@@ -2201,7 +2213,7 @@ fn place_spawns_an_entity_referencing_the_mesh() {
         spawn.components,
         [(H_MESH_ASSET, MESH_BARREL_ID.to_le_bytes().to_vec())]
     );
-    assert!(rig.has("3  MeshAsset"));
+    assert!(rig.has("3  Mesh asset"));
     assert!(rig.has("4 entities"));
     // Placed at the engine's default transform, and NOT selected: the user has to find the new row
     // (or click the mesh in the viewport) before they can move it.
@@ -2242,7 +2254,7 @@ fn place_is_on_screen_in_the_default_panel_for_a_real_source_path() {
         .get_by_role_and_label(Role::Button, "place")
         .click();
     rig.settle();
-    assert!(rig.has("3  MeshAsset"));
+    assert!(rig.has("3  Mesh asset"));
 }
 
 #[test]
@@ -2697,18 +2709,14 @@ fn right_drag_looks_around_by_editing_the_camera_entity() {
 }
 
 #[test]
-fn a_right_drag_leaks_an_unpaired_pointer_up_to_the_engine() {
-    // DOCUMENTS A DEFECT (minor): m17.1 gated the forwarded pointer-DOWN and pointer-MOVE on the
-    // primary button, but not the pointer-UP. So every look-around ends by telling the engine
-    // "left button released" for a press it was never told about. Harmless to today's host, which
-    // ignores it; a game that acts on button-up during Play would see phantom releases.
+fn a_right_drag_does_not_forward_an_unpaired_primary_release() {
     let mut rig = Rig::new();
     rig.present_frame();
     rig.drag(
         egui::PointerButton::Secondary,
         &[(400.5, 270.5), (440.5, 270.5), (500.5, 270.5)],
     );
-    assert_eq!(rig.host.inputs, ["up 500,270 b0"]);
+    assert!(rig.host.inputs.is_empty());
 }
 
 /// Press the right button over the viewport, the way a person does to fly: it is the fly button.
@@ -2731,6 +2739,20 @@ fn wasd_flies_the_camera_while_the_right_button_is_held() {
     let [x, y, z] = rig.host.translation(CAMERA);
     assert!(z > EYE_Z, "S backs away along +z, got z = {z}");
     assert_eq!((x, y), (0.0, 0.0));
+}
+
+#[test]
+fn movement_continues_after_right_dragging_to_look() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    right_button_down(&mut rig, (400.0, 270.0));
+    rig.pointer_move((500.0, 300.0));
+    let before = rig.host.translation(CAMERA);
+    rig.hold_key(egui::Key::W);
+    let after = rig.host.translation(CAMERA);
+    assert_ne!(after, before, "W moves during the same held right-drag");
+    right_button_up(&mut rig, (500.0, 300.0));
+    assert!(!rig.app().stack.can_undo());
 }
 
 #[test]
@@ -2773,10 +2795,9 @@ fn w_e_and_q_fly_while_the_right_button_is_held() {
 }
 
 #[test]
-fn keys_are_never_forwarded_to_the_engine() {
-    // DOCUMENTS A STUB: the editor→engine input vocabulary is pointer-only (`protocol_input::Input`
-    // has no Key variant), so a game that reads the keyboard cannot be driven during Play from
-    // this window. Only the editor's own camera sees keys.
+fn inspect_preview_does_not_forward_player_keys() {
+    // Inspect Preview keeps keyboard navigation local to the editor. Player Preview forwards
+    // movement only after an explicit viewport capture and a matching engine acknowledgement.
     let mut rig = Rig::new();
     rig.present_frame();
     rig.click("▶");
@@ -2787,4 +2808,739 @@ fn keys_are_never_forwarded_to_the_engine() {
     }
     assert!(rig.host.inputs.is_empty());
     assert!(rig.host.commands().is_empty());
+}
+
+const WIDGET_PLAYER_SESSION: u64 = 57;
+
+fn widget_play_control(mode: u8, phase: u8, captured: bool) -> PlayControlState {
+    PlayControlState {
+        supported_modes: 3,
+        mode,
+        phase,
+        status: u8::from(phase != 0),
+        captured,
+        session_id: WIDGET_PLAYER_SESSION,
+        tick_count: 0,
+        reason: String::new(),
+    }
+}
+
+fn widget_player_rig() -> Rig {
+    let mut rig = Rig::with_scene("/proj/level.rscene");
+    rig.present_frame();
+    rig.click(ROW_CRATE);
+    rig.click("Move (W)");
+    rig.click("▶");
+    rig.host.shared.lock().unwrap().play_control = Some(widget_play_control(1, 1, false));
+    rig.settle();
+    rig.host.inputs.clear();
+    rig.host.log.clear();
+    rig
+}
+
+#[test]
+fn walk_widget_requires_capability_and_sends_mode_intent_without_inventing_ack() {
+    let mut rig = Rig::new();
+    assert!(!rig.has("Walk"), "older hosts expose only Inspect Preview");
+    rig.host.shared.lock().unwrap().play_control = Some(PlayControlState::default());
+    rig.settle();
+    assert!(
+        !rig.has("Walk"),
+        "Inspect-only capability does not offer Walk"
+    );
+
+    rig.host.shared.lock().unwrap().play_control = Some(widget_play_control(0, 0, false));
+    rig.settle();
+    assert!(rig.has("Walk"));
+    assert!(!rig.toggled("Walk"));
+    rig.host.log.clear();
+    rig.click_checkbox("Walk");
+    assert_eq!(
+        rig.host.play_controls(),
+        [PlayControl {
+            action: PlayControlAction::SelectPlayer,
+            session_id: WIDGET_PLAYER_SESSION,
+        }]
+    );
+    assert!(
+        !rig.toggled("Walk"),
+        "intent alone is not a mode acknowledgement"
+    );
+
+    rig.host.shared.lock().unwrap().play_control = Some(widget_play_control(1, 0, false));
+    rig.settle();
+    assert!(rig.toggled("Walk"));
+    rig.host.log.clear();
+    rig.click_checkbox("Walk");
+    assert_eq!(
+        rig.host.play_controls(),
+        [PlayControl {
+            action: PlayControlAction::SelectInspect,
+            session_id: WIDGET_PLAYER_SESSION,
+        }]
+    );
+    assert!(
+        rig.toggled("Walk"),
+        "returning to Inspect also awaits acknowledgement"
+    );
+}
+
+#[test]
+fn player_viewport_click_requests_capture_but_blocks_keys_look_pick_and_gizmo_until_ack() {
+    let mut rig = widget_player_rig();
+    let camera = rig.host.translation(CAMERA);
+    let crate_pose = rig.host.translation(CRATE);
+    // Aim at the selected crate's actual translate handle: Inspect would start a gizmo here.
+    let handle = rig.x_handle_px(gizmo::Vec3::new(0.0, 0.0, 0.0), 0.7);
+    rig.viewport_click(handle);
+    rig.hold_key(egui::Key::W);
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::MouseMoved(egui::vec2(24.0, -9.0)));
+    rig.pointer_move((600.0, 320.0));
+    assert_eq!(
+        rig.host.play_controls(),
+        [PlayControl {
+            action: PlayControlAction::Capture,
+            session_id: WIDGET_PLAYER_SESSION,
+        }]
+    );
+    assert!(!rig.app().player.captured());
+    assert!(
+        rig.host.inputs.is_empty(),
+        "pending capture forwards neither keys nor look"
+    );
+    assert_eq!(rig.host.count(EditorMessage::PickRequest), 0);
+    assert_eq!(rig.host.count(EditorMessage::SetComponent), 0);
+    assert!(rig.app().gizmo_drag.is_none());
+    assert_eq!(rig.app().selected, Some(CRATE));
+    assert_eq!(rig.host.translation(CAMERA), camera);
+    assert_eq!(rig.host.translation(CRATE), crate_pose);
+}
+
+#[test]
+fn player_widget_matching_capture_ack_forwards_hid_w_and_escape_releases_it() {
+    let mut rig = widget_player_rig();
+    rig.viewport_click((480.0, 270.0));
+    assert!(!rig.app().player.captured());
+    assert!(rig.host.inputs.is_empty());
+    rig.host.shared.lock().unwrap().play_control = Some(widget_play_control(1, 1, true));
+    rig.settle();
+    assert!(rig.app().player.captured());
+    assert_eq!(
+        rig.host.inputs,
+        ["move 0,0"],
+        "ack resets the virtual look origin"
+    );
+    rig.host.inputs.clear();
+    rig.host.log.clear();
+    rig.hold_key(egui::Key::W);
+    assert_eq!(
+        rig.host.inputs,
+        ["key down 26"],
+        "USB HID W, once across held frames"
+    );
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::MouseMoved(egui::vec2(9.0, -4.0)));
+    rig.settle();
+    assert_eq!(
+        rig.host.inputs.last().map(String::as_str),
+        Some("move 9,-4")
+    );
+    assert_eq!(rig.host.count(EditorMessage::PickRequest), 0);
+    assert_eq!(rig.host.count(EditorMessage::SetComponent), 0);
+
+    rig.host.inputs.clear();
+    rig.host.log.clear();
+    rig.key(egui::Key::Escape);
+    assert!(!rig.app().player.captured());
+    assert_eq!(rig.host.inputs, ["key up 26"]);
+    assert_eq!(
+        rig.host.play_controls(),
+        [PlayControl {
+            action: PlayControlAction::Release,
+            session_id: WIDGET_PLAYER_SESSION,
+        }]
+    );
+    assert_eq!(
+        rig.host.play.phase,
+        PlayPhase::Playing,
+        "Esc releases without stopping Preview"
+    );
+}
+
+#[test]
+fn player_active_and_paused_widgets_block_save_and_ctrl_s() {
+    for (phase, wire_phase) in [(PlayPhase::Playing, 1), (PlayPhase::Paused, 2)] {
+        let mut rig = widget_player_rig();
+        if phase == PlayPhase::Paused {
+            rig.click("⏸");
+            rig.host.shared.lock().unwrap().play_control =
+                Some(widget_play_control(1, wire_phase, false));
+            rig.settle();
+        }
+        assert_eq!(rig.host.play.phase, phase);
+        rig.host.log.clear();
+        rig.click("File");
+        assert!(
+            !rig.enabled(SAVE),
+            "Player {phase:?} cannot save the simulated world"
+        );
+        rig.key(egui::Key::Escape);
+        rig.chord(CTRL, egui::Key::S);
+        assert_eq!(
+            rig.host.count(EditorMessage::SaveScene),
+            0,
+            "Ctrl+S in Player {phase:?}"
+        );
+        assert!(rig.host.files.is_empty());
+    }
+}
+
+#[test]
+fn thermal_preview_is_selected_cell_readonly_state() {
+    let mut rig = Rig::new();
+    rig.harness.state_mut().selected = Some(CRATE);
+    {
+        let mut s = rig.app().shared.lock().unwrap();
+        s.play_state = rime_protocol::PlayState {
+            phase: rime_protocol::PlayPhase::Paused,
+            tick_count: 12,
+        };
+        s.thermal = Some(rime_protocol::ThermalPreview {
+            status: 1,
+            phase: 2,
+            session_id: 1,
+            revision: 2,
+            host_tick: 12,
+            accepted_host_tick: 12,
+            field_tick: 12,
+            cells: vec![rime_protocol::ThermalPreviewCell {
+                editor_id: CRATE,
+                temperature_kelvin: 273.15,
+                liquid_mass_fraction: 0.25,
+                energy_joules: 83375.,
+            }],
+            ..Default::default()
+        });
+    }
+    rig.settle();
+    assert!(rig.has_text("Temperature: 273.150 K"));
+    assert!(rig.has_text("Liquid mass: 25.000%"));
+    assert!(rig.has_text("Energy: 8.338e4 J"));
+    assert!(
+        rig.host.commands().is_empty(),
+        "Reading preview must not author components"
+    );
+    rig.harness.state_mut().selected = Some(LIGHT);
+    rig.settle();
+    assert!(!rig.has_text("Temperature: 273.150 K"));
+    assert!(rig.has_text("Ready"));
+    {
+        let mut s = rig.app().shared.lock().unwrap();
+        let m = s.thermal.as_mut().unwrap();
+        m.status = 4;
+        m.field_status = 6;
+        m.heat_status = 2;
+    }
+    rig.settle();
+    assert!(rig.has_text("Step refused — showing last committed state"));
+    assert!(rig.has_text("Heat source exceeds the material temperature range"));
+    assert!(rig.host.commands().is_empty());
+}
+
+#[test]
+fn wheel_dollies_camera_without_an_undo_edit_or_object_selection() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.pointer_move((480.0, 270.0));
+    let before = rig.host.translation(CAMERA);
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::NONE,
+        });
+    rig.settle();
+    assert!(rig.host.translation(CAMERA)[2] < before[2]);
+    assert_eq!(rig.app().selected, None);
+    assert!(!rig.app().stack.can_undo());
+    // The same wheel over the Outliner must not move the view.
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(egui::pos2(20.0, 150.0)));
+    rig.settle();
+    let before = rig.host.translation(CAMERA);
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, 1.0),
+            modifiers: egui::Modifiers::NONE,
+        });
+    rig.settle();
+    assert_eq!(rig.host.translation(CAMERA), before);
+}
+
+#[test]
+fn effects_filter_can_be_opened_and_reset_without_despawning_anything() {
+    let mut rig = Rig::new();
+    let entities = rig.host.world.len();
+    rig.click("Filter");
+    rig.click("Effects (smoke / fire)");
+    rig.key(egui::Key::Escape);
+    assert!(!rig.has(ROW_CRATE));
+    assert!(rig.has("Effects filter active"));
+    assert_eq!(rig.host.world.len(), entities);
+    rig.click("Filter");
+    rig.click("All entities");
+    rig.key(egui::Key::Escape);
+    assert!(rig.has(ROW_CRATE));
+}
+
+#[test]
+fn a_bodyless_emitter_remains_selectable_and_movable_through_the_effects_filter() {
+    let mut rig = Rig::new();
+    const H_SMOKE: u64 = 0x9001;
+    {
+        let mut shared = rig.host.shared.lock().unwrap();
+        shared.schema.types.push(SchemaEntry {
+            type_hash: H_SMOKE,
+            name: "rime::vfx_scene::SmokeEmitter".into(),
+            is_component: true,
+            fields: vec![field("enabled", FieldKind::Bool, 0)],
+        });
+    }
+    // A transform + source description, no MeshRef or collider to ray-pick.
+    rig.host.world.push(SnapshotEntity {
+        editor_id: 9001,
+        index: 9,
+        generation: 0,
+        components: vec![comp(H_LOCAL, trs_at(0.0, 0.0, 0.0)), comp(H_SMOKE, vec![1])],
+    });
+    rig.host.publish_snapshot();
+    rig.settle();
+    rig.click("Filter");
+    rig.click("Effects (smoke / fire)");
+    rig.key(egui::Key::Escape);
+    assert!(rig.has("3  Smoke emitter"));
+    assert!(!rig.has(ROW_CRATE));
+    rig.click("3  Smoke emitter");
+    assert_eq!(rig.app().selected, Some(9001));
+    // The transform's first numeric field is translation.x; no visual body is required.
+    rig.type_into_number_field(0, "2.5");
+    assert_eq!(rig.host.translation(9001)[0], 2.5);
+    rig.chord(CTRL, egui::Key::Z);
+    assert_eq!(rig.host.translation(9001)[0], 0.0);
+}
+
+#[test]
+fn outliner_tiles_keep_selection_filters_and_clickable_role_icons() {
+    let mut rig = Rig::new();
+    rig.click(ROW_LIGHT);
+    rig.host.log.clear();
+    rig.click("Display");
+    rig.click("Tiles");
+    rig.key(egui::Key::Escape);
+    assert_eq!(rig.app().selected, Some(LIGHT));
+    rig.click("Select 2  Mesh asset"); // the picture itself is an accessible button
+    assert_eq!(rig.app().selected, Some(CRATE));
+    assert!(
+        rig.host.commands().is_empty(),
+        "display/selection changes are not world edits"
+    );
+    rig.click("Display");
+    rig.click("List");
+    rig.key(egui::Key::Escape);
+    assert!(rig.toggled(ROW_CRATE));
+}
+
+#[cfg(unix)]
+fn configure_echo_game(rig: &mut Rig) {
+    rig.harness.state_mut().game.config = Some(game_run::Config {
+        executable: "/bin/echo".into(),
+        args: vec!["--play".into()],
+    });
+    rig.settle();
+}
+
+#[test]
+#[cfg(unix)]
+fn run_game_saves_the_current_document_before_spawning_exact_argv() {
+    let mut rig = Rig::with_scene("/tmp/a city scene.rscene");
+    configure_echo_game(&mut rig);
+    rig.click(ROW_LIGHT);
+    rig.type_into_number_field(0, "12.5");
+    rig.click("Run game");
+    assert!(rig.host.files.contains_key("/tmp/a city scene.rscene"));
+    assert_eq!(
+        rig.app().scene_path.as_deref(),
+        Some("/tmp/a city scene.rscene")
+    );
+    let path = rig
+        .app()
+        .game
+        .log
+        .clone()
+        .expect("game launched after save");
+    for _ in 0..100 {
+        if std::fs::read_to_string(&path)
+            .unwrap_or_default()
+            .contains("--scene /tmp/a city scene.rscene")
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(std::fs::read_to_string(&path)
+        .unwrap()
+        .contains("--play --scene /tmp/a city scene.rscene"));
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn stale_same_path_success_cannot_launch_after_a_fresh_save_refusal() {
+    let mut rig = Rig::with_scene("/refused/city.rscene");
+    configure_echo_game(&mut rig);
+    rig.host.shared.lock().unwrap().last_save = Some(SaveResult {
+        ok: true,
+        path: "/refused/city.rscene".into(),
+        ..Default::default()
+    });
+    rig.click("Run game");
+    assert!(rig.app().game.log.is_none());
+    assert!(rig.has_text("refused: the load skipped 213 unregistered components"));
+}
+
+#[test]
+#[cfg(unix)]
+fn save_in_flight_blocks_run_and_document_switching() {
+    let mut rig = Rig::with_scene("/tmp/city.rscene");
+    configure_echo_game(&mut rig);
+    rig.click("File");
+    rig.harness
+        .get_by_role_and_label(Role::Button, SAVE)
+        .click();
+    rig.harness.step(); // send the save, deliberately do not let the fake host acknowledge yet
+    rig.harness.step(); // redraw the now-disabled controls without pumping the host
+    assert!(rig.app().save_pending.is_some());
+    assert!(!rig.enabled("Run game"));
+    rig.host.pump();
+    rig.settle();
+    assert!(rig.app().save_pending.is_none());
+    assert!(
+        rig.app().game.log.is_none(),
+        "a manual save must not launch a game"
+    );
+}
+
+#[test]
+fn city_roles_name_geometry_and_keep_semantic_source_priority() {
+    let mut schema = fake_schema();
+    schema.types.push(SchemaEntry {
+        type_hash: 0x9002,
+        name: "rime::blockkit::SlabRole".into(),
+        is_component: true,
+        fields: ["building", "storey", "kind", "tint"]
+            .iter()
+            .map(|name| field(name, FieldKind::U32, 0))
+            .collect(),
+    });
+    let mut entity = SnapshotEntity {
+        index: 0,
+        generation: 0,
+        editor_id: 1,
+        components: vec![SnapshotComponent {
+            type_hash: 0x9002,
+            data: encode_value(&Value::Struct(vec![
+                ("building".into(), Value::U32(3)),
+                ("storey".into(), Value::U32(1)),
+                ("kind".into(), Value::U32(2)),
+                ("tint".into(), Value::U32(0)),
+            ])),
+        }],
+    };
+    assert_eq!(
+        outliner_label(&schema, 5, &entity),
+        "5  Doorway wall · B4 / level 2"
+    );
+    // Real camera/light components take precedence over their generic city placement role.
+    entity.components.push(SnapshotComponent {
+        type_hash: H_CAMERA,
+        data: vec![],
+    });
+    assert_eq!(outliner_label(&schema, 5, &entity), "5  Camera");
+    entity.components.remove(1);
+    entity.components[0].data = encode_value(&Value::Struct(vec![
+        ("building".into(), Value::U32(0xc17a_0002)),
+        ("storey".into(), Value::U32(0)),
+        ("kind".into(), Value::U32(5)),
+        ("tint".into(), Value::U32(0)),
+    ]));
+    assert_eq!(outliner_label(&schema, 5, &entity), "5  Street lamp 3");
+    entity.components[0].data.clear();
+    assert_eq!(outliner_label(&schema, 5, &entity), "5  City part");
+}
+
+#[test]
+fn external_camera_edits_rebase_the_next_navigation_gesture() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    right_button_up(&mut rig, (480.0, 270.0));
+    rig.host.entity_mut(CAMERA).unwrap().components[0].data = trs_at(80.0, 16.0, 40.0);
+    rig.host.publish_snapshot();
+    rig.settle();
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.settle();
+    right_button_up(&mut rig, (480.0, 270.0));
+    let [x, y, z] = rig.host.translation(CAMERA);
+    assert_eq!((x, y), (80.0, 16.0));
+    assert!(
+        z < 40.0 && z > 30.0,
+        "movement continues from the external pose: {z}"
+    );
+}
+
+#[test]
+fn stop_restores_camera_and_next_flight_starts_from_restored_pose() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.click("▶");
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    rig.settle();
+    right_button_up(&mut rig, (480.0, 270.0));
+    assert!(rig.host.translation(CAMERA)[2] < EYE_Z);
+    rig.click("⏹");
+    assert_eq!(rig.host.translation(CAMERA), [0.0, 0.0, EYE_Z]);
+    right_button_down(&mut rig, (480.0, 270.0));
+    right_button_up(&mut rig, (480.0, 270.0));
+    let z = rig.host.translation(CAMERA)[2];
+    assert!(
+        z < EYE_Z && z > EYE_Z - 4.0,
+        "rebased to restored camera: {z}"
+    );
+}
+
+#[test]
+fn letterbox_bars_do_not_pick_zoom_or_start_camera_navigation() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    let panel = rig.viewport_rect();
+    let image = viewport_image_rect(panel, (64, 36));
+    let bar = if image.left() > panel.left() + 1.0 {
+        egui::pos2(panel.left() + 0.5, panel.center().y)
+    } else {
+        assert!(image.top() > panel.top() + 1.0, "test needs letterboxing");
+        egui::pos2(panel.center().x, panel.top() + 0.5)
+    };
+    let before = rig.host.translation(CAMERA);
+    rig.host.log.clear();
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(bar));
+    rig.settle();
+    for pressed in [true, false] {
+        rig.harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerButton {
+                pos: bar,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        rig.settle();
+    }
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerButton {
+            pos: bar,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+    rig.hold_key(egui::Key::W);
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, 60.0),
+            modifiers: egui::Modifiers::NONE,
+        });
+    rig.settle();
+    assert_eq!(rig.host.translation(CAMERA), before);
+    assert_eq!(rig.host.count(EditorMessage::PickRequest), 0);
+    assert!(rig.host.inputs.is_empty());
+}
+
+#[test]
+fn camera_reconciliation_ignores_repeated_delayed_snapshots_and_accepts_new_owner() {
+    let mut camera = FlyCam::default();
+    let baseline = trs_at(0.0, 0.0, 20.0);
+    camera.sync(CAMERA, &baseline, 1, PlayPhase::Edit);
+    let mut revision = 1;
+    for step in 1..=120 {
+        let latest = trs_at(0.0, 0.0, 20.0 - step as f32 * 0.1);
+        camera.sent(&latest);
+        // The mirror is patched optimistically between real engine snapshots.
+        camera.sync(CAMERA, &latest, revision, PlayPhase::Edit);
+        // A delayed structural snapshot may still show the original pose multiple times.
+        revision += 1;
+        camera.sync(CAMERA, &baseline, revision, PlayPhase::Edit);
+        assert_eq!(camera.last_blob, latest);
+    }
+    let latest = camera.last_blob.clone();
+    camera.sync(CAMERA, &latest, 123, PlayPhase::Edit);
+    assert!(
+        camera.pending.is_empty(),
+        "latest snapshot acknowledges the gesture"
+    );
+    let external = trs_at(-10.0, 5.0, 80.0);
+    camera.sync(CAMERA, &external, 124, PlayPhase::Edit);
+    assert_eq!(camera.pos, [-10.0, 5.0, 80.0]);
+    camera.sync(CAMERA + 10, &baseline, 125, PlayPhase::Edit);
+    assert_eq!(camera.pos, [0.0, 0.0, 20.0], "new camera entity rebases");
+}
+
+#[test]
+fn viewport_image_preserves_stream_aspect_in_wide_and_tall_docks() {
+    for size in [egui::vec2(1200.0, 400.0), egui::vec2(400.0, 900.0)] {
+        let panel = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), size);
+        let image = viewport_image_rect(panel, (960, 540));
+        assert!((image.aspect_ratio() - 16.0 / 9.0).abs() < 0.0001);
+        assert_eq!(image.center(), panel.center());
+        assert!(panel.contains_rect(image));
+    }
+}
+
+#[test]
+fn inactive_camera_is_not_the_navigation_target() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.host
+        .entity_mut(CAMERA)
+        .unwrap()
+        .components
+        .iter_mut()
+        .find(|c| c.type_hash == H_CAMERA)
+        .unwrap()
+        .data = encode_value(&Value::Struct(vec![
+        ("fov_y".into(), Value::F32(1.0)),
+        ("active".into(), Value::Bool(false)),
+    ]));
+    rig.host
+        .entity_mut(LIGHT)
+        .unwrap()
+        .components
+        .push(comp(H_CAMERA, default_blob(H_CAMERA)));
+    rig.host.publish_snapshot();
+    rig.settle();
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    right_button_up(&mut rig, (480.0, 270.0));
+    assert_eq!(rig.host.translation(CAMERA), [0.0, 0.0, EYE_Z]);
+    assert!(rig.host.translation(LIGHT)[2] < 0.0);
+}
+
+#[test]
+fn delayed_engine_snapshots_do_not_reset_continuous_movement_before_release() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    let mut previous = rig.app().fly.pos[2];
+    // Hold the engine queue while the UI keeps processing frames and stale snapshots. This
+    // reproduces a slow streamed viewport rather than the instant pump used by ordinary clicks.
+    for _ in 0..30 {
+        rig.host.publish_snapshot();
+        rig.harness.step();
+        let next = rig.app().fly.pos[2];
+        assert!(
+            next < previous,
+            "each frame accumulates from local navigation"
+        );
+        previous = next;
+    }
+    right_button_up(&mut rig, (480.0, 270.0));
+    assert_eq!(rig.host.translation(CAMERA)[2], previous);
+    assert!(
+        rig.app().fly.pending.is_empty(),
+        "release confirms the last pose"
+    );
+    rig.settle();
+    assert_eq!(
+        rig.host.translation(CAMERA)[2],
+        previous,
+        "no movement after release"
+    );
+}
+
+#[test]
+fn captured_primary_drag_releases_when_pointer_enters_a_letterbox_bar() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    rig.pointer_move((480.0, 270.0));
+    rig.pointer_button((480.0, 270.0), egui::PointerButton::Primary, true);
+    rig.pointer_move((520.0, 300.0));
+    let panel = rig.viewport_rect();
+    let image = viewport_image_rect(panel, (64, 36));
+    let bar = if image.left() > panel.left() + 1.0 {
+        egui::pos2(panel.left() + 0.5, panel.center().y)
+    } else {
+        egui::pos2(panel.center().x, panel.top() + 0.5)
+    };
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerMoved(bar));
+    rig.settle();
+    rig.harness
+        .input_mut()
+        .events
+        .push(egui::Event::PointerButton {
+            pos: bar,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+    rig.settle();
+    assert!(rig
+        .host
+        .inputs
+        .iter()
+        .any(|event| event.starts_with("down ")));
+    assert!(rig.host.inputs.last().unwrap().starts_with("up "));
+}
+
+#[test]
+fn explicit_camera_edit_can_restore_a_pose_that_is_still_pending() {
+    let mut rig = Rig::new();
+    rig.present_frame();
+    right_button_down(&mut rig, (480.0, 270.0));
+    rig.hold_key(egui::Key::W);
+    assert!(rig.app().fly.pos[2] < EYE_Z);
+    assert!(!rig.app().fly.pending.is_empty());
+    // An explicit undo/inspector edit knows it is new intent. It must not be mistaken for a
+    // delayed snapshot just because its bytes equal the navigation gesture's baseline.
+    rig.harness.state_mut().send(Command::SetComponent {
+        id: CAMERA,
+        type_hash: H_LOCAL,
+        blob: trs_at(0.0, 0.0, EYE_Z),
+    });
+    assert_eq!(rig.app().fly.pos, [0.0, 0.0, EYE_Z]);
+    assert!(rig.app().fly.pending.is_empty());
 }

@@ -1,0 +1,15 @@
+{
+  "model": "gpt-6-astra",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Read-only independent design consultation, no tools/files; give your OWN proposal <=600 words. C++20 game engine existing: fixed-mass ThermalSample enthalpy/latent curve (273.15K fresh-water default, configurable material interval), transactional source/pair operations with explicit rounding receipts; bounded move-only ThermalField explicit index graph, immutable signed powers, source-first ordered substeps, complete per-tick journal, atomic whole-field failure. No geometry/flow/network authority. Editor has reflected authored ECS components, generic typed f64/struct inspector, entity references remapped generically to scene-local IDs on disk and session EditorIds on wire, Play snapshot/restore including refs, existing optional smoke/fire ECS preview side table. Need NEXT bounded thermal editor authoring + live readonly diagnostics, NOT renderer ice. New removable fluids_scene above ECS/fluids. Three disabled-by-default authored components: ThermalCell mass/T/fraction/material; ThermalContact two ecs::Entity refs + G; ThermalSource target ref + signed watts. Runtime preview side table, not serialized components. Whole enabled graph invalidates on duplicate links/source targets, absent/disabled/stale referenced cells, invalid physical params or cap overflow. <=16cells32links16sources. Preview rebuilds ALL from initial descriptions on any semantic description change (including Pause), same descriptions preserve evolving state. Stop clears, new Play recreates; invalid edit clears stale rows. Numerical step refusal keeps last committed values visibly marked refused. Dedicated bounded engine->editor readonly diagnostic message, finite double rows keyed by EditorId; GUI selected-cell readout and status. Old peers ignore unknown messages. Host emits frame-correlated diagnostics after PlayState; smoke tests step ack then consume matching host tick; authoring blobs stay unchanged. No additional network authority. Find hard API/data-integrity traps, especially reference remapping, no NaN-induced repeated rebuild, freeze/rebuild policy, graph caps before allocation, distinguish failed vs stale readonly values, wire decoder bounds and old scenes/peers. Propose decisive positive/negative end-to-end tests and the smallest useful contract. Do not redesign numerical solver or suggest making runtime state saveable. We own edits and verify every suggestion locally."
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "reasoning_effort": "low",
+  "max_tokens": 8000
+}

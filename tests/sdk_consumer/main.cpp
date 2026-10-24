@@ -15,6 +15,9 @@
 
 #include "rime/app/application.hpp" // rime::app  → transitively rime::render/rhi/ecs/platform/core
 #include "rime/assets/cooked_reader.hpp" // rime::assets
+#include "rime/editorhost/thermal_preview.hpp"
+#include "rime/fluids_render/phase_surface.hpp"
+#include "rime/fluids_scene/preview.hpp"
 
 int main(int argc, char** argv) {
     // 1) The application framework. A default AppConfig is headless and GPU-free, so this runs on a
@@ -51,7 +54,30 @@ int main(int argc, char** argv) {
         return 4;
     }
 
-    std::printf("sdk_consumer OK: ticked 3 frames, loaded mesh (%u vertices, %zu indices)\n",
+    // 3) Exercise the installed thermal adapter and diagnostic codec. Linking editorhost also
+    //    traverses stream's static AV1 dependencies, which a render-only SDK consumer misses.
+    auto& world = app.world();
+    rime::fluids_scene::register_fluids_scene_components(world);
+    rime::fluids_scene::ThermalCell cell;
+    cell.enabled = true;
+    cell.liquid_mass_fraction = 0.0;
+    const auto target = world.spawn_with(cell);
+    (void)world.spawn_with(rime::fluids_scene::ThermalSource{target, 10000.0, true});
+    rime::fluids_scene::ThermalPreview thermal;
+    if (!thermal.tick(world, 1, 1.0 / 60.0) || !thermal.field() ||
+        thermal.field()->cells()[0].state().liquid_mass_fraction <= 0.0)
+        return 5;
+    rime::fluids_render::register_fluids_render_components(world);
+    world.add_component<rime::fluids_render::ThermalSurface>(target, {true});
+    if (rime::fluids_render::phase_surfaces(world, thermal).count != 1)
+        return 7;
+    rime::editorhost::ThermalPreviewMsg diagnostic, decoded;
+    const auto encoded = rime::editorhost::serialize_thermal_preview(diagnostic);
+    if (!rime::editorhost::parse_thermal_preview(encoded, decoded))
+        return 6;
+
+    std::printf("sdk_consumer OK: ticked 3 frames, loaded mesh (%u vertices, %zu indices), thermal "
+                "preview and wire verified\n",
                 mesh->vertex_count,
                 mesh->indices.size());
     return 0;

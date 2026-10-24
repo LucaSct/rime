@@ -1,0 +1,16 @@
+{
+  "world_steps": 900,
+  "recording_hash_mismatches": 0,
+  "candidate_hash_mismatches": 0,
+  "first_mismatches": [],
+  "hash-reference-run": {
+    "plain_pairs": 3318450,
+    "exact_narrowphase_calls": 3365643,
+    "produced_manifolds": 992631
+  },
+  "hash-candidate-run": {
+    "plain_pairs": 3318450,
+    "exact_narrowphase_calls": 2205878,
+    "produced_manifolds": 992631
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "baseline_commit": "e559cb5c2906d203d94ad64779ec369ee5e0e6d3",
+  "source_sha256": {
+    "engine/physics/src/gjk.hpp": "aa7c26378d45e4cfdd8a1f48c5f8b29d7c98ea33e72db9be27777286298d977e",
+    "tests/physics/separated_hull_test.cpp": "9a08d4413f18c94cb14d4aabf8f608dce2ef0a76a9be6d53ce31953fd66c0eff",
+    "docs/perf/environment-preview-2026-10-17/ghost-contact-hulls.json": "f8c54ffd9a2a8247057635bd007b038b477e3d7aac4bcce8464ba003be746f7e",
+    "docs/perf/gjk-flat-tetrahedron-2026-10-18/probe.cpp": "7c125e010dbb99caad20fbf597489a498d7b3cb74481b860c888abbda0b4be0b",
+    "tests/physics/CMakeLists.txt": "d321d523b56b70754bbc03a2cb037687bd3f9602eb293bbe658ab88badbac076"
+  },
+  "build_preset": "release",
+  "build_type": "RelWithDebInfo",
+  "gcc": "c++ (GCC) 16.2.1 20260810",
+  "clang": "clang version 23.1.1",
+  "measurement_scope": "correctness diagnostics; no timing or throughput claim",
+  "baseline_header_sha256": "a06b185f226dc08c725a7b27c30dc808c269f1bc61a8552821608a6ff0ab56a5",
+  "hardware_attempt": {
+    "source_stamp": "e559cb5-dirty",
+    "exit_code": 1,
+    "qualified": false,
+    "binary_sha256": "da6551e944cb75cff6c96128148a637c6ffa464ddbc3b15105f274bac07235bc",
+    "refusal": [
+      "frame and sim.block budgets",
+      "baseline driver mismatch",
+      "unstable graphics clocks"
+    ],
+    "concurrent_ci_observed": true
+  },
+  "ctest": {
+    "exit_code": 8,
+    "passed": 88,
+    "total": 89,
+    "failed_test": "the_block_headless",
+    "failed_claims": [
+      "collapse: the far side of the street is untouched",
+      "collapse: most of the block is still standing",
+      "collapse: the damage stayed local to a few buildings"
+    ]
+  }
+}

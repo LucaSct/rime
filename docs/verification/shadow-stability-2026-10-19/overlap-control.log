@@ -1,0 +1,17 @@
+[INFO] rhi: candidate [0] 'llvmpipe (LLVM 23.1.1, 256 bits)' (type score 100)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'llvmpipe (LLVM 23.1.1, 256 bits)' (Vulkan 1.4.354) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+[doctest] doctest version is "2.4.11"
+[doctest] run with "--help" for options
+===============================================================================
+/home/next/projects/rime/tests/render/shadow_transition_test.cpp:18:
+TEST CASE:  shadows: shared mesh and terrain sampler blends cascade boundaries
+
+/home/next/projects/rime/tests/render/shadow_transition_test.cpp:152: ERROR: CHECK( max_overlap_step < 0.15f ) is NOT correct!
+  values: CHECK( 1 <  0.15 )
+
+/home/next/projects/rime/tests/render/shadow_transition_test.cpp:153: MESSAGE: cascade transition steps x=0.0874023, z=0.0112305, overlapping=1
+
+===============================================================================
+[doctest] test cases:    1 |    0 passed | 1 failed | 5 skipped
+[doctest] assertions: 2054 | 2053 passed | 1 failed |
+[doctest] Status: FAILURE!

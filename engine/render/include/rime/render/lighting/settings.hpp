@@ -64,6 +64,14 @@ struct LightingSettings {
     // 0.5 is the standard compromise. See docs/math/shadow-mapping.md §2.
     float cascade_split_lambda = 0.5f;
 
+    // Farthest distance (world metres from the camera) the cascades cover. The camera's z_far is a
+    // raster decision (how far terrain may be drawn); a shadow map's texels are spread over the
+    // cascade splits, so feeding it a multi-kilometre view range makes cascade 0 hundreds of metres
+    // wide and its texels metre-sized. 0 (or negative, NaN, infinite, or not beyond the camera's
+    // z_near) means "unset": the camera's z_far is used unchanged. A valid value only ever shortens
+    // the range — min(camera z_far, this).
+    float shadow_max_distance = 0.0f;
+
     // Shadow bias, in the units the depth compare needs (docs/math/shadow-mapping.md §4). The
     // normal offset pushes the sample point off the receiving surface along its normal (kills most
     // acne regardless of light angle); the small constant depth bias mops up the rest. Too much of
@@ -189,6 +197,10 @@ struct LightingSettings {
     // geometry/light edits respond, but an unchanged scene does not receive fresh Monte Carlo
     // noise each frame. Trades temporal convergence for bounded spatial quadrature error.
     bool ddgi_stable_rays = false;
+
+    // Cull only directional-cascade casters outside that cascade's light frustum. Kept
+    // independent of shadows_enabled for an explicit on/off proof; local maps are unchanged.
+    bool shadow_caster_culling = false;
 };
 
 } // namespace rime::render

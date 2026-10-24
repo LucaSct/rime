@@ -1,0 +1,52 @@
+[INFO] rhi: candidate [0] 'NVIDIA GeForce RTX 3060' (type score 1000)  <-- chosen (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:365)
+[INFO] rhi: Vulkan device ready — GPU 'NVIDIA GeForce RTX 3060' (Vulkan 1.4.351) (/home/next/projects/rime/engine/rhi/src/vulkan/device_vulkan.cpp:135)
+RIME_BINDING_ROW invocation=0 draws=36 attempts=180 issues=12 filter=2 match=0 caster=0
+RIME_BINDING_ROW invocation=1 draws=36 attempts=180 issues=12 filter=2 match=0 caster=0
+RIME_BINDING_ROW invocation=2 draws=36 attempts=180 issues=12 filter=2 match=0 caster=0
+city content: /home/next/reports/rime-player-performance-2026-10-19/native-binding-proof/content
+99-the-block: authored player spawn: capsule centre (-10.000, 1.000, 2.000) m, yaw -0.0000 rad, pitch 0.0000 rad
+99-the-block --perf: NVIDIA GeForce RTX 3060 (NVIDIA 615.78.08), 1280x720, warmup 0, measuring 3 frames…
+  frame     p50 6.95  p95 399.00  p99 399.00  max 399.00 ms  (3 frames)
+  collapse  p50 3.42  p95 6.95  p99 6.95  max 6.95 ms  (2 frames)
+  sim(both) p50 0.585  p99 4.219  max 4.219 ms
+  sim.client p50 0.016  p99 0.019  max 0.019 ms  <- what a player pays
+  render    p50 2.83  p99 398.94  max 398.94 ms
+  submit    p99 4.08  max 4.08 ms  = queue p99 71.60 + fence wait p99 20.26 (max 20.26); gpu passes p99 3.35  max 3.35 ms
+  frame.player p50 2.85  p99 398.95  max 398.95 ms  <- client + render, i.e. one machine
+  sim.server p50 0.373  p99 4.172  max 4.172 ms
+  where the CPU frame went (per-frame totals, p99, top 6 of 37):
+    frame.declare.per_frame             394.213 ms
+    rhi.submit.reclaim.per_frame         73.234 ms
+    rhi.submit.queue.per_frame           71.601 ms
+    rhi.submit.wait.per_frame            20.263 ms
+    physics.server.step.per_frame         4.153 ms
+    frame.submit.per_frame                4.076 ms
+  what the frame could NOT name (residual = parent - its named parts):
+    frame.unaccounted          p50   0.001  p99   0.001  max   0.001  min   0.000 ms
+    frame.render.unaccounted   p50   0.014  p99   0.016  max   0.016  min   0.008 ms
+    sim.block.unaccounted      p50   0.038  p99   0.196  max   0.196  min   0.033 ms
+    sim.client.unaccounted     p50   0.009  p99   0.010  max   0.010  min   0.004 ms
+    sim.server.unaccounted     p50   0.019  p99   0.356  max   0.356  min   0.003 ms
+  worst frame #0 at 399.00 ms
+    frame.declare               394.213 ms
+    rhi.submit.reclaim           73.234 ms
+    rhi.submit.queue             71.601 ms
+    rhi.submit.wait              20.263 ms
+  passes: 50 declared at peak, timestamp pool brackets 1024
+  work ledger: {"frames.measured":3,"draws.submitted":36,"draws.culled":3,"parts.alive_end":6326,"debris.peak_live":362,"leaves.live":0,"sdf.stamps":16,"ddgi.probes_updated":1152,"shadow.spot_maps":24,"ground.materials_bound":1,"ground.textures_refused_unsupported":0,"net.max_batches_per_tick":1,"net.client_physics_steps":3,"net.client_batches_applied":3,"physics.job_participants":32,"physics.server.parallel_steps":0,"physics.client.parallel_steps":0,"physics.max_active_islands":1,"physics.server.max_bodies":923,"physics.client.max_bodies":1,"physics.server.max_broadphase_pairs":2008,"physics.client.max_broadphase_pairs":0,"physics.worst_tick_index":3,"physics.worst_tick_us":4157,"physics.worst_tick_steps":2,"physics.worst_tick_min_islands":0,"physics.worst_tick_max_islands":1,"physics.worst_tick_largest":362,"physics.worst_tick_awake_bodies":362,"physics.worst_tick_parallel_steps":0,"physics.worst_tick_island_ns_total":0,"physics.worst_tick_island_ns_largest":0,"physics.worst_step_island_ns_total":0,"physics.worst_step_island_ns_largest":0,"physics.worst_step_active_islands":0,"physics.worst_step_largest_bodies":0,"physics.worst_step_awake_bodies":0}
+  wrote /home/next/reports/rime-player-performance-2026-10-19/native-binding-proof/unqualified-perf-3-frames.json
+  PERF GATE:
+  frame: 3 samples, need 200 — a percentile over this few frames is not evidence about the tail
+  frame.collapse: 2 samples, need 45 — a percentile over this few frames is not evidence about the tail
+  sim.collapse: 2 samples, need 45 — a percentile over this few frames is not evidence about the tail
+  frame.unaccounted: 3 samples, need 200 — a percentile over this few frames is not evidence about the tail
+  frame.render.unaccounted: 3 samples, need 200 — a percentile over this few frames is not evidence about the tail
+  sim.block.unaccounted: 3 samples, need 200 — a percentile over this few frames is not evidence about the tail
+  sim.client.unaccounted: 3 samples, need 200 — a percentile over this few frames is not evidence about the tail
+  sim.server.unaccounted: 3 samples, need 200 — a percentile over this few frames is not evidence about the tail
+  frame p99: 399.005 ms, budget 16.600 ms  (3 samples)
+  frame max: 399.005 ms, budget 33.000 ms  (3 samples)
+  baseline: not-provided — no committed baseline was supplied — this run establishes one, it does not confirm one
+99-the-block: authored environment (cosmetic) enabled_sources=2 sources=2 smoke=0 flames=3 lights=1 phase_surfaces=2 phase_cells=2 thermal_status=1 atlas=1 fx_ticks=3 thermal_ticks=3 invalid_source_visits=0 invalid_thermal_builds=0 thermal_refusals=0
+99-the-block --perf: FAILED the perf gate
+RIME_BINDING_TOTAL invocations=3 draws=108 attempts=540 issues=36
