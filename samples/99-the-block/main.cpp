@@ -7122,8 +7122,17 @@ void run_shimmer_trace(Demo& demo, const char* csv_path) {
 //
 // The owner saw the play HUD read "peers DIVERGED" after an aimed charge and after rifle fire. This
 // is the headless form of that session on a city map: 20 rifle hits that reach destructible parts,
-// then an aimed charge, then the sim runs on until the authority has committed no new damage op for
-// 10 s (bounded). Every tick is classified exactly as the HUD classifies it.
+// then an aimed charge, then 60 ticks of aftermath, then the authority's LOCAL DAMAGE GATE closes
+// (DestructionWorld::set_local_damage_enabled) and the sim runs on until nothing has been in flight
+// for 30 ticks, within a fixed 300-tick budget. Every tick is classified exactly as the HUD
+// classifies it.
+//
+// Why a gate rather than "wait until the authority goes quiet", which is what this used to do: the
+// length of that wait is set by a chaotic fracture cascade, so it was a different test on every
+// platform -- 982 s here, 2862 s on the slower runner, >3600 s on windows-latest, same commit. The
+// gate turns it into a bounded one (18 s here) WITHOUT weakening a claim: the cascade's ops up to
+// the gate are real, in flight, and must all be held; what is given up is only coverage of a
+// collapse settling naturally, which none of the claims below was ever about.
 //
 // What it asserts, and why each is there:
 //   - the HUD never says DIVERGED. The peers really are in sync whenever nothing is in flight
@@ -7131,7 +7140,10 @@ void run_shimmer_trace(Demo& demo, const char* csv_path) {
 //     and both are failures;
 //   - the HUD DID say "syncing" — the sensitivity half: a run that never had anything in flight
 //     never exercised the case the row exists to get right, and would pass vacuously;
-//   - the peers agree once the authority has gone quiet, within the bound;
+//   - the gate held (the authority committed nothing after it -- the sensitivity control for the
+//     gate itself: with the call removed, 1414 ops land after the gate tick and this fails), and
+//     the client then held every published op within the budget;
+//   - the peers agree once nothing is in flight;
 //   - a CONTROL: one damage op committed on the server and never published must then read
 //     DIVERGED. Without it, a classifier that answered "syncing" to everything would pass too.
 //
@@ -7295,7 +7307,6 @@ int run_desync_check(const std::filesystem::path& cooked, std::string_view scene
     }
 
     std::uint64_t tick = 0, syncing_ticks = 0, diverged_ticks = 0, hash_differs = 0;
-    std::uint64_t last_sent = s.server.destruction_net_server.ops_sent(), last_sent_change = 0;
     std::uint64_t peak_in_flight = 0, behind_run = 0, longest_behind_run = 0;
     const bool trace = std::getenv("RIME_DESYNC_TRACE") != nullptr;
     const auto step = [&](const gameplay::CharacterInput& in, const char* phase) {
@@ -7310,18 +7321,14 @@ int run_desync_check(const std::filesystem::path& cooked, std::string_view scene
         peak_in_flight = std::max(peak_in_flight, in_flight);
         behind_run = in_flight > 0 ? behind_run + 1 : 0;
         longest_behind_run = std::max(longest_behind_run, behind_run);
-        const std::uint64_t sent = s.server.destruction_net_server.ops_sent();
-        if (sent != last_sent) {
-            last_sent = sent;
-            last_sent_change = tick;
-        }
         if (trace)
-            std::printf("T %llu %s state=%d in_flight=%llu sent=%llu\n",
-                        static_cast<unsigned long long>(tick),
-                        phase,
-                        static_cast<int>(state),
-                        static_cast<unsigned long long>(in_flight),
-                        static_cast<unsigned long long>(sent));
+            std::printf(
+                "T %llu %s state=%d in_flight=%llu sent=%llu\n",
+                static_cast<unsigned long long>(tick),
+                phase,
+                static_cast<int>(state),
+                static_cast<unsigned long long>(in_flight),
+                static_cast<unsigned long long>(s.server.destruction_net_server.ops_sent()));
         if (state == PeerSync::Diverged && diverged_ticks == 1 &&
             std::string_view(phase) != "control") {
             std::printf("  DIVERGED first at tick %llu (%s):\n",
@@ -7329,6 +7336,7 @@ int run_desync_check(const std::filesystem::path& cooked, std::string_view scene
                         phase);
             print_peer_difference(s);
         }
+        return in_flight;
     };
 
     // 20 rifle hits that reach a destructible part (not shots, not hits on loose rubble).
@@ -7360,18 +7368,28 @@ int run_desync_check(const std::filesystem::path& cooked, std::string_view scene
     const bool charged = demo.fire_charge_aimed();
     const std::uint64_t charge_tick = tick;
 
-    // Drain: at least 10 s after the charge AND 10 s after the authority's last damage op, bounded
-    // at 200 s so a collapse that never ends fails rather than hangs.
-    constexpr std::uint64_t kQuiet = 600, kDrainBound = 12000;
-    while (tick - charge_tick < kDrainBound &&
-           (tick - charge_tick < kQuiet || tick - last_sent_change < kQuiet))
-        step(look, "drain");
-    const bool quiet = tick - last_sent_change >= kQuiet;
+    // Let the charge's immediate aftermath run, then stop NEW local damage. The next tick's
+    // destruction update replaces committed_ops before publish, so no pre-gate batch can leak
+    // through after this point. The client must hold the published stream within a fixed budget.
+    constexpr std::uint64_t kAftermath = 60, kSettledTicks = 30, kSettleBudget = 300;
+    for (std::uint64_t i = 0; i < kAftermath; ++i)
+        step(look, "aftermath");
+    s.server.destruction.set_local_damage_enabled(false);
+    const std::uint64_t gate_tick = tick;
+    std::uint64_t settle_ticks = 0, settled_run = 0, committed_after_gate = 0;
+    while (settle_ticks < kSettleBudget && settled_run < kSettledTicks) {
+        const std::uint64_t in_flight = step(look, "drain");
+        ++settle_ticks;
+        committed_after_gate += s.server.destruction.committed_ops().size();
+        settled_run = in_flight == 0 ? settled_run + 1 : 0;
+    }
+    const bool settled = settled_run >= kSettledTicks;
     std::uint64_t end_in_flight = 0;
     const PeerSync end_state = classify_peer_sync(s, &end_in_flight);
     // The session's numbers, before the control below adds ticks of its own.
-    const std::uint64_t session_ticks = tick, session_last_sent = last_sent_change,
-                        session_syncing = syncing_ticks, session_differs = hash_differs;
+    const std::uint64_t session_ticks = tick, session_syncing = syncing_ticks,
+                        session_differs = hash_differs;
+    const std::uint64_t suppressed_at_session_end = s.server.destruction.suppressed_local_ops();
 
     std::printf("  rifle     : %llu hits on destructible parts (%llu shots)\n",
                 static_cast<unsigned long long>(rifle_hits),
@@ -7379,10 +7397,14 @@ int run_desync_check(const std::filesystem::path& cooked, std::string_view scene
     std::printf("  charge    : %s at tick %llu\n",
                 charged ? "detonated" : "HIT NOTHING",
                 static_cast<unsigned long long>(charge_tick));
-    std::printf("  drain     : authority last sent ops at tick %llu, ran to %llu (%s)\n",
-                static_cast<unsigned long long>(session_last_sent),
+    std::printf("  drain     : gate at tick %llu, settled in %llu tick(s) at tick %llu (%s); "
+                "committed after gate %llu, suppressed local ops %llu\n",
+                static_cast<unsigned long long>(gate_tick),
+                static_cast<unsigned long long>(settle_ticks),
                 static_cast<unsigned long long>(session_ticks),
-                quiet ? "quiet" : "BOUND EXHAUSTED");
+                settled ? "settled" : "BUDGET EXHAUSTED",
+                static_cast<unsigned long long>(committed_after_gate),
+                static_cast<unsigned long long>(suppressed_at_session_end));
     std::printf(
         "  ops       : sent %llu (%llu before the charge), applied %llu, dropped %llu, "
         "refused %llu, unaddressable %llu\n",
@@ -7407,10 +7429,11 @@ int run_desync_check(const std::filesystem::path& cooked, std::string_view scene
     // authority OUTSIDE the tick: the next tick's update replaces `committed_ops()` before anything
     // publishes it, so the client can never hold that op. The part is found the way the player
     // finds one (a ray onto a standing part), so it exists on both peers. Then let the authority go
-    // quiet again — the injected break may set off follow-up damage, which IS published and must
-    // drain first — and classify.
+    // settle with the local gate closed again before classifying.
     std::size_t control_ops = 0;
     PeerSync control_state = PeerSync::InSync;
+    std::uint64_t control_ticks = 0, control_settled_run = 0;
+    bool control_settled = false;
     if (aim(false)) {
         s.client.view.yaw = look.yaw;
         s.client.view.pitch = look.pitch;
@@ -7423,6 +7446,8 @@ int run_desync_check(const std::filesystem::path& cooked, std::string_view scene
                 hit,
                 f)) {
             auto& d = s.server.destruction;
+            // This deliberate out-of-tick divergence must bypass the session's local gate.
+            d.set_local_damage_enabled(true);
             for (std::size_t i = 0; i < d.instance_count(); ++i)
                 d.apply_damage(destruction::InstanceId{static_cast<std::uint32_t>(i), 0},
                                hit.point,
@@ -7431,11 +7456,17 @@ int run_desync_check(const std::filesystem::path& cooked, std::string_view scene
                                {});
             d.update(s.server.physics);
             control_ops = d.committed_ops().size();
+            d.set_local_damage_enabled(false);
         }
-        const std::uint64_t control_start = tick;
-        while (tick - control_start < kDrainBound &&
-               (tick - control_start < 60 || tick - last_sent_change < kQuiet))
-            step(look, "control");
+        // Give the control at least 60 ticks for the injected break, plus a consecutive
+        // no-in-flight window; exhausting the same fixed budget invalidates its verdict.
+        while (control_ticks < kSettleBudget &&
+               (control_ticks < 60 || control_settled_run < kSettledTicks)) {
+            const std::uint64_t in_flight = step(look, "control");
+            ++control_ticks;
+            control_settled_run = in_flight == 0 ? control_settled_run + 1 : 0;
+        }
+        control_settled = control_ticks >= 60 && control_settled_run >= kSettledTicks;
         control_state = classify_peer_sync(s);
     }
     bool okay = true;
@@ -7448,15 +7479,19 @@ int run_desync_check(const std::filesystem::path& cooked, std::string_view scene
           "the aimed charge detonated and the authority published damage");
     check(session_syncing > 0, "the HUD showed 'syncing' (ops were in flight; not vacuous)");
     check(diverged_ticks == 0, "the HUD never showed DIVERGED during the session");
-    check(quiet, "the authority went quiet within the bound");
+    check(settled, "the client held every published op within kSettleBudget ticks of the gate");
+    check(committed_after_gate == 0,
+          "the gate held: the authority committed no new damage after it");
     check(end_state == PeerSync::InSync && end_in_flight == 0,
           "the peers agree once nothing is in flight");
-    std::printf("  control   : %zu op(s) committed and never published -> %s\n",
+    std::printf("  control   : %zu op(s) committed and never published; %llu tick(s), %s -> %s\n",
                 control_ops,
+                static_cast<unsigned long long>(control_ticks),
+                control_settled ? "settled" : "BUDGET EXHAUSTED",
                 control_state == PeerSync::Diverged  ? "DIVERGED"
                 : control_state == PeerSync::Syncing ? "syncing"
                                                      : "in sync");
-    check(control_ops > 0 && control_state == PeerSync::Diverged,
+    check(control_settled && control_ops > 0 && control_state == PeerSync::Diverged,
           "control: an op the client never receives reads DIVERGED");
     std::printf("99-the-block --desync-check: %s\n", okay ? "PASSED" : "FAILED");
     return okay ? 0 : 1;

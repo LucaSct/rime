@@ -170,6 +170,10 @@ struct DestructionWorld::Impl {
     std::vector<DamageOp> pending_remote_ops;
     std::vector<DamageOp> committed_ops;
 
+    // The gate cuts the completed local suffix before application; remote ops keep their order.
+    bool local_damage_enabled = true;
+    std::uint64_t suppressed_local_ops = 0;
+
     // Remote ops refused by stage 1's validation, cumulative over the world's life. Every field of
     // a remote op is untrusted (it was decoded off a socket), and a peer that silently discards
     // ops is indistinguishable from one that has nothing to do — so the drops are counted and

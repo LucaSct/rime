@@ -417,6 +417,14 @@ std::uint64_t DestructionWorld::rejected_remote_ops() const noexcept {
     return impl_->rejected_remote_ops;
 }
 
+void DestructionWorld::set_local_damage_enabled(bool enabled) {
+    impl_->local_damage_enabled = enabled;
+}
+
+std::uint64_t DestructionWorld::suppressed_local_ops() const noexcept {
+    return impl_->suppressed_local_ops;
+}
+
 void DestructionWorld::apply_remote_ops(std::span<const DamageOp> ops) {
     // Validation is deferred to update()'s stage 1, which is where the drops are documented and
     // where the instance table is about to be walked anyway. Queuing is deliberately dumb so that
@@ -626,6 +634,14 @@ void DestructionWorld::update(physics::PhysicsWorld& world) {
         }
         drain_side(e, true);
         drain_side(e, false);
+    }
+
+    // Remote ops precede explicit_begin; explicit damage and contact damage were both appended
+    // after it. Cutting only this suffix lets a host stop generating damage without blocking a
+    // mirror from applying its authority's already-published ops.
+    if (!impl.local_damage_enabled) {
+        impl.suppressed_local_ops += ops.size() - explicit_begin;
+        ops.resize(explicit_begin);
     }
 
     // The op list is now COMPLETE and canonical — the input to everything below, and the artifact

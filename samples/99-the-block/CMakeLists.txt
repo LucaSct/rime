@@ -237,40 +237,18 @@ set_tests_properties(the_block_effects_smoke PROPERTIES
 # The `peers` HUD row's honesty (oct21-desync): 20 rifle hits and an aimed charge on the generated
 # city, every tick classified as the HUD classifies it. GPU-free.
 #
-# TIMEOUT 3600 -- AND THE HONEST STATEMENT IS THAT THIS TEST'S WALL-CLOCK BUDGET CANNOT BE SIZED
-# CORRECTLY. Keep the derivation, because two successive numbers here were both wrong for
-# different reasons and the third is a bound, not a measurement.
+# TIMEOUT 600 -- sized from a measurement, which this test could not have until oct24. It used to
+# drain until the authority had published nothing for 600 ticks, and how long THAT takes is set by a
+# chaotic fracture cascade: 982 s on nextos, 2862 s on starbase, >3600 s on windows-latest, same
+# commit. Two successive timeout raises failed for that structural reason, not for slowness.
 #
-# The original 1800 came from 226 s measured on the faster self-hosted runner in a RELEASE build,
-# times the 2.2-2.8x slow-runner factor. Every job that runs this test builds DEBUG. Measured on
-# PR #348: 1010 s on macos-latest (passed), a TIMEOUT at the 1800 s wall on windows-latest, and
-# 982 s on nextos. So the Debug figure is ~4.4x the release one the budget was built from.
-#
-# The reason it cannot be sized is in the cross-machine ratio, and it is worth reading off the
-# siblings rather than guessing. Built from the SAME binary in the same two jobs:
-#     the_block_headless      nextos 7.88 s   macOS 32.8 s    4.16x
-#     the_block_world_smoke   nextos 2.29 s   macOS  6.4 s    2.79x
-#     the_block_desync_check  nextos  982 s   macOS 1010 s    1.03x   <-- does not move
-# A test whose runtime is flat across a 3-4x CPU gap is not bounded by work. This one is bounded
-# by SETTLING: both drain loops below run until the authority has been quiet for kQuiet ticks, up
-# to kDrainBound, and the number of ticks that takes is a property of a chaotic fracture cascade --
-# the same chaos CLAUDE.md already documents for this sample's claims. A different platform is a
-# different last bit, so it is a different tick count. The two machines did not run the same test
-# at different speeds; they ran different-length tests that happened to land 3 % apart.
-#
-# What that makes the worst case: the run measured here took 2885 ticks in 982 s, i.e. ~340 ms per
-# tick, and kDrainBound is 12000 -- about 4080 s on the FASTEST machine in the matrix, before any
-# slow-runner factor. 3600 is therefore not a safe ceiling; it is 2x the observed Windows lower
-# bound and a bet that the cascade settles near its typical length. Windows did not fail because
-# Windows is slow -- at the siblings' 1.47x Windows/macOS ratio a 2885-tick run would want ~1445 s
-# -- it failed because it ran MORE ticks.
-#
-# The real fix is a code change and an owner's call, not a bigger number: give the test an explicit
-# tick budget it can afford and let it report when it has not settled inside it, instead of
-# converting a chaotic tick count into a wall-clock gamble. Raising the timeout is safe to do in
-# the meantime only because the hosted `build` job sets no timeout-minutes at all, so it inherits
-# GitHub's 360-minute default against a 36-minute ctest; the binding budget is the self-hosted
-# build job's, raised to 150 minutes in ci-self-hosted.yml.
+# Now the charge gets 60 aftermath ticks, then the authority's local damage gate closes
+# (DestructionWorld::set_local_damage_enabled) and both the session and its divergence control must
+# settle within a fixed 300 ticks -- exhausting either budget FAILS, it is not reported-and-passed.
+# The test is therefore a bounded number of ticks, and its wall clock is sizeable like any other:
+# measured 18.26 s on nextos in Debug (660 ticks: a 600-tick session plus the 60-tick control). The slowest sibling ratio in the matrix is
+# the_block_headless on macos-latest, 4.16x nextos, and windows-latest has run ~1.47x macOS; that
+# predicts ~112 s on the slowest job. 600 matches the sibling tests and leaves >5x headroom.
 #
 # NOT REGISTERED UNDER A SANITIZER, and the reason is a measurement rather than a preference. The
 # sibling timeouts above budget for "the sanitizer build on the slow runner" at roughly 3x the
@@ -286,12 +264,12 @@ set_tests_properties(the_block_effects_smoke PROPERTIES
 # self-hosted build & test jobs plus hosted Linux, macOS and Windows), so its determinism and
 # HUD-honesty assertions are fully gated. ASan's value is memory errors, and the engine code this
 # mode drives (physics step, gameplay classification, the net predictor) is exercised by the other
-# 92 tests under ASan. The number to replace this with is a measured ASan runtime; nobody has one.
+# 92 tests under ASan. A bounded test can now be re-measured under ASan; nobody has done that yet.
 if(RIME_SANITIZER STREQUAL "off")
     add_test(NAME the_block_desync_check COMMAND the_block --desync-check)
     set_tests_properties(the_block_desync_check PROPERTIES
         FIXTURES_REQUIRED block_demo_cook
-        TIMEOUT 3600)
+        TIMEOUT 600)
 else()
     # Visible at configure time rather than silently absent -- a dropped test that announces
     # nothing is the CMake version of a skip path without a counter.

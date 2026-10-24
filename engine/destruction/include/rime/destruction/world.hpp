@@ -164,6 +164,29 @@ public:
     // would count the same events twice — don't).
     void update(physics::PhysicsWorld& world);
 
+    // --- the local damage gate (oct24)
+    // ------------------------------------------------------------
+    //
+    // Stop this peer GENERATING damage — explicit apply_damage calls and contact-derived erosion
+    // alike — while everything already set in motion carries on: debris still falls, bodies still
+    // collide, and remote ops still apply. Enabled by default; with it enabled update() is
+    // bit-identical to a world that never had a gate.
+    //
+    // Why it exists: a fracture cascade is chaotic, so "wait until the authority stops breaking
+    // things" is a wait whose LENGTH is a property of the last bit of the platform's float maths
+    // (the desync check ran 982 s on one machine and >3600 s on another, same commit). A host that
+    // needs a bounded settle — a test proving replication converges, a server freezing a round —
+    // closes this gate and then waits only for what is already in flight, which is bounded.
+    //
+    // How: update() still builds the complete op list on its one code path and then drops the
+    // LOCAL suffix (everything after the remote ops) before the commit snapshot. Cutting at the end
+    // rather than skipping sources up front means there is no second, gated pipeline that could
+    // quietly drift from the real one. Every dropped op is counted in suppressed_local_ops(), so a
+    // gated peer can be told apart from one whose scene simply produced no damage — the project's
+    // rule that a skip path without a counter reads as passing.
+    void set_local_damage_enabled(bool enabled);
+    [[nodiscard]] std::uint64_t suppressed_local_ops() const noexcept;
+
     // --- replication (m11.4, ADR-0033 A1/A3) -----------------------------------------------------
 
     // Declare who owns `instance` (see Authority above). Default `Local`; an unknown id is a safe
