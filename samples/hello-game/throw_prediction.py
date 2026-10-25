@@ -99,14 +99,22 @@ def run_leg(server_extra=(), client_extra=(), throw=True, one_way=1, hold=0):
     enough that the server's one-command input buffer runs dry on the press tick and executes a
     synthesized stand-in -- which never launches (ADR-0103 §2, ADR-0105 §5's lose-all case). That is
     the engine behaving correctly, but the leg was meant to test something else, so it is rerun. The
-    tell is the client's own `spawn_retired_without_launch`; `lose-all` expects it and is never rerun.
+    tell is the client's own `spawn_retired_without_launch`; `lose-all` expects that, and reruns instead
+    when its fault never fired.
     A discarded attempt must STILL hold the invariant every leg gates -- at most one live presentation
     per key and at most one Launch -- so a rerun can never hide a ghost. Reruns are printed.
     """
     expects_lost_press = "lose-all" in server_extra
     for attempt in range(1, MAX_ATTEMPTS + 1):
         s, c = run_leg_once(server_extra, client_extra, throw, one_way, hold)
-        if not throw or expects_lost_press or c.get("spawn_retired_without_launch", 0) == 0:
+        if not throw:
+            return s, c
+        # lose-all's own precondition is that its fault FIRED: on a slow runner (hosted macOS) the
+        # press can be synthesized before any copy arrives, leaving the fault nothing to drop
+        # ("dropped 0") -- the same starvation as below, seen from the other leg.
+        if expects_lost_press and s.get("spawn_fault_lose_all", 0) >= 1:
+            return s, c
+        if not expects_lost_press and c.get("spawn_retired_without_launch", 0) == 0:
             return s, c
         assert c["live_presentations_max"] <= 1 and c["presentation_launch"] <= 1, (
             "a discarded attempt broke the no-ghost invariant", c)
