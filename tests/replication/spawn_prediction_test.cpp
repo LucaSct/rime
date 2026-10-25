@@ -1009,3 +1009,39 @@ TEST_CASE("a refused spawn checkpoint changes nothing") {
     CHECK(h.reconciler.epoch() == epoch);
     CHECK(h.reconciler.provisional().size() == 1);
 }
+
+TEST_CASE("the outcome acknowledgement round-trips exactly and refuses every malformed length") {
+    const SpawnOutcomeAck ack{SpawnKey{0xA1B2C3D4u, 0x01020304u, 5}};
+    std::array<std::byte, kSpawnOutcomeAckBytes + 4> bytes{};
+    REQUIRE(encode_spawn_outcome_ack(ack, bytes) == kSpawnOutcomeAckBytes);
+    CHECK(kSpawnOutcomeAckBytes == 10);
+    CHECK(bytes[0] == std::byte{kSpawnOutcomeAckTag});
+    // Little-endian, the layout the header documents: incarnation, sequence, slot.
+    CHECK(bytes[1] == std::byte{0xD4});
+    CHECK(bytes[4] == std::byte{0xA1});
+    CHECK(bytes[5] == std::byte{0x04});
+    CHECK(bytes[9] == std::byte{5});
+
+    SpawnOutcomeAck decoded{};
+    REQUIRE(decode_spawn_outcome_ack(std::span(bytes).first(kSpawnOutcomeAckBytes), decoded));
+    CHECK(decoded == ack);
+
+    // Too small an output buffer writes nothing.
+    std::array<std::byte, kSpawnOutcomeAckBytes - 1> small{};
+    CHECK(encode_spawn_outcome_ack(ack, small) == 0);
+    CHECK(std::all_of(small.begin(), small.end(), [](std::byte b) { return b == std::byte{0}; }));
+
+    // Every refusal leaves `out` as it was.
+    const SpawnOutcomeAck sentinel{SpawnKey{9, 9, 9}};
+    for (std::size_t length : {std::size_t{0}, std::size_t{1}, kSpawnOutcomeAckBytes - 1,
+                               kSpawnOutcomeAckBytes + 1}) {
+        SpawnOutcomeAck out = sentinel;
+        CHECK_FALSE(decode_spawn_outcome_ack(std::span(bytes).first(length), out));
+        CHECK(out == sentinel);
+    }
+    auto wrong_tag = bytes;
+    wrong_tag[0] = std::byte{kSpawnExtensionTag};
+    SpawnOutcomeAck out = sentinel;
+    CHECK_FALSE(decode_spawn_outcome_ack(std::span(wrong_tag).first(kSpawnOutcomeAckBytes), out));
+    CHECK(out == sentinel);
+}

@@ -236,6 +236,37 @@ private:
 };
 
 // ---------------------------------------------------------------------------------------------
+// The outcome acknowledgement (client -> server, m20.5b)
+// ---------------------------------------------------------------------------------------------
+//
+// DURABLE OUTCOMES, RETAINED UNTIL ACKNOWLEDGED. The server re-sends every verdict in every
+// checkpoint until the client says it holds it, because checkpoints ride an unreliable,
+// superseding stream: a verdict sent once and lost would leave a guess unresolved until it expired
+// locally. The client's statement is this message -- "I have APPLIED every outcome through
+// `through`" -- sent on ReliableOrdered whenever SpawnReconciler::outcomes_held_through()
+// advances. It is the ONLY thing that advances the server's frontier (guardrail 5: a per-peer
+// "what they have" fact strengthens on confirmed holding, never on "we sent it"), and one key
+// stands for a whole prefix because outcomes ascend.
+//
+// Wire layout, little-endian: u8 tag = kSpawnOutcomeAckTag, then a SpawnKey (u32 incarnation, u32
+// sequence, u8 slot) -- exactly kSpawnOutcomeAckBytes, anything else is malformed.
+
+inline constexpr std::uint8_t kSpawnOutcomeAckTag = 0xE6;
+inline constexpr std::size_t kSpawnOutcomeAckBytes = 1 + kSpawnKeyBytes;
+
+struct SpawnOutcomeAck {
+    SpawnKey through{};
+    [[nodiscard]] bool operator==(const SpawnOutcomeAck&) const = default;
+};
+
+// Writes kSpawnOutcomeAckBytes, or nothing (returns 0) when `out` is too small.
+[[nodiscard]] std::size_t encode_spawn_outcome_ack(const SpawnOutcomeAck& ack,
+                                                   std::span<std::byte> out);
+// Exact length and tag, or false with `out` unchanged. What the key MEANS (the right incarnation,
+// not ahead of what was sent) is the server's to judge, not the codec's.
+[[nodiscard]] bool decode_spawn_outcome_ack(std::span<const std::byte> in, SpawnOutcomeAck& out);
+
+// ---------------------------------------------------------------------------------------------
 // The presentation ledger
 // ---------------------------------------------------------------------------------------------
 

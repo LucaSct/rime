@@ -290,6 +290,27 @@ SpawnCheckpointDecode SpawnCheckpointDecoder::decode(std::span<const std::byte> 
     return result;
 }
 
+std::size_t encode_spawn_outcome_ack(const SpawnOutcomeAck& ack, std::span<std::byte> out) {
+    if (out.size() < kSpawnOutcomeAckBytes)
+        return 0;
+    Writer writer{out};
+    writer.u8(kSpawnOutcomeAckTag);
+    writer.key(ack.through);
+    return writer.at;
+}
+
+bool decode_spawn_outcome_ack(std::span<const std::byte> in, SpawnOutcomeAck& out) {
+    // Exact length, not "at least": a longer message is not this one with padding, it is a
+    // different (or corrupted) message, and accepting it would let trailing bytes ride unread.
+    if (in.size() != kSpawnOutcomeAckBytes)
+        return false;
+    Reader reader{in};
+    if (reader.u8() != kSpawnOutcomeAckTag)
+        return false;
+    out.through = reader.key();
+    return true;
+}
+
 // ---------------------------------------------------------------------------------------------
 // PresentationLedger
 // ---------------------------------------------------------------------------------------------
