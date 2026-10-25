@@ -10,6 +10,7 @@
 #include <optional>
 #include <span>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "rime/replication/input_v2.hpp"
@@ -35,9 +36,9 @@
 //      overlay that never changes the epoch. The epoch is the server's statement of membership; if
 //      a client guess could advance it, every checkpoint would look like the wrong set. Each
 //      reconciliation restores the roster, resolves the overlay against the server's outcomes
-//      (accepted: ADOPT the replica's identity; rejected or ended: remove), drops the guesses the
-//      replay will make again, and replays the unretired commands, which recreate them under the
-//      same keys and the same local ids.
+//      (accepted: ADOPT the replica's identity; rejected or ended: remove), and replays unretired
+//      commands under the same keys and local ids. A skipped replay keeps its guesses; a local
+//      removal cannot cancel presentation before the server has given its verdict.
 //   3. AN EXACTLY-ONCE PRESENTATION LEDGER. `PredictionStep::replaying` can silence effects during
 //      a replay, but it cannot stop a launch sound playing a second time when the authoritative
 //      replica arrives under a new id. The ledger remembers (key, event kind, ordinal) triples
@@ -63,7 +64,8 @@ struct SpawnKey {
     std::uint8_t slot = 0;
     [[nodiscard]] bool operator==(const SpawnKey&) const = default;
     // Lexicographic (incarnation, sequence, slot): the order the server produces outcomes in, which
-    // is what lets one "acknowledged through" key stand for a whole prefix of them.
+    // is what lets one "acknowledged through" key stand for a whole prefix of them. Raw uint32
+    // sequence comparison assumes no wrap (about 2.27 years at 60 Hz); m20.4 shares that limit.
     [[nodiscard]] auto operator<=>(const SpawnKey&) const = default;
 };
 
@@ -303,7 +305,7 @@ public:
     [[nodiscard]] bool
     should_play(const SpawnKey& key, PresentationEventKind kind, std::uint16_t ordinal);
     // Binds the key to the replica's identity; the presentation already playing continues as that
-    // entity's. False (counted) when the key was already bound.
+    // entity's. False (counted) when already bound or cancelled: cancellation cannot be undone.
     bool adopt(const SpawnKey& key, PredictedEntityId id);
     // The key's guess was wrong: returns the events already played so the game can stop removable
     // effects, and makes every later should_play for the key false.
@@ -329,6 +331,8 @@ public:
     [[nodiscard]] std::uint64_t duplicate_adoptions() const noexcept {
         return duplicate_adoptions_;
     }
+
+    [[nodiscard]] std::uint64_t adopt_after_cancel() const noexcept { return adopt_after_cancel_; }
 
     [[nodiscard]] std::uint64_t cancels() const noexcept { return cancels_; }
 
@@ -361,6 +365,7 @@ private:
     std::uint64_t suppressed_cancelled_ = 0;
     std::uint64_t adoptions_ = 0;
     std::uint64_t duplicate_adoptions_ = 0;
+    std::uint64_t adopt_after_cancel_ = 0;
     std::uint64_t cancels_ = 0;
     std::uint64_t duplicate_cancels_ = 0;
     std::uint64_t key_overflow_ = 0;
@@ -394,7 +399,7 @@ struct SpawnBudget {
     // before its verdict arrived. Oldest evicted first (counted).
     std::size_t max_snapshots = 128;
     // Resolved keys remembered, so a duplicate verdict is recognised and an expired guess is never
-    // respawned by replay. Oldest evicted first (counted).
+    // respawned by replay. Oldest evicted first (counted); a watermark still blocks older keys.
     std::size_t max_tombstones = 64;
 };
 
@@ -464,8 +469,14 @@ public:
     [[nodiscard]] std::vector<ProvisionalEntity> provisional() const;
     [[nodiscard]] std::optional<PredictedEntityId> provisional_id(const SpawnKey& key) const;
 
-    // What the client may acknowledge upstream: the newest outcome key it has APPLIED, never one it
-    // merely received (guardrail 5). Valid as a prefix because outcomes ascend.
+    // Refusal tests inspect this bounded memory because losing it can resurrect a replayed guess.
+    [[nodiscard]] bool has_tombstone(const SpawnKey& key) const noexcept;
+
+    // What the client may acknowledge upstream: the newest outcome key it has PROCESSED in an
+    // applied checkpoint, never one it merely received (guardrail 5) -- a refused or stale
+    // checkpoint never advances it. A contradictory verdict counts as processed: it can never be
+    // applied, and leaving it unacknowledged would make the server resend it forever. Valid as a
+    // prefix because outcomes ascend.
     [[nodiscard]] std::optional<SpawnKey> outcomes_held_through() const noexcept {
         return held_through_;
     }
@@ -474,6 +485,30 @@ public:
     // redundant window recovers a lost copy before the server executes it, and the leaf only ever
     // sees the result -- an ordinary acceptance. m20.5b counts it from the InputSchedule.
     [[nodiscard]] std::uint64_t rejected_launches() const noexcept { return rejected_launches_; }
+
+    [[nodiscard]] std::uint64_t rejected_unpredicted() const noexcept {
+        return rejected_unpredicted_;
+    }
+
+    // Local entity removal and the server's cancellation are separate: only the latter stops
+    // removable effects, since a later acceptance may still name a replica for a removed guess.
+    [[nodiscard]] std::uint64_t local_removals() const noexcept { return local_removals_; }
+
+    [[nodiscard]] std::uint64_t local_releases() const noexcept { return local_releases_; }
+
+    [[nodiscard]] std::uint64_t authoritative_cancels() const noexcept {
+        return authoritative_cancels_;
+    }
+
+    [[nodiscard]] std::uint64_t unreplayed_guesses() const noexcept { return unreplayed_guesses_; }
+
+    [[nodiscard]] std::uint64_t frontier_ahead_of_client() const noexcept {
+        return frontier_ahead_of_client_;
+    }
+
+    [[nodiscard]] std::uint64_t epoch_roster_mismatch() const noexcept {
+        return epoch_roster_mismatch_;
+    }
 
     [[nodiscard]] std::uint64_t retired_without_launch() const noexcept {
         return retired_without_launch_;
@@ -555,6 +590,7 @@ private:
         PredictedEntityId id{};
         Life life = Life::Live;
         std::vector<Snapshot> snapshots;
+        bool replayed_command = false;
     };
 
     void simulate(std::span<const PredictedEntityId> roster,
@@ -567,6 +603,7 @@ private:
     [[nodiscard]] Provisional* find(const SpawnKey& key);
     [[nodiscard]] const Resolution* resolution(const SpawnKey& key) const;
     void resolve(const SpawnKey& key, Resolution resolution);
+    void release_local_if_pending(const SpawnKey& key);
 
     PredictionHooks hooks_;
     SpawnHooks spawn_hooks_;
@@ -578,7 +615,11 @@ private:
     std::vector<PredictedEntityId> roster_;
     std::vector<SpawnBinding> bindings_;
     std::vector<Provisional> provisional_;
+    // Verdict classification must survive tombstone eviction; the acknowledged frontier prunes it.
+    std::unordered_set<SpawnKey, SpawnKeyHash> predicted_keys_;
     std::vector<std::pair<SpawnKey, Resolution>> tombstones_;
+    std::vector<SpawnKey> pending_local_release_;
+    std::optional<SpawnKey> forgotten_through_;
     std::optional<SpawnKey> held_through_;
     std::uint64_t last_server_tick_ = 0;
     std::uint32_t last_sequence_ = 0;
@@ -588,6 +629,13 @@ private:
     bool in_step_ = false;
     SpawnReconcileOutcome* active_outcome_ = nullptr;
     std::uint64_t rejected_launches_ = 0;
+    std::uint64_t rejected_unpredicted_ = 0;
+    std::uint64_t local_removals_ = 0;
+    std::uint64_t local_releases_ = 0;
+    std::uint64_t authoritative_cancels_ = 0;
+    std::uint64_t unreplayed_guesses_ = 0;
+    std::uint64_t frontier_ahead_of_client_ = 0;
+    std::uint64_t epoch_roster_mismatch_ = 0;
     std::uint64_t retired_without_launch_ = 0;
     std::uint64_t duplicate_outcomes_ignored_ = 0;
     std::uint64_t confirmed_after_expiry_alive_ = 0;

@@ -366,6 +366,12 @@ bool PresentationLedger::adopt(const SpawnKey& key, PredictedEntityId id) {
     Entry* entry = find_or_open(key);
     if (entry == nullptr)
         return false;
+    // A cancelled effect has already been handed back for removal; binding it would leave the
+    // replica unable to present an impact even though the adoption appeared successful.
+    if (entry->state == State::Cancelled) {
+        ++adopt_after_cancel_;
+        return false;
+    }
     if (entry->bound) {
         ++duplicate_adoptions_;
         return false;
@@ -466,7 +472,10 @@ void SpawnReconciler::simulate(std::span<const PredictedEntityId> roster,
     // guess the replay has not yet recreated (Dropped) is left out: stepping it would advance a
     // projectile whose launch, under the corrected state, may never happen.
     std::vector<PredictedEntityId> members(roster.begin(), roster.end());
-    for (const auto& guess : provisional_) {
+    for (auto& guess : provisional_) {
+        // A replay of some other command cannot prove this guess's launch was absent.
+        if (step.replaying && guess.key.sequence == command.sequence)
+            guess.replayed_command = true;
         if (guess.life == Life::Live)
             members.push_back(guess.id);
     }
@@ -502,7 +511,8 @@ SpawnReconciler::spawn_provisional(const SpawnKey& key, std::span<const std::byt
     }
     // Already resolved -- expired locally while its command was still unretired, typically. The
     // verdict, not a replay, decides what the player sees from here.
-    if (resolution(key) != nullptr) {
+    // Even after the bounded tombstone is evicted, an older replay must not mint a second id.
+    if (resolution(key) != nullptr || (forgotten_through_ && key <= *forgotten_through_)) {
         ++respawn_suppressed_;
         return std::nullopt;
     }
@@ -512,6 +522,8 @@ SpawnReconciler::spawn_provisional(const SpawnKey& key, std::span<const std::byt
             // by either never sees a second projectile.
             hooks_.restore(guess->id, initial_state);
             guess->life = Life::Live;
+            // The corrected replay supersedes snapshots from the old timeline.
+            guess->snapshots.clear();
             ++recreated_;
             if (active_outcome_ != nullptr)
                 ++active_outcome_->recreated;
@@ -529,7 +541,9 @@ SpawnReconciler::spawn_provisional(const SpawnKey& key, std::span<const std::byt
                                1 + (serial >> 31)};
     spawn_hooks_.create(id);
     hooks_.restore(id, initial_state);
-    provisional_.push_back({key, id, Life::Live, {}});
+    // A later verdict still answers a predicted launch even if its bounded tombstone was evicted.
+    predicted_keys_.insert(key);
+    provisional_.push_back({key, id, Life::Live, {}, false});
     return id;
 }
 
@@ -574,6 +588,16 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
     new_roster.reserve(checkpoint.entities.size());
     for (const auto& entity : checkpoint.entities)
         new_roster.push_back(entity.id);
+    // Membership is the epoch's identity. An unchanged epoch with a different set cannot be
+    // installed without making a server membership change look like a client-side overlay change.
+    if (checkpoint.membership_epoch == epoch_ &&
+        (new_roster.size() != roster_.size() ||
+         std::any_of(new_roster.begin(), new_roster.end(), [&](const auto& id) {
+             return !contains(roster_, id);
+         }))) {
+        ++epoch_roster_mismatch_;
+        return out;
+    }
 
     // --- 1. Adoption: a guess the server answered with a roster entity BECOMES that entity. ----
     std::vector<PredictedEntityId> adopted_ids;
@@ -599,6 +623,7 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
             continue; // the first confirmation, already adopted above
         Provisional* guess = find(outcome.key);
         const Resolution* prior = resolution(outcome.key);
+        const bool was_predicted = predicted_keys_.contains(outcome.key);
         const bool lost_locally =
             prior != nullptr && (*prior == Resolution::Expired || *prior == Resolution::Dropped ||
                                  *prior == Resolution::NoLaunch);
@@ -614,7 +639,7 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
                     // ledger's memory of the launch keeps the launch from playing again.
                     if (*prior == Resolution::NoLaunch)
                         ++contradictory_outcomes_;
-                    else
+                    else if (*prior == Resolution::Expired)
                         ++confirmed_after_expiry_alive_;
                 } else {
                     ++contradictory_outcomes_;
@@ -638,9 +663,14 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
                     ++contradictory_outcomes_;
                     break;
                 }
-                ++rejected_launches_;
+                // Only a key this client actually predicted is a refused predicted launch.
+                if (was_predicted)
+                    ++rejected_launches_;
+                else
+                    ++rejected_unpredicted_;
                 resolve(outcome.key, Resolution::Rejected);
                 append_cancel(outcome.key);
+                ++authoritative_cancels_;
                 break;
             case SpawnOutcomeKind::AcceptedEnded:
                 if (guess != nullptr) {
@@ -656,8 +686,9 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
                 } else if (*prior == Resolution::Adopted) {
                     ++accepted_ended_; // the adopted replica ended before its verdict was
                                        // acknowledged
-                } else if (*prior == Resolution::Expired || *prior == Resolution::Dropped) {
-                    ++confirmed_after_expiry_ended_; // stays absent; nothing is restarted
+                } else if (lost_locally) {
+                    if (*prior == Resolution::Expired)
+                        ++confirmed_after_expiry_ended_; // stays absent; nothing is restarted
                 } else {
                     ++contradictory_outcomes_;
                     break;
@@ -677,7 +708,8 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
             // The replay below runs this guess's command again and will recreate it if the
             // corrected state still launches -- drop it until then.
             guess.life = Life::Dropped;
-            guess.snapshots.clear();
+            guess.replayed_command = false;
+            // Keep snapshots until replay actually replaces them: a budget reseed can skip replay.
             continue;
         }
         const auto offset = result.retired_through - guess.key.sequence;
@@ -694,7 +726,8 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
             const auto key = guess.key;
             remove(i);
             resolve(key, Resolution::NoLaunch);
-            append_cancel(key);
+            // Retirement is a local inference, while only a server Rejected verdict can cancel.
+            ++local_removals_;
             ++retired_without_launch_;
             ++out.retired_without_launch;
             continue;
@@ -711,7 +744,12 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
             const auto key = guess.key;
             remove(i);
             resolve(key, Resolution::Expired);
+            // A missing snapshot cannot carry this guess to the verdict; release its presentation
+            // memory now so a late server replica may still present events it never played.
+            release(key);
+            ++local_releases_;
             ++pending_without_snapshot_;
+            ++local_removals_;
             continue;
         }
         hooks_.restore(guess.id, snapshot->state);
@@ -752,27 +790,46 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
     last_server_tick_ = checkpoint.server_tick;
     has_checkpoint_ = true;
 
-    // --- 6. Guesses the replay did not make again: under the corrected state, no launch. ------
+    // --- 6. Resolve only guesses an actual replay did not make again. --------------------------
     for (std::size_t i = provisional_.size(); i-- > 0;) {
         if (provisional_[i].life != Life::Dropped)
             continue;
+        if (out.base.replayed == 0 || !provisional_[i].replayed_command) {
+            // ReconcileOutcome::replayed is the inner signal: a reseed or budget skip did not
+            // test this launch, so its last snapshot and entity remain until verdict or bound.
+            provisional_[i].life = Life::Live;
+            ++unreplayed_guesses_;
+            continue;
+        }
         spawn_hooks_.destroy(provisional_[i].id);
         const auto key = provisional_[i].key;
         remove(i);
         resolve(key, Resolution::Dropped);
-        append_cancel(key);
+        // The corrected replay is still a client inference; the server may later accept it.
+        ++local_removals_;
         ++not_recreated_;
         ++out.not_recreated;
     }
 
     // --- 7. Acknowledgement and forgetting. ----------------------------------------------------
+    // A contradictory verdict is still held: re-sending it forever cannot make it applicable.
     if (!ext.outcomes.empty() && (!held_through_ || *held_through_ < ext.outcomes.back().key))
         held_through_ = ext.outcomes.back().key;
     if (ext.acknowledged_through) {
-        // Nothing at or below the frontier is ever sent again, and every such key's command has
-        // retired (a verdict exists only for an executed command), so no replay can ask either.
-        std::erase_if(tombstones_,
-                      [&](const auto& entry) { return entry.first <= *ext.acknowledged_through; });
+        // Only a frontier this client has held can retire suppression of an old local guess.
+        if (!held_through_ || *ext.acknowledged_through > *held_through_)
+            ++frontier_ahead_of_client_;
+        if (held_through_) {
+            const auto through = std::min(*ext.acknowledged_through, *held_through_);
+            std::erase_if(tombstones_, [&](const auto& entry) {
+                if (entry.first > through)
+                    return false;
+                release_local_if_pending(entry.first);
+                return true;
+            });
+            // Once the server has acknowledged this prefix it cannot send a new verdict for it.
+            std::erase_if(predicted_keys_, [&](const auto& key) { return key <= through; });
+        }
     }
     expire(last_sequence_);
     return out;
@@ -784,13 +841,27 @@ void SpawnReconciler::expire(std::uint32_t through_sequence) {
         if (through_sequence < guess.key.sequence ||
             through_sequence - guess.key.sequence < spawn_budget_.max_unresolved_sequences)
             continue;
-        // The ledger is left alone: what the player saw stays seen, and a late verdict either binds
-        // the live replica or leaves the projectile absent -- never a second launch.
+        // Release retains played events, so a late verdict can bind a replica without restarting
+        // the launch while still permitting a new impact triple once.
         spawn_hooks_.destroy(guess.id);
         const auto key = guess.key;
         remove(i);
         resolve(key, Resolution::Expired);
+        // The local bound ends the guess, not the server's authority over later presentation.
+        release(key);
+        ++local_releases_;
         ++provisional_expired_;
+        ++local_removals_;
+    }
+    for (std::size_t i = pending_local_release_.size(); i-- > 0;) {
+        const auto key = pending_local_release_[i];
+        if (through_sequence >= key.sequence &&
+            through_sequence - key.sequence >= spawn_budget_.max_unresolved_sequences) {
+            release(key);
+            ++local_releases_;
+            pending_local_release_.erase(pending_local_release_.begin() +
+                                         static_cast<std::ptrdiff_t>(i));
+        }
     }
 }
 
@@ -822,6 +893,13 @@ const SpawnReconciler::Resolution* SpawnReconciler::resolution(const SpawnKey& k
 }
 
 void SpawnReconciler::resolve(const SpawnKey& key, Resolution resolution) {
+    if (resolution == Resolution::NoLaunch || resolution == Resolution::Dropped) {
+        // These are local guesses about the server; keep the ledger live until its bound or
+        // verdict.
+        pending_local_release_.push_back(key);
+    } else {
+        std::erase(pending_local_release_, key);
+    }
     const auto it = std::find_if(tombstones_.begin(), tombstones_.end(), [&](const auto& entry) {
         return entry.first == key;
     });
@@ -831,9 +909,24 @@ void SpawnReconciler::resolve(const SpawnKey& key, Resolution resolution) {
     }
     tombstones_.emplace_back(key, resolution);
     while (tombstones_.size() > spawn_budget_.max_tombstones) {
+        // Raw uint32 sequence ordering has a wrap limit; m20.4's Reconciler shares it.
+        const auto evicted = tombstones_.front().first;
+        release_local_if_pending(evicted);
+        if (!forgotten_through_ || *forgotten_through_ < evicted)
+            forgotten_through_ = evicted;
         tombstones_.erase(tombstones_.begin());
         ++tombstones_evicted_;
     }
+}
+
+void SpawnReconciler::release_local_if_pending(const SpawnKey& key) {
+    const auto it = std::find(pending_local_release_.begin(), pending_local_release_.end(), key);
+    if (it == pending_local_release_.end())
+        return;
+    // A bounded tombstone cannot retain an unreleased presentation key beyond its own eviction.
+    release(key);
+    ++local_releases_;
+    pending_local_release_.erase(it);
 }
 
 std::vector<ProvisionalEntity> SpawnReconciler::provisional() const {
@@ -850,6 +943,10 @@ std::optional<PredictedEntityId> SpawnReconciler::provisional_id(const SpawnKey&
         return guess.key == key && guess.life == Life::Live;
     });
     return it == provisional_.end() ? std::nullopt : std::optional{it->id};
+}
+
+bool SpawnReconciler::has_tombstone(const SpawnKey& key) const noexcept {
+    return resolution(key) != nullptr;
 }
 
 } // namespace rime::replication
