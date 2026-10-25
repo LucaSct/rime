@@ -262,10 +262,13 @@ RunReport run_network_client(const LaunchOptions& options,
     std::vector<replication::ProvisionalEntity> detached_guesses;
     std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> live_presentations;
     std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> launched_presentations;
-    std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> authoritative_ends;
+    std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> ended_keys;
     std::optional<replication::SpawnKey> acknowledged_outcomes;
     std::uint64_t presentation_launch = 0, presentation_end = 0;
     std::uint64_t presentation_cancelled = 0, presentation_suspended = 0;
+    // Keys whose end was the entity's own life limit rather than the server's: the miss/hit
+    // evidence (a hit ends the server's flight early, so its end arrives as an authoritative one).
+    std::uint64_t lifetime_ends = 0;
     std::uint64_t live_presentations_max = 0, spawn_response_ticks = 0;
     std::optional<std::uint64_t> spawn_press_tick;
     bool spawn_responded = false;
@@ -345,17 +348,26 @@ RunReport run_network_client(const LaunchOptions& options,
                 spawn_responded = true;
             }
         }
-        // A still-tracked provisional whose own age reached the game's life limit really ended;
-        // losing the provisional during reconciliation or at a diagnostic budget did not.
+        // An entity that still exists but whose own age reached the game's life limit really
+        // ended -- a still-tracked guess, or the adopted replica, which (predicted ahead of the
+        // server by the round trip) normally reaches its life before the server's binding goes.
+        // Losing the guess during reconciliation or at a diagnostic budget is NOT an end: the
+        // entity is gone, not expired, and its key waits for the verdict.
+        const auto ended_in_place = [&](replication::PredictedEntityId id) {
+            return spawn_hooks->entity_for(id) != ecs::kNullEntity && !spawn_hooks->is_live(id);
+        };
         for (const auto& provisional : spawn_reconciler->provisional())
-            if (!spawn_hooks->is_live(provisional.id))
-                authoritative_ends.insert(provisional.key);
+            if (ended_in_place(provisional.id) && ended_keys.insert(provisional.key).second)
+                ++lifetime_ends;
+        for (const auto& binding : spawn_bindings)
+            if (ended_in_place(binding.id) && ended_keys.insert(binding.key).second)
+                ++lifetime_ends;
         for (auto it = live_presentations.begin(); it != live_presentations.end();) {
             if (visible.contains(*it)) {
                 ++it;
                 continue;
             }
-            if (!ledger.cancelled(*it) && authoritative_ends.contains(*it) &&
+            if (!ledger.cancelled(*it) && ended_keys.contains(*it) &&
                 launched_presentations.contains(*it)) {
                 if (ledger.should_play(*it, replication::PresentationEventKind::End, 0))
                     ++presentation_end;
@@ -366,7 +378,7 @@ RunReport run_network_client(const LaunchOptions& options,
             it = live_presentations.erase(it);
         }
         // AcceptedEnded can arrive after a local removal, when there is no visible transition.
-        for (const auto& key : authoritative_ends)
+        for (const auto& key : ended_keys)
             if (launched_presentations.contains(key) &&
                 !visible.contains(key) && !ledger.cancelled(key) &&
                 ledger.should_play(key, replication::PresentationEventKind::End, 0))
@@ -398,10 +410,10 @@ RunReport run_network_client(const LaunchOptions& options,
                     if (std::none_of(checkpoint.spawns->bindings.begin(),
                                      checkpoint.spawns->bindings.end(),
                                      [&](const auto& binding) { return binding.key == old.key; }))
-                        authoritative_ends.insert(old.key);
+                        ended_keys.insert(old.key);
                 for (const auto& outcome : checkpoint.spawns->outcomes)
                     if (outcome.kind == replication::SpawnOutcomeKind::AcceptedEnded)
-                        authoritative_ends.insert(outcome.key);
+                        ended_keys.insert(outcome.key);
                 // Bindings are authoritative for this applied roster only; a stale or refused
                 // checkpoint cannot replace the keys used by presentation.
                 spawn_bindings = checkpoint.spawns->bindings;
@@ -706,7 +718,8 @@ RunReport run_network_client(const LaunchOptions& options,
         spawn_metrics = fmt::format(
             ",\"prediction_path\":\"spawn\",\"presentation_launch\":{},"
             "\"presentation_end\":{},\"presentation_cancelled\":{},"
-            "\"presentation_suspended\":{},\"spawn_response_ticks\":{},"
+            "\"presentation_suspended\":{},\"presentation_lifetime_ends\":{},"
+            "\"spawn_response_ticks\":{},"
             "\"live_presentations_max\":{},\"spawn_acks_sent\":{},"
             "\"spawn_ack_send_refused\":{},\"ledger_played\":{},"
             "\"ledger_duplicates_suppressed\":{},\"ledger_suppressed_cancelled\":{},"
@@ -733,6 +746,7 @@ RunReport run_network_client(const LaunchOptions& options,
             presentation_end,
             presentation_cancelled,
             presentation_suspended,
+            lifetime_ends,
             spawn_responded ? spawn_response_ticks :
                 (spawn_press_tick ? report.ticks - *spawn_press_tick : 0),
             live_presentations_max,

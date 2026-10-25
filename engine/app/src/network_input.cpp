@@ -189,15 +189,19 @@ void count_refusal(RunReport::NetworkInputCounters& counts, InputV2Refusal reaso
 
 } // namespace
 
+// The default one-command input buffer plus the one send period a single lost datagram costs.
+constexpr std::uint32_t kLoseOneSlack = 2;
+
 struct NetworkInputServer::Impl {
     Impl(ListenerLink supplied_link,
          double tick_hz,
          const GameDefinition::NetworkInputProfile& profile,
          ecs::World& world,
          const GameDefinition::RemotePlayProfile* remote_play,
-         SpawnFault fault = SpawnFault::None)
+         SpawnFault fault = SpawnFault::None,
+         std::uint32_t fault_ticks = 0)
         : link(std::move(supplied_link)), driver(link, driver_config()), profile(profile),
-          world(world), fault(fault),
+          world(world), fault(fault), fault_ticks(fault_ticks),
           neutral_after_ticks(static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz * 0.1)))) {
         driver.listen();
         schema_hash = input_schema_identity(profile, remote_play);
@@ -370,9 +374,13 @@ struct NetworkInputServer::Impl {
                         }
                         // The leaf's six-tick default is 100 ms only at 60 Hz. Derive the
                         // silence bound from this game's fixed rate before its first command.
-                        // The one-packet loss diagnostic needs the redundant successor to
-                        // arrive before retirement; three accepted commands cover the window.
-                        schedule.emplace(fault == SpawnFault::LoseOne ? 3u : 1u,
+                        // `lose-one` drops one datagram, so the launch command's next copy -- the
+                        // redundant window of the client's NEXT send -- arrives one send period
+                        // (one client tick) late. A one-command buffer has already retired it
+                        // as synthesized by then (measured: retired_without_launch 1), which
+                        // would test synthesis, not redundancy. One more buffered command
+                        // absorbs exactly that one period; the fault leg alone pays the tick.
+                        schedule.emplace(fault == SpawnFault::LoseOne ? kLoseOneSlack : 1u,
                                          neutral_after_ticks);
                         ++totals.clients_admitted;
                         event(fmt::format("{{\"event\":\"client_connected\",\"peer\":\"{}:{}\"}}",
@@ -413,13 +421,13 @@ struct NetworkInputServer::Impl {
                         ++totals.spawn_ack_stale;
                         continue;
                     }
-                    // A frontier is a claim of APPLIED verdicts, not of sent packets. Only this
-                    // reliable message can retire durable outcomes (ADR-0105 guardrail 5).
-                    acknowledged_through = ack.through;
-                    std::erase_if(pending_outcomes, [&](const SpawnOutcome& outcome) {
-                        return outcome.key <= ack.through;
-                    });
-                    ++totals.spawn_acks_applied;
+                    if (duplicate_window_open()) {
+                        // Validated, then treated as not yet arrived: what a lost-then-resent
+                        // ack looks like to the client. after_tick applies it when the window ends.
+                        fault_held_ack = ack.through;
+                        continue;
+                    }
+                    apply_ack(ack.through);
                     continue;
                 }
                 if (message.channel != net::Channel::UnreliableSequenced) {
@@ -464,7 +472,11 @@ struct NetworkInputServer::Impl {
     GameDefinition::NetworkInputProfile profile;
     ecs::World& world;
     SpawnFault fault = SpawnFault::None;
+    std::uint32_t fault_ticks = 0;
     std::optional<std::uint32_t> fault_sequence;
+    // `duplicate` holds the client's ack for its window, so the verdict rides every checkpoint in
+    // it -- a repeated confirmation the client must recognise -- and applies it afterwards.
+    std::optional<SpawnKey> fault_held_ack;
     std::optional<std::uint64_t> fault_launch_tick;
     std::uint32_t fault_prior_epoch = 0;
     std::uint64_t current_server_tick = 0;
@@ -482,6 +494,7 @@ struct NetworkInputServer::Impl {
         SpawnKey key{};
         ecs::Entity entity{};
         PredictedEntityId id{};
+        std::uint64_t launch_tick = 0;
     };
 
     std::vector<LiveSpawn> live_spawns;
@@ -498,6 +511,20 @@ struct NetworkInputServer::Impl {
     std::vector<net::SessionEvent> events;
     std::vector<net::Received> messages;
     std::vector<InputCommand> commands;
+
+    [[nodiscard]] bool duplicate_window_open() const noexcept {
+        return fault == SpawnFault::Duplicate && fault_launch_tick &&
+               current_server_tick < *fault_launch_tick + fault_ticks;
+    }
+
+    void apply_ack(const SpawnKey& through) {
+        // A frontier is a claim of APPLIED verdicts, not of sent packets. Only the client's
+        // reliable ack can retire durable outcomes (ADR-0105 guardrail 5).
+        acknowledged_through = through;
+        std::erase_if(pending_outcomes,
+                      [&](const SpawnOutcome& outcome) { return outcome.key <= through; });
+        ++totals.spawn_acks_applied;
+    }
 
     [[nodiscard]] ActionState select_actions() {
         last_applied = false;
@@ -569,6 +596,9 @@ struct NetworkInputServer::Impl {
                     outcome->id = {};
                     ++totals.spawn_accepted_ended;
                 }
+                // Flight length is the game-agnostic trace of HOW it ended: a fixed-life
+                // projectile that ran its full life missed, one that ended sooner hit.
+                totals.spawn_last_flight_ticks = current_server_tick - live->launch_tick;
                 replicator->despawn(live->entity);
                 live_spawns.erase(live);
                 ++membership_epoch;
@@ -595,7 +625,8 @@ struct NetworkInputServer::Impl {
                 }
                 outcome.kind = SpawnOutcomeKind::Accepted;
                 outcome.id = {net_id.index, net_id.generation};
-                live_spawns.push_back({report.key, report.entity, outcome.id});
+                live_spawns.push_back(
+                    {report.key, report.entity, outcome.id, current_server_tick});
                 ++membership_epoch;
                 ++totals.spawn_epoch_advances;
                 ++totals.spawn_accepted;
@@ -621,7 +652,8 @@ NetworkInputServer::bind(const std::string& host,
                          ecs::World& world,
                          const GameDefinition::RemotePlayProfile* remote_play,
                          std::string& error,
-                         SpawnFault fault) {
+                         SpawnFault fault,
+                         std::uint32_t fault_ticks) {
     const auto local = platform::Endpoint::from_string(host, port);
     if (!local) {
         error = "EINVAL";
@@ -643,7 +675,7 @@ NetworkInputServer::bind(const std::string& host,
         return nullptr;
     }
     auto impl = std::make_unique<Impl>(
-        ListenerLink{std::move(*socket)}, tick_hz, profile, world, remote_play, fault);
+        ListenerLink{std::move(*socket)}, tick_hz, profile, world, remote_play, fault, fault_ticks);
     if (remote_play &&
         (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
          !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {
@@ -707,6 +739,10 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
                                     std::span<const SpawnReport> spawns) {
     impl_->current_server_tick = server_tick;
     impl_->receive_spawns(spawns);
+    if (impl_->fault_held_ack && !impl_->duplicate_window_open()) {
+        impl_->apply_ack(*impl_->fault_held_ack);
+        impl_->fault_held_ack.reset();
+    }
     if (!impl_->admitted || !impl_->schedule)
         return;
     net::Session* session = impl_->driver.session(*impl_->admitted);
@@ -740,8 +776,7 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
         // without its binding would make two visible identities for one key on the client.
         const bool hide_spawn = impl_->fault_launch_tick &&
             (impl_->fault == SpawnFault::LateAlive || impl_->fault == SpawnFault::LateEnded) &&
-            server_tick < *impl_->fault_launch_tick +
-                (impl_->fault == SpawnFault::LateAlive ? 10u : 50u);
+            server_tick < *impl_->fault_launch_tick + impl_->fault_ticks;
         if (hide_spawn) {
             checkpoint.membership_epoch = impl_->fault_prior_epoch;
             if (impl_->fault == SpawnFault::LateAlive) ++impl_->totals.spawn_fault_late_alive;
@@ -790,7 +825,7 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
         ++impl_->totals.checkpoint_encoded;
         if (impl_->fault == SpawnFault::Duplicate && impl_->fault_launch_tick &&
             server_tick >= *impl_->fault_launch_tick &&
-            server_tick < *impl_->fault_launch_tick + 12u) {
+            server_tick < *impl_->fault_launch_tick + impl_->fault_ticks) {
             if (session->send_unreliable(std::span(checkpoint_bytes).first(encoded_size),
                                          impl_->now, kRemoteOwnerCheckpointStream))
                 ++impl_->totals.spawn_fault_duplicate;

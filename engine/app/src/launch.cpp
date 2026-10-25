@@ -118,6 +118,7 @@ std::string launch_usage(std::string_view program) {
         "  --input-tape-throw  same tape, with one Throw on tick 12\n"
         "  --spawn-fault CASE  dedicated Throw diagnostic (refuse, lose-one, lose-all, duplicate, late-alive, late-ended)\n"
         "  --spawn-debug-break CASE  connected sensitivity control (no-ledger, no-adopt, authority-presentation)\n"
+        "  --spawn-fault-ticks N  window of duplicate / late-alive / late-ended, in server ticks\n"
         "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
@@ -190,6 +191,11 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             else if (value == "authority-presentation")
                 result.options.spawn_debug_break = SpawnDebugBreak::AuthorityPresentation;
             else return fail("--spawn-debug-break needs a known case");
+        } else if (arg == "--spawn-fault-ticks") {
+            if (!has_value || result.options.spawn_fault_ticks != 0 ||
+                !parse_uint(args[++i], result.options.spawn_fault_ticks) ||
+                result.options.spawn_fault_ticks == 0)
+                return fail("--spawn-fault-ticks needs a positive integer once");
         } else if (arg == "--spawn-unresolved-bound") {
             if (!has_value || result.options.spawn_unresolved_bound != 0 ||
                 !parse_uint(args[++i], result.options.spawn_unresolved_bound) ||
@@ -375,6 +381,13 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
     if (result.options.spawn_fault != SpawnFault::None &&
         (result.options.mode != LaunchMode::Dedicated || result.options.offline))
         return fail("--spawn-fault requires listening dedicated mode");
+    {
+        const auto fault = result.options.spawn_fault;
+        const bool timed = fault == SpawnFault::Duplicate || fault == SpawnFault::LateAlive ||
+                           fault == SpawnFault::LateEnded;
+        if (timed != (result.options.spawn_fault_ticks != 0))
+            return fail("--spawn-fault-ticks goes with duplicate, late-alive or late-ended only");
+    }
     if ((result.options.spawn_debug_break != SpawnDebugBreak::None ||
          result.options.spawn_unresolved_bound != 0) && result.options.connect_host.empty())
         return fail("spawn client diagnostics require --connect");
@@ -567,7 +580,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                                      app.world(),
                                      definition.remote_play ? &*definition.remote_play : nullptr,
                                      report.bind_error,
-                                     options.spawn_fault);
+                                     options.spawn_fault,
+                                     options.spawn_fault_ticks);
         if (!network) {
             report.bind_failed = report.bind_error.starts_with('E');
             return refuse(report,
@@ -787,14 +801,15 @@ RunReport run_game_mode(const LaunchOptions& options,
                     ",\"spawn_fault_refuse\":{},\"spawn_fault_lose_one\":{},"
                     "\"spawn_fault_lose_all\":{},\"spawn_fault_duplicate\":{},"
                     "\"spawn_fault_late_alive\":{},\"spawn_fault_late_ended\":{},"
-                    "\"launch_recovered_by_redundancy\":{}",
+                    "\"launch_recovered_by_redundancy\":{},\"spawn_last_flight_ticks\":{}",
                     report.network_input.spawn_fault_refuse,
                     report.network_input.spawn_fault_lose_one,
                     report.network_input.spawn_fault_lose_all,
                     report.network_input.spawn_fault_duplicate,
                     report.network_input.spawn_fault_late_alive,
                     report.network_input.spawn_fault_late_ended,
-                    report.network_input.launch_recovered_by_redundancy);
+                    report.network_input.launch_recovered_by_redundancy,
+                    report.network_input.spawn_last_flight_ticks);
             fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
                        "\"applied\":{},\"synthesized\":{},\"neutralized\":{},"
                        "\"late\":{},\"duplicate\":{},\"future\":{},"

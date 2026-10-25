@@ -37,7 +37,8 @@ public:
          ecs::World& world,
          const GameDefinition::RemotePlayProfile* remote_play,
          std::string& error,
-         SpawnFault fault = SpawnFault::None);
+         SpawnFault fault = SpawnFault::None,
+         std::uint32_t fault_ticks = 0);
     // A caller-owned link and clock let deterministic tests drive the exact production pump.
     static std::unique_ptr<NetworkInputServer>
     on_link(net::Link& link,

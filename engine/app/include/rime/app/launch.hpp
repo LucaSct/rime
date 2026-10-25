@@ -101,6 +101,10 @@ struct LaunchOptions {
     bool input_tape = false;
     bool input_tape_throw = false;
     SpawnFault spawn_fault = SpawnFault::None;
+    // The window of a timed fault, in server ticks: how long `duplicate` doubles checkpoints and
+    // holds the client's ack, or how long `late-*` withholds the verdict. Required by exactly
+    // those three cases, so the proof states the number it derived instead of inheriting one.
+    std::uint32_t spawn_fault_ticks = 0;
     SpawnDebugBreak spawn_debug_break = SpawnDebugBreak::None;
     std::uint32_t spawn_unresolved_bound = 0;
     std::uint32_t net_delay_ms = 0;
@@ -222,6 +226,8 @@ struct RunReport {
         std::uint64_t spawn_fault_lose_all = 0, spawn_fault_duplicate = 0;
         std::uint64_t spawn_fault_late_alive = 0, spawn_fault_late_ended = 0;
         std::uint64_t launch_recovered_by_redundancy = 0;
+        // Server ticks between the most recent keyed launch's report and its end's report.
+        std::uint64_t spawn_last_flight_ticks = 0;
     } network_input;
 
     bool bind_failed = false;

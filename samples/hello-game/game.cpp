@@ -894,9 +894,22 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
         const core::Vec3 wished{command.move_x, 0.0f, command.move_y};
         if (core::length(wished) > 1e-4f)
             state->player_facing = wished * (1.0f / core::length(wished));
+        // "At most one live projectile" asks about THIS step's simulated set, as the server asks
+        // about its own `projectile_`. A guess the reconciler has dropped for replay is still an
+        // entity in this world, holding its pre-replay age, until the replay recreates or
+        // discards it; querying the whole world would let that leftover veto its own recreation,
+        // and the guess would be lost under the very replay meant to make it again (measured:
+        // `spawn_not_recreated` 1 and `spawn_adopted` 0 whenever a replay preceded the verdict).
         bool live_projectile = false;
-        bound->query<ThrownProjectile>().for_each(
-            [&](ecs::Entity, const ThrownProjectile& p) { live_projectile |= p.age < 45; });
+        if (spawns) {
+            for (const auto id : members) {
+                const auto* p = bound->get<ThrownProjectile>(spawns->entity_for(id));
+                live_projectile |= p != nullptr && p->age < 45;
+            }
+        } else {
+            bound->query<ThrownProjectile>().for_each(
+                [&](ecs::Entity, const ThrownProjectile& p) { live_projectile |= p.age < 45; });
+        }
         if ((command.pressed & (1u << kButtonThrow)) != 0 && state->throw_charges > 0 &&
             state->throw_cooldown == 0 && !live_projectile) {
             bool launched = true;
