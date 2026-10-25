@@ -871,9 +871,24 @@ RunReport run_network_client(const LaunchOptions& options,
         }
         ++report.ticks;
     }
+    // A client that leaves on its own -- the window closed, or a --frames bound reached -- says
+    // goodbye. Without it the server holds the one client slot until its idle timeout, and a player
+    // who closes the window and reconnects at once is refused as `full` (measured). The session's
+    // Closing state re-sends the disconnect once per update for a few updates, because one datagram
+    // is a coin flip on a lossy link.
+    const bool left_on_our_own = !disconnected;
+    if (left_on_our_own) {
+        if (auto* session = driver.session(*session_id))
+            session->disconnect();
+        for (int i = 0; i < 6; ++i) {
+            events.clear();
+            driver.update(now_ms(), events);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+    }
     if (options.frames == 0 && disconnected)
         pump(); // the closing packet may share a poll with the final state
-    if (options.frames == 0 && !graceful)
+    if (options.frames == 0 && !graceful && !(left_on_our_own && app.quit_requested()))
         return fail(report, "server did not disconnect gracefully");
     app.finish_gpu();
     report.state_digest = definition.remote_play->digest(mirror_world);

@@ -824,8 +824,14 @@ bool HelloGame::bind_remote_world(ecs::World& world) {
             if (collider.sensor)
                 pickups_.push_back(Pickup{entity, physics::BodyId{}});
         });
+    // At MOST kPickupCount, not exactly: a client joining a session already in progress mirrors
+    // only the pickups nobody has collected (the server despawned the rest), and demanding all four
+    // kept every later client waiting for an initial world that could never arrive (measured:
+    // owner's second session after collecting three, "timed out waiting for ownership and initial
+    // world"). The client only dresses the live ones with a mesh; collection is the server's
+    // arithmetic.
     return world.is_alive(player_) && world.is_alive(state_entity_) && world.is_alive(crate_) &&
-           pickups_.size() == kPickupCount;
+           pickups_.size() <= kPickupCount;
 }
 
 // ── The content ───────────────────────────────────────────────────────────────────────────────
