@@ -390,7 +390,11 @@ int positive(const std::filesystem::path& binary) {
     Child child(binary, 240, trace_path.string());
     const auto port = child.ready();
     check(port != 0, "ready parsed with nonzero port");
-    bool mapped = false, maps_read = false;
+    // Read only by the Linux-only /proc/<pid>/maps check below; [[maybe_unused]] keeps Apple
+    // Clang's -Wunused-but-set-variable (an error under -Werror, CI on #349) quiet on the other
+    // platforms.
+    [[maybe_unused]] bool mapped = false;
+    [[maybe_unused]] bool maps_read = false;
     if (auto value = vulkan_mapped(child.pid)) {
         mapped = *value;
         maps_read = true;
@@ -499,7 +503,11 @@ int negative(const std::filesystem::path& binary) {
                                                      "unadmitted_messages",
                                                      "bad_length"};
     for (const auto name : cases) {
-        Child child(binary, 60);
+        // "full" needs two complete handshakes in sequence before the refusal can be counted, and
+        // the server stops after its tick budget whether or not they finished. One second (60
+        // ticks) was enough on Linux but a stalled hosted macOS runner missed it once (#349), so
+        // that case gets three seconds; the rest need only one exchange.
+        Child child(binary, name == "full" ? 180 : 60);
         const auto port = child.ready();
         bool sent = false;
         bool refusal_reply = true;
@@ -588,11 +596,19 @@ int negative(const std::filesystem::path& binary) {
             if (name == "full")
                 good = good && number(*finished, "clients_refused") == 1;
         }
+        // Every input to the verdict is printed, so a red run on a machine we cannot log into
+        // says which part failed instead of only that something did.
         check(good,
-              fmt::format("negative {}: {} counter, applied {}, child exit 0",
+              fmt::format("negative {}: {} counter {}, applied {}, child exit 0 (sent {}, "
+                          "refusal reply {}, exited {}, finished {})",
                           name,
                           key,
-                          finished ? number(*finished, "applied") : 0));
+                          finished ? number(*finished, key) : 0,
+                          finished ? number(*finished, "applied") : 0,
+                          sent,
+                          refusal_reply,
+                          exited,
+                          finished.has_value()));
     }
     return failures ? 1 : 0;
 }

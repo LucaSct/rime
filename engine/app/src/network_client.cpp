@@ -412,7 +412,11 @@ RunReport run_network_client(const LaunchOptions& options,
         PresentSetupContext setup{mirror_world, *meshes, *materials, *renderer};
         game->present_setup(setup);
         app.on_render([&](FrameContext& ctx) {
-            (void)replication::update_render_transforms(mirror_world, ctx.alpha);
+            // The frame's interpolation fraction is a double; the render transforms are float. The
+            // narrowing is intended (a [0,1) blend factor loses nothing that matters) -- and MSVC's
+            // C4244 is an error under /WX, which is how CI on #350 caught it being implicit.
+            (void)replication::update_render_transforms(mirror_world,
+                                                        static_cast<float>(ctx.alpha));
             if (!options.no_prediction) {
                 if (const auto* source =
                         prediction_world.get<ecs::WorldTransform>(predicted_player))
