@@ -233,6 +233,9 @@ struct TickContext {
     std::optional<CommandProvenance> command;
     // A decoded-command diagnostic asks the game to refuse this one otherwise valid launch.
     bool refuse_spawn = false;
+    // m20.6c diagnostic: the server asks the game to apply its declared server-only impulse
+    // (`InteractionProfile::j_max`) to the interaction object this tick. Never set otherwise.
+    bool interaction_kick = false;
     // Where to report keyed spawns this tick; null when nobody is listening (local play, or a game
     // without `SpawnPredictionProfile`). Non-owning; valid for the duration of `fixed_tick`.
     std::vector<SpawnReport>* spawns = nullptr;
@@ -472,6 +475,9 @@ struct GameDefinition {
             // across a restore, so the contact cache of a discarded timeline leaks into replay.
             struct ClientOptions {
                 bool rebuild_on_restore = true;
+                // The `stale-restore` control: restore the object from the previous restore's
+                // bytes, i.e. one checkpoint old, so every replay starts from a stale state.
+                bool stale_restore = false;
             };
 
             struct ClientHooks {
@@ -493,6 +499,11 @@ struct GameDefinition {
                                         ClientOptions options) = nullptr;
             // A diagnostic tape that walks the player into the object (`--input-tape-push`).
             ActionState (*diagnostic_push_input)(std::uint64_t) = nullptr;
+            // The largest server-only impulse the game applies on `TickContext::interaction_kick`
+            // (N*s) and the object's mass (kg), declared ONCE here so the game's kick and the
+            // proof's raw-correction bound (`interaction_raw_bound`) share the number. 0 = none.
+            float j_max = 0.0f;
+            float object_mass = 0.0f;
         };
 
         std::optional<InteractionProfile> interaction;

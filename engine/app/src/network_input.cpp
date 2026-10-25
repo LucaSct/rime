@@ -521,6 +521,8 @@ struct NetworkInputServer::Impl {
     std::optional<std::uint64_t> interaction_tick;
     // Interaction epoch advances when a spawn fault started hiding its answer (see after_tick).
     std::uint64_t fault_prior_interaction_epochs = 0;
+    // m20.6c: server ticks at which the interaction object is kicked (diagnostic, empty = never).
+    std::vector<std::uint64_t> kick_ticks;
 
     struct LiveSpawn {
         SpawnKey key{};
@@ -591,7 +593,12 @@ struct NetworkInputServer::Impl {
         if (!interaction || !policy || (interaction_tick && *interaction_tick == server_tick))
             return;
         interaction_tick = server_tick;
-        const auto decision = policy->update(interaction->sample(world, owner, object));
+        const auto sample = interaction->sample(world, owner, object);
+        const auto decision = policy->update(sample);
+        // A join taken while the object still moves: the sliding re-join the proof schedules. The
+        // leaf cannot tell this apart from a resting join, and the proof must be able to.
+        if (decision == MembershipDecision::Join && sample.speed > policy->params().rest_speed)
+            ++totals.interaction_joined_sliding;
         if (decision != MembershipDecision::Stay) {
             ++membership_epoch;
             ++totals.interaction_epoch_advances;
@@ -788,6 +795,22 @@ bool NetworkInputServer::refuse_spawn() const noexcept {
     return impl_->selected_refuse;
 }
 
+void NetworkInputServer::set_interaction_kicks(std::vector<std::uint64_t> ticks) {
+    impl_->kick_ticks = std::move(ticks);
+}
+
+bool NetworkInputServer::interaction_kick(std::uint64_t server_tick) {
+    if (!impl_->interaction || !impl_->policy ||
+        std::find(impl_->kick_ticks.begin(), impl_->kick_ticks.end(), server_tick) ==
+            impl_->kick_ticks.end())
+        return false;
+    ++impl_->totals.interaction_kicks;
+    // Membership as of the previous tick's policy step: the state the client's roster reflects.
+    ++(impl_->policy->member() ? impl_->totals.interaction_kicks_member
+                               : impl_->totals.interaction_kicks_nonmember);
+    return true;
+}
+
 std::optional<CommandProvenance> NetworkInputServer::command_provenance() const noexcept {
     return impl_->selected_provenance;
 }
@@ -953,6 +976,7 @@ RunReport::NetworkInputCounters NetworkInputServer::counters() const noexcept {
         counts.interaction_joined_in_contact = policy.joined_in_contact;
         counts.interaction_leave_deferred_moving = policy.leave_deferred_moving;
         counts.interaction_leave_deferred_touching = policy.leave_deferred_touching;
+        counts.interaction_leave_deferred_quiet = policy.leave_deferred_quiet;
     }
     counts.amplification_blocked = impl_->link.amplification_blocked();
     counts.driver_dropped = impl_->driver.datagrams_dropped();

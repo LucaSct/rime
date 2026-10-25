@@ -72,6 +72,10 @@ struct InteractionCounters {
     std::uint64_t joined_in_contact = 0;
     std::uint64_t leave_deferred_moving = 0;   // would have left, but the object was moving
     std::uint64_t leave_deferred_touching = 0; // would have left, but it was touched
+    // Would have left, but the object is at rest and untouched and the quiet run is not yet
+    // rest_ticks long (m20.6c: the third reason, which the first two counters could not see, so
+    // a leave delayed only by the quiet window read as "not deferred at all").
+    std::uint64_t leave_deferred_quiet = 0;
 };
 
 class InteractionMembershipPolicy {

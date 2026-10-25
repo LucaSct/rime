@@ -37,6 +37,8 @@ MembershipDecision InteractionMembershipPolicy::update(const InteractionSample& 
             ++counters_.leave_deferred_touching;
         else if (moving)
             ++counters_.leave_deferred_moving;
+        else
+            ++counters_.leave_deferred_quiet; // at rest and untouched, but not for long enough yet
     }
     return MembershipDecision::Stay;
 }

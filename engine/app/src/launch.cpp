@@ -121,6 +121,10 @@ std::string launch_usage(std::string_view program) {
         "late-alive, late-ended)\n"
         "  --spawn-debug-break CASE  connected sensitivity control (no-ledger, no-adopt, "
         "authority-presentation)\n"
+        "  --interaction-fault kick@T[,kick@T2]  dedicated: kick the crate at server tick T\n"
+        "  --interaction-debug-break CASE  connected control (present-mirror, no-rebuild, "
+        "stale-restore)\n"
+        "  --interaction-trace  connected: list every crate checkpoint correction\n"
         "  --spawn-fault-ticks N  window of duplicate / late-alive / late-ended, in server ticks\n"
         "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
@@ -207,6 +211,37 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
                 result.options.spawn_debug_break = SpawnDebugBreak::AuthorityPresentation;
             else
                 return fail("--spawn-debug-break needs a known case");
+        } else if (arg == "--interaction-fault") {
+            if (!has_value || !result.options.interaction_kicks.empty())
+                return fail("--interaction-fault needs one kick@T[,kick@T2] list");
+            std::string_view rest = args[++i];
+            while (!rest.empty()) {
+                const auto comma = rest.find(',');
+                const auto item = rest.substr(0, comma);
+                std::uint64_t tick = 0;
+                if (!item.starts_with("kick@") || !parse_uint(item.substr(5), tick))
+                    return fail("--interaction-fault needs kick@T[,kick@T2]");
+                result.options.interaction_kicks.push_back(tick);
+                rest = comma == std::string_view::npos ? std::string_view{}
+                                                       : rest.substr(comma + 1);
+            }
+            if (result.options.interaction_kicks.empty())
+                return fail("--interaction-fault needs kick@T[,kick@T2]");
+        } else if (arg == "--interaction-debug-break") {
+            if (!has_value ||
+                result.options.interaction_debug_break != InteractionDebugBreak::None)
+                return fail("--interaction-debug-break needs one case");
+            const auto value = args[++i];
+            if (value == "present-mirror")
+                result.options.interaction_debug_break = InteractionDebugBreak::PresentMirror;
+            else if (value == "no-rebuild")
+                result.options.interaction_debug_break = InteractionDebugBreak::NoRebuild;
+            else if (value == "stale-restore")
+                result.options.interaction_debug_break = InteractionDebugBreak::StaleRestore;
+            else
+                return fail("--interaction-debug-break needs a known case");
+        } else if (arg == "--interaction-trace") {
+            result.options.interaction_trace = true;
         } else if (arg == "--spawn-fault-ticks") {
             if (!has_value || result.options.spawn_fault_ticks != 0 ||
                 !parse_uint(args[++i], result.options.spawn_fault_ticks) ||
@@ -404,6 +439,13 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         if (timed != (result.options.spawn_fault_ticks != 0))
             return fail("--spawn-fault-ticks goes with duplicate, late-alive or late-ended only");
     }
+    if (!result.options.interaction_kicks.empty() &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline))
+        return fail("--interaction-fault requires listening dedicated mode");
+    if ((result.options.interaction_debug_break != InteractionDebugBreak::None ||
+         result.options.interaction_trace) &&
+        result.options.connect_host.empty())
+        return fail("interaction client diagnostics require --connect");
     if ((result.options.spawn_debug_break != SpawnDebugBreak::None ||
          result.options.spawn_unresolved_bound != 0) &&
         result.options.connect_host.empty())
@@ -606,6 +648,14 @@ RunReport run_game_mode(const LaunchOptions& options,
                           (report.bind_failed ? "UDP bind failed: " : "remote play refused: ") +
                               report.bind_error);
         }
+        if (!options.interaction_kicks.empty()) {
+            if (!definition.remote_play || !definition.remote_play->active_interaction() ||
+                definition.remote_play->active_interaction()->j_max <= 0.0f)
+                return refuse(report,
+                              RunStatus::Failed,
+                              "--interaction-fault needs an interaction profile with a j_max");
+            network->set_interaction_kicks(options.interaction_kicks);
+        }
         fmt::print("{{\"event\":\"ready\",\"transport\":\"udp\",\"bind\":\"{}:{}\",\"codec\":2,"
                    "\"auth\":\"none\"}}\n",
                    options.listen_host,
@@ -677,6 +727,7 @@ RunReport run_game_mode(const LaunchOptions& options,
             tick.input = network->before_tick(game_ticks);
             tick.command = network->command_provenance();
             tick.refuse_spawn = network->refuse_spawn();
+            tick.interaction_kick = network->interaction_kick(game_ticks);
             // The report list lives through publication, so a keyed launch and its first
             // checkpoint describe the same tick rather than disagreeing for one frame.
             tick.spawns = definition.remote_play && definition.remote_play->spawn_prediction
@@ -827,14 +878,31 @@ RunReport run_game_mode(const LaunchOptions& options,
                     report.network_input.spawn_fault_late_ended,
                     report.network_input.launch_recovered_by_redundancy,
                     report.network_input.spawn_last_flight_ticks);
-            if (definition.remote_play && definition.remote_play->active_interaction())
+            if (definition.remote_play && definition.remote_play->active_interaction()) {
+                // The proof's raw-correction bound from the leaf's one function, so the script
+                // reads the code's arithmetic instead of redoing it (ADR-0106 §4).
+                const auto* interaction = definition.remote_play->active_interaction();
+                const float raw_bound = interaction->object_mass > 0.0f
+                                            ? replication::interaction_raw_bound(
+                                                  interaction->params.player_max_speed,
+                                                  interaction->j_max,
+                                                  interaction->object_mass,
+                                                  interaction->params.replay_ticks,
+                                                  interaction->params.fixed_dt)
+                                            : 0.0f;
                 spawn_counters +=
                     fmt::format(",\"interaction_joins\":{},\"interaction_leaves\":{},"
                                 "\"interaction_joined_in_contact\":{},"
                                 "\"interaction_leave_deferred_moving\":{},"
                                 "\"interaction_leave_deferred_touching\":{},"
                                 "\"interaction_epoch_advances\":{},\"interaction_member_ticks\":{},"
-                                "\"interaction_capture_refused\":{}",
+                                "\"interaction_capture_refused\":{},"
+                                "\"interaction_leave_deferred_quiet\":{},"
+                                "\"interaction_joined_sliding\":{},\"interaction_kicks\":{},"
+                                "\"interaction_kicks_member\":{},"
+                                "\"interaction_kicks_nonmember\":{},"
+                                "\"interaction_j_max\":{:.3f},"
+                                "\"interaction_raw_bound\":{:.6f}",
                                 report.network_input.interaction_joins,
                                 report.network_input.interaction_leaves,
                                 report.network_input.interaction_joined_in_contact,
@@ -842,7 +910,15 @@ RunReport run_game_mode(const LaunchOptions& options,
                                 report.network_input.interaction_leave_deferred_touching,
                                 report.network_input.interaction_epoch_advances,
                                 report.network_input.interaction_member_ticks,
-                                report.network_input.interaction_capture_refused);
+                                report.network_input.interaction_capture_refused,
+                                report.network_input.interaction_leave_deferred_quiet,
+                                report.network_input.interaction_joined_sliding,
+                                report.network_input.interaction_kicks,
+                                report.network_input.interaction_kicks_member,
+                                report.network_input.interaction_kicks_nonmember,
+                                static_cast<double>(interaction->j_max),
+                                static_cast<double>(raw_bound));
+            }
             fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
                        "\"applied\":{},\"synthesized\":{},\"neutralized\":{},"
                        "\"late\":{},\"duplicate\":{},\"future\":{},"

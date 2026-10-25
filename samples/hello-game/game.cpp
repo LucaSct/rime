@@ -376,6 +376,17 @@ void HelloGame::apply_intent(const Intent& intent) {
 void HelloGame::fixed_tick(app::TickContext& ctx) {
     apply_intent(intent_from(ctx.input));
     const float step = static_cast<float>(ctx.dt);
+    // `--interaction-fault kick@T`: a SERVER-ONLY impulse on the crate (m20.6c). Nothing in the
+    // client's input, prediction or checkpoint knows about it until the next checkpoint carries
+    // the changed velocity -- which is the point: it is a disturbance the prediction cannot
+    // foresee. +z is toward the player in the proof's tape (the player walks in from +z). The
+    // body is bound after the first step, and a kick before that is a no-op the server counted.
+    if (ctx.interaction_kick && bound_) {
+        physics::BodyState crate{};
+        if (physics_.get_body_state(crate_body_, crate))
+            physics_.apply_impulse(
+                crate_body_, core::Vec3{0.0f, 0.0f, kCrateKickImpulse}, crate.position);
+    }
     move_player(ctx.world, step);
     sync_.step(ctx.world, physics_, step);
     // Bind the markers' body ids once the bridge has created them. It cannot be done in `setup`:
@@ -1205,6 +1216,9 @@ struct InteractionPhysics {
     ecs::Entity player{}; // the predicted player, which also holds its ReplicatedGameState
     replication::PredictedEntityId object{};
     bool rebuild_on_restore = true;
+    // The `stale-restore` control and the bytes it restores from.
+    bool stale_restore = false;
+    std::vector<std::byte> previous_bytes;
     std::unique_ptr<physics::PhysicsWorld> physics;
     physics::BodyId player_body{};
     physics::BodyId crate_body{};
@@ -1228,7 +1242,12 @@ struct InteractionPhysics {
     }
 
     void restore(std::span<const std::byte> bytes) {
-        const auto crate = decode_crate(bytes);
+        // The control restores from the PREVIOUS restore's bytes: one checkpoint old, so every
+        // replay starts from a state the server has already left.
+        std::vector<std::byte> current(bytes.begin(), bytes.end());
+        const auto crate =
+            decode_crate(stale_restore && !previous_bytes.empty() ? previous_bytes : current);
+        previous_bytes = std::move(current);
         if (!crate)
             return;
         if (rebuild_on_restore || !physics)
@@ -1266,6 +1285,7 @@ InteractionProfile::ClientHooks interaction_client_hooks(
     state->player = player;
     state->object = object;
     state->rebuild_on_restore = options.rebuild_on_restore;
+    state->stale_restore = options.stale_restore;
     InteractionProfile::ClientHooks out{};
     out.hooks = inner;
     auto& prediction = out.hooks.prediction;
@@ -1306,6 +1326,7 @@ InteractionProfile::ClientHooks interaction_client_hooks(
     spawn.destroy = [state, next = inner.spawn.destroy](replication::PredictedEntityId id) {
         if (id == state->object) {
             state->physics.reset();
+            state->previous_bytes.clear();
             state->touching = false;
         } else {
             next(id);
@@ -1330,17 +1351,30 @@ InteractionProfile::ClientHooks interaction_client_hooks(
     return out;
 }
 
-// The push tape (`--input-tape-push`), in client ticks: walk forward (-z) into the crate and push
-// it for most of 90 ticks, stand still 60 (the crate comes to rest), retreat 150 (the crate
-// leaves the group once out of range and quiet), walk back 100 (it joins again, at rest, out of
-// reach), then stand. No Throw: a crate correction here is the undisturbed residual.
+// The push tape (`--input-tape-push`), in client ticks. Walking is 4 m/s = 1/15 m per tick, +z is
+// "toward the camera / away from the crate", which rests at z = -2.5 (join radius 5.117 m, leave
+// radius 6.117 m, centre to centre on the floor plane). The sequence is what m20.6c's proof needs
+// to see, in this order (arithmetic for the nominal timing; the proof gates what ACTUALLY happened):
+//
+//    1-10   stand            crate is a member from the first server tick (2.5 m < 5.117 m)
+//   11-90   retreat 5.33 m   the crate leaves once d > 6.117 m (t ~ 65) -- it has been asleep for
+//                            ages, so the 30-tick quiet window is already met
+//   91-100  stand
+//  101-245  walk back -z     joins at d <= 5.117 m (t ~ 142), touches at d ~ 0.85 m (t ~ 206) and
+//                            pushes it ~2.7 m for the last 40 ticks: the crate moves at 4 m/s
+//  246-275  retreat 2 m      back to ~3.3 m away, still a member (inside 6.117 m)
+//  276-315  stand            the crate rests; KICK #1 lands here, the crate being a member
+//  316-405  retreat 6 m      beyond 6.117 m, at rest: leaves (t ~ 358)
+//  406-425  stand
+//  426-520  walk back -z     KICK #2 lands ~15 ticks before the unkicked join (t ~ 501): the crate
+//                            slides toward the player (0.41 m, ~24 ticks at mu 0.5) and the player's
+//                            closing speed drags the join inside that window -- a JOIN WHILE SLIDING
+//  521-600  stand            the crate comes to rest as a member
 app::ActionState push_tape(std::uint64_t tick) {
     app::ActionState actions{};
-    if (tick <= 90)
-        actions.axes[kAxisMoveZ] = -1.0f;
-    else if (tick > 150 && tick <= 300)
+    if ((tick >= 11 && tick <= 90) || (tick >= 246 && tick <= 275) || (tick >= 316 && tick <= 405))
         actions.axes[kAxisMoveZ] = 1.0f;
-    else if (tick > 300 && tick <= 400)
+    else if ((tick >= 101 && tick <= 245) || (tick >= 426 && tick <= 520))
         actions.axes[kAxisMoveZ] = -1.0f;
     return actions;
 }
@@ -1466,7 +1500,9 @@ app::GameDefinition definition_with_interaction() {
                                                       interaction_sample,
                                                       capture_crate,
                                                       interaction_client_hooks,
-                                                      push_tape};
+                                                      push_tape,
+                                                      HelloGame::kCrateKickImpulse,
+                                                      kCrateRigidBody.mass};
     return def;
 }
 

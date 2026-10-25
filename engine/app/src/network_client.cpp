@@ -303,6 +303,10 @@ RunReport run_network_client(const LaunchOptions& options,
     // ADR-0106 §3 expects to be non-zero: the rebuilt world has no warm-start cache.
     double crate_max_sim_correction = 0.0;
     std::uint64_t crate_member_checkpoints = 0, crate_corrections_over_1cm = 0;
+    // `--interaction-trace`: one (server tick, simulated correction in metres) pair per
+    // member->member checkpoint, so a proof can tell the undisturbed residual (before a kick) from
+    // the disturbance and its convergence (after) instead of reading one maximum over the run.
+    std::vector<std::pair<std::uint64_t, double>> crate_trace;
     // Push response: the first predicted step in which the player touched the object, and the
     // presented object's position just before that step.
     std::optional<std::uint64_t> crate_push_tick;
@@ -347,7 +351,9 @@ RunReport run_network_client(const LaunchOptions& options,
     // What the player sees of the object: the predicted simulation plus the smoother's offset
     // while it is a predicted member, otherwise (or with --no-prediction) the mirror's authority.
     const auto presented_object = [&] {
-        if (!options.no_prediction && interaction_hooks)
+        // `present-mirror` control: keep predicting, but SHOW the round-trip-old mirror.
+        if (!options.no_prediction && interaction_hooks &&
+            options.interaction_debug_break != InteractionDebugBreak::PresentMirror)
             if (const auto simulated = interaction_hooks->object_pose()) {
                 core::Transform pose = *simulated;
                 pose.translation = smoother.presented(interaction_id, simulated->translation);
@@ -361,7 +367,8 @@ RunReport run_network_client(const LaunchOptions& options,
     // what was on screen to what the corrected simulation now says.
     const auto note_object_checkpoint = [&](bool was_member,
                                             const std::optional<core::Transform>& simulated_before,
-                                            const core::Transform& shown_before) {
+                                            const core::Transform& shown_before,
+                                            std::uint64_t checkpoint_server_tick) {
         const bool member = object_member();
         if (member && !was_member)
             ++crate_joins_seen;
@@ -384,6 +391,8 @@ RunReport run_network_client(const LaunchOptions& options,
             ++crate_member_checkpoints;
             if (jump > 0.01)
                 ++crate_corrections_over_1cm;
+            if (options.interaction_trace)
+                crate_trace.emplace_back(checkpoint_server_tick, jump);
         }
     };
 
@@ -498,8 +507,10 @@ RunReport run_network_client(const LaunchOptions& options,
                 if (!result.base.applied)
                     continue;
                 if (interaction_hooks)
-                    note_object_checkpoint(
-                        object_was_member, object_simulated_before, object_shown_before);
+                    note_object_checkpoint(object_was_member,
+                                           object_simulated_before,
+                                           object_shown_before,
+                                           base.server_tick);
                 for (const auto& old : spawn_bindings)
                     if (std::none_of(checkpoint.spawns->bindings.begin(),
                                      checkpoint.spawns->bindings.end(),
@@ -672,7 +683,13 @@ RunReport run_network_client(const LaunchOptions& options,
                             return fail(report, "interaction object unavailable");
                         interaction_id = {net_id->index, net_id->generation};
                         interaction_hooks = interaction->client_hooks(
-                            prediction_world, predicted_player, interaction_id, *spawn_hooks, {});
+                            prediction_world,
+                            predicted_player,
+                            interaction_id,
+                            *spawn_hooks,
+                            {options.interaction_debug_break != InteractionDebugBreak::NoRebuild,
+                             options.interaction_debug_break ==
+                                 InteractionDebugBreak::StaleRestore});
                         spawn_hooks = interaction_hooks->hooks;
                     }
                     if (options.spawn_debug_break == SpawnDebugBreak::NoAdopt) {
@@ -964,6 +981,15 @@ RunReport run_network_client(const LaunchOptions& options,
                             crate_responded ? crate_response_ticks
                                             : (crate_push_tick ? report.ticks - *crate_push_tick
                                                                : report.ticks));
+            if (options.interaction_trace) {
+                spawn_metrics += ",\"crate_trace\":[";
+                for (std::size_t i = 0; i < crate_trace.size(); ++i)
+                    spawn_metrics += fmt::format("{}[{},{:.6f}]",
+                                                 i == 0 ? "" : ",",
+                                                 crate_trace[i].first,
+                                                 crate_trace[i].second);
+                spawn_metrics += "]";
+            }
         }
     } else {
         spawn_metrics = ",\"prediction_path\":\"legacy\"";

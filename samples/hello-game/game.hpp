@@ -115,6 +115,11 @@ public:
     static constexpr float kPickupRadius = 0.6f;     // the trigger sphere the player must touch
     static constexpr int kPickupCount = 5;
     static constexpr float kRingRadius = 5.0f; // the markers sit on this circle about the origin
+    // The largest SERVER-ONLY impulse the game applies to the crate (m20.6c, ADR-0106 §4): a
+    // 12 N*s kick on the 6 kg crate is a 2 m/s velocity step. Declared once; the interaction
+    // profile's `j_max` reads it, so the kick the server applies and the raw-correction bound the
+    // proof derives cannot drift apart.
+    static constexpr float kCrateKickImpulse = 12.0f;
 
     // Where marker `index` is. Public because the autopilot steers at it, and steering at a
     // hard-coded coordinate instead would mean moving a marker silently turns the self-check into

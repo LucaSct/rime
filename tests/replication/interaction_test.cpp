@@ -83,6 +83,27 @@ TEST_CASE("interaction: a touch or motion at tick 29 resets the rest run") {
     }
 }
 
+TEST_CASE("interaction: a leave delayed only by the quiet window is counted as quiet") {
+    InteractionMembershipPolicy m(hello());
+    make_member(m);
+    const float far = m.params().leave_radius() + 0.1f;
+    // Ticks 1..29 of rest beyond the radius: each is a deferral for the quiet window alone.
+    for (int i = 1; i < 30; ++i)
+        CHECK(m.update(far_rest(far)) == MembershipDecision::Stay);
+    CHECK(m.counters().leave_deferred_quiet == 29);
+    CHECK(m.counters().leave_deferred_moving == 0);
+    CHECK(m.counters().leave_deferred_touching == 0);
+    CHECK(m.update(far_rest(far)) == MembershipDecision::Leave);
+    CHECK(m.counters().leave_deferred_quiet == 29); // the leaving tick is not a deferral
+    // A tick of motion beyond the radius is "moving", never "quiet"; inside the radius, nothing.
+    InteractionMembershipPolicy n(hello());
+    make_member(n);
+    n.update({far, 1.0f, false});
+    n.update(far_rest(n.params().leave_radius() - 0.01f));
+    CHECK(n.counters().leave_deferred_quiet == 0);
+    CHECK(n.counters().leave_deferred_moving == 1);
+}
+
 TEST_CASE("interaction: it never leaves inside the leave radius, however still") {
     InteractionMembershipPolicy m(hello());
     make_member(m);
