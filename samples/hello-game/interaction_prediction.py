@@ -313,10 +313,19 @@ gate("present-mirror control fails the response gate",
 s, norebuild, k1, _ = run_leg(
     client_extra=[*impair, "--interaction-debug-break", "no-rebuild"], impaired=True)
 worst, n, _, _ = residual_before(norebuild, k1)
-gate("no-rebuild control fails the residual gate", worst > RESIDUAL and membership_ok(s, norebuild),
-     f"max pre-kick correction {worst * 1000:.2f} mm > {RESIDUAL * 1000:.0f} mm "
-     f"({worst / baseline_residual:.1f}x the clean run's {baseline_residual * 1000:.2f} mm): the "
-     f"warm-start cache of a discarded timeline leaks into the replay")
+# The no-rebuild control is gated on its RATIO to the clean run, not on the absolute 1 cm bound. Measured
+# 12.5-15.3 mm against that 10 mm bound -- only 1.25-1.5x -- so another machine's last bits could put it
+# under the bound, and a control that passes its gate by luck is a CI red that proves nothing. Measured
+# ~10x the clean run, which is the robust statement: the residual MEASUREMENT sees a leaked warm-start
+# cache. The absolute 1 cm gate is therefore a WEAK detector of this failure (said in ADR-0106's
+# addendum); the strong one is m20.6b's in-process replay-twice test (285 of 624 bytes differ without
+# the rebuild), which is exact rather than statistical.
+NO_REBUILD_MIN_RATIO = 4.0
+gate("no-rebuild control: the residual measurement sees the leak",
+     worst >= NO_REBUILD_MIN_RATIO * baseline_residual and membership_ok(s, norebuild),
+     f"max pre-kick correction {worst * 1000:.2f} mm = {worst / baseline_residual:.1f}x the clean "
+     f"run's {baseline_residual * 1000:.2f} mm (>= {NO_REBUILD_MIN_RATIO:.0f}x; vs the 1 cm gate: "
+     f"{worst / RESIDUAL:.2f}x): the warm-start cache of a discarded timeline leaks into the replay")
 s, stale, k1, _ = run_leg(
     client_extra=[*impair, "--interaction-debug-break", "stale-restore"], impaired=True)
 worst, n, _, _ = residual_before(stale, k1)
