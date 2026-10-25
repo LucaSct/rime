@@ -90,6 +90,12 @@ def finished(output):
 
 
 MAX_ATTEMPTS = 3
+# The server buffers this many commands before executing one. m20.3's default of 1 holds on this
+# workstation, but the hosted macOS runner starved every leg (71-107 synthesized ticks of 160-200,
+# three attempts each) -- the press then executes as a stand-in and never launches, which tests the
+# jitter buffer, not speculative spawn. Three ticks of slack is what this proof needs to be about its
+# subject; an adaptive server buffer is the real fix and a brick of its own.
+INPUT_SLACK = 3
 
 
 def run_leg(server_extra=(), client_extra=(), throw=True, one_way=1, hold=0):
@@ -127,7 +133,7 @@ def run_leg_once(server_extra=(), client_extra=(), throw=True, one_way=1, hold=0
     ticks = budget(one_way, hold)
     server = subprocess.Popen(
         [EXE, "dedicated", "--listen", "127.0.0.1:0", "--ticks", str(ticks), "--linger-ms",
-         "1000", *server_extra],
+         "1000", "--input-slack", str(INPUT_SLACK), *server_extra],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
     client = None
     try:
