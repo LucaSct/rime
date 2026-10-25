@@ -4,6 +4,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 
 #include "rime/app/launch.hpp"
@@ -49,7 +51,8 @@ public:
     [[nodiscard]] ActionState before_tick(std::uint64_t server_tick);
     [[nodiscard]] ActionState before_tick(std::uint64_t server_tick, std::uint64_t now_ms);
     [[nodiscard]] bool last_applied() const noexcept;
-    void after_tick(std::uint64_t server_tick);
+    [[nodiscard]] std::optional<CommandProvenance> command_provenance() const noexcept;
+    void after_tick(std::uint64_t server_tick, std::span<const SpawnReport> spawns = {});
     void linger(std::uint64_t final_tick, std::uint32_t duration_ms);
     [[nodiscard]] RunReport::NetworkInputCounters counters() const noexcept;
 

@@ -21,6 +21,7 @@
 #include "rime/platform/keyboard.hpp"
 #include "rime/replication/input_v2.hpp"
 #include "rime/replication/prediction.hpp"
+#include "rime/replication/spawn_prediction.hpp"
 
 // `GameDefinition` — what a GAME supplies to the engine, as opposed to what the engine owns (m20.1,
 // ADR-0056-m20.1).
@@ -170,7 +171,51 @@ struct SetupContext {
     std::filesystem::path content_root{};
 };
 
+// COMMAND PROVENANCE (m20.5b, ADR-0105 Consequences): which client command a server tick executed.
+// A game that predicts a spawn names it with a SpawnKey built from these numbers -- (incarnation,
+// sequence, slot) -- and the client builds the same key from the command it predicted, which is
+// what lets the server's verdict find the client's guess (spawn_prediction.hpp, technique 1).
+struct CommandProvenance {
+    // The admitted session's incarnation (`net::Session::incarnation()`): a reconnect is a new
+    // incarnation, so its keys can never collide with the old session's. 0 with no client.
+    std::uint32_t incarnation = 0;
+    // The InputV2 sequence this tick retired. 0 means "no command" (InputCommand's convention):
+    // before a client's schedule has started, nothing retires.
+    std::uint32_t sequence = 0;
+    // True only when the client's own command ran. False for a SYNTHESIZED stand-in (a late or
+    // lost command, held keys repeated with `pressed` cleared) and for a tick with no client: a
+    // stand-in is the server's guess at what the player meant, and a guess must never spend a
+    // charge or launch anything the client did not ask for -- the client could not predict it.
+    bool applied = false;
+};
+
+// What a game tells its host about one speculative spawn during a tick (m20.5b). The host --
+// today the dedicated server's pump, when the game declares `SpawnPredictionProfile` -- turns each
+// report into a durable outcome for the client, gives a launched entity a network identity, and
+// retracts that identity when the entity ends. A game reports only keyed spawns (a command with
+// provenance); local play has no host listening and no key to report.
+struct SpawnReport {
+    enum class Kind : std::uint8_t {
+        Launched, // `entity` was created for `key` this tick
+        Refused,  // the game said no to `key`; `reason` is the game's own code (never 0)
+        Ended,    // `entity`, launched for `key`, ended this tick (the game has despawned it)
+    };
+
+    Kind kind = Kind::Launched;
+    replication::SpawnKey key{};
+    ecs::Entity entity{};
+    std::uint8_t reason = 0;
+};
+
 struct TickContext {
+    // A constructor, not aggregate initialisation, for the m20.1 fields: every game and proof
+    // brace-initialises `{world, dt, tick, input}`, and with -Wextra a trailing field that brace
+    // list omits is a -Wmissing-field-initializers warning (an error under RIME_WARNINGS_AS_ERRORS)
+    // at every one of those sites. The fields after `input` are set by name by the hosts that have
+    // them.
+    TickContext(ecs::World& world_, double dt_, std::uint64_t tick_, ActionState input_ = {})
+        : world(world_), dt(dt_), tick(tick_), input(input_) {}
+
     ecs::World& world;
     // ALWAYS the fixed dt — the same number every tick for the life of the run. A game that
     // integrates against anything else is not deterministic, and the dedicated/play digest proof
@@ -181,6 +226,13 @@ struct TickContext {
     std::uint64_t tick = 0;
     // The player's, autopilot's, or admitted network client's wish for this tick.
     ActionState input{};
+    // Set by a network server for every tick it drives (applied or not); `nullopt` for local play,
+    // the autopilot and offline runs. A game that launches only on `applied` commands when this is
+    // set, and freely when it is not, behaves the same alone and authoritative.
+    std::optional<CommandProvenance> command;
+    // Where to report keyed spawns this tick; null when nobody is listening (local play, or a game
+    // without `SpawnPredictionProfile`). Non-owning; valid for the duration of `fixed_tick`.
+    std::vector<SpawnReport>* spawns = nullptr;
 };
 
 // Presentation is a separate world from simulation, and these contexts exist only in a mode that
@@ -328,6 +380,27 @@ struct GameDefinition {
         core::Transform (*player_pose)(const ecs::World&, ecs::Entity) = nullptr;
         // A fixed command tape keeps the process proof independent of replicated-state timing.
         ActionState (*diagnostic_input_tape)(std::uint64_t) = nullptr;
+
+        // m20.5b (ADR-0105): opt into SPECULATIVE SPAWN -- the game launches entities from
+        // commands, reports them through `TickContext::spawns`, and the server answers each key
+        // with a durable outcome in the owner checkpoint's spawn extension. Absent, nothing about
+        // remote play changes: the same input identity, the m20.4 checkpoint bytes, the same
+        // counters.
+        //
+        // NEGOTIATED THROUGH THE SCHEMA IDENTITY, not a new hello field: `input_schema_identity`
+        // folds the profile's presence and `version` in, so a client and a server that disagree
+        // about it are refused at the hello as `Schema` before either can send the other a
+        // checkpoint it would refuse (an m20.4 decoder treats the extension as trailing bytes).
+        struct SpawnPredictionProfile {
+            std::uint32_t version = 1;
+            // Server: the state bytes of one SPAWNED roster member, as the owner checkpoint
+            // carries it (the player still goes through `prediction_hooks`' capture). Bound to
+            // an entity rather than a PredictedEntityId because the server knows its own entity;
+            // the id on the wire is that entity's NetId. Empty bytes refuse the checkpoint.
+            std::vector<std::byte> (*capture_spawned)(const ecs::World&, ecs::Entity) = nullptr;
+        };
+
+        std::optional<SpawnPredictionProfile> spawn_prediction;
     };
 
     std::optional<RemotePlayProfile> remote_play;
@@ -342,6 +415,8 @@ struct GameDefinition {
 // the rule changed. A remote-playable game's identity includes its fixed timestep: a client
 // predicting at 1/30 s against a 1/60 s server would replay every command at the wrong dt and
 // read as a stream of corrections, so it is refused at the hello as a schema mismatch instead.
+// The same holds for speculative spawn (m20.5b): a declared `spawn_prediction` folds a marker and
+// its version in after the m20.4 hash, and an absent one leaves the m20.4 value bit for bit.
 [[nodiscard]] std::uint64_t
 input_schema_identity(const GameDefinition::NetworkInputProfile& input,
                       const GameDefinition::RemotePlayProfile* remote_play);

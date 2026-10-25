@@ -590,6 +590,7 @@ RunReport run_game_mode(const LaunchOptions& options,
     // ── 6. The tick — the same body in every mode ──────────────────────────────────────────────
     bool game_finished = false;
     std::uint64_t game_ticks = 0;
+    std::vector<SpawnReport> spawn_reports;
     app.on_fixed_tick([&](ecs::World& world, double dt) {
         if (game_finished) {
             // A real-clock frame can owe several ticks and the game can finish on the first; the
@@ -604,6 +605,12 @@ RunReport run_game_mode(const LaunchOptions& options,
                                        : ActionState{};
         if (network) {
             tick.input = network->before_tick(game_ticks);
+            tick.command = network->command_provenance();
+            // The report list lives through publication, so a keyed launch and its first
+            // checkpoint describe the same tick rather than disagreeing for one frame.
+            tick.spawns = definition.remote_play && definition.remote_play->spawn_prediction
+                              ? &spawn_reports
+                              : nullptr;
             if (input_trace) {
                 // One line per committed tick: tick, applied(1)/synthesized(0), four axes,
                 // held and pressed. max_digits10 preserves the exact float for replay.
@@ -618,7 +625,8 @@ RunReport run_game_mode(const LaunchOptions& options,
         }
         game->fixed_tick(tick);
         if (network) {
-            network->after_tick(game_ticks);
+            network->after_tick(game_ticks, spawn_reports);
+            spawn_reports.clear();
         }
         ++game_ticks;
         if (game->finished()) {
@@ -701,6 +709,39 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (network) {
         report.network_input = network->counters();
         if (options.ticks > 0) {
+            // Keep the m20.4 event byte-identical for games without the profile. An opted-in
+            // server names every refusal and skip beside the existing input counters.
+            const std::string spawn_counters =
+                definition.remote_play && definition.remote_play->spawn_prediction
+                    ? fmt::format(",\"spawn_accepted\":{},\"spawn_rejected\":{},"
+                                  "\"spawn_accepted_ended\":{},\"spawn_epoch_advances\":{},"
+                                  "\"spawn_outcomes_deferred\":{},\"spawn_outcomes_dropped\":{},"
+                                  "\"spawn_foreign_key\":{},\"spawn_out_of_order\":{},"
+                                  "\"spawn_end_unknown\":{},\"spawn_roster_refused\":{},"
+                                  "\"spawn_without_client\":{},\"spawn_extension_refused\":{},"
+                                  "\"spawn_acks_applied\":{},\"spawn_ack_malformed\":{},"
+                                  "\"spawn_ack_wrong_channel\":{},"
+                                  "\"spawn_ack_wrong_incarnation\":{},\"spawn_ack_ahead\":{},"
+                                  "\"spawn_ack_stale\":{}",
+                                  report.network_input.spawn_accepted,
+                                  report.network_input.spawn_rejected,
+                                  report.network_input.spawn_accepted_ended,
+                                  report.network_input.spawn_epoch_advances,
+                                  report.network_input.spawn_outcomes_deferred,
+                                  report.network_input.spawn_outcomes_dropped,
+                                  report.network_input.spawn_foreign_key,
+                                  report.network_input.spawn_out_of_order,
+                                  report.network_input.spawn_end_unknown,
+                                  report.network_input.spawn_roster_refused,
+                                  report.network_input.spawn_without_client,
+                                  report.network_input.spawn_extension_refused,
+                                  report.network_input.spawn_acks_applied,
+                                  report.network_input.spawn_ack_malformed,
+                                  report.network_input.spawn_ack_wrong_channel,
+                                  report.network_input.spawn_ack_wrong_incarnation,
+                                  report.network_input.spawn_ack_ahead,
+                                  report.network_input.spawn_ack_stale)
+                    : std::string{};
             fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
                        "\"applied\":{},\"synthesized\":{},\"neutralized\":{},"
                        "\"late\":{},\"duplicate\":{},\"future\":{},"
@@ -718,7 +759,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"checkpoint_encoded\":{},\"checkpoint_encode_refused\":{},"
                        "\"checkpoint_send_refused\":{},\"input_result_send_refused\":{},"
                        "\"replication_registration_refused\":{},\"publish_missing_session\":{},"
-                       "\"checkpoint_capture_refused\":{}}}\n",
+                       "\"checkpoint_capture_refused\":{}{}}}\n",
                        report.ticks,
                        report.state_digest,
                        report.network_input.applied,
@@ -758,7 +799,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                        report.network_input.input_result_send_refused,
                        report.network_input.replication_registration_refused,
                        report.network_input.publish_missing_session,
-                       report.network_input.checkpoint_capture_refused);
+                       report.network_input.checkpoint_capture_refused,
+                       spawn_counters);
             std::fflush(stdout);
         }
     }

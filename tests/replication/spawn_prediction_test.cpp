@@ -1272,8 +1272,8 @@ TEST_CASE("the outcome acknowledgement round-trips exactly and refuses every mal
 
     // Every refusal leaves `out` as it was.
     const SpawnOutcomeAck sentinel{SpawnKey{9, 9, 9}};
-    for (std::size_t length : {std::size_t{0}, std::size_t{1}, kSpawnOutcomeAckBytes - 1,
-                               kSpawnOutcomeAckBytes + 1}) {
+    for (std::size_t length :
+         {std::size_t{0}, std::size_t{1}, kSpawnOutcomeAckBytes - 1, kSpawnOutcomeAckBytes + 1}) {
         SpawnOutcomeAck out = sentinel;
         CHECK_FALSE(decode_spawn_outcome_ack(std::span(bytes).first(length), out));
         CHECK(out == sentinel);

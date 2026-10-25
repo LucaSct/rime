@@ -194,6 +194,23 @@ struct RunReport {
         std::uint64_t checkpoint_send_refused = 0, input_result_send_refused = 0;
         std::uint64_t replication_registration_refused = 0, publish_missing_session = 0;
         std::uint64_t checkpoint_capture_refused = 0;
+        // m20.5b speculative spawn (only reported when the game declares SpawnPredictionProfile).
+        // Every skip, drop and refusal on the outcome path has one (guardrail 5).
+        std::uint64_t spawn_accepted = 0, spawn_rejected = 0, spawn_accepted_ended = 0;
+        std::uint64_t spawn_epoch_advances = 0;
+        // Outcomes held back because one checkpoint carries at most 16; they go in a later one.
+        std::uint64_t spawn_outcomes_deferred = 0;
+        // Outcomes not retained at all: the unacknowledged list was at its hard bound.
+        std::uint64_t spawn_outcomes_dropped = 0;
+        // Reports the server could not turn into outcomes: a key that is not the admitted
+        // session's, one not above the previous outcome, an end for an unknown entity, a launch
+        // the replicator could not name (or named in the provisional range), or no client.
+        std::uint64_t spawn_foreign_key = 0, spawn_out_of_order = 0, spawn_end_unknown = 0;
+        std::uint64_t spawn_roster_refused = 0, spawn_without_client = 0;
+        std::uint64_t spawn_extension_refused = 0;
+        // SpawnOutcomeAck: applied, and every reason one was refused.
+        std::uint64_t spawn_acks_applied = 0, spawn_ack_malformed = 0, spawn_ack_wrong_channel = 0;
+        std::uint64_t spawn_ack_wrong_incarnation = 0, spawn_ack_ahead = 0, spawn_ack_stale = 0;
     } network_input;
 
     bool bind_failed = false;

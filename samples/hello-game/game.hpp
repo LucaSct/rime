@@ -41,6 +41,7 @@ namespace hello_game {
 inline constexpr std::uint8_t kAxisMoveX = 0; // −1 left … +1 right
 inline constexpr std::uint8_t kAxisMoveZ = 1; // −1 forward (−z, the camera's look) … +1 back
 inline constexpr std::uint8_t kButtonQuit = 0;
+inline constexpr std::uint8_t kButtonThrow = 1;
 
 // ── What the game is told, per tick ───────────────────────────────────────────────────────────
 //
@@ -65,6 +66,20 @@ struct ReplicatedGameState {
     rime::core::Vec3 player_velocity{};
     rime::core::Vec3 crate_position{};
     rime::core::Quat crate_rotation{};
+    // Resource state belongs to the owner checkpoint's group. The score is authoritative only:
+    // prediction never runs the target test or grants a point.
+    std::uint32_t throw_charges = 3;
+    std::uint32_t throw_cooldown = 0;
+    std::uint32_t target_score = 0;
+    rime::core::Vec3 player_facing{0.0f, 0.0f, -1.0f};
+};
+
+// One entity per accepted flight. WorldTransform lets the normal world stream give it a NetId;
+// the complete motion state is also captured in the owner checkpoint for prediction.
+struct ThrownProjectile {
+    rime::core::Vec3 position{};
+    rime::core::Vec3 velocity{};
+    std::uint32_t age = 0;
 };
 
 [[nodiscard]] std::uint64_t replicated_digest(const rime::ecs::World& world);
@@ -122,6 +137,9 @@ public:
     // server that set up meshes nobody will see is a server that needed a device to start.
     [[nodiscard]] std::uint64_t presentation_calls() const noexcept { return presentation_calls_; }
 
+    // A test moves the target off the known flight path as a sensitivity control for the sweep.
+    void set_throw_target(rime::core::Vec3 target) noexcept { throw_target_ = target; }
+
 private:
     struct Pickup {
         rime::ecs::Entity entity{};
@@ -133,6 +151,7 @@ private:
     [[nodiscard]] ReplicatedGameState* state() const noexcept;
     void bind_bodies(rime::ecs::World& world);
     void collect(rime::ecs::World& world);
+    void throw_step(rime::app::TickContext& ctx, ReplicatedGameState& state);
 
     // The physics world is the GAME's (it was the host's before m20.1): the engine owns the loop
     // and hands the game the tick, and what the game simulates with is its own affair.
@@ -144,6 +163,9 @@ private:
     rime::ecs::Entity crate_{};
     rime::ecs::Entity camera_{}; // presentation only: spawned by present_setup, absent otherwise
     rime::ecs::Entity state_entity_{};
+    rime::ecs::Entity projectile_{};
+    rime::replication::SpawnKey projectile_key_{};
+    rime::core::Vec3 throw_target_{0.0f, 0.9f, -2.55f};
     rime::physics::BodyId player_body_{};
     rime::ecs::World* world_ = nullptr;
     std::vector<Pickup> pickups_;
@@ -181,4 +203,13 @@ RIME_REFLECT_FIELD(player_position)
 RIME_REFLECT_FIELD(player_velocity)
 RIME_REFLECT_FIELD(crate_position)
 RIME_REFLECT_FIELD(crate_rotation)
+RIME_REFLECT_FIELD(throw_charges)
+RIME_REFLECT_FIELD(throw_cooldown)
+RIME_REFLECT_FIELD(target_score)
+RIME_REFLECT_FIELD(player_facing)
+RIME_REFLECT_END()
+RIME_REFLECT_BEGIN(hello_game::ThrownProjectile)
+RIME_REFLECT_FIELD(position)
+RIME_REFLECT_FIELD(velocity)
+RIME_REFLECT_FIELD(age)
 RIME_REFLECT_END()

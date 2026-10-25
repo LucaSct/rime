@@ -22,6 +22,7 @@
 #include "rime/platform/socket.hpp"
 #include "rime/replication/input_v2.hpp"
 #include "rime/replication/server_replicator.hpp"
+#include "rime/replication/spawn_prediction.hpp"
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -195,9 +196,12 @@ struct NetworkInputServer::Impl {
          ecs::World& world,
          const GameDefinition::RemotePlayProfile* remote_play)
         : link(std::move(supplied_link)), driver(link, driver_config()), profile(profile),
+          world(world),
           neutral_after_ticks(static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz * 0.1)))) {
         driver.listen();
         schema_hash = input_schema_identity(profile, remote_play);
+        if (remote_play && remote_play->spawn_prediction)
+            spawn_profile = &*remote_play->spawn_prediction;
         if (remote_play) {
             owner = remote_play->owned_player(world);
             hooks = remote_play->prediction_hooks(world, owner);
@@ -293,6 +297,12 @@ struct NetworkInputServer::Impl {
                 event(fmt::format("{{\"event\":\"client_left\",\"reason\":\"{}\"}}", reason));
                 admitted.reset();
                 save_schedule();
+                // Outcomes name one incarnation only; a reconnect cannot acknowledge or bind
+                // the former peer's launches even if it happens to reuse input sequences.
+                pending_outcomes.clear();
+                live_spawns.clear();
+                acknowledged_through.reset();
+                newest_outcome.reset();
             }
         }
         for (const auto id : driver.session_ids()) {
@@ -377,6 +387,37 @@ struct NetworkInputServer::Impl {
                         ++totals.wrong_channel;
                     continue;
                 }
+                if (spawn_profile && bytes[0] == std::byte{kSpawnOutcomeAckTag}) {
+                    if (message.channel != net::Channel::ReliableOrdered) {
+                        ++totals.spawn_ack_wrong_channel;
+                        continue;
+                    }
+                    SpawnOutcomeAck ack{};
+                    if (!decode_spawn_outcome_ack(bytes, ack)) {
+                        ++totals.spawn_ack_malformed;
+                        continue;
+                    }
+                    if (ack.through.incarnation != session->incarnation()) {
+                        ++totals.spawn_ack_wrong_incarnation;
+                        continue;
+                    }
+                    if (!newest_outcome || ack.through > *newest_outcome) {
+                        ++totals.spawn_ack_ahead;
+                        continue;
+                    }
+                    if (acknowledged_through && ack.through <= *acknowledged_through) {
+                        ++totals.spawn_ack_stale;
+                        continue;
+                    }
+                    // A frontier is a claim of APPLIED verdicts, not of sent packets. Only this
+                    // reliable message can retire durable outcomes (ADR-0105 guardrail 5).
+                    acknowledged_through = ack.through;
+                    std::erase_if(pending_outcomes, [&](const SpawnOutcome& outcome) {
+                        return outcome.key <= ack.through;
+                    });
+                    ++totals.spawn_acks_applied;
+                    continue;
+                }
                 if (message.channel != net::Channel::UnreliableSequenced) {
                     ++totals.wrong_channel;
                     continue;
@@ -399,6 +440,7 @@ struct NetworkInputServer::Impl {
     ListenerLink link;
     net::NetDriver driver;
     GameDefinition::NetworkInputProfile profile;
+    ecs::World& world;
     std::uint64_t schema_hash = 0;
     std::uint32_t neutral_after_ticks = 6;
     std::optional<net::SessionId> admitted;
@@ -406,6 +448,19 @@ struct NetworkInputServer::Impl {
     std::optional<InputSchedule> schedule;
     std::unique_ptr<ServerReplicator> replicator;
     PredictionHooks hooks;
+    const GameDefinition::RemotePlayProfile::SpawnPredictionProfile* spawn_profile = nullptr;
+
+    struct LiveSpawn {
+        SpawnKey key{};
+        ecs::Entity entity{};
+        PredictedEntityId id{};
+    };
+
+    std::vector<LiveSpawn> live_spawns;
+    std::vector<SpawnOutcome> pending_outcomes;
+    std::optional<SpawnKey> acknowledged_through;
+    std::optional<SpawnKey> newest_outcome;
+    std::optional<CommandProvenance> selected_provenance;
     ecs::Entity owner{};
     NetId owner_net_id{};
     std::uint32_t membership_epoch = 0;
@@ -418,13 +473,96 @@ struct NetworkInputServer::Impl {
 
     [[nodiscard]] ActionState select_actions() {
         last_applied = false;
+        selected_provenance.reset();
         if (!schedule) {
             ++totals.synthesized;
             return {};
         }
         const ScheduledInput selected = schedule->step();
         last_applied = selected.applied;
+        if (admitted) {
+            if (const auto* session = driver.session(*admitted))
+                selected_provenance = CommandProvenance{
+                    session->incarnation(), selected.command.sequence, selected.applied};
+        }
         return profile.to_actions(selected.command);
+    }
+
+    void receive_spawns(std::span<const SpawnReport> reports) {
+        if (!spawn_profile)
+            return;
+        for (const SpawnReport& report : reports) {
+            if (!admitted) {
+                ++totals.spawn_without_client;
+                continue;
+            }
+            const auto* session = driver.session(*admitted);
+            if (!session || report.key.incarnation != session->incarnation()) {
+                ++totals.spawn_foreign_key;
+                continue;
+            }
+            if (report.kind == SpawnReport::Kind::Ended) {
+                const auto live = std::find_if(
+                    live_spawns.begin(), live_spawns.end(), [&](const LiveSpawn& entry) {
+                        return entry.key == report.key && entry.entity == report.entity;
+                    });
+                if (live == live_spawns.end()) {
+                    // A launch this pump never adopted (refused on roster grounds, or forgotten by
+                    // a reconnect) still left an entity in the world, and the game hands its
+                    // despawn to whoever listens for reports. Despawn it here, or it outlives its
+                    // flight forever on the server.
+                    ++totals.spawn_end_unknown;
+                    if (world.is_alive(report.entity))
+                        replicator->despawn(report.entity);
+                    continue;
+                }
+                // End the world-stream identity before publication. If the verdict has not
+                // been acknowledged, its Accepted becomes AcceptedEnded, with no stale binding.
+                if (const auto outcome = std::find_if(
+                        pending_outcomes.begin(),
+                        pending_outcomes.end(),
+                        [&](const SpawnOutcome& entry) { return entry.key == report.key; });
+                    outcome != pending_outcomes.end()) {
+                    outcome->kind = SpawnOutcomeKind::AcceptedEnded;
+                    outcome->id = {};
+                    ++totals.spawn_accepted_ended;
+                }
+                replicator->despawn(live->entity);
+                live_spawns.erase(live);
+                ++membership_epoch;
+                ++totals.spawn_epoch_advances;
+                continue;
+            }
+            if (newest_outcome && report.key <= *newest_outcome) {
+                ++totals.spawn_out_of_order;
+                continue;
+            }
+            SpawnOutcome outcome{};
+            outcome.key = report.key;
+            if (report.kind == SpawnReport::Kind::Refused) {
+                outcome.kind = SpawnOutcomeKind::Rejected;
+                outcome.reason = report.reason;
+                ++totals.spawn_rejected;
+            } else {
+                const NetId net_id = replicator->replicate(report.entity);
+                if (net_id == kNullNetId || (net_id.index & kProvisionalIndexBit) != 0) {
+                    if (net_id != kNullNetId)
+                        replicator->despawn(report.entity);
+                    ++totals.spawn_roster_refused;
+                    continue;
+                }
+                outcome.kind = SpawnOutcomeKind::Accepted;
+                outcome.id = {net_id.index, net_id.generation};
+                live_spawns.push_back({report.key, report.entity, outcome.id});
+                ++membership_epoch;
+                ++totals.spawn_epoch_advances;
+                ++totals.spawn_accepted;
+            }
+            newest_outcome = report.key;
+            // The wire has a 16-verdict limit, not the durable store: refusing or forgetting
+            // a game-allowed launch because of transport pressure would lie to the client.
+            pending_outcomes.push_back(outcome);
+        }
     }
 };
 
@@ -451,7 +589,9 @@ NetworkInputServer::bind(const std::string& host,
         error = error_name();
         return nullptr;
     }
-    if (remote_play && (!remote_play->owned_player || !remote_play->prediction_hooks)) {
+    if (remote_play &&
+        (!remote_play->owned_player || !remote_play->prediction_hooks ||
+         (remote_play->spawn_prediction && !remote_play->spawn_prediction->capture_spawned))) {
         error = "remote play profile is incomplete";
         return nullptr;
     }
@@ -477,8 +617,10 @@ NetworkInputServer::on_link(net::Link& link,
                             ecs::World& world,
                             const GameDefinition::RemotePlayProfile* remote_play,
                             std::string& error) {
-    if (remote_play && (!remote_play->owned_player || !remote_play->prediction_hooks ||
-                        !world.is_alive(remote_play->owned_player(world)))) {
+    if (remote_play &&
+        (!remote_play->owned_player || !remote_play->prediction_hooks ||
+         !world.is_alive(remote_play->owned_player(world)) ||
+         (remote_play->spawn_prediction && !remote_play->spawn_prediction->capture_spawned))) {
         error = "remote play profile has no live owned player";
         return nullptr;
     }
@@ -510,7 +652,13 @@ bool NetworkInputServer::last_applied() const noexcept {
     return impl_->last_applied;
 }
 
-void NetworkInputServer::after_tick(std::uint64_t server_tick) {
+std::optional<CommandProvenance> NetworkInputServer::command_provenance() const noexcept {
+    return impl_->selected_provenance;
+}
+
+void NetworkInputServer::after_tick(std::uint64_t server_tick,
+                                    std::span<const SpawnReport> spawns) {
+    impl_->receive_spawns(spawns);
     if (!impl_->admitted || !impl_->schedule)
         return;
     net::Session* session = impl_->driver.session(*impl_->admitted);
@@ -538,12 +686,41 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick) {
         return;
     }
     checkpoint.entities.push_back(PredictedEntityState{id, std::move(state)});
+    SpawnCheckpointExtension extension{};
+    if (impl_->spawn_profile) {
+        extension.acknowledged_through = impl_->acknowledged_through;
+        for (const auto& live : impl_->live_spawns) {
+            const auto spawned_state =
+                impl_->spawn_profile->capture_spawned(impl_->world, live.entity);
+            if (spawned_state.empty()) {
+                ++impl_->totals.checkpoint_capture_refused;
+                return;
+            }
+            checkpoint.entities.push_back({live.id, spawned_state});
+            extension.bindings.push_back({live.key, live.id});
+        }
+        const auto count = std::min(impl_->pending_outcomes.size(), kSpawnExtensionMaxOutcomes);
+        extension.outcomes.assign(impl_->pending_outcomes.begin(),
+                                  impl_->pending_outcomes.begin() + count);
+        impl_->totals.spawn_outcomes_deferred += impl_->pending_outcomes.size() - count;
+    }
     checkpoint.group_state = impl_->hooks.capture_group();
     std::array<std::byte, kCheckpointMaxMessageBytes> checkpoint_bytes{};
-    const auto encoded = encode_owner_checkpoint(checkpoint, checkpoint_bytes);
-    if (!encoded) {
+    std::size_t encoded_size = 0;
+    if (impl_->spawn_profile) {
+        const auto encoded = encode_spawn_checkpoint(checkpoint, extension, checkpoint_bytes);
+        if (!encoded)
+            ++impl_->totals.spawn_extension_refused;
+        else
+            encoded_size = encoded.bytes_written;
+    } else {
+        const auto encoded = encode_owner_checkpoint(checkpoint, checkpoint_bytes);
+        if (encoded)
+            encoded_size = encoded.bytes_written;
+    }
+    if (encoded_size == 0) {
         ++impl_->totals.checkpoint_encode_refused;
-    } else if (!session->send_unreliable(std::span(checkpoint_bytes).first(encoded.bytes_written),
+    } else if (!session->send_unreliable(std::span(checkpoint_bytes).first(encoded_size),
                                          impl_->now,
                                          kRemoteOwnerCheckpointStream)) {
         ++impl_->totals.checkpoint_send_refused;
