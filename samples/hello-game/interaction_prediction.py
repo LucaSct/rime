@@ -75,6 +75,9 @@ KICK_DV = J_MAX / CRATE_MASS                      # 2 m/s
 RAW_BOUND = (V_PUSH_MAX + KICK_DV) * REPLAY_TICKS * DT   # 6.4 m, ADR-0106 §4
 SNAP_DISTANCE, TAU = 1.0, 0.1                     # SmootherParams defaults (the leaf)
 PRESENTED_STEP = SNAP_DISTANCE * (1.0 - math.exp(-DT / TAU))   # 0.1535 m per step, no snap
+# Three buffered commands, as throw_prediction.py: the hosted macOS runner starves a one-command
+# server buffer, and this proof is about the crate, not the jitter buffer.
+INPUT_SLACK = 3
 RESIDUAL = 0.01         # ADR-0106: an undisturbed correction stays under 1 cm
 PLAYER_AGREES = 0.001   # the predicted player's own correction at a checkpoint: <= 1 mm = agreed
 VISIBLE_IMPAIRED = 0.10 # a kick must show > 10 cm when the prediction runs ~10+ ticks ahead
@@ -108,7 +111,8 @@ def run_leg_once(client_extra, impaired, kicks, tape):
     k1, k2 = offset + TAPE_KICK1, offset + TAPE_KICK2
     server = subprocess.Popen(
         [EXE, "dedicated", "--listen", "127.0.0.1:0", "--ticks", str(ticks), "--linger-ms",
-         "1000", *(["--interaction-fault", f"kick@{k1},kick@{k2}"] if kicks else [])],
+         "1000", "--input-slack", str(INPUT_SLACK),
+         *(["--interaction-fault", f"kick@{k1},kick@{k2}"] if kicks else [])],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
     client = None
     try:

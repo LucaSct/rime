@@ -120,6 +120,8 @@ struct LaunchOptions {
     // holds the client's ack, or how long `late-*` withholds the verdict. Required by exactly
     // those three cases, so the proof states the number it derived instead of inheriting one.
     std::uint32_t spawn_fault_ticks = 0;
+    // `dedicated --input-slack N` (1..8): commands buffered before one executes. 0 = unset (1).
+    std::uint32_t input_slack = 0;
     SpawnDebugBreak spawn_debug_break = SpawnDebugBreak::None;
     // m20.6c, all OFF by default. `--interaction-fault kick@T[,kick@T2]` (dedicated): at those
     // server ticks the game applies its declared server-only impulse to the interaction object.

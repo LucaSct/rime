@@ -207,9 +207,10 @@ struct NetworkInputServer::Impl {
          ecs::World& world,
          const GameDefinition::RemotePlayProfile* remote_play,
          SpawnFault fault = SpawnFault::None,
-         std::uint32_t fault_ticks = 0)
+         std::uint32_t fault_ticks = 0,
+         std::uint32_t input_slack = 1)
         : link(std::move(supplied_link)), driver(link, driver_config()), profile(profile),
-          world(world), fault(fault), fault_ticks(fault_ticks),
+          world(world), fault(fault), fault_ticks(fault_ticks), input_slack(input_slack),
           neutral_after_ticks(static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz * 0.1)))) {
         driver.listen();
         schema_hash = input_schema_identity(profile, remote_play);
@@ -396,8 +397,10 @@ struct NetworkInputServer::Impl {
                         // as synthesized by then (measured: retired_without_launch 1), which
                         // would test synthesis, not redundancy. One more buffered command
                         // absorbs exactly that one period; the fault leg alone pays the tick.
-                        schedule.emplace(fault == SpawnFault::LoseOne ? kLoseOneSlack : 1u,
-                                         neutral_after_ticks);
+                        schedule.emplace(
+                            std::max(input_slack,
+                                     fault == SpawnFault::LoseOne ? kLoseOneSlack : 1u),
+                            neutral_after_ticks);
                         ++totals.clients_admitted;
                         event(fmt::format("{{\"event\":\"client_connected\",\"peer\":\"{}:{}\"}}",
                                           session->peer().address_string(),
@@ -493,6 +496,10 @@ struct NetworkInputServer::Impl {
     ecs::World& world;
     SpawnFault fault = SpawnFault::None;
     std::uint32_t fault_ticks = 0;
+    // Commands the server buffers before executing one (InputSchedule's slack). 1 is m20.3's
+    // contract; `--input-slack` raises it for a run whose client cannot keep up with one tick of
+    // slack (a starved CI VM) -- a fixed knob until the buffer adapts on its own.
+    std::uint32_t input_slack = 1;
     std::optional<std::uint32_t> fault_sequence;
     // `duplicate` holds the client's ack for its window, so the verdict rides every checkpoint in
     // it -- a repeated confirmation the client must recognise -- and applies it afterwards.
@@ -707,7 +714,8 @@ NetworkInputServer::bind(const std::string& host,
                          const GameDefinition::RemotePlayProfile* remote_play,
                          std::string& error,
                          SpawnFault fault,
-                         std::uint32_t fault_ticks) {
+                         std::uint32_t fault_ticks,
+                         std::uint32_t input_slack) {
     const auto local = platform::Endpoint::from_string(host, port);
     if (!local) {
         error = "EINVAL";
@@ -729,8 +737,14 @@ NetworkInputServer::bind(const std::string& host,
         error = "owned player is not alive";
         return nullptr;
     }
-    auto impl = std::make_unique<Impl>(
-        ListenerLink{std::move(*socket)}, tick_hz, profile, world, remote_play, fault, fault_ticks);
+    auto impl = std::make_unique<Impl>(ListenerLink{std::move(*socket)},
+                                       tick_hz,
+                                       profile,
+                                       world,
+                                       remote_play,
+                                       fault,
+                                       fault_ticks,
+                                       input_slack);
     if (remote_play &&
         (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
          !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {

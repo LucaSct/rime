@@ -126,6 +126,7 @@ std::string launch_usage(std::string_view program) {
         "stale-restore)\n"
         "  --interaction-trace  connected: list every crate checkpoint correction\n"
         "  --spawn-fault-ticks N  window of duplicate / late-alive / late-ended, in server ticks\n"
+        "  --input-slack N    dedicated: commands buffered before one executes (1..8, default 1)\n"
         "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
@@ -243,6 +244,11 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
                 return fail("--interaction-debug-break needs a known case");
         } else if (arg == "--interaction-trace") {
             result.options.interaction_trace = true;
+        } else if (arg == "--input-slack") {
+            if (!has_value || result.options.input_slack != 0 ||
+                !parse_uint(args[++i], result.options.input_slack) ||
+                result.options.input_slack == 0 || result.options.input_slack > 8)
+                return fail("--input-slack needs an integer 1..8 once");
         } else if (arg == "--spawn-fault-ticks") {
             if (!has_value || result.options.spawn_fault_ticks != 0 ||
                 !parse_uint(args[++i], result.options.spawn_fault_ticks) ||
@@ -641,7 +647,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                                      definition.remote_play ? &*definition.remote_play : nullptr,
                                      report.bind_error,
                                      options.spawn_fault,
-                                     options.spawn_fault_ticks);
+                                     options.spawn_fault_ticks,
+                                     options.input_slack == 0 ? 1u : options.input_slack);
         if (!network) {
             report.bind_failed = report.bind_error.starts_with('E');
             return refuse(report,
