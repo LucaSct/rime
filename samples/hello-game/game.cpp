@@ -390,7 +390,7 @@ void HelloGame::throw_step(app::TickContext& ctx, ReplicatedGameState& replicate
             ctx.command ? replication::SpawnKey{ctx.command->incarnation, ctx.command->sequence, 0}
                         : replication::SpawnKey{};
         std::uint8_t refusal = 0;
-        if (replicated.throw_charges == 0)
+        if (ctx.refuse_spawn || replicated.throw_charges == 0)
             refusal = 1;
         else if (ctx.world.is_alive(projectile_))
             refusal = 3;

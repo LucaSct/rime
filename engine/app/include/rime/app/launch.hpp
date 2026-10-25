@@ -59,6 +59,8 @@ inline constexpr rhi::Extent2D kPlayRenderExtent{1280, 720};
 inline constexpr std::uint16_t kDefaultListenPort = 7463;
 
 enum class LaunchMode : std::uint8_t { Play, Dedicated, Browser, Stream, Host };
+enum class SpawnFault : std::uint8_t { None, Refuse, LoseOne, LoseAll, Duplicate, LateAlive, LateEnded };
+enum class SpawnDebugBreak : std::uint8_t { None, NoLedger, NoAdopt, AuthorityPresentation };
 
 [[nodiscard]] std::string_view to_string(LaunchMode mode) noexcept;
 
@@ -98,6 +100,9 @@ struct LaunchOptions {
     bool no_prediction = false;
     bool input_tape = false;
     bool input_tape_throw = false;
+    SpawnFault spawn_fault = SpawnFault::None;
+    SpawnDebugBreak spawn_debug_break = SpawnDebugBreak::None;
+    std::uint32_t spawn_unresolved_bound = 0;
     std::uint32_t net_delay_ms = 0;
     std::uint32_t net_jitter_ms = 0;
     std::uint32_t net_blackout_ms = 0;
@@ -212,6 +217,11 @@ struct RunReport {
         // SpawnOutcomeAck: applied, and every reason one was refused.
         std::uint64_t spawn_acks_applied = 0, spawn_ack_malformed = 0, spawn_ack_wrong_channel = 0;
         std::uint64_t spawn_ack_wrong_incarnation = 0, spawn_ack_ahead = 0, spawn_ack_stale = 0;
+        // Process-proof faults are after session decoding and inert unless explicitly selected.
+        std::uint64_t spawn_fault_refuse = 0, spawn_fault_lose_one = 0;
+        std::uint64_t spawn_fault_lose_all = 0, spawn_fault_duplicate = 0;
+        std::uint64_t spawn_fault_late_alive = 0, spawn_fault_late_ended = 0;
+        std::uint64_t launch_recovered_by_redundancy = 0;
     } network_input;
 
     bool bind_failed = false;

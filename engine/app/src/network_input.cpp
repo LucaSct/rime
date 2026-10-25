@@ -194,9 +194,10 @@ struct NetworkInputServer::Impl {
          double tick_hz,
          const GameDefinition::NetworkInputProfile& profile,
          ecs::World& world,
-         const GameDefinition::RemotePlayProfile* remote_play)
+         const GameDefinition::RemotePlayProfile* remote_play,
+         SpawnFault fault = SpawnFault::None)
         : link(std::move(supplied_link)), driver(link, driver_config()), profile(profile),
-          world(world),
+          world(world), fault(fault),
           neutral_after_ticks(static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz * 0.1)))) {
         driver.listen();
         schema_hash = input_schema_identity(profile, remote_play);
@@ -369,7 +370,10 @@ struct NetworkInputServer::Impl {
                         }
                         // The leaf's six-tick default is 100 ms only at 60 Hz. Derive the
                         // silence bound from this game's fixed rate before its first command.
-                        schedule.emplace(1, neutral_after_ticks);
+                        // The one-packet loss diagnostic needs the redundant successor to
+                        // arrive before retirement; three accepted commands cover the window.
+                        schedule.emplace(fault == SpawnFault::LoseOne ? 3u : 1u,
+                                         neutral_after_ticks);
                         ++totals.clients_admitted;
                         event(fmt::format("{{\"event\":\"client_connected\",\"peer\":\"{}:{}\"}}",
                                           session->peer().address_string(),
@@ -432,6 +436,24 @@ struct NetworkInputServer::Impl {
                     count_refusal(totals, decoded.refusal);
                     continue;
                 }
+                // Faults cut a decoded command window, after transport and codec admission.
+                if (fault == SpawnFault::LoseOne || fault == SpawnFault::LoseAll) {
+                    for (const auto& command : commands)
+                        if (command.pressed != 0 && !fault_sequence)
+                            fault_sequence = command.sequence;
+                    const bool carries_launch =
+                        fault_sequence && std::any_of(commands.begin(), commands.end(),
+                            [&](const auto& command) { return command.sequence == *fault_sequence; });
+                    const auto result = schedule->result(0);
+                    const bool retired = fault_sequence && result.any_retired &&
+                                         result.retired_through >= *fault_sequence;
+                    if (carries_launch && !retired &&
+                        (fault == SpawnFault::LoseAll || totals.spawn_fault_lose_one == 0)) {
+                        if (fault == SpawnFault::LoseOne) ++totals.spawn_fault_lose_one;
+                        else ++totals.spawn_fault_lose_all;
+                        continue;
+                    }
+                }
                 schedule->offer(commands);
             }
         }
@@ -441,6 +463,12 @@ struct NetworkInputServer::Impl {
     net::NetDriver driver;
     GameDefinition::NetworkInputProfile profile;
     ecs::World& world;
+    SpawnFault fault = SpawnFault::None;
+    std::optional<std::uint32_t> fault_sequence;
+    std::optional<std::uint64_t> fault_launch_tick;
+    std::uint32_t fault_prior_epoch = 0;
+    std::uint64_t current_server_tick = 0;
+    bool selected_refuse = false;
     std::uint64_t schema_hash = 0;
     std::uint32_t neutral_after_ticks = 6;
     std::optional<net::SessionId> admitted;
@@ -473,6 +501,7 @@ struct NetworkInputServer::Impl {
 
     [[nodiscard]] ActionState select_actions() {
         last_applied = false;
+        selected_refuse = false;
         selected_provenance.reset();
         if (!schedule) {
             ++totals.synthesized;
@@ -480,6 +509,15 @@ struct NetworkInputServer::Impl {
         }
         const ScheduledInput selected = schedule->step();
         last_applied = selected.applied;
+        if (fault_sequence && selected.applied &&
+            selected.command.sequence == *fault_sequence &&
+            fault == SpawnFault::LoseOne && totals.spawn_fault_lose_one > 0)
+            ++totals.launch_recovered_by_redundancy;
+        if (fault == SpawnFault::Refuse && selected.applied &&
+            selected.command.pressed != 0 && totals.spawn_fault_refuse == 0) {
+            selected_refuse = true;
+            ++totals.spawn_fault_refuse;
+        }
         if (admitted) {
             if (const auto* session = driver.session(*admitted))
                 selected_provenance = CommandProvenance{
@@ -492,6 +530,10 @@ struct NetworkInputServer::Impl {
         if (!spawn_profile)
             return;
         for (const SpawnReport& report : reports) {
+            if (!fault_launch_tick && report.kind == SpawnReport::Kind::Launched) {
+                fault_launch_tick = current_server_tick;
+                fault_prior_epoch = membership_epoch;
+            }
             if (!admitted) {
                 ++totals.spawn_without_client;
                 continue;
@@ -578,7 +620,8 @@ NetworkInputServer::bind(const std::string& host,
                          const GameDefinition::NetworkInputProfile& profile,
                          ecs::World& world,
                          const GameDefinition::RemotePlayProfile* remote_play,
-                         std::string& error) {
+                         std::string& error,
+                         SpawnFault fault) {
     const auto local = platform::Endpoint::from_string(host, port);
     if (!local) {
         error = "EINVAL";
@@ -600,7 +643,7 @@ NetworkInputServer::bind(const std::string& host,
         return nullptr;
     }
     auto impl = std::make_unique<Impl>(
-        ListenerLink{std::move(*socket)}, tick_hz, profile, world, remote_play);
+        ListenerLink{std::move(*socket)}, tick_hz, profile, world, remote_play, fault);
     if (remote_play &&
         (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
          !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {
@@ -652,12 +695,17 @@ bool NetworkInputServer::last_applied() const noexcept {
     return impl_->last_applied;
 }
 
+bool NetworkInputServer::refuse_spawn() const noexcept {
+    return impl_->selected_refuse;
+}
+
 std::optional<CommandProvenance> NetworkInputServer::command_provenance() const noexcept {
     return impl_->selected_provenance;
 }
 
 void NetworkInputServer::after_tick(std::uint64_t server_tick,
                                     std::span<const SpawnReport> spawns) {
+    impl_->current_server_tick = server_tick;
     impl_->receive_spawns(spawns);
     if (!impl_->admitted || !impl_->schedule)
         return;
@@ -688,8 +736,20 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
     checkpoint.entities.push_back(PredictedEntityState{id, std::move(state)});
     SpawnCheckpointExtension extension{};
     if (impl_->spawn_profile) {
+        // A delayed answer is redacted as a coherent older roster. Publishing the new entity
+        // without its binding would make two visible identities for one key on the client.
+        const bool hide_spawn = impl_->fault_launch_tick &&
+            (impl_->fault == SpawnFault::LateAlive || impl_->fault == SpawnFault::LateEnded) &&
+            server_tick < *impl_->fault_launch_tick +
+                (impl_->fault == SpawnFault::LateAlive ? 10u : 50u);
+        if (hide_spawn) {
+            checkpoint.membership_epoch = impl_->fault_prior_epoch;
+            if (impl_->fault == SpawnFault::LateAlive) ++impl_->totals.spawn_fault_late_alive;
+            else ++impl_->totals.spawn_fault_late_ended;
+        }
         extension.acknowledged_through = impl_->acknowledged_through;
         for (const auto& live : impl_->live_spawns) {
+            if (hide_spawn) continue;
             const auto spawned_state =
                 impl_->spawn_profile->capture_spawned(impl_->world, live.entity);
             if (spawned_state.empty()) {
@@ -699,10 +759,12 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
             checkpoint.entities.push_back({live.id, spawned_state});
             extension.bindings.push_back({live.key, live.id});
         }
-        const auto count = std::min(impl_->pending_outcomes.size(), kSpawnExtensionMaxOutcomes);
-        extension.outcomes.assign(impl_->pending_outcomes.begin(),
-                                  impl_->pending_outcomes.begin() + count);
-        impl_->totals.spawn_outcomes_deferred += impl_->pending_outcomes.size() - count;
+        if (!hide_spawn) {
+            const auto count = std::min(impl_->pending_outcomes.size(), kSpawnExtensionMaxOutcomes);
+            extension.outcomes.assign(impl_->pending_outcomes.begin(),
+                                      impl_->pending_outcomes.begin() + count);
+            impl_->totals.spawn_outcomes_deferred += impl_->pending_outcomes.size() - count;
+        }
     }
     checkpoint.group_state = impl_->hooks.capture_group();
     std::array<std::byte, kCheckpointMaxMessageBytes> checkpoint_bytes{};
@@ -726,6 +788,13 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
         ++impl_->totals.checkpoint_send_refused;
     } else {
         ++impl_->totals.checkpoint_encoded;
+        if (impl_->fault == SpawnFault::Duplicate && impl_->fault_launch_tick &&
+            server_tick >= *impl_->fault_launch_tick &&
+            server_tick < *impl_->fault_launch_tick + 12u) {
+            if (session->send_unreliable(std::span(checkpoint_bytes).first(encoded_size),
+                                         impl_->now, kRemoteOwnerCheckpointStream))
+                ++impl_->totals.spawn_fault_duplicate;
+        }
     }
 }
 

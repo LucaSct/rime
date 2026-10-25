@@ -259,10 +259,16 @@ RunReport run_network_client(const LaunchOptions& options,
     std::optional<GameDefinition::RemotePlayProfile::SpawnPredictionProfile::ClientHooks>
         spawn_hooks;
     std::vector<replication::SpawnBinding> spawn_bindings;
+    std::vector<replication::ProvisionalEntity> detached_guesses;
     std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> live_presentations;
+    std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> launched_presentations;
+    std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> authoritative_ends;
     std::optional<replication::SpawnKey> acknowledged_outcomes;
     std::uint64_t presentation_launch = 0, presentation_end = 0;
-    std::uint64_t presentation_cancelled = 0, live_presentations_max = 0;
+    std::uint64_t presentation_cancelled = 0, presentation_suspended = 0;
+    std::uint64_t live_presentations_max = 0, spawn_response_ticks = 0;
+    std::optional<std::uint64_t> spawn_press_tick;
+    bool spawn_responded = false;
     std::uint64_t spawn_acks_sent = 0, spawn_ack_send_refused = 0;
     // Checkpoints the spawn path could not use: an m20.4-shaped one (no extension, so no verdicts
     // to apply) or one whose roster lacks the mirror's player. Counted, because a client that
@@ -308,11 +314,19 @@ RunReport run_network_client(const LaunchOptions& options,
                 visible.insert(binding.key);
                 ++live_per_key[binding.key];
             }
-        for (const auto& provisional : spawn_reconciler->provisional())
-            if (spawn_hooks->is_live(provisional.id)) {
-                visible.insert(provisional.key);
-                ++live_per_key[provisional.key];
-            }
+        if (!options.no_prediction &&
+            options.spawn_debug_break != SpawnDebugBreak::AuthorityPresentation) {
+            for (const auto& provisional : spawn_reconciler->provisional())
+                if (spawn_hooks->is_live(provisional.id)) {
+                    visible.insert(provisional.key);
+                    ++live_per_key[provisional.key];
+                }
+            for (const auto& detached : detached_guesses)
+                if (spawn_hooks->is_live(detached.id)) {
+                    visible.insert(detached.key);
+                    ++live_per_key[detached.key];
+                }
+        }
         // Count identities per key before the set coalesces them for ledger events. A surviving
         // provisional ghost beside its adopted roster entity must make this diagnostic exceed 1.
         for (const auto& [key, count] : live_per_key) {
@@ -320,23 +334,43 @@ RunReport run_network_client(const LaunchOptions& options,
             live_presentations_max = std::max(live_presentations_max, count);
         }
         for (const auto& key : visible) {
-            if (live_presentations.insert(key).second &&
-                ledger.should_play(key, replication::PresentationEventKind::Launch, 0))
+            live_presentations.insert(key);
+            if ((options.spawn_debug_break == SpawnDebugBreak::NoLedger ||
+                 ledger.should_play(key, replication::PresentationEventKind::Launch, 0))) {
                 ++presentation_launch;
+                launched_presentations.insert(key);
+            }
+            if (spawn_press_tick && !spawn_responded) {
+                spawn_response_ticks = report.ticks + 1 - *spawn_press_tick;
+                spawn_responded = true;
+            }
         }
+        // A still-tracked provisional whose own age reached the game's life limit really ended;
+        // losing the provisional during reconciliation or at a diagnostic budget did not.
+        for (const auto& provisional : spawn_reconciler->provisional())
+            if (!spawn_hooks->is_live(provisional.id))
+                authoritative_ends.insert(provisional.key);
         for (auto it = live_presentations.begin(); it != live_presentations.end();) {
             if (visible.contains(*it)) {
                 ++it;
                 continue;
             }
-            // Local lifetime expiry plays End once; a later authoritative verdict may still
-            // adopt the key, but the exactly-once ledger will not replay its Launch.
-            if (!ledger.cancelled(*it) &&
-                ledger.should_play(*it, replication::PresentationEventKind::End, 0))
-                ++presentation_end;
-            ledger.release(*it);
+            if (!ledger.cancelled(*it) && authoritative_ends.contains(*it) &&
+                launched_presentations.contains(*it)) {
+                if (ledger.should_play(*it, replication::PresentationEventKind::End, 0))
+                    ++presentation_end;
+                ledger.release(*it);
+            } else if (!ledger.cancelled(*it)) {
+                ++presentation_suspended;
+            }
             it = live_presentations.erase(it);
         }
+        // AcceptedEnded can arrive after a local removal, when there is no visible transition.
+        for (const auto& key : authoritative_ends)
+            if (launched_presentations.contains(key) &&
+                !visible.contains(key) && !ledger.cancelled(key) &&
+                ledger.should_play(key, replication::PresentationEventKind::End, 0))
+                ++presentation_end;
     };
 
     const auto apply_pending = [&] {
@@ -360,6 +394,14 @@ RunReport run_network_client(const LaunchOptions& options,
                 const auto result = spawn_reconciler->apply_checkpoint(base, *checkpoint.spawns);
                 if (!result.base.applied)
                     continue;
+                for (const auto& old : spawn_bindings)
+                    if (std::none_of(checkpoint.spawns->bindings.begin(),
+                                     checkpoint.spawns->bindings.end(),
+                                     [&](const auto& binding) { return binding.key == old.key; }))
+                        authoritative_ends.insert(old.key);
+                for (const auto& outcome : checkpoint.spawns->outcomes)
+                    if (outcome.kind == replication::SpawnOutcomeKind::AcceptedEnded)
+                        authoritative_ends.insert(outcome.key);
                 // Bindings are authoritative for this applied roster only; a stale or refused
                 // checkpoint cannot replace the keys used by presentation.
                 spawn_bindings = checkpoint.spawns->bindings;
@@ -513,12 +555,27 @@ RunReport run_network_client(const LaunchOptions& options,
                         [&](const replication::SpawnKey& key, std::span<const std::byte> state) {
                             return spawn_reconciler->spawn_provisional(key, state);
                         });
+                    if (options.spawn_debug_break == SpawnDebugBreak::NoAdopt) {
+                        spawn_hooks->spawn.adopt = [&](auto provisional, auto authoritative) {
+                            // Keep the old entity beside a fresh replica so the live-key gate
+                            // proves that it can see the ghost named by ADR-0105 §5.
+                            for (const auto& guess : spawn_reconciler->provisional())
+                                if (guess.id == provisional)
+                                    detached_guesses.push_back(guess);
+                            spawn_hooks->spawn.create(authoritative);
+                        };
+                    }
+                    replication::SpawnBudget spawn_budget{};
+                    if (options.spawn_unresolved_bound)
+                        spawn_budget.max_unresolved_sequences = options.spawn_unresolved_bound;
                     spawn_reconciler = std::make_unique<replication::SpawnReconciler>(
                         spawn_hooks->prediction,
                         spawn_hooks->spawn,
                         definition.remote_play->fixed_dt,
                         session->incarnation(),
-                        &ledger);
+                        &ledger,
+                        replication::ReconcilerBudget{},
+                        spawn_budget);
                     std::vector<replication::PredictedEntityId> members;
                     for (const auto& member : checkpoint.entities)
                         members.push_back(member.id);
@@ -603,6 +660,8 @@ RunReport run_network_client(const LaunchOptions& options,
             first_input_position = presented_position();
         }
         command.sequence = ++sequence;
+        if (options.input_tape_throw && command.pressed != 0 && !spawn_press_tick)
+            spawn_press_tick = report.ticks + 1;
         window.push(command);
         if (spawn_reconciler) {
             spawn_reconciler->predict(command);
@@ -647,6 +706,7 @@ RunReport run_network_client(const LaunchOptions& options,
         spawn_metrics = fmt::format(
             ",\"prediction_path\":\"spawn\",\"presentation_launch\":{},"
             "\"presentation_end\":{},\"presentation_cancelled\":{},"
+            "\"presentation_suspended\":{},\"spawn_response_ticks\":{},"
             "\"live_presentations_max\":{},\"spawn_acks_sent\":{},"
             "\"spawn_ack_send_refused\":{},\"ledger_played\":{},"
             "\"ledger_duplicates_suppressed\":{},\"ledger_suppressed_cancelled\":{},"
@@ -672,6 +732,9 @@ RunReport run_network_client(const LaunchOptions& options,
             presentation_launch,
             presentation_end,
             presentation_cancelled,
+            presentation_suspended,
+            spawn_responded ? spawn_response_ticks :
+                (spawn_press_tick ? report.ticks - *spawn_press_tick : 0),
             live_presentations_max,
             spawn_acks_sent,
             spawn_ack_send_refused,

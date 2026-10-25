@@ -230,6 +230,8 @@ struct TickContext {
     // the autopilot and offline runs. A game that launches only on `applied` commands when this is
     // set, and freely when it is not, behaves the same alone and authoritative.
     std::optional<CommandProvenance> command;
+    // A decoded-command diagnostic asks the game to refuse this one otherwise valid launch.
+    bool refuse_spawn = false;
     // Where to report keyed spawns this tick; null when nobody is listening (local play, or a game
     // without `SpawnPredictionProfile`). Non-owning; valid for the duration of `fixed_tick`.
     std::vector<SpawnReport>* spawns = nullptr;

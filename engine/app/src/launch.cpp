@@ -116,6 +116,9 @@ std::string launch_usage(std::string_view program) {
         "  --client-port N  connected local UDP port diagnostic\n"
         "  --input-tape  connected fixed input for process diagnostics (no Throw)\n"
         "  --input-tape-throw  same tape, with one Throw on tick 12\n"
+        "  --spawn-fault CASE  dedicated Throw diagnostic (refuse, lose-one, lose-all, duplicate, late-alive, late-ended)\n"
+        "  --spawn-debug-break CASE  connected sensitivity control (no-ledger, no-adopt, authority-presentation)\n"
+        "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
         "  --listen ADDR:PORT  dedicated: bind IPv4 address and port (0 = OS chosen)\n"
@@ -167,6 +170,31 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         } else if (arg == "--input-tape-throw") {
             result.options.input_tape = true;
             result.options.input_tape_throw = true;
+        } else if (arg == "--spawn-fault") {
+            if (!has_value || result.options.spawn_fault != SpawnFault::None)
+                return fail("--spawn-fault needs one case");
+            const auto value = args[++i];
+            if (value == "refuse") result.options.spawn_fault = SpawnFault::Refuse;
+            else if (value == "lose-one") result.options.spawn_fault = SpawnFault::LoseOne;
+            else if (value == "lose-all") result.options.spawn_fault = SpawnFault::LoseAll;
+            else if (value == "duplicate") result.options.spawn_fault = SpawnFault::Duplicate;
+            else if (value == "late-alive") result.options.spawn_fault = SpawnFault::LateAlive;
+            else if (value == "late-ended") result.options.spawn_fault = SpawnFault::LateEnded;
+            else return fail("--spawn-fault needs a known case");
+        } else if (arg == "--spawn-debug-break") {
+            if (!has_value || result.options.spawn_debug_break != SpawnDebugBreak::None)
+                return fail("--spawn-debug-break needs one case");
+            const auto value = args[++i];
+            if (value == "no-ledger") result.options.spawn_debug_break = SpawnDebugBreak::NoLedger;
+            else if (value == "no-adopt") result.options.spawn_debug_break = SpawnDebugBreak::NoAdopt;
+            else if (value == "authority-presentation")
+                result.options.spawn_debug_break = SpawnDebugBreak::AuthorityPresentation;
+            else return fail("--spawn-debug-break needs a known case");
+        } else if (arg == "--spawn-unresolved-bound") {
+            if (!has_value || result.options.spawn_unresolved_bound != 0 ||
+                !parse_uint(args[++i], result.options.spawn_unresolved_bound) ||
+                result.options.spawn_unresolved_bound == 0)
+                return fail("--spawn-unresolved-bound needs a positive integer once");
         } else if (arg == "--snap-bound") {
             if (!has_value || result.options.has_snap_bound)
                 return fail("--snap-bound needs a non-negative finite number once");
@@ -344,6 +372,12 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         (result.options.mode != LaunchMode::Dedicated || result.options.offline)) {
         return fail("--input-trace requires listening dedicated mode");
     }
+    if (result.options.spawn_fault != SpawnFault::None &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline))
+        return fail("--spawn-fault requires listening dedicated mode");
+    if ((result.options.spawn_debug_break != SpawnDebugBreak::None ||
+         result.options.spawn_unresolved_bound != 0) && result.options.connect_host.empty())
+        return fail("spawn client diagnostics require --connect");
     if (!result.options.connect_host.empty() && result.options.mode != LaunchMode::Play)
         return fail("--connect requires play mode");
     if (!result.options.connect_host.empty() &&
@@ -532,7 +566,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                                      *definition.network_input,
                                      app.world(),
                                      definition.remote_play ? &*definition.remote_play : nullptr,
-                                     report.bind_error);
+                                     report.bind_error,
+                                     options.spawn_fault);
         if (!network) {
             report.bind_failed = report.bind_error.starts_with('E');
             return refuse(report,
@@ -610,6 +645,7 @@ RunReport run_game_mode(const LaunchOptions& options,
         if (network) {
             tick.input = network->before_tick(game_ticks);
             tick.command = network->command_provenance();
+            tick.refuse_spawn = network->refuse_spawn();
             // The report list lives through publication, so a keyed launch and its first
             // checkpoint describe the same tick rather than disagreeing for one frame.
             tick.spawns = definition.remote_play && definition.remote_play->spawn_prediction
@@ -715,7 +751,7 @@ RunReport run_game_mode(const LaunchOptions& options,
         if (options.ticks > 0) {
             // Keep the m20.4 event byte-identical for games without the profile. An opted-in
             // server names every refusal and skip beside the existing input counters.
-            const std::string spawn_counters =
+            std::string spawn_counters =
                 definition.remote_play && definition.remote_play->spawn_prediction
                     ? fmt::format(",\"spawn_accepted\":{},\"spawn_rejected\":{},"
                                   "\"spawn_accepted_ended\":{},\"spawn_epoch_advances\":{},"
@@ -746,6 +782,19 @@ RunReport run_game_mode(const LaunchOptions& options,
                                   report.network_input.spawn_ack_ahead,
                                   report.network_input.spawn_ack_stale)
                     : std::string{};
+            if (definition.remote_play && definition.remote_play->spawn_prediction)
+                spawn_counters += fmt::format(
+                    ",\"spawn_fault_refuse\":{},\"spawn_fault_lose_one\":{},"
+                    "\"spawn_fault_lose_all\":{},\"spawn_fault_duplicate\":{},"
+                    "\"spawn_fault_late_alive\":{},\"spawn_fault_late_ended\":{},"
+                    "\"launch_recovered_by_redundancy\":{}",
+                    report.network_input.spawn_fault_refuse,
+                    report.network_input.spawn_fault_lose_one,
+                    report.network_input.spawn_fault_lose_all,
+                    report.network_input.spawn_fault_duplicate,
+                    report.network_input.spawn_fault_late_alive,
+                    report.network_input.spawn_fault_late_ended,
+                    report.network_input.launch_recovered_by_redundancy);
             fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
                        "\"applied\":{},\"synthesized\":{},\"neutralized\":{},"
                        "\"late\":{},\"duplicate\":{},\"future\":{},"

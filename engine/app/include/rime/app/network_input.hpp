@@ -36,7 +36,8 @@ public:
          const GameDefinition::NetworkInputProfile& profile,
          ecs::World& world,
          const GameDefinition::RemotePlayProfile* remote_play,
-         std::string& error);
+         std::string& error,
+         SpawnFault fault = SpawnFault::None);
     // A caller-owned link and clock let deterministic tests drive the exact production pump.
     static std::unique_ptr<NetworkInputServer>
     on_link(net::Link& link,
@@ -51,6 +52,7 @@ public:
     [[nodiscard]] ActionState before_tick(std::uint64_t server_tick);
     [[nodiscard]] ActionState before_tick(std::uint64_t server_tick, std::uint64_t now_ms);
     [[nodiscard]] bool last_applied() const noexcept;
+    [[nodiscard]] bool refuse_spawn() const noexcept;
     [[nodiscard]] std::optional<CommandProvenance> command_provenance() const noexcept;
     void after_tick(std::uint64_t server_tick, std::span<const SpawnReport> spawns = {});
     void linger(std::uint64_t final_tick, std::uint32_t duration_ms);
