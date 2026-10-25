@@ -59,7 +59,15 @@ inline constexpr rhi::Extent2D kPlayRenderExtent{1280, 720};
 inline constexpr std::uint16_t kDefaultListenPort = 7463;
 
 enum class LaunchMode : std::uint8_t { Play, Dedicated, Browser, Stream, Host };
-enum class SpawnFault : std::uint8_t { None, Refuse, LoseOne, LoseAll, Duplicate, LateAlive, LateEnded };
+enum class SpawnFault : std::uint8_t {
+    None,
+    Refuse,
+    LoseOne,
+    LoseAll,
+    Duplicate,
+    LateAlive,
+    LateEnded
+};
 enum class SpawnDebugBreak : std::uint8_t { None, NoLedger, NoAdopt, AuthorityPresentation };
 
 [[nodiscard]] std::string_view to_string(LaunchMode mode) noexcept;

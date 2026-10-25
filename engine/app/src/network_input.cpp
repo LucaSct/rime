@@ -450,15 +450,19 @@ struct NetworkInputServer::Impl {
                         if (command.pressed != 0 && !fault_sequence)
                             fault_sequence = command.sequence;
                     const bool carries_launch =
-                        fault_sequence && std::any_of(commands.begin(), commands.end(),
-                            [&](const auto& command) { return command.sequence == *fault_sequence; });
+                        fault_sequence &&
+                        std::any_of(commands.begin(), commands.end(), [&](const auto& command) {
+                            return command.sequence == *fault_sequence;
+                        });
                     const auto result = schedule->result(0);
                     const bool retired = fault_sequence && result.any_retired &&
                                          result.retired_through >= *fault_sequence;
                     if (carries_launch && !retired &&
                         (fault == SpawnFault::LoseAll || totals.spawn_fault_lose_one == 0)) {
-                        if (fault == SpawnFault::LoseOne) ++totals.spawn_fault_lose_one;
-                        else ++totals.spawn_fault_lose_all;
+                        if (fault == SpawnFault::LoseOne)
+                            ++totals.spawn_fault_lose_one;
+                        else
+                            ++totals.spawn_fault_lose_all;
                         continue;
                     }
                 }
@@ -536,12 +540,11 @@ struct NetworkInputServer::Impl {
         }
         const ScheduledInput selected = schedule->step();
         last_applied = selected.applied;
-        if (fault_sequence && selected.applied &&
-            selected.command.sequence == *fault_sequence &&
+        if (fault_sequence && selected.applied && selected.command.sequence == *fault_sequence &&
             fault == SpawnFault::LoseOne && totals.spawn_fault_lose_one > 0)
             ++totals.launch_recovered_by_redundancy;
-        if (fault == SpawnFault::Refuse && selected.applied &&
-            selected.command.pressed != 0 && totals.spawn_fault_refuse == 0) {
+        if (fault == SpawnFault::Refuse && selected.applied && selected.command.pressed != 0 &&
+            totals.spawn_fault_refuse == 0) {
             selected_refuse = true;
             ++totals.spawn_fault_refuse;
         }
@@ -625,8 +628,7 @@ struct NetworkInputServer::Impl {
                 }
                 outcome.kind = SpawnOutcomeKind::Accepted;
                 outcome.id = {net_id.index, net_id.generation};
-                live_spawns.push_back(
-                    {report.key, report.entity, outcome.id, current_server_tick});
+                live_spawns.push_back({report.key, report.entity, outcome.id, current_server_tick});
                 ++membership_epoch;
                 ++totals.spawn_epoch_advances;
                 ++totals.spawn_accepted;
@@ -774,17 +776,21 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
     if (impl_->spawn_profile) {
         // A delayed answer is redacted as a coherent older roster. Publishing the new entity
         // without its binding would make two visible identities for one key on the client.
-        const bool hide_spawn = impl_->fault_launch_tick &&
+        const bool hide_spawn =
+            impl_->fault_launch_tick &&
             (impl_->fault == SpawnFault::LateAlive || impl_->fault == SpawnFault::LateEnded) &&
             server_tick < *impl_->fault_launch_tick + impl_->fault_ticks;
         if (hide_spawn) {
             checkpoint.membership_epoch = impl_->fault_prior_epoch;
-            if (impl_->fault == SpawnFault::LateAlive) ++impl_->totals.spawn_fault_late_alive;
-            else ++impl_->totals.spawn_fault_late_ended;
+            if (impl_->fault == SpawnFault::LateAlive)
+                ++impl_->totals.spawn_fault_late_alive;
+            else
+                ++impl_->totals.spawn_fault_late_ended;
         }
         extension.acknowledged_through = impl_->acknowledged_through;
         for (const auto& live : impl_->live_spawns) {
-            if (hide_spawn) continue;
+            if (hide_spawn)
+                continue;
             const auto spawned_state =
                 impl_->spawn_profile->capture_spawned(impl_->world, live.entity);
             if (spawned_state.empty()) {
@@ -827,7 +833,8 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
             server_tick >= *impl_->fault_launch_tick &&
             server_tick < *impl_->fault_launch_tick + impl_->fault_ticks) {
             if (session->send_unreliable(std::span(checkpoint_bytes).first(encoded_size),
-                                         impl_->now, kRemoteOwnerCheckpointStream))
+                                         impl_->now,
+                                         kRemoteOwnerCheckpointStream))
                 ++impl_->totals.spawn_fault_duplicate;
         }
     }

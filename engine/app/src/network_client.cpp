@@ -385,8 +385,8 @@ RunReport run_network_client(const LaunchOptions& options,
         }
         // AcceptedEnded can arrive after a local removal, when there is no visible transition.
         for (const auto& key : ended_keys)
-            if (launched_presentations.contains(key) &&
-                !visible.contains(key) && !ledger.cancelled(key) &&
+            if (launched_presentations.contains(key) && !visible.contains(key) &&
+                !ledger.cancelled(key) &&
                 ledger.should_play(key, replication::PresentationEventKind::End, 0))
                 ++presentation_end;
     };
@@ -755,8 +755,8 @@ RunReport run_network_client(const LaunchOptions& options,
             presentation_suspended,
             presentation_resumed,
             lifetime_ends,
-            spawn_responded ? spawn_response_ticks :
-                (spawn_press_tick ? report.ticks - *spawn_press_tick : 0),
+            spawn_responded ? spawn_response_ticks
+                            : (spawn_press_tick ? report.ticks - *spawn_press_tick : 0),
             live_presentations_max,
             spawn_acks_sent,
             spawn_ack_send_refused,
