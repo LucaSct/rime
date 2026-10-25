@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -20,6 +21,7 @@
 #include <vector>
 
 #include "rime/app/application.hpp"
+#include "rime/app/network_client.hpp"
 #include "rime/app/network_input.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/platform/clock.hpp"
@@ -104,6 +106,16 @@ std::string launch_usage(std::string_view program) {
         "  --frames N    play: run N real-clock frames, then stop\n"
         "  --autopilot   drive the game from its built-in autopilot\n"
         "  --headless    play: render off-screen instead of opening a window\n"
+        "  --connect HOST[:PORT]  play on a remote server (default port 7463)\n"
+        "  --no-gpu     connected play without a device or window\n"
+        "  --no-prediction  display the authoritative local player\n"
+        "  --net-impair delay_ms=D,loss=P,jitter_ms=J,seed=S,blackout_ms=B@tick=T\n"
+        "  --snap-bound M  count connected corrections larger than M metres\n"
+        "  --profile-version-override N  connected schema refusal diagnostic\n"
+        "  --fixed-dt-override S  advertise a different connected timestep\n"
+        "  --client-port N  connected local UDP port diagnostic\n"
+        "  --input-tape  connected fixed input for process diagnostics\n"
+        "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
         "  --listen ADDR:PORT  dedicated: bind IPv4 address and port (0 = OS chosen)\n"
         "  --offline    dedicated: run without a network listener\n"
@@ -123,6 +135,7 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
 
     std::size_t i = 0;
     bool port_given = false;
+    bool linger_given = false;
     // The mode word, if any, is FIRST. Positional-first keeps `mygame dedicated --port 7777` and
     // `mygame --port 7777 dedicated` from both being valid spellings of one command, which is how a
     // CLI grows a second, undocumented grammar.
@@ -144,6 +157,105 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             result.options.autopilot = true;
         } else if (arg == "--headless") {
             result.options.headless = true;
+        } else if (arg == "--no-gpu") {
+            result.options.no_gpu = true;
+        } else if (arg == "--no-prediction") {
+            result.options.no_prediction = true;
+        } else if (arg == "--input-tape") {
+            result.options.input_tape = true;
+        } else if (arg == "--snap-bound") {
+            if (!has_value || result.options.has_snap_bound)
+                return fail("--snap-bound needs a non-negative finite number once");
+            const auto value = args[++i];
+            const auto [end, ec] = std::from_chars(
+                value.data(), value.data() + value.size(), result.options.snap_bound);
+            if (ec != std::errc{} || end != value.data() + value.size() ||
+                !std::isfinite(result.options.snap_bound) || result.options.snap_bound < 0)
+                return fail("--snap-bound needs a non-negative finite number");
+            result.options.has_snap_bound = true;
+        } else if (arg == "--profile-version-override") {
+            if (!has_value || result.options.has_profile_version_override ||
+                !parse_uint(args[++i], result.options.profile_version_override))
+                return fail("--profile-version-override needs an integer once");
+            result.options.has_profile_version_override = true;
+        } else if (arg == "--fixed-dt-override") {
+            if (!has_value || result.options.has_fixed_dt_override)
+                return fail("--fixed-dt-override needs a positive finite number once");
+            const auto value = args[++i];
+            const auto [end, ec] = std::from_chars(
+                value.data(), value.data() + value.size(), result.options.fixed_dt_override);
+            if (ec != std::errc{} || end != value.data() + value.size() ||
+                !std::isfinite(result.options.fixed_dt_override) ||
+                result.options.fixed_dt_override <= 0)
+                return fail("--fixed-dt-override needs a positive finite number");
+            result.options.has_fixed_dt_override = true;
+        } else if (arg == "--client-port") {
+            if (!has_value || !parse_uint(args[++i], result.options.client_port) ||
+                result.options.client_port == 0)
+                return fail("--client-port needs a port in 1..65535");
+        } else if (arg == "--linger-ms") {
+            if (!has_value || linger_given || !parse_uint(args[++i], result.options.linger_ms))
+                return fail("--linger-ms needs a non-negative integer");
+            linger_given = true;
+        } else if (arg == "--connect") {
+            if (!has_value || !result.options.connect_host.empty())
+                return fail("--connect needs HOST[:PORT] once");
+            const auto address = args[++i];
+            if (address.starts_with("["))
+                return fail("IPv6 is not supported yet");
+            const auto colon = address.find(':');
+            const auto host = address.substr(0, colon);
+            if (host.empty() ||
+                (colon != std::string_view::npos &&
+                 (address.find(':', colon + 1) != std::string_view::npos ||
+                  !parse_uint(address.substr(colon + 1), result.options.connect_port) ||
+                  result.options.connect_port == 0)))
+                return fail("--connect needs HOST[:PORT] with port 1..65535");
+            result.options.connect_host = host == "localhost" ? "127.0.0.1" : std::string(host);
+            if (!platform::Endpoint::from_string(result.options.connect_host,
+                                                 result.options.connect_port))
+                return fail("--connect needs a numeric IPv4 address or localhost");
+        } else if (arg == "--net-impair") {
+            if (!has_value || result.options.net_impair)
+                return fail("--net-impair may be given once");
+            const auto value = args[++i];
+            bool delay = false, loss = false, seed = false, jitter = false, blackout = false;
+            for (std::size_t start = 0; start < value.size();) {
+                const auto comma = value.find(',', start);
+                const auto part =
+                    value.substr(start, comma == std::string_view::npos ? comma : comma - start);
+                if (part.starts_with("delay_ms=") && !delay)
+                    delay = parse_uint(part.substr(9), result.options.net_delay_ms);
+                else if (part.starts_with("seed=") && !seed)
+                    seed = parse_uint(part.substr(5), result.options.net_seed);
+                else if (part.starts_with("jitter_ms=") && !jitter)
+                    jitter = parse_uint(part.substr(10), result.options.net_jitter_ms);
+                else if (part.starts_with("loss=") && !loss) {
+                    const auto number = part.substr(5);
+                    const auto [end, ec] = std::from_chars(
+                        number.data(), number.data() + number.size(), result.options.net_loss);
+                    loss = ec == std::errc{} && end == number.data() + number.size() &&
+                           std::isfinite(result.options.net_loss) && result.options.net_loss >= 0 &&
+                           result.options.net_loss < 1;
+                } else if (part.starts_with("blackout_ms=") && !blackout) {
+                    const auto at = part.find("@tick=");
+                    blackout =
+                        at != std::string_view::npos &&
+                        parse_uint(part.substr(12, at - 12), result.options.net_blackout_ms) &&
+                        parse_uint(part.substr(at + 6), result.options.net_blackout_tick) &&
+                        result.options.net_blackout_ms > 0;
+                } else {
+                    return fail("invalid --net-impair field");
+                }
+                if (comma == std::string_view::npos)
+                    break;
+                start = comma + 1;
+            }
+            if (!delay || !seed || (value.find("loss=") != std::string_view::npos && !loss) ||
+                (value.find("jitter_ms=") != std::string_view::npos && !jitter) ||
+                (value.find("blackout_ms=") != std::string_view::npos && !blackout))
+                return fail("--net-impair needs delay_ms=D,seed=S and valid optional fields");
+            result.options.net_impair = true;
         } else if (arg == "--ticks") {
             if (!has_value || !parse_uint(args[++i], result.options.ticks) ||
                 result.options.ticks == 0) {
@@ -228,6 +340,20 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         (result.options.mode != LaunchMode::Dedicated || result.options.offline)) {
         return fail("--input-trace requires listening dedicated mode");
     }
+    if (!result.options.connect_host.empty() && result.options.mode != LaunchMode::Play)
+        return fail("--connect requires play mode");
+    if (!result.options.connect_host.empty() &&
+        (result.options.ticks > 0 || port_given || !result.options.content_dir.empty()))
+        return fail("connected play does not use --ticks, --port or --content");
+    if ((result.options.no_gpu || result.options.no_prediction || result.options.input_tape ||
+         result.options.net_impair || result.options.has_snap_bound ||
+         result.options.has_profile_version_override || result.options.has_fixed_dt_override ||
+         result.options.client_port != 0) &&
+        result.options.connect_host.empty())
+        return fail("--no-gpu, --no-prediction and --net-impair require --connect");
+    if (linger_given && (result.options.mode != LaunchMode::Dedicated || result.options.offline ||
+                         result.options.ticks == 0))
+        return fail("--linger-ms requires bounded listening dedicated mode");
     return result;
 }
 
@@ -237,6 +363,8 @@ RunReport run_game_mode(const LaunchOptions& options,
     RunReport report{};
     report.mode = options.mode;
     const bool listening = options.mode == LaunchMode::Dedicated && !options.offline;
+    if (!options.connect_host.empty())
+        return run_network_client(options, definition, hooks);
 
     // ── 1. The modes this build cannot run, refused by name before anything is constructed ──────
     switch (options.mode) {
@@ -341,6 +469,9 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (definition.register_components) {
         definition.register_components(app.world());
     }
+    if (definition.remote_play && definition.remote_play->register_replicated) {
+        definition.remote_play->register_replicated(app.world());
+    }
     if (!entry_scene_path.empty()) {
         const scene::LoadReport loaded = scene::load_scene_file(app.world(), entry_scene_path);
         if (!loaded.ok) {
@@ -374,6 +505,12 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (!game->setup(setup)) {
         return refuse(report, RunStatus::Failed, "the game's setup() refused to start");
     }
+    if (listening && definition.remote_play &&
+        (!definition.remote_play->register_replicated || !definition.remote_play->owned_player ||
+         !definition.remote_play->prediction_hooks || !definition.remote_play->digest ||
+         definition.remote_play->fixed_dt != app.fixed_dt())) {
+        return refuse(report, RunStatus::Failed, "invalid remote play profile or fixed timestep");
+    }
 
     std::unique_ptr<NetworkInputServer> network;
     std::ofstream input_trace;
@@ -384,14 +521,20 @@ RunReport run_game_mode(const LaunchOptions& options,
                 return refuse(report, RunStatus::Failed, "could not open input trace");
             }
         }
-        network = NetworkInputServer::bind(options.listen_host,
-                                           options.port,
-                                           definition.tick_hz,
-                                           *definition.network_input,
-                                           report.bind_error);
+        network =
+            NetworkInputServer::bind(options.listen_host,
+                                     options.port,
+                                     definition.tick_hz,
+                                     *definition.network_input,
+                                     app.world(),
+                                     definition.remote_play ? &*definition.remote_play : nullptr,
+                                     report.bind_error);
         if (!network) {
-            report.bind_failed = true;
-            return refuse(report, RunStatus::Failed, "UDP bind failed: " + report.bind_error);
+            report.bind_failed = report.bind_error.starts_with('E');
+            return refuse(report,
+                          RunStatus::Failed,
+                          (report.bind_failed ? "UDP bind failed: " : "remote play refused: ") +
+                              report.bind_error);
         }
         fmt::print("{{\"event\":\"ready\",\"transport\":\"udp\",\"bind\":\"{}:{}\",\"codec\":2,"
                    "\"auth\":\"none\"}}\n",
@@ -515,6 +658,8 @@ RunReport run_game_mode(const LaunchOptions& options,
             std::this_thread::sleep_until(deadline);
             (void)app.step(app.fixed_dt());
         }
+        if (options.linger_ms > 0 && game_ticks > 0)
+            network->linger(game_ticks - 1, options.linger_ms);
     } else if (options.ticks > 0) {
         // Bounded and deterministic: a frame dt equal to the fixed dt is exactly one tick per step,
         // with no wall clock anywhere — which is what makes two runs (two modes, two thread counts)
@@ -550,7 +695,9 @@ RunReport run_game_mode(const LaunchOptions& options,
     report.frames = app.frame_index();
     report.finished = game_finished;
     report.windowed = app.windowed();
-    report.state_digest = game->state_digest(app.world());
+    report.state_digest = definition.remote_play && definition.remote_play->digest
+                              ? definition.remote_play->digest(app.world())
+                              : game->state_digest(app.world());
     if (network) {
         report.network_input = network->counters();
         if (options.ticks > 0) {
@@ -562,7 +709,16 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"sequence_order\":{},\"hello_malformed\":{},\"hello_version\":{},"
                        "\"hello_schema\":{},\"unadmitted_messages\":{},\"wrong_channel\":{},"
                        "\"oversized\":{},\"clients_admitted\":{},\"clients_refused\":{},"
-                       "\"clients_left\":{},\"amplification_blocked\":{},\"driver_dropped\":{}}}\n",
+                       "\"clients_left\":{},\"refusal_close_deferred\":{},"
+                       "\"amplification_blocked\":{},\"driver_dropped\":{},"
+                       "\"replication_acks\":{},\"replication_ack_refused\":{},"
+                       "\"replication_records_too_large\":{},"
+                       "\"replication_budget_deferred\":{},\"replication_orphans\":{},"
+                       "\"replication_clients_released\":{},"
+                       "\"checkpoint_encoded\":{},\"checkpoint_encode_refused\":{},"
+                       "\"checkpoint_send_refused\":{},\"input_result_send_refused\":{},"
+                       "\"replication_registration_refused\":{},\"publish_missing_session\":{},"
+                       "\"checkpoint_capture_refused\":{}}}\n",
                        report.ticks,
                        report.state_digest,
                        report.network_input.applied,
@@ -587,8 +743,22 @@ RunReport run_game_mode(const LaunchOptions& options,
                        report.network_input.clients_admitted,
                        report.network_input.clients_refused,
                        report.network_input.clients_left,
+                       report.network_input.refusal_close_deferred,
                        report.network_input.amplification_blocked,
-                       report.network_input.driver_dropped);
+                       report.network_input.driver_dropped,
+                       report.network_input.replication_acks,
+                       report.network_input.replication_ack_refused,
+                       report.network_input.replication_records_too_large,
+                       report.network_input.replication_budget_deferred,
+                       report.network_input.replication_orphans,
+                       report.network_input.replication_clients_released,
+                       report.network_input.checkpoint_encoded,
+                       report.network_input.checkpoint_encode_refused,
+                       report.network_input.checkpoint_send_refused,
+                       report.network_input.input_result_send_refused,
+                       report.network_input.replication_registration_refused,
+                       report.network_input.publish_missing_session,
+                       report.network_input.checkpoint_capture_refused);
             std::fflush(stdout);
         }
     }

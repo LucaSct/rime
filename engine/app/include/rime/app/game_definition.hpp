@@ -15,10 +15,12 @@
 #include <vector>
 
 #include "rime/core/jobs/job_system.hpp"
+#include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/platform/event.hpp"
 #include "rime/platform/keyboard.hpp"
 #include "rime/replication/input_v2.hpp"
+#include "rime/replication/prediction.hpp"
 
 // `GameDefinition` — what a GAME supplies to the engine, as opposed to what the engine owns (m20.1,
 // ADR-0056-m20.1).
@@ -233,6 +235,11 @@ public:
 
     [[nodiscard]] virtual ActionState autopilot() const { return {}; }
 
+    // Remote play binds a newly replicated mirror after its initial world is complete. A game
+    // keeps its own entity handles; binding them here lets its normal presentation and autopilot
+    // read that mirror without simulating or duplicating it.
+    [[nodiscard]] virtual bool bind_remote_world(ecs::World&) { return false; }
+
     // A hash of the game's SIMULATED state — what a dedicated server and a player must agree on.
     // Game-defined because only the game knows which state is authoritative (a camera pose is not,
     // a crate's pose is). 0 means "this game supplies none", and a proof that compares digests must
@@ -303,8 +310,40 @@ struct GameDefinition {
 
     std::optional<NetworkInputProfile> network_input;
 
+    // Both worlds register the same reflected component schema before constructing a replicator.
+    // ServerReplicator currently publishes the full reflected registry. A per-profile filter can
+    // follow when a larger game needs it; hello-game's small world does not need one yet.
+    // The hooks bind to one world and one owned entity; the server uses capture for checkpoints,
+    // while the client uses the same contract for prediction and reconciliation.
+    struct RemotePlayProfile {
+        GameComponentRegistrar register_replicated;
+        ecs::Entity (*owned_player)(ecs::World&) = nullptr;
+        replication::PredictionHooks (*prediction_hooks)(ecs::World&, ecs::Entity) = nullptr;
+        double fixed_dt = 0.0;
+        std::uint64_t (*digest)(const ecs::World&) = nullptr;
+        replication::InputCommand (*to_command)(const ActionState&) = nullptr;
+        ecs::Entity (*seed_prediction)(ecs::World&, ecs::World&, ecs::Entity) = nullptr;
+        // The same local pose the renderer presents, queried without a GPU for response and snap
+        // diagnostics. Games may keep controller position outside their transform component.
+        core::Transform (*player_pose)(const ecs::World&, ecs::Entity) = nullptr;
+        // A fixed command tape keeps the process proof independent of replicated-state timing.
+        ActionState (*diagnostic_input_tape)(std::uint64_t) = nullptr;
+    };
+
+    std::optional<RemotePlayProfile> remote_play;
+
     // Make a fresh game. Required.
     std::function<std::unique_ptr<Game>()> create;
 };
+
+// The input identity a client and a server must agree on before any command flows (ADR-0103 §1,
+// ADR-0104). ONE function, used by the server pump and by every client, because the identity was
+// once spelled out in three places and the proof client drifted from the other two the moment
+// the rule changed. A remote-playable game's identity includes its fixed timestep: a client
+// predicting at 1/30 s against a 1/60 s server would replay every command at the wrong dt and
+// read as a stream of corrections, so it is refused at the hello as a schema mismatch instead.
+[[nodiscard]] std::uint64_t
+input_schema_identity(const GameDefinition::NetworkInputProfile& input,
+                      const GameDefinition::RemotePlayProfile* remote_play);
 
 } // namespace rime::app

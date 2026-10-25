@@ -249,6 +249,46 @@ TEST_CASE("launch: dedicated listen grammar and conflicts") {
     CHECK(parse({"play", "--port", "9000"}).status == ParseStatus::Ok);
 }
 
+TEST_CASE("launch: connected play and linger grammar") {
+    const auto connected = parse({"play",
+                                  "--connect",
+                                  "localhost",
+                                  "--no-gpu",
+                                  "--no-prediction",
+                                  "--net-impair",
+                                  "delay_ms=50,loss=0.05,seed=7"});
+    REQUIRE(connected.status == ParseStatus::Ok);
+    CHECK(connected.options.connect_host == "127.0.0.1");
+    CHECK(connected.options.connect_port == kDefaultListenPort);
+    CHECK(connected.options.no_gpu);
+    CHECK(connected.options.no_prediction);
+    CHECK(connected.options.net_delay_ms == 50);
+    CHECK(connected.options.net_loss == doctest::Approx(0.05));
+    CHECK(connected.options.net_seed == 7);
+    const auto explicit_port = parse({"play", "--connect", "127.0.0.1:1234"});
+    REQUIRE(explicit_port.status == ParseStatus::Ok);
+    CHECK(explicit_port.options.connect_port == 1234);
+    const auto linger = parse({"dedicated", "--ticks", "240", "--linger-ms", "1000"});
+    REQUIRE(linger.status == ParseStatus::Ok);
+    CHECK(linger.options.linger_ms == 1000);
+    for (const auto bad :
+         {"", "127.0.0.1:", "127.0.0.1:0", "127.0.0.1:65536", "example.com", "127.0.0.1:3:4"})
+        CHECK(parse({"play", "--connect", bad}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "[::1]:7463"}).error == "IPv6 is not supported yet");
+    CHECK(parse({"dedicated", "--connect", "127.0.0.1"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--ticks", "1"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--port", "7463"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--no-gpu"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--no-prediction"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--net-impair", "delay_ms=1,loss=0,seed=1"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--net-impair", "delay_ms=1,loss=1,seed=1"})
+              .status == ParseStatus::Error);
+    CHECK(parse({"play", "--linger-ms", "0"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--offline", "--ticks", "1", "--linger-ms", "1"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"dedicated", "--linger-ms", "1"}).status == ParseStatus::Error);
+}
+
 TEST_CASE("launch: input trace needs a listening dedicated run") {
     const auto valid =
         parse({"dedicated", "--listen", "127.0.0.1:0", "--input-trace", "trace.txt"});

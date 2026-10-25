@@ -1950,6 +1950,17 @@ acceptance of the captured case, not a claim that all lighting artifacts are gon
 > (sensitivity control). Its negative run gates 13 refusal cases. LAN, unauthenticated; one client;
 > POSIX-only proof (no child-process helper on Windows yet); stale-incarnation case not yet gated.
 > Still not yet: `host`, `play --connect`, snapshot replication to the remote player, authentication.
+>
+> **m20.4 (2026-10-24)** — `play --connect HOST[:PORT]` is a real client ([ADR-0104](adr/0104-m20.4-play-connect-and-the-predicted-set.md)).
+> The server replicates the world (acked-baseline deltas) and sends one owner checkpoint per tick; the
+> client keeps the MIRROR and a separate PREDICTION world, predicts its own player through the game's
+> `RemotePlayProfile` hooks, and reconciles on the checkpoint's `retired_through`. Measured: own-input
+> response 0 ticks with prediction vs 14–15 without (100 ms delay), corrections/replays/reordering
+> observed under loss + jitter with every client digest equal to its server's, `max_snap` 0.133 m
+> against a 4.27 m game-derived bound, reseed after a 3 s blackout, schema/timestep/full/unreachable
+> refusals. Prediction scope is the local player only, behind a predicted-SET contract (m20.5: own
+> weapon + one projectile; m20.6: one bounded interaction group). Damage is never predicted. Not yet:
+> multiple clients, `host`, a process-level stale-incarnation gate, Windows coverage of the proofs.
 
 ### Detail
 

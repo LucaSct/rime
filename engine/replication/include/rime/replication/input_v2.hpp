@@ -103,8 +103,14 @@ struct InputHelloReply {
 
 // FNV-1a 64 over the profile ID's bytes, followed by the version's four LITTLE-ENDIAN bytes.
 // No terminator or length prefix enters the hash, so every platform hashes the same profile.
+// Remote play also hashes the eight little-endian bytes of fixed_dt's double bit pattern: peers
+// that integrate the same commands at different timesteps must refuse before sharing state.
+// The two-argument form stays unchanged for m20.3 profiles without a remote simulation.
 [[nodiscard]] std::uint64_t input_schema_hash(std::string_view profile_id,
                                               std::uint32_t profile_version) noexcept;
+[[nodiscard]] std::uint64_t input_schema_hash(std::string_view profile_id,
+                                              std::uint32_t profile_version,
+                                              double fixed_dt) noexcept;
 
 struct ScheduledInput {
     InputCommand command{};

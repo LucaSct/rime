@@ -294,7 +294,7 @@ struct Client {
         replication::InputHello offer{
             static_cast<std::uint8_t>(min),
             static_cast<std::uint8_t>(max),
-            replication::input_schema_hash(profile.profile_id, profile.profile_version) ^
+            app::input_schema_identity(profile, def.remote_play ? &*def.remote_play : nullptr) ^
                 static_cast<std::uint64_t>(wrong_schema)};
         std::array<std::byte, replication::kInputHelloBytes> bytes{};
         const auto n = replication::encode_input_hello(offer, bytes);

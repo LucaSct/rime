@@ -9,6 +9,8 @@
 
 #include <utility>
 
+#include "rime/replication/input_v2.hpp"
+
 namespace rime::app {
 namespace {
 
@@ -78,6 +80,14 @@ ActionState InputMapper::take() noexcept {
     s.pressed = pressed_;
     pressed_ = 0; // an edge is delivered to exactly one tick
     return s;
+}
+
+std::uint64_t input_schema_identity(const GameDefinition::NetworkInputProfile& input,
+                                    const GameDefinition::RemotePlayProfile* remote_play) {
+    return remote_play != nullptr
+               ? replication::input_schema_hash(
+                     input.profile_id, input.profile_version, remote_play->fixed_dt)
+               : replication::input_schema_hash(input.profile_id, input.profile_version);
 }
 
 } // namespace rime::app
