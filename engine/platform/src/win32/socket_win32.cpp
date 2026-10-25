@@ -23,6 +23,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <afunix.h>
+#include <mstcpip.h> // SIO_UDP_CONNRESET
 // clang-format on
 
 #include <cstdio>  // std::remove (unlink a stale socket file)
@@ -386,6 +387,26 @@ UdpSocket::bind(std::uint16_t port, std::string_view host, bool reuse_address) {
         RIME_WARN("udp bind: FIONBIO: WSA error {}", ::WSAGetLastError());
         ::closesocket(s);
         return std::nullopt;
+    }
+    // Windows turns an ICMP "port unreachable" -- the answer to an earlier send_to a peer that has
+    // gone away -- into a WSAECONNRESET on the NEXT recvfrom, even though UDP has no connection to
+    // reset. recv_from reports that as "nothing waiting", and the link's drain loop stops at the
+    // first nothing, so a server still sending to a departed client would cut its reception short
+    // every tick until that session timed out. POSIX never reports this on an unconnected socket;
+    // SIO_UDP_CONNRESET = FALSE gives Windows the same contract. Best effort: a failure costs only
+    // that stall, so it is logged rather than refusing the bind.
+    BOOL report_connreset = FALSE;
+    DWORD returned = 0;
+    if (::WSAIoctl(s,
+                   SIO_UDP_CONNRESET,
+                   &report_connreset,
+                   sizeof(report_connreset),
+                   nullptr,
+                   0,
+                   &returned,
+                   nullptr,
+                   nullptr) != 0) {
+        RIME_WARN("udp bind: SIO_UDP_CONNRESET: WSA error {}", ::WSAGetLastError());
     }
     return UdpSocket(static_cast<SocketHandle>(s));
 }
