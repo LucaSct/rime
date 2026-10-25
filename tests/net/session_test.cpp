@@ -341,6 +341,31 @@ TEST_CASE("graceful disconnect closes the peer long before its timeout would") {
     CHECK(h.now_ms < closed_at + server_config().timeout_ms); // i.e. not via the timeout backstop
 }
 
+TEST_CASE("a final reliable message survives a disconnect read in the same update") {
+    // The m20.3 refusal shape: the server queues its reason, then disconnects. A client that polls
+    // less often than the server ticks reads both datagrams in one update(); the reply must reach
+    // the game through the Disconnected event rather than die with the reaped session.
+    Harness h;
+    h.server.listen();
+    const auto id = h.client.connect(kServer, h.now_ms);
+    REQUIRE(id.has_value());
+    h.tick(5);
+    REQUIRE(h.server.session_ids().size() == 1);
+    Session* server_side = h.server.session(h.server.session_ids().front());
+    REQUIRE(server_side != nullptr);
+    CHECK(server_side->send_reliable(payload_of("refused: full"), h.now_ms));
+    server_side->disconnect();
+    h.client_events.clear();
+    h.tick(4, /*pump_client=*/false); // the client process is stalled; both datagrams queue up
+    h.tick(1);
+
+    const SessionEvent* bye = first_of(h.client_events, SessionEvent::Kind::Disconnected);
+    REQUIRE(bye != nullptr);
+    CHECK(h.client.session(*id) == nullptr);
+    REQUIRE(bye->undrained.size() == 1);
+    CHECK(bye->undrained.front().bytes == payload_of("refused: full"));
+}
+
 TEST_CASE("garbage from an unknown endpoint allocates nothing and poisons nothing") {
     Harness h;
     h.server.listen();

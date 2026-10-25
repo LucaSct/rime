@@ -459,6 +459,17 @@ app::GameDefinition definition() {
         {platform::Key::D, kAxisMoveX, +1.0f},
     };
     def.input.buttons = {{platform::Key::Escape, kButtonQuit}};
+    // InputCommand's x/y plane becomes this game's x/z plane: W is negative z, D positive x.
+    // Keep held and pressed in the same button positions as the keyboard's Escape binding.
+    def.network_input = app::GameDefinition::NetworkInputProfile{
+        "hello-game.actions", 1, [](const replication::InputCommand& command) -> app::ActionState {
+            app::ActionState state{};
+            state.axes[kAxisMoveX] = command.move_x;
+            state.axes[kAxisMoveZ] = command.move_y;
+            state.held = command.held;
+            state.pressed = command.pressed;
+            return state;
+        }};
     def.create = [] { return std::make_unique<HelloGame>(); };
     // Content (m20.2): the arena is a file, found through the content root — `--content`, else
     // `content/` beside the executable, else (a binary still in its build directory) the source

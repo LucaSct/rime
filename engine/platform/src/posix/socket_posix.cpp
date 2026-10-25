@@ -313,7 +313,8 @@ void LocalListener::close() noexcept {
 // SOCK_DGRAM: connectionless, message-oriented. The one behavioural difference from the TCP
 // backend is non-blocking receive — the game loop polls per tick and must never stall — set once
 // at bind with O_NONBLOCK. SIGPIPE does not exist for unconnected UDP sends, so no suppression.
-std::optional<UdpSocket> UdpSocket::bind(std::uint16_t port, std::string_view host) {
+std::optional<UdpSocket>
+UdpSocket::bind(std::uint16_t port, std::string_view host, bool reuse_address) {
     addrinfo hints{};
     hints.ai_family = AF_INET; // v1 is IPv4-only (see socket.hpp's Endpoint note)
     hints.ai_socktype = SOCK_DGRAM;
@@ -329,23 +330,30 @@ std::optional<UdpSocket> UdpSocket::bind(std::uint16_t port, std::string_view ho
     }
 
     int fd = -1;
+    // Kept across close()/logging so a caller naming the failure reads the bind's own errno (see
+    // the Win32 twin for the CI failure that made this explicit).
+    int bind_error = 0;
     for (addrinfo* ai = results; ai != nullptr; ai = ai->ai_next) {
         fd = ::socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (fd < 0) {
             continue;
         }
-        const int yes = 1;
-        ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        if (reuse_address) {
+            const int yes = 1;
+            ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+        }
         if (::bind(fd, ai->ai_addr, ai->ai_addrlen) == 0) {
             break;
         }
+        bind_error = errno; // read NOW, before close() and the logger can touch errno
         ::close(fd);
         fd = -1;
     }
     ::freeaddrinfo(results);
 
     if (fd < 0) {
-        RIME_WARN("udp bind {}:{}: {}", host, port, std::strerror(errno));
+        RIME_WARN("udp bind {}:{}: {}", host, port, std::strerror(bind_error));
+        errno = bind_error; // the contract (as on Win32): on failure, errno is the bind's error
         return std::nullopt;
     }
     // Non-blocking from birth: recv_from polls and returns nullopt when nothing waits.

@@ -95,6 +95,7 @@ EngineRun run_through_engine(app::LaunchMode mode,
                              std::function<std::unique_ptr<rhi::Device>()> factory = {}) {
     app::LaunchOptions options{};
     options.mode = mode;
+    options.offline = mode == app::LaunchMode::Dedicated;
     options.ticks = ticks;
     options.workers = workers;
     options.autopilot = true;

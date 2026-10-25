@@ -266,10 +266,11 @@ class UdpSocket {
 public:
     // Bind host:port for receiving. `host` defaults to loopback; pass "0.0.0.0" to receive on
     // every interface (a dedicated server). A `port` of 0 asks the OS for an ephemeral port, read
-    // back with local_port() — how tests avoid racing a hard-coded port. SO_REUSEADDR is set so a
-    // quick restart isn't blocked. Returns nullopt on failure (logged).
-    [[nodiscard]] static std::optional<UdpSocket> bind(std::uint16_t port,
-                                                       std::string_view host = "127.0.0.1");
+    // back with local_port() — how tests avoid racing a hard-coded port. Existing callers keep
+    // SO_REUSEADDR; a dedicated listener disables it so a second bind cannot share its port.
+    // Returns nullopt on failure (logged).
+    [[nodiscard]] static std::optional<UdpSocket>
+    bind(std::uint16_t port, std::string_view host = "127.0.0.1", bool reuse_address = true);
 
     UdpSocket() = default;
     ~UdpSocket();

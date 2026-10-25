@@ -45,7 +45,8 @@ rime_install_module(rime_app)
 add_library(rime_app_game STATIC
     src/content_root.cpp
     src/game_definition.cpp
-    src/launch.cpp)
+    src/launch.cpp
+    src/network_input.cpp)
 add_library(rime::app_game ALIAS rime_app_game)
 
 target_include_directories(rime_app_game
@@ -53,8 +54,8 @@ target_include_directories(rime_app_game
            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
 target_link_libraries(rime_app_game
-    PUBLIC rime::app rime::ecs rime::platform rime::render
-    PRIVATE rime::scene rime::rhi rime::core fmt::fmt)
+    PUBLIC rime::app rime::ecs rime::platform rime::render rime::replication
+    PRIVATE rime::scene rime::rhi rime::core rime::net fmt::fmt)
 
 rime_apply_common_target_options(rime_app_game)
 rime_install_module(rime_app_game)

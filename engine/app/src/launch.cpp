@@ -10,15 +10,20 @@
 
 #include <fmt/core.h>
 
+#include <cerrno>
 #include <charconv>
 #include <chrono>
+#include <fstream>
+#include <iomanip>
 #include <limits>
 #include <thread>
 #include <vector>
 
 #include "rime/app/application.hpp"
+#include "rime/app/network_input.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/platform/clock.hpp"
+#include "rime/platform/socket.hpp"
 #include "rime/render/material.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
@@ -90,18 +95,21 @@ std::string launch_usage(std::string_view program) {
     return fmt::format(
         "usage: {} [play | dedicated | browser | stream | host] [options]\n"
         "  play        play locally (the default): a window, or off-screen with --headless\n"
-        "  dedicated   a headless server: no window, no GPU device, no Vulkan loaded\n"
+        "  dedicated   a UDP server by default: no window, no GPU device\n"
         "  browser     host for a browser          (not yet implemented)\n"
         "  stream      a CLI streaming server      (not yet implemented)\n"
         "  host        host a multiplayer session  (not yet implemented)\n"
         "options:\n"
-        "  --ticks N     run exactly N fixed ticks, deterministically, then stop\n"
+        "  --ticks N     bound the run to N fixed ticks\n"
         "  --frames N    play: run N real-clock frames, then stop\n"
         "  --autopilot   drive the game from its built-in autopilot\n"
         "  --headless    play: render off-screen instead of opening a window\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
-        "  --port N      the port a listening mode binds\n"
-        "  --content DIR the game's content root (default: content/ beside this executable)\n",
+        "  --listen ADDR:PORT  dedicated: bind IPv4 address and port (0 = OS chosen)\n"
+        "  --offline    dedicated: run without a network listener\n"
+        "  --port N     dedicated: shorthand for --listen 0.0.0.0:N\n"
+        "  --content DIR the game's content root (default: content/ beside this executable)\n"
+        "  --input-trace PATH  listening dedicated: record the action used each tick\n",
         program);
 }
 
@@ -114,6 +122,7 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
     };
 
     std::size_t i = 0;
+    bool port_given = false;
     // The mode word, if any, is FIRST. Positional-first keeps `mygame dedicated --port 7777` and
     // `mygame --port 7777 dedicated` from both being valid spellings of one command, which is how a
     // CLI grows a second, undocumented grammar.
@@ -156,11 +165,44 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
                 return fail("--content needs a directory");
             }
             result.options.content_dir = std::string{args[++i]};
-        } else if (arg == "--port") {
-            if (!has_value || !parse_uint(args[++i], result.options.port) ||
-                result.options.port == 0) {
-                return fail("--port needs an integer in 1..65535");
+        } else if (arg == "--input-trace") {
+            if (!has_value || args[i + 1].empty()) {
+                return fail("--input-trace needs a path");
             }
+            result.options.input_trace = std::string{args[++i]};
+        } else if (arg == "--port") {
+            if (!has_value || !parse_uint(args[++i], result.options.port)) {
+                return fail("--port needs an integer in 0..65535");
+            }
+            port_given = true;
+        } else if (arg == "--listen") {
+            if (!has_value) {
+                return fail("--listen needs ADDR:PORT");
+            }
+            const std::string_view address = args[++i];
+            if (address.starts_with("[")) {
+                const std::size_t close = address.find(']');
+                std::uint16_t parsed_port = 0;
+                if (close == std::string_view::npos || close == 1 || close + 1 >= address.size() ||
+                    address[close + 1] != ':' ||
+                    !parse_uint(address.substr(close + 2), parsed_port)) {
+                    return fail("--listen needs ADDR:PORT");
+                }
+                return fail("IPv6 is not supported yet");
+            }
+            const std::size_t colon = address.rfind(':');
+            if (colon == std::string_view::npos || colon == 0 ||
+                address.substr(0, colon).find(':') != std::string_view::npos ||
+                !parse_uint(address.substr(colon + 1), result.options.port)) {
+                return fail("--listen needs ADDR:PORT");
+            }
+            result.options.listen_host = std::string(address.substr(0, colon));
+            if (!platform::Endpoint::from_string(result.options.listen_host, result.options.port)) {
+                return fail("--listen needs a numeric IPv4 ADDR:PORT");
+            }
+            result.options.explicit_listen = true;
+        } else if (arg == "--offline") {
+            result.options.offline = true;
         } else {
             return fail(fmt::format("unknown argument '{}'", arg));
         }
@@ -172,6 +214,20 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
     if (result.options.mode == LaunchMode::Dedicated && result.options.frames > 0) {
         return fail("dedicated renders no frames; bound it with --ticks instead");
     }
+    if (result.options.explicit_listen && port_given) {
+        return fail("--listen and --port cannot be combined");
+    }
+    if (result.options.offline && (result.options.explicit_listen || port_given)) {
+        return fail("--offline cannot be combined with --listen or --port");
+    }
+    if (result.options.mode != LaunchMode::Dedicated &&
+        (result.options.offline || result.options.explicit_listen)) {
+        return fail("--listen and --offline require dedicated mode");
+    }
+    if (!result.options.input_trace.empty() &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline)) {
+        return fail("--input-trace requires listening dedicated mode");
+    }
     return result;
 }
 
@@ -180,6 +236,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                         const RunHooks& hooks) {
     RunReport report{};
     report.mode = options.mode;
+    const bool listening = options.mode == LaunchMode::Dedicated && !options.offline;
 
     // ── 1. The modes this build cannot run, refused by name before anything is constructed ──────
     switch (options.mode) {
@@ -208,6 +265,16 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (!definition.create) {
         return refuse(report, RunStatus::Failed, "the GameDefinition has no create() factory");
     }
+    if (listening && (!definition.network_input || !definition.network_input->to_actions ||
+                      definition.network_input->profile_id.empty())) {
+        report.usage_error = true;
+        return refuse(
+            report, RunStatus::Failed, "this game has no network input profile; use --offline");
+    }
+    if (!options.input_trace.empty() && !listening) {
+        report.usage_error = true;
+        return refuse(report, RunStatus::Failed, "--input-trace requires listening dedicated mode");
+    }
 
     // ── 1b. The content root, before anything is constructed (m20.2) ─────────────────────────────
     //
@@ -231,7 +298,8 @@ RunReport run_game_mode(const LaunchOptions& options,
             return refuse(report, RunStatus::Failed, describe_content_failure(report.content));
         }
         if (hooks.log_content_root) {
-            fmt::print("{}: content root {} ({})\n",
+            fmt::print(listening ? stderr : stdout,
+                       "{}: content root {} ({})\n",
                        definition.name,
                        report.content.dir.string(),
                        report.content.why);
@@ -307,6 +375,36 @@ RunReport run_game_mode(const LaunchOptions& options,
         return refuse(report, RunStatus::Failed, "the game's setup() refused to start");
     }
 
+    std::unique_ptr<NetworkInputServer> network;
+    std::ofstream input_trace;
+    if (listening) {
+        if (!options.input_trace.empty()) {
+            input_trace.open(options.input_trace, std::ios::out | std::ios::trunc);
+            if (!input_trace) {
+                return refuse(report, RunStatus::Failed, "could not open input trace");
+            }
+        }
+        network = NetworkInputServer::bind(options.listen_host,
+                                           options.port,
+                                           definition.tick_hz,
+                                           *definition.network_input,
+                                           report.bind_error);
+        if (!network) {
+            report.bind_failed = true;
+            return refuse(report, RunStatus::Failed, "UDP bind failed: " + report.bind_error);
+        }
+        fmt::print("{{\"event\":\"ready\",\"transport\":\"udp\",\"bind\":\"{}:{}\",\"codec\":2,"
+                   "\"auth\":\"none\"}}\n",
+                   options.listen_host,
+                   network->local_port());
+        std::fflush(stdout);
+        fmt::print(stderr,
+                   "{}: unauthenticated server reachable on {}:{}\n",
+                   definition.name,
+                   options.listen_host,
+                   network->local_port());
+    }
+
     // ── 4. Presentation — only where a device exists ───────────────────────────────────────────
     //
     // Declared after the game so they are destroyed before it, and after the Application's device
@@ -328,9 +426,8 @@ RunReport run_game_mode(const LaunchOptions& options,
 
     // ── 5. Input ────────────────────────────────────────────────────────────────────────────────
     //
-    // Exactly one source per run. The keyboard exists only in `play`; `dedicated` has no local
-    // player, so without --autopilot its game receives an empty ActionState every tick — which is
-    // what a server with no clients connected is. (Network input is the host/dedicated brick.)
+    // Exactly one source per tick. A listening dedicated run first pumps its admitted client;
+    // without one, the schedule supplies a neutral stand-in for that tick.
     InputMapper mapper(definition.input);
     report.rejected_bindings = mapper.rejected_bindings();
     const bool keyboard = options.mode == LaunchMode::Play && !options.autopilot;
@@ -362,7 +459,24 @@ RunReport run_game_mode(const LaunchOptions& options,
         tick.input = options.autopilot ? game->autopilot()
                      : keyboard        ? mapper.take()
                                        : ActionState{};
+        if (network) {
+            tick.input = network->before_tick(game_ticks);
+            if (input_trace) {
+                // One line per committed tick: tick, applied(1)/synthesized(0), four axes,
+                // held and pressed. max_digits10 preserves the exact float for replay.
+                input_trace << game_ticks << ' ' << (network->last_applied() ? 1 : 0);
+                for (float axis : tick.input.axes) {
+                    input_trace << ' '
+                                << std::setprecision(std::numeric_limits<float>::max_digits10)
+                                << axis;
+                }
+                input_trace << ' ' << tick.input.held << ' ' << tick.input.pressed << '\n';
+            }
+        }
         game->fixed_tick(tick);
+        if (network) {
+            network->after_tick(game_ticks);
+        }
         ++game_ticks;
         if (game->finished()) {
             game_finished = true;
@@ -391,7 +505,17 @@ RunReport run_game_mode(const LaunchOptions& options,
     }
 
     // ── 8. Drive it ─────────────────────────────────────────────────────────────────────────────
-    if (options.ticks > 0) {
+    if (listening) {
+        // A bounded listener still waits for real tick deadlines: racing a 30-tick test through
+        // setup would give a client no opportunity to send even one command.
+        const auto period = std::chrono::duration<double>(app.fixed_dt());
+        auto deadline = std::chrono::steady_clock::now();
+        while (!app.quit_requested() && (options.ticks == 0 || game_ticks < options.ticks)) {
+            deadline += std::chrono::duration_cast<std::chrono::steady_clock::duration>(period);
+            std::this_thread::sleep_until(deadline);
+            (void)app.step(app.fixed_dt());
+        }
+    } else if (options.ticks > 0) {
         // Bounded and deterministic: a frame dt equal to the fixed dt is exactly one tick per step,
         // with no wall clock anywhere — which is what makes two runs (two modes, two thread counts)
         // comparable tick for tick.
@@ -427,6 +551,47 @@ RunReport run_game_mode(const LaunchOptions& options,
     report.finished = game_finished;
     report.windowed = app.windowed();
     report.state_digest = game->state_digest(app.world());
+    if (network) {
+        report.network_input = network->counters();
+        if (options.ticks > 0) {
+            fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
+                       "\"applied\":{},\"synthesized\":{},\"neutralized\":{},"
+                       "\"late\":{},\"duplicate\":{},\"future\":{},"
+                       "\"truncated\":{},\"bad_length\":{},\"bad_count\":{},"
+                       "\"unknown_codec\":{},\"reserved_nonzero\":{},\"non_finite\":{},"
+                       "\"sequence_order\":{},\"hello_malformed\":{},\"hello_version\":{},"
+                       "\"hello_schema\":{},\"unadmitted_messages\":{},\"wrong_channel\":{},"
+                       "\"oversized\":{},\"clients_admitted\":{},\"clients_refused\":{},"
+                       "\"clients_left\":{},\"amplification_blocked\":{},\"driver_dropped\":{}}}\n",
+                       report.ticks,
+                       report.state_digest,
+                       report.network_input.applied,
+                       report.network_input.synthesized,
+                       report.network_input.neutralized,
+                       report.network_input.late,
+                       report.network_input.duplicate,
+                       report.network_input.future,
+                       report.network_input.truncated,
+                       report.network_input.bad_length,
+                       report.network_input.bad_count,
+                       report.network_input.unknown_codec,
+                       report.network_input.reserved_nonzero,
+                       report.network_input.non_finite,
+                       report.network_input.sequence_order,
+                       report.network_input.hello_malformed,
+                       report.network_input.hello_version,
+                       report.network_input.hello_schema,
+                       report.network_input.unadmitted_messages,
+                       report.network_input.wrong_channel,
+                       report.network_input.oversized,
+                       report.network_input.clients_admitted,
+                       report.network_input.clients_refused,
+                       report.network_input.clients_left,
+                       report.network_input.amplification_blocked,
+                       report.network_input.driver_dropped);
+            std::fflush(stdout);
+        }
+    }
     if (hooks.on_finished) {
         hooks.on_finished(app, *game, last_frame);
     }
@@ -457,14 +622,22 @@ int run_game(int argc, char** argv, const GameDefinition& definition) {
             fmt::print(stderr, "{}: {}\n", definition.name, r.message);
             return kExitNotYet;
         case RunStatus::Failed:
+            if (r.bind_failed) {
+                fmt::print("{{\"event\":\"bind_failed\",\"bind\":\"{}:{}\",\"error\":\"{}\"}}\n",
+                           parsed.options.listen_host,
+                           parsed.options.port,
+                           r.bind_error);
+                std::fflush(stdout);
+            }
             fmt::print(stderr, "{}: {}\n", definition.name, r.message);
-            return kExitFailed;
+            return r.usage_error ? kExitUsage : kExitFailed;
         case RunStatus::Ok:
             break;
     }
     // One line an operator can grep and a script can compare. The digest is printed in every mode
     // so "does my dedicated server agree with my client" is answerable from two log lines.
-    fmt::print("{}: {} — {} ticks, {} frames, device {}, digest {:016x}{}\n",
+    fmt::print(r.mode == LaunchMode::Dedicated && !parsed.options.offline ? stderr : stdout,
+               "{}: {} — {} ticks, {} frames, device {}, digest {:016x}{}\n",
                definition.name,
                to_string(r.mode),
                r.ticks,

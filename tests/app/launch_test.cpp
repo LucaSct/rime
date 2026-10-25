@@ -15,6 +15,7 @@
 
 #include <array>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <memory>
 #include <string>
@@ -26,6 +27,8 @@
 #include "rime/ecs/query.hpp"
 #include "rime/ecs/reflect.hpp"
 #include "rime/ecs/transform.hpp"
+#include "rime/net/net_driver.hpp"
+#include "rime/platform/socket.hpp"
 #include "rime/rhi/device.hpp"
 #include "rime/scene/scene_format.hpp"
 #include "support/temp_path.hpp"
@@ -135,6 +138,7 @@ LaunchOptions bounded(LaunchMode mode, std::uint64_t ticks) {
     o.ticks = ticks;
     o.workers = 1;
     o.headless = true;
+    o.offline = mode == LaunchMode::Dedicated;
     return o;
 }
 
@@ -186,7 +190,7 @@ TEST_CASE("launch: options parse, and malformed numbers are refused rather than 
     CHECK(parse({"--ticks", "12x"}).status == ParseStatus::Error);
     CHECK(parse({"--ticks", "0"}).status == ParseStatus::Error);
     CHECK(parse({"--ticks"}).status == ParseStatus::Error);
-    CHECK(parse({"--port", "0"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--port", "0"}).status == ParseStatus::Ok);
     CHECK(parse({"--port", "65536"}).status == ParseStatus::Error);
     CHECK(parse({"--frames", "-1"}).status == ParseStatus::Error);
     CHECK(parse({"--bogus"}).status == ParseStatus::Error);
@@ -203,6 +207,82 @@ TEST_CASE("launch: the mode word must come first, and nonsense combinations are 
     // Dedicated renders nothing, so a frame bound is a request it cannot honour.
     CHECK(parse({"dedicated", "--frames", "8"}).status == ParseStatus::Error);
     CHECK(parse({"play", "--frames", "8"}).status == ParseStatus::Ok);
+}
+
+TEST_CASE("launch: dedicated listen grammar and conflicts") {
+    const auto defaults = parse({"dedicated"});
+    REQUIRE(defaults.status == ParseStatus::Ok);
+    CHECK(defaults.options.listen_host == "0.0.0.0");
+    CHECK(defaults.options.port == kDefaultListenPort);
+    CHECK_FALSE(defaults.options.offline);
+    CHECK_FALSE(defaults.options.explicit_listen);
+
+    const auto listen = parse({"dedicated", "--listen", "127.0.0.1:0"});
+    REQUIRE(listen.status == ParseStatus::Ok);
+    CHECK(listen.options.listen_host == "127.0.0.1");
+    CHECK(listen.options.port == 0);
+    CHECK(listen.options.explicit_listen);
+    const auto port = parse({"dedicated", "--port", "9000"});
+    REQUIRE(port.status == ParseStatus::Ok);
+    CHECK(port.options.listen_host == "0.0.0.0");
+    CHECK(port.options.port == 9000);
+    const auto shorthand = parse({"dedicated", "--listen", "0.0.0.0:9000"});
+    REQUIRE(shorthand.status == ParseStatus::Ok);
+    CHECK(port.options.listen_host == shorthand.options.listen_host);
+    CHECK(port.options.port == shorthand.options.port);
+    CHECK(parse({"dedicated", "--offline"}).options.offline);
+
+    CHECK(parse({"dedicated", "--listen", "127.0.0.1:1", "--port", "2"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"dedicated", "--offline", "--port", "2"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--offline", "--listen", "127.0.0.1:2"}).status ==
+          ParseStatus::Error);
+    for (const auto malformed : {"127.0.0.1", "127.0.0.1:", ":7463", "127.0.0.1:65536"}) {
+        CHECK(parse({"dedicated", "--listen", malformed}).status == ParseStatus::Error);
+    }
+    const auto ipv6 = parse({"dedicated", "--listen", "[::]:7463"});
+    CHECK(ipv6.status == ParseStatus::Error);
+    CHECK(ipv6.error == "IPv6 is not supported yet");
+    CHECK(parse({"play", "--listen", "127.0.0.1:1"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--offline"}).status == ParseStatus::Error);
+    // play still parses --port, even though only dedicated uses it in this brick.
+    CHECK(parse({"play", "--port", "9000"}).status == ParseStatus::Ok);
+}
+
+TEST_CASE("launch: input trace needs a listening dedicated run") {
+    const auto valid =
+        parse({"dedicated", "--listen", "127.0.0.1:0", "--input-trace", "trace.txt"});
+    REQUIRE(valid.status == ParseStatus::Ok);
+    CHECK(valid.options.input_trace == "trace.txt");
+    CHECK(parse({"dedicated", "--input-trace"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--input-trace", ""}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--offline", "--input-trace", "trace.txt"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"play", "--input-trace", "trace.txt"}).status == ParseStatus::Error);
+}
+
+TEST_CASE("socket: no-reuse UDP binding refuses a second owner of the port") {
+    auto first = platform::UdpSocket::bind(0, "127.0.0.1", false);
+    REQUIRE(first.has_value());
+    REQUIRE(first->local_port() != 0);
+    auto second = platform::UdpSocket::bind(first->local_port(), "127.0.0.1", false);
+    CHECK_FALSE(second.has_value());
+}
+
+TEST_CASE("launch: measure unadmitted handshake datagram sizes") {
+    net::ConnectRequest request{};
+    net::ConnectReject reject{};
+    net::ConnectAccept accept{};
+    const auto request_bytes = net::encode_connect_request(request).size() + 4;
+    const auto reject_bytes = net::encode_connect_reject(reject).size() + 4;
+    const auto accept_bytes = net::encode_connect_accept(accept).size() + 4;
+    std::printf("unadmitted datagram bytes: request=%zu reject=%zu accept=%zu\n",
+                request_bytes,
+                reject_bytes,
+                accept_bytes);
+    CHECK(request_bytes > 0);
+    CHECK(reject_bytes > 0);
+    CHECK(accept_bytes > 0);
 }
 
 TEST_CASE("launch: only dedicated is device-free by definition") {
@@ -247,7 +327,9 @@ TEST_CASE("launch: run_game maps outcomes to distinct exit codes") {
     CHECK(run({"stream"}) == kExitNotYet);
     CHECK(run({"host"}) == kExitNotYet);
     CHECK(run({"warp"}) == kExitUsage);
-    CHECK(run({"dedicated", "--ticks", "3", "--autopilot", "--workers", "1"}) == kExitOk);
+    CHECK(run({"dedicated", "--ticks", "1"}) == kExitUsage);
+    CHECK(run({"dedicated", "--offline", "--ticks", "3", "--autopilot", "--workers", "1"}) ==
+          kExitOk);
     CHECK(seen.ticks == 3);
 }
 

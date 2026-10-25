@@ -138,13 +138,13 @@ echo "  not hidden: /usr/lib system libraries (libc, libstdc++, X11/Wayland clie
 # ── 2-4. In-tree vs bundle, dedicated ─────────────────────────────────────────────────────────
 for ticks in 120 2000; do
     step "dedicated --ticks $ticks --autopilot: in-tree vs bundle-in-sandbox"
-    ref_out="$("$intree" dedicated --ticks "$ticks" --autopilot 2>&1)" || bad "in-tree run exited $?"
+    ref_out="$("$intree" dedicated --offline --ticks "$ticks" --autopilot 2>&1)" || bad "in-tree run exited $?"
     echo "$ref_out" | sed 's/^/  in-tree | /'
     grep -q "content root .*in-tree fallback" <<<"$ref_out" && ok "in-tree run used the in-tree fallback" \
         || bad "in-tree run did not say it used the in-tree fallback"
 
     set +e
-    bun_out="$(in_sandbox "$sandbox_game" dedicated --ticks "$ticks" --autopilot 2>&1)"; rc=$?
+    bun_out="$(in_sandbox "$sandbox_game" dedicated --offline --ticks "$ticks" --autopilot 2>&1)"; rc=$?
     set -e
     echo "$bun_out" | sed 's/^/  bundle  | /'
     [ "$rc" -eq 0 ] && ok "bundle dedicated exited 0" || bad "bundle dedicated exited $rc"
@@ -179,9 +179,9 @@ for where in sandbox host; do
     expected_content="$bundle/content"
     if [ "$where" = sandbox ]; then
         expected_content="$sandbox_bundle/content"
-        f1_out="$(in_sandbox "$sandbox_game" dedicated --ticks 120 --autopilot 2>&1)"; rc=$?
+        f1_out="$(in_sandbox "$sandbox_game" dedicated --offline --ticks 120 --autopilot 2>&1)"; rc=$?
     else
-        f1_out="$("$game" dedicated --ticks 120 --autopilot 2>&1)"; rc=$?
+        f1_out="$("$game" dedicated --offline --ticks 120 --autopilot 2>&1)"; rc=$?
     fi
     set -e
     echo "$f1_out" | sed "s/^/  $where | /"
