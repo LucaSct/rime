@@ -23,8 +23,13 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <afunix.h>
-#include <mstcpip.h> // SIO_UDP_CONNRESET
+#include <mstcpip.h>
 // clang-format on
+// Not every SDK's mstcpip.h declares it (the windows-latest runner's does not); its value is fixed
+// by the Winsock ABI, built from winsock2.h's own macros.
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
 
 #include <cstdio>  // std::remove (unlink a stale socket file)
 #include <cstring> // std::memcpy
