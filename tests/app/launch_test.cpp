@@ -249,6 +249,47 @@ TEST_CASE("launch: dedicated listen grammar and conflicts") {
     CHECK(parse({"play", "--port", "9000"}).status == ParseStatus::Ok);
 }
 
+TEST_CASE("launch: interaction diagnostics parse, are off by default, and are refused in the wrong "
+          "mode") {
+    // m20.6c: kicks are a listening-dedicated server fault, the break and trace are connected play.
+    const auto plain = parse({"dedicated", "--listen", "127.0.0.1:0", "--ticks", "5"});
+    REQUIRE(plain.status == ParseStatus::Ok);
+    CHECK(plain.options.interaction_kicks.empty());
+    CHECK(plain.options.interaction_debug_break == InteractionDebugBreak::None);
+    CHECK_FALSE(plain.options.interaction_trace);
+
+    const auto kicks = parse({"dedicated",
+                              "--listen",
+                              "127.0.0.1:0",
+                              "--ticks",
+                              "5",
+                              "--interaction-fault",
+                              "kick@300,kick@489"});
+    REQUIRE(kicks.status == ParseStatus::Ok);
+    REQUIRE(kicks.options.interaction_kicks.size() == 2);
+    CHECK(kicks.options.interaction_kicks[0] == 300);
+    CHECK(kicks.options.interaction_kicks[1] == 489);
+    for (const char* bad : {"kick@", "kick@x", "kick@1,", "kick@1,,kick@2", "boom@3", ""})
+        CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--interaction-fault", bad}).status ==
+              ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--interaction-fault", "kick@3"}).status ==
+          ParseStatus::Error);
+
+    const auto broken = parse({"play",
+                               "--connect",
+                               "127.0.0.1",
+                               "--interaction-debug-break",
+                               "stale-restore",
+                               "--interaction-trace"});
+    REQUIRE(broken.status == ParseStatus::Ok);
+    CHECK(broken.options.interaction_debug_break == InteractionDebugBreak::StaleRestore);
+    CHECK(broken.options.interaction_trace);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--interaction-debug-break", "bogus"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"play", "--interaction-debug-break", "no-rebuild"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--interaction-trace"}).status == ParseStatus::Error);
+}
+
 TEST_CASE("launch: connected play and linger grammar") {
     const auto connected = parse({"play",
                                   "--connect",

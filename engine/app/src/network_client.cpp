@@ -307,8 +307,9 @@ RunReport run_network_client(const LaunchOptions& options,
     // correction at the same checkpoint, both in metres) triple per member->member checkpoint. The
     // player's is what lets a proof tell a crate that disagrees because its pusher did (a lost or
     // late command: the server's player stood still while the prediction walked) from a crate that
-    // disagrees while the player agrees -- hidden physics state. So a proof can tell the undisturbed residual (before a kick) from
-    // the disturbance and its convergence (after) instead of reading one maximum over the run.
+    // disagrees while the player agrees -- hidden physics state. So a proof can tell the
+    // undisturbed residual (before a kick) from the disturbance and its convergence (after) instead
+    // of reading one maximum over the run.
     std::vector<std::array<double, 3>> crate_trace;
     // Push response: the first predicted step in which the player touched the object, and the
     // presented object's position just before that step.
@@ -396,7 +397,8 @@ RunReport run_network_client(const LaunchOptions& options,
             if (jump > 0.01)
                 ++crate_corrections_over_1cm;
             if (options.interaction_trace)
-                crate_trace.push_back({static_cast<double>(checkpoint_server_tick), jump, player_jump});
+                crate_trace.push_back(
+                    {static_cast<double>(checkpoint_server_tick), jump, player_jump});
         }
     };
 
@@ -511,12 +513,12 @@ RunReport run_network_client(const LaunchOptions& options,
                 if (!result.base.applied)
                     continue;
                 if (interaction_hooks)
-                    note_object_checkpoint(object_was_member,
-                                           object_simulated_before,
-                                           object_shown_before,
-                                           base.server_tick,
-                                           static_cast<double>(core::length(
-                                               presented_position() - before)));
+                    note_object_checkpoint(
+                        object_was_member,
+                        object_simulated_before,
+                        object_shown_before,
+                        base.server_tick,
+                        static_cast<double>(core::length(presented_position() - before)));
                 for (const auto& old : spawn_bindings)
                     if (std::none_of(checkpoint.spawns->bindings.begin(),
                                      checkpoint.spawns->bindings.end(),

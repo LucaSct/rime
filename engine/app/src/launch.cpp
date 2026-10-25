@@ -222,14 +222,15 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
                 if (!item.starts_with("kick@") || !parse_uint(item.substr(5), tick))
                     return fail("--interaction-fault needs kick@T[,kick@T2]");
                 result.options.interaction_kicks.push_back(tick);
-                rest = comma == std::string_view::npos ? std::string_view{}
-                                                       : rest.substr(comma + 1);
+                if (comma != std::string_view::npos && comma + 1 == rest.size())
+                    return fail("--interaction-fault needs kick@T[,kick@T2]"); // trailing comma
+                rest =
+                    comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
             }
             if (result.options.interaction_kicks.empty())
                 return fail("--interaction-fault needs kick@T[,kick@T2]");
         } else if (arg == "--interaction-debug-break") {
-            if (!has_value ||
-                result.options.interaction_debug_break != InteractionDebugBreak::None)
+            if (!has_value || result.options.interaction_debug_break != InteractionDebugBreak::None)
                 return fail("--interaction-debug-break needs one case");
             const auto value = args[++i];
             if (value == "present-mirror")
@@ -882,14 +883,14 @@ RunReport run_game_mode(const LaunchOptions& options,
                 // The proof's raw-correction bound from the leaf's one function, so the script
                 // reads the code's arithmetic instead of redoing it (ADR-0106 §4).
                 const auto* interaction = definition.remote_play->active_interaction();
-                const float raw_bound = interaction->object_mass > 0.0f
-                                            ? replication::interaction_raw_bound(
-                                                  interaction->params.player_max_speed,
-                                                  interaction->j_max,
-                                                  interaction->object_mass,
-                                                  interaction->params.replay_ticks,
-                                                  interaction->params.fixed_dt)
-                                            : 0.0f;
+                const float raw_bound =
+                    interaction->object_mass > 0.0f
+                        ? replication::interaction_raw_bound(interaction->params.player_max_speed,
+                                                             interaction->j_max,
+                                                             interaction->object_mass,
+                                                             interaction->params.replay_ticks,
+                                                             interaction->params.fixed_dt)
+                        : 0.0f;
                 spawn_counters +=
                     fmt::format(",\"interaction_joins\":{},\"interaction_leaves\":{},"
                                 "\"interaction_joined_in_contact\":{},"

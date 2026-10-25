@@ -1354,7 +1354,8 @@ InteractionProfile::ClientHooks interaction_client_hooks(
 // The push tape (`--input-tape-push`), in client ticks. Walking is 4 m/s = 1/15 m per tick, +z is
 // "toward the camera / away from the crate", which rests at z = -2.5 (join radius 5.117 m, leave
 // radius 6.117 m, centre to centre on the floor plane). The sequence is what m20.6c's proof needs
-// to see, in this order (arithmetic for the nominal timing; the proof gates what ACTUALLY happened):
+// to see, in this order (arithmetic for the nominal timing; the proof gates what ACTUALLY
+// happened):
 //
 //    1-10   stand            crate is a member from the first server tick (2.5 m < 5.117 m)
 //   11-90   retreat 5.33 m   the crate leaves once d > 6.117 m (t ~ 65) -- it has been asleep for
@@ -1367,8 +1368,9 @@ InteractionProfile::ClientHooks interaction_client_hooks(
 //  316-405  retreat 6 m      beyond 6.117 m, at rest: leaves (t ~ 358)
 //  406-425  stand
 //  426-520  walk back -z     KICK #2 lands ~15 ticks before the unkicked join (t ~ 501): the crate
-//                            slides toward the player (0.41 m, ~24 ticks at mu 0.5) and the player's
-//                            closing speed drags the join inside that window -- a JOIN WHILE SLIDING
+//                            slides toward the player (0.41 m, ~24 ticks at mu 0.5) and the
+//                            player's closing speed drags the join inside that window -- a JOIN
+//                            WHILE SLIDING
 //  521-600  stand            the crate comes to rest as a member
 app::ActionState push_tape(std::uint64_t tick) {
     app::ActionState actions{};
