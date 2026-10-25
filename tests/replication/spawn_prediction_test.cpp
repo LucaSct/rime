@@ -89,6 +89,7 @@ struct ClientGame {
     // beside the guess instead of renaming the guess.
     bool ignore_adoption = false;
     std::size_t launches_simulated = 0;
+    std::vector<PredictedEntityId> provisional_creates;
 
     PredictionHooks hooks() {
         return {[this](PredictedEntityId id) {
@@ -144,6 +145,8 @@ struct ClientGame {
         return {[this](PredictedEntityId id) {
                     CHECK_FALSE(balls.contains(pack(id)));
                     balls[pack(id)] = {};
+                    if ((id.index & kProvisionalIndexBit) != 0)
+                        provisional_creates.push_back(id);
                 },
                 [this](PredictedEntityId id) {
                     CHECK(balls.erase(pack(id)) == 1);
@@ -309,8 +312,9 @@ struct Harness {
 
     Harness(std::uint32_t command_delay_frames,
             std::uint32_t checkpoint_delay_frames,
-            SpawnBudget budget = {})
-        : reconciler(game.hooks(), game.spawn_hooks(), kDt, kInc, &ledger, {}, budget),
+            SpawnBudget budget = {},
+            ReconcilerBudget replay_budget = {})
+        : reconciler(game.hooks(), game.spawn_hooks(), kDt, kInc, &ledger, replay_budget, budget),
           command_delay(command_delay_frames), checkpoint_delay(checkpoint_delay_frames) {
         game.reconciler = &reconciler;
         reconciler.set_membership(1, {kPlayer});
@@ -390,6 +394,19 @@ struct Harness {
 
 constexpr SpawnKey key_at(std::uint32_t sequence) {
     return {kInc, sequence, 0};
+}
+
+OwnerCheckpoint
+client_checkpoint(std::uint64_t tick, std::uint32_t retired, std::uint8_t charges = 3) {
+    OwnerCheckpoint checkpoint{};
+    checkpoint.server_tick = tick;
+    checkpoint.membership_epoch = 1;
+    checkpoint.result.server_tick = tick;
+    checkpoint.result.retired_through = retired;
+    checkpoint.result.any_retired = retired != 0;
+    checkpoint.entities.push_back({kPlayer, f32(0.0f)});
+    checkpoint.group_state = {std::byte{charges}, std::byte{0}};
+    return checkpoint;
 }
 
 } // namespace
@@ -488,6 +505,7 @@ TEST_CASE("confirmed after local expiry: the live replica binds, an ended one st
         h.step(throw_command());
         h.run(3);
         CHECK(h.reconciler.provisional_expired() == 1);
+        CHECK(h.reconciler.local_releases() == 1);
         CHECK(h.game.balls.empty());
         h.run(10);
         CHECK(h.reconciler.confirmed_after_expiry_alive() == 1);
@@ -525,7 +543,11 @@ TEST_CASE("a launch command retired as synthesized is never recreated by replay"
     REQUIRE(h.reconciler.retired_without_launch() == 1);
     // Before retirement, the replays did recreate the guess -- under the same id.
     CHECK(h.reconciler.recreated() >= 1);
-    CHECK(h.cancelled({key, PresentationEventKind::Launch, 0}));
+    // Synthesized retirement removes an edge-triggered guess, but a late server verdict owns the
+    // effect; the launch must remain playable until that verdict arrives.
+    CHECK_FALSE(h.cancelled({key, PresentationEventKind::Launch, 0}));
+    CHECK(h.reconciler.local_removals() == 1);
+    CHECK(h.reconciler.authoritative_cancels() == 0);
     const auto simulated = h.game.launches_simulated;
     for (int i = 0; i < 12; ++i) {
         h.step(neutral());
@@ -536,6 +558,7 @@ TEST_CASE("a launch command retired as synthesized is never recreated by replay"
     CHECK(h.server.ball == std::nullopt);
     CHECK(h.game.charges == 3);
     CHECK(h.launches[key] == 1);
+    CHECK(h.reconciler.local_releases() == 0); // the default bound has not elapsed
 }
 
 TEST_CASE("replay across ten checkpoints still plays the launch exactly once") {
@@ -545,10 +568,15 @@ TEST_CASE("replay across ten checkpoints still plays the launch exactly once") {
     h.run(12);
     h.step(throw_command());
     const auto key = key_at(13);
+    const auto first_id = h.reconciler.provisional_id(key);
+    REQUIRE(first_id);
     for (int i = 0; i < 30; ++i) {
         h.step(neutral());
         CHECK(h.launches[key] == 1);
         CHECK(h.max_live[key] <= 1);
+        // Reusing the id is part of the replay promise, even when presentation is keyed by key.
+        if (h.reconciler.provisional_id(key))
+            CHECK(h.reconciler.provisional_id(key) == first_id);
     }
     CHECK(h.reconciler.recreated() >= 10);
     CHECK(h.reconciler.adopted() == 1);
@@ -589,6 +617,195 @@ TEST_CASE("a retired launch whose verdict is late stays provisional, then resolv
         CHECK(h.cancelled({key_at(2), PresentationEventKind::Launch, 0}));
         CHECK(h.game.balls.empty());
     }
+}
+
+TEST_CASE("a skipped replay keeps a live guess until the server accepts it") {
+    // The tiny replay budget makes the inner reconciler restore without running the throw again.
+    Harness h(4, 4, {}, ReconcilerBudget{128, 2});
+    h.step(neutral());
+    h.step(throw_command());
+    const auto key = key_at(2);
+    while (h.reconciler.base().replay_budget_exceeded() == 0 && h.frame < 20)
+        h.step(neutral());
+    REQUIRE(h.reconciler.base().replay_budget_exceeded() == 1);
+    CHECK(h.reconciler.unreplayed_guesses() >= 1);
+    CHECK_FALSE(h.cancelled({key, PresentationEventKind::Launch, 0}));
+    CHECK_FALSE(h.ledger.cancelled(key));
+    while (!h.ledger.bound(key) && h.frame < 25)
+        h.step(neutral());
+    CHECK(h.ledger.bound(key) == PredictedEntityId{100, 1});
+    CHECK(h.reconciler.authoritative_cancels() == 0);
+    CHECK(h.ledger.should_play(key, PresentationEventKind::Impact, 0));
+    CHECK_FALSE(h.ledger.should_play(key, PresentationEventKind::Impact, 0));
+}
+
+TEST_CASE("a dropped guess waits for an authoritative verdict before cancelling presentation") {
+    for (const bool accepted : {true, false}) {
+        Harness h(30, 30);
+        h.step(neutral());
+        h.step(throw_command());
+        const auto key = key_at(2);
+        auto corrected = client_checkpoint(1, 1, 0);
+        corrected.result.applied_mask[0] = 1;
+        REQUIRE(h.reconciler.apply_checkpoint(corrected, {}).base.applied);
+        CHECK(h.reconciler.not_recreated() == 1);
+        CHECK(h.reconciler.local_removals() == 1);
+        CHECK_FALSE(h.ledger.cancelled(key));
+
+        auto verdict = client_checkpoint(2, 2, 2);
+        verdict.result.applied_mask[0] = 3;
+        SpawnCheckpointExtension ext{};
+        if (accepted) {
+            verdict.membership_epoch = 2;
+            verdict.entities.push_back({{100, 1}, ball_bytes({0.0f, 1})});
+            ext.bindings.push_back({key, {100, 1}});
+            ext.outcomes.push_back({key, SpawnOutcomeKind::Accepted, {100, 1}, 0});
+        } else {
+            ext.outcomes.push_back({key, SpawnOutcomeKind::Rejected, {}, 1});
+        }
+        const auto answer = h.reconciler.apply_checkpoint(verdict, ext);
+        REQUIRE(answer.base.applied);
+        if (accepted) {
+            CHECK(answer.cancelled.empty());
+            CHECK(h.ledger.bound(key) == PredictedEntityId{100, 1});
+            CHECK(h.ledger.should_play(key, PresentationEventKind::Impact, 0));
+            CHECK_FALSE(h.ledger.should_play(key, PresentationEventKind::Impact, 0));
+        } else {
+            CHECK(answer.cancelled ==
+                  std::vector<PresentationEvent>{{key, PresentationEventKind::Launch, 0}});
+            CHECK(h.reconciler.authoritative_cancels() == 1);
+        }
+    }
+}
+
+TEST_CASE("a locally dropped guess releases presentation at the bound without a verdict") {
+    SpawnBudget budget{};
+    budget.max_unresolved_sequences = 3;
+    Harness h(30, 30, budget);
+    h.step(neutral());
+    h.step(throw_command());
+    auto corrected = client_checkpoint(1, 1, 0);
+    corrected.result.applied_mask[0] = 1;
+    REQUIRE(h.reconciler.apply_checkpoint(corrected, {}).base.applied);
+    CHECK(h.reconciler.local_releases() == 0);
+    h.run(3);
+    CHECK(h.reconciler.local_releases() == 1);
+    CHECK_FALSE(h.ledger.cancelled(key_at(2)));
+    CHECK(h.ledger.should_play(key_at(2), PresentationEventKind::Impact, 0));
+    CHECK_FALSE(h.ledger.should_play(key_at(2), PresentationEventKind::Impact, 0));
+}
+
+TEST_CASE("evicting a tombstone cannot recreate an older provisional id") {
+    SpawnBudget budget{};
+    budget.max_tombstones = 1;
+    budget.max_unresolved_sequences = 3;
+    Harness h(6, 6, budget);
+    h.step(neutral());
+    h.step(throw_command());
+    h.run(4);
+    h.step(throw_command()); // sequence 7; the first guess has expired locally
+    h.run(24);
+    CHECK(h.reconciler.tombstones_evicted() >= 1);
+    CHECK(h.reconciler.respawn_suppressed() >= 1);
+    CHECK(h.game.provisional_creates.size() == 2);
+    CHECK(h.reconciler.provisional_expired() == 2);
+
+    // A verdict can arrive after eviction; it still answers a launch this client predicted.
+    Harness late(30, 30, budget);
+    late.step(neutral());
+    late.step(throw_command());
+    late.run(4);
+    late.step(throw_command());
+    late.run(4);
+    REQUIRE_FALSE(late.reconciler.has_tombstone(key_at(2)));
+    auto cp = client_checkpoint(1, 7);
+    SpawnCheckpointExtension ext{};
+    ext.outcomes.push_back({key_at(2), SpawnOutcomeKind::Rejected, {}, 1});
+    REQUIRE(late.reconciler.apply_checkpoint(cp, ext).base.applied);
+    CHECK(late.reconciler.rejected_launches() == 1);
+    CHECK(late.reconciler.rejected_unpredicted() == 0);
+}
+
+TEST_CASE("a server frontier is clamped to held outcomes and preserves newer tombstones") {
+    SpawnBudget budget{};
+    budget.max_unresolved_sequences = 3;
+    Harness h(30, 30, budget);
+    h.step(neutral());
+    h.step(throw_command());
+    h.run(4);
+    h.step(throw_command()); // sequence 7
+    h.run(4);
+    REQUIRE(h.reconciler.has_tombstone(key_at(2)));
+    REQUIRE(h.reconciler.has_tombstone(key_at(7)));
+    const auto created = h.game.provisional_creates.size();
+
+    // A held outcome means command 2 has retired; command 7 is still replayable.
+    auto cp = client_checkpoint(1, 2);
+    cp.result.applied_mask[0] = 3;
+    SpawnCheckpointExtension ext{};
+    ext.acknowledged_through = key_at(7);
+    REQUIRE(h.reconciler.apply_checkpoint(cp, ext).base.applied);
+    CHECK(h.reconciler.frontier_ahead_of_client() == 1);
+    CHECK(h.reconciler.has_tombstone(key_at(2)));
+    CHECK(h.reconciler.has_tombstone(key_at(7)));
+
+    cp.server_tick = cp.result.server_tick = 2;
+    ext.acknowledged_through.reset();
+    ext.outcomes.push_back({key_at(2), SpawnOutcomeKind::Rejected, {}, 1});
+    REQUIRE(h.reconciler.apply_checkpoint(cp, ext).base.applied);
+    CHECK(h.reconciler.outcomes_held_through() == key_at(2));
+    cp.server_tick = cp.result.server_tick = 3;
+    ext.outcomes.clear();
+    ext.acknowledged_through = key_at(2);
+    REQUIRE(h.reconciler.apply_checkpoint(cp, ext).base.applied);
+    CHECK_FALSE(h.reconciler.has_tombstone(key_at(2)));
+    CHECK(h.reconciler.has_tombstone(key_at(7)));
+    cp.server_tick = cp.result.server_tick = 4;
+    REQUIRE(h.reconciler.apply_checkpoint(cp, ext).base.applied);
+    CHECK(h.game.provisional_creates.size() == created);
+}
+
+TEST_CASE("a retired applied guess without a snapshot expires without cancelling") {
+    SpawnBudget budget{};
+    budget.max_snapshots = 0;
+    Harness h(1, 1, budget);
+    h.server.refuse_next_throw = true;
+    h.server.defer_outcomes = 8;
+    h.step(neutral());
+    h.step(throw_command());
+    while (h.reconciler.pending_without_snapshot() == 0 && h.frame < 12)
+        h.step(neutral());
+    CHECK(h.reconciler.pending_without_snapshot() == 1);
+    CHECK(h.reconciler.provisional().empty());
+    CHECK(h.reconciler.has_tombstone(key_at(2)));
+    CHECK_FALSE(h.ledger.cancelled(key_at(2)));
+    h.run(12);
+    CHECK(h.reconciler.rejected_launches() == 1);
+    CHECK(h.cancelled({key_at(2), PresentationEventKind::Launch, 0}));
+}
+
+TEST_CASE("same-epoch roster changes refuse whole; an unpredicted rejection is separate") {
+    Harness h(30, 30);
+    h.step(neutral());
+    auto cp = client_checkpoint(1, 1);
+    cp.result.applied_mask[0] = 1;
+    SpawnCheckpointExtension ext{};
+    ext.outcomes.push_back({key_at(2), SpawnOutcomeKind::Rejected, {}, 1});
+    REQUIRE(h.reconciler.apply_checkpoint(cp, ext).base.applied);
+    CHECK(h.reconciler.rejected_launches() == 0);
+    CHECK(h.reconciler.rejected_unpredicted() == 1);
+    const auto held = h.reconciler.outcomes_held_through();
+    const auto cancelled = h.ledger.cancelled(key_at(2));
+    const auto tombstone = h.reconciler.has_tombstone(key_at(2));
+    cp.server_tick = cp.result.server_tick = 2;
+    cp.entities.push_back({{100, 1}, ball_bytes({0.0f, 0})});
+    ext.outcomes.clear();
+    CHECK_FALSE(h.reconciler.apply_checkpoint(cp, ext).base.applied);
+    CHECK(h.reconciler.epoch_roster_mismatch() == 1);
+    CHECK(h.reconciler.roster().size() == 1);
+    CHECK(h.reconciler.outcomes_held_through() == held);
+    CHECK(h.ledger.cancelled(key_at(2)) == cancelled);
+    CHECK(h.reconciler.has_tombstone(key_at(2)) == tombstone);
 }
 
 TEST_CASE("sensitivity control: the broken policies fail the gates the real ones pass") {
@@ -920,6 +1137,10 @@ TEST_CASE("presentation ledger: exactly once, cancel, release, and every bound c
     CHECK(cancelled == std::vector<PresentationEvent>{{b, PresentationEventKind::Launch, 0}});
     CHECK(ledger.cancel(b).empty());
     CHECK(ledger.duplicate_cancels() == 1);
+    // Cancellation has already returned the launch for removal; adoption cannot revive that key.
+    CHECK_FALSE(ledger.adopt(b, {101, 1}));
+    CHECK(ledger.adopt_after_cancel() == 1);
+    CHECK_FALSE(ledger.bound(b));
     CHECK_FALSE(ledger.should_play(b, PresentationEventKind::Impact, 0));
     CHECK(ledger.suppressed_cancelled() == 1);
 
@@ -999,13 +1220,31 @@ TEST_CASE("a refused spawn checkpoint changes nothing") {
     good.base.result.server_tick = 50;
     auto bad = good;
     bad.base.result.server_tick = 51;
+    bad.spawns->outcomes.push_back({key_at(20), SpawnOutcomeKind::Rejected, {}, 1});
     CHECK_FALSE(h.reconciler.apply_checkpoint(bad.base, *bad.spawns).base.applied);
     CHECK(h.reconciler.invalid_base() == 1);
+    CHECK_FALSE(h.reconciler.outcomes_held_through());
     bad = good;
     bad.spawns->bindings.push_back({key_at(1), {555, 1}});
+    bad.spawns->outcomes.push_back({key_at(20), SpawnOutcomeKind::Rejected, {}, 1});
     CHECK_FALSE(h.reconciler.apply_checkpoint(bad.base, *bad.spawns).base.applied);
     CHECK(h.reconciler.invalid_extension(SpawnExtensionRefusal::BindingNotInRoster) == 1);
     CHECK(h.game.balls == balls);
     CHECK(h.reconciler.epoch() == epoch);
     CHECK(h.reconciler.provisional().size() == 1);
+    CHECK_FALSE(h.reconciler.outcomes_held_through());
+    CHECK_FALSE(h.ledger.cancelled(key_at(2)));
+    CHECK_FALSE(h.reconciler.has_tombstone(key_at(2)));
+
+    // A stale message carrying a newer verdict must not acknowledge or cancel it either.
+    good.spawns->outcomes.push_back({key_at(20), SpawnOutcomeKind::Rejected, {}, 1});
+    REQUIRE(h.reconciler.apply_checkpoint(good.base, *good.spawns).base.applied);
+    const auto held = h.reconciler.outcomes_held_through();
+    const auto tombstone = h.reconciler.has_tombstone(key_at(20));
+    good.spawns->outcomes.clear();
+    good.spawns->outcomes.push_back({key_at(21), SpawnOutcomeKind::Rejected, {}, 1});
+    CHECK_FALSE(h.reconciler.apply_checkpoint(good.base, *good.spawns).base.applied);
+    CHECK(h.reconciler.outcomes_held_through() == held);
+    CHECK(h.reconciler.has_tombstone(key_at(20)) == tombstone);
+    CHECK_FALSE(h.ledger.cancelled(key_at(21)));
 }
