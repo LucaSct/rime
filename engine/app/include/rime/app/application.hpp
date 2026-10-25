@@ -308,6 +308,12 @@ public:
 
     [[nodiscard]] bool quit_requested() const noexcept { return quit_; }
 
+    // Service the OS queue WITHOUT rendering: what a caller-owned loop does on an iteration it
+    // cannot afford to present. A windowed app that skips step() and never pumps would freeze in
+    // the compositor's eyes (and ignore its close button); events land in the next step's input
+    // snapshot, and a close request is recorded as a quit request exactly as step() records it.
+    void pump_only();
+
     // Block until no frame is still executing on the GPU.
     //
     // `run()` and `run_frames()` do this for you at loop exit, which is why their contract can

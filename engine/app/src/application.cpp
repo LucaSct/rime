@@ -435,6 +435,12 @@ FixedTimestep::Step Application::step(double frame_dt) {
     return s;
 }
 
+void Application::pump_only() {
+    if (!pump_window()) {
+        request_quit();
+    }
+}
+
 void Application::run_frames(int frames) {
     // Bounded headless run off the real monotonic clock — what CI executes (there is no window to
     // close the loop). The first frame's dt is ~0 (baseline), so it runs zero ticks and just

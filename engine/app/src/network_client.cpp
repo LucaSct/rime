@@ -776,10 +776,13 @@ RunReport run_network_client(const LaunchOptions& options,
     }
 
     InputMapper mapper(definition.input);
+    std::uint64_t frames_skipped = 0;
     auto deadline = Clock::now();
     const auto period = std::chrono::duration_cast<Clock::duration>(
         std::chrono::duration<double>(definition.remote_play->fixed_dt));
-    while (!disconnected &&
+    // The window's close button ends the session: step() and pump_only() record it as a quit
+    // request, and a loop that never asked would leave a window nobody can close.
+    while (!disconnected && !app.quit_requested() &&
            (options.frames == 0 || report.frames < static_cast<std::uint64_t>(options.frames))) {
         deadline += period;
         std::this_thread::sleep_until(deadline);
@@ -852,8 +855,20 @@ RunReport run_network_client(const LaunchOptions& options,
                 std::span(bytes).first(size), now_ms(), kRemoteInputCommandsStream);
         mirror.send_ack(driver, now_ms());
         mirror.settle_transform_history();
-        (void)app.step(definition.remote_play->fixed_dt);
-        ++report.frames;
+        // ONE TICK PER ITERATION, A FRAME ONLY WHEN ON SCHEDULE. The loop is paced by the tick
+        // deadline, and a vsync (FIFO) present blocks until the next vblank on top of that, so a
+        // client that rendered every iteration ran below the tick rate (measured: 41 Hz on an RTX
+        // 3060 in Debug, 28 Hz on lavapipe) and fell behind the server for good -- its commands
+        // arrived late, the server executed stand-ins (596 of 600 ticks), and the player could not
+        // move. When the next deadline has already passed, this iteration skips the present and
+        // only services the window, so ticks keep wall-clock pace and frames are what get dropped.
+        if (Clock::now() < deadline + period) {
+            (void)app.step(definition.remote_play->fixed_dt);
+            ++report.frames;
+        } else {
+            app.pump_only();
+            ++frames_skipped;
+        }
         ++report.ticks;
     }
     if (options.frames == 0 && disconnected)
@@ -1003,31 +1018,33 @@ RunReport run_network_client(const LaunchOptions& options,
     } else {
         spawn_metrics = ",\"prediction_path\":\"legacy\"";
     }
-    fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
-               "\"response_ticks\":{},\"max_snap\":{:.6f},\"snaps_over_bound\":{},"
-               "\"corrections\":{},\"reseeds\":{},\"replayed\":{},\"max_replay\":{},"
-               "\"stale_checkpoints\":{},\"checkpoints\":{},"
-               "\"malformed_datagrams\":{},\"oversized_datagrams\":{},"
-               "\"epoch_mismatch\":{},\"incomplete_checkpoints\":{},"
-               "\"history_overflow\":{},\"replay_budget_exceeded\":{}{} }}\n",
-               report.ticks,
-               report.state_digest,
-               responded ? response_ticks : report.ticks,
-               max_snap,
-               snaps_over_bound,
-               base.corrections(),
-               base.reseeds(),
-               replayed,
-               max_replay,
-               stale_checkpoints,
-               checkpoints,
-               socket_link.malformed(),
-               socket_link.oversized(),
-               base.epoch_mismatch(),
-               base.incomplete_checkpoints(),
-               base.history_overflow(),
-               base.replay_budget_exceeded(),
-               spawn_metrics);
+    fmt::print(
+        "{{\"event\":\"finished\",\"frames_skipped\":{},\"ticks\":{},\"digest\":\"0x{:016x}\","
+        "\"response_ticks\":{},\"max_snap\":{:.6f},\"snaps_over_bound\":{},"
+        "\"corrections\":{},\"reseeds\":{},\"replayed\":{},\"max_replay\":{},"
+        "\"stale_checkpoints\":{},\"checkpoints\":{},"
+        "\"malformed_datagrams\":{},\"oversized_datagrams\":{},"
+        "\"epoch_mismatch\":{},\"incomplete_checkpoints\":{},"
+        "\"history_overflow\":{},\"replay_budget_exceeded\":{}{} }}\n",
+        frames_skipped,
+        report.ticks,
+        report.state_digest,
+        responded ? response_ticks : report.ticks,
+        max_snap,
+        snaps_over_bound,
+        base.corrections(),
+        base.reseeds(),
+        replayed,
+        max_replay,
+        stale_checkpoints,
+        checkpoints,
+        socket_link.malformed(),
+        socket_link.oversized(),
+        base.epoch_mismatch(),
+        base.incomplete_checkpoints(),
+        base.history_overflow(),
+        base.replay_budget_exceeded(),
+        spawn_metrics);
     std::fflush(stdout);
     return report;
 }
