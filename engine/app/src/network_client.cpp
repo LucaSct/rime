@@ -263,12 +263,13 @@ RunReport run_network_client(const LaunchOptions& options,
     std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> live_presentations;
     std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> launched_presentations;
     std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> ended_keys;
+    std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> suspended_keys;
     std::optional<replication::SpawnKey> acknowledged_outcomes;
     std::uint64_t presentation_launch = 0, presentation_end = 0;
     std::uint64_t presentation_cancelled = 0, presentation_suspended = 0;
     // Keys whose end was the entity's own life limit rather than the server's: the miss/hit
     // evidence (a hit ends the server's flight early, so its end arrives as an authoritative one).
-    std::uint64_t lifetime_ends = 0;
+    std::uint64_t lifetime_ends = 0, presentation_resumed = 0;
     std::uint64_t live_presentations_max = 0, spawn_response_ticks = 0;
     std::optional<std::uint64_t> spawn_press_tick;
     bool spawn_responded = false;
@@ -337,7 +338,11 @@ RunReport run_network_client(const LaunchOptions& options,
             live_presentations_max = std::max(live_presentations_max, count);
         }
         for (const auto& key : visible) {
-            live_presentations.insert(key);
+            // A suspended key that becomes visible again is the replica of a late verdict -- or
+            // a guess resurrected by replay, which must never happen. Counted either way; the
+            // proof says which legs may show it.
+            if (live_presentations.insert(key).second && suspended_keys.erase(key) != 0)
+                ++presentation_resumed;
             if ((options.spawn_debug_break == SpawnDebugBreak::NoLedger ||
                  ledger.should_play(key, replication::PresentationEventKind::Launch, 0))) {
                 ++presentation_launch;
@@ -374,6 +379,7 @@ RunReport run_network_client(const LaunchOptions& options,
                 ledger.release(*it);
             } else if (!ledger.cancelled(*it)) {
                 ++presentation_suspended;
+                suspended_keys.insert(*it);
             }
             it = live_presentations.erase(it);
         }
@@ -718,7 +724,8 @@ RunReport run_network_client(const LaunchOptions& options,
         spawn_metrics = fmt::format(
             ",\"prediction_path\":\"spawn\",\"presentation_launch\":{},"
             "\"presentation_end\":{},\"presentation_cancelled\":{},"
-            "\"presentation_suspended\":{},\"presentation_lifetime_ends\":{},"
+            "\"presentation_suspended\":{},\"presentation_resumed\":{},"
+            "\"presentation_lifetime_ends\":{},"
             "\"spawn_response_ticks\":{},"
             "\"live_presentations_max\":{},\"spawn_acks_sent\":{},"
             "\"spawn_ack_send_refused\":{},\"ledger_played\":{},"
@@ -746,6 +753,7 @@ RunReport run_network_client(const LaunchOptions& options,
             presentation_end,
             presentation_cancelled,
             presentation_suspended,
+            presentation_resumed,
             lifetime_ends,
             spawn_responded ? spawn_response_ticks :
                 (spawn_press_tick ? report.ticks - *spawn_press_tick : 0),
