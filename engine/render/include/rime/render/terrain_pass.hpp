@@ -262,6 +262,18 @@ struct TerrainLodDraw {
     bool parent_bake = false; // fade toward the parent's bake
 };
 
+// The scene's draw type lives above this pass; keep the shadow input at the tile/LOD boundary.
+struct TerrainShadowDraw {
+    TerrainTileId tile = kInvalidTerrainTile;
+    TerrainLodDraw lod{};
+};
+
+// Reject only boxes wholly beyond one lateral homogeneous clip plane. Depth is deliberately
+// ignored: a caster in front of the cascade near plane can still affect the layer.
+[[nodiscard]] bool terrain_tile_outside_clip(core::Vec3 aabb_min,
+                                             core::Vec3 aabb_max,
+                                             const core::Mat4& view_proj) noexcept;
+
 // The push block both terrain shaders read, byte for byte. 208 bytes: m19.5 appended the camera
 // position and the flat material to m19.3's 128, and m19.8d2 appended the three LOD vectors.
 // Vulkan only GUARANTEES 128 (maxPushConstantsSize), so 208 is above the floor and the pass checks
@@ -459,18 +471,19 @@ public:
                    RenderGraph::FrameSlice scene_uniforms,
                    const ShadowBinding& shadow);
 
-    // Shadow caster: draw tile `id` depth-only into layer `layer` of the sun's cascade array,
-    // LOADING what the mesh casters already wrote there. `view_proj` is that cascade's light
-    // matrix. Terrain.vert is reused verbatim (same LOD morph, same height fetch), so the caster
-    // surface is exactly the one the camera sees -- a hill shadows what lies behind it from a low
-    // sun. A no-op for a tile this pass does not hold.
-    void add_shadow_caster(RenderGraph& graph,
-                           RGTexture cascades,
-                           std::uint32_t layer,
-                           TerrainTileId id,
-                           const core::Mat4& view_proj,
-                           const core::Vec3& eye,
-                           const TerrainLodDraw& lod);
+    // One LOAD/STORE pass per cascade, with every surviving tile recorded inside it. Terrain.vert
+    // is reused verbatim so the shadow surface has the camera draw's height fetch and LOD morph.
+    void add_shadow_casters(RenderGraph& graph,
+                            RGTexture cascades,
+                            std::uint32_t layer,
+                            std::span<const TerrainShadowDraw> draws,
+                            const core::Mat4& view_proj,
+                            const core::Vec3& eye);
+
+    // Cumulative witnesses for shadow submission and lateral cascade rejection.
+    [[nodiscard]] std::uint64_t shadow_tiles_drawn() const noexcept { return shadow_drawn_; }
+
+    [[nodiscard]] std::uint64_t shadow_tiles_culled() const noexcept { return shadow_culled_; }
 
     // Assets `upload()` would not draw. Guardrail 5: a refused tile and a tile that was never
     // handed over produce the same empty frame, so the difference has to be countable.
@@ -555,6 +568,8 @@ private:
     std::uint64_t refused_ = 0;
     std::uint64_t splat_refused_ = 0;
     std::uint64_t drawn_ = 0;
+    std::uint64_t shadow_drawn_ = 0;
+    std::uint64_t shadow_culled_ = 0;
     std::uint64_t sky_bound_ = 0;
     std::uint64_t sky_partial_ = 0;
     bool sky_partial_warned_ = false;
