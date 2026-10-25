@@ -235,14 +235,18 @@ struct Client {
             return;
         events.clear();
         driver->update(now_ms(), events);
-        for (const auto& event : events)
+        messages.clear();
+        for (auto& event : events) {
             if (event.kind == net::SessionEvent::Kind::Connected)
                 connected = true;
-        auto* session = driver->session(*id);
-        if (!session)
-            return;
-        messages.clear();
-        session->drain_received(messages);
+            // A refusal is a reliable reply followed by the server's disconnect; read in one
+            // update, the reply arrives on the Disconnected event, not in a session that is gone.
+            if (event.kind == net::SessionEvent::Kind::Disconnected)
+                for (auto& message : event.undrained)
+                    messages.push_back(std::move(message));
+        }
+        if (auto* session = driver->session(*id))
+            session->drain_received(messages);
         for (const auto& message : messages) {
             replication::InputHelloReply decoded{};
             if (replication::decode_input_hello_reply(message.bytes, decoded)) {
