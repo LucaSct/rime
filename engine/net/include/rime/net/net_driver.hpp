@@ -70,6 +70,15 @@ struct SessionEvent {
     // Zero unless reason is ProtocolMismatch/AppMismatch/SchemaMismatch.
     std::uint64_t expected = 0; // what the server runs
     std::uint64_t actual = 0;   // what we sent
+
+    // Disconnected only: messages the channel had already DELIVERED to the session (and so acked
+    // to the sender) that the game had not drained yet when the session was reaped. A peer that
+    // sends a final reliable message and then disconnects -- a refusal with its reason, say -- puts
+    // both datagrams on the wire one tick apart, and a reader that polls less often than that sees
+    // them in one update(): without this the reply would die with the session, and the sender,
+    // holding an ack for it, would believe it had been read. Drain these exactly as you would
+    // Session::drain_received.
+    std::vector<Received> undrained;
 };
 
 // A one-line, actionable rendering of an event: "connection to 127.0.0.1:7777 failed: schema hash

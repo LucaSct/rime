@@ -279,8 +279,9 @@ RunReport run_network_client(const LaunchOptions& options,
     const auto pump = [&] {
         const auto before_mirror = reconciler ? std::optional{presented_position()} : std::nullopt;
         events.clear();
+        messages.clear();
         driver.update(now_ms(), events);
-        for (const auto& event : events) {
+        for (auto& event : events) {
             if (event.kind == net::SessionEvent::Kind::Connected) {
                 // The overrides exist to provoke a Schema refusal on purpose; everything else uses
                 // the ONE identity function the server uses, so a game that opts into more (m20.5's
@@ -305,9 +306,13 @@ RunReport run_network_client(const LaunchOptions& options,
                 failure_reason = event.kind == net::SessionEvent::Kind::ConnectFailed
                                      ? "unreachable"
                                      : "server disconnected before initial world";
+                // A refusal is the server's reliable reply followed by its disconnect. Read in one
+                // update, the reply rides the Disconnected event; decoding it below replaces this
+                // generic reason with the real one (full, schema, version).
+                for (auto& message : event.undrained)
+                    messages.push_back(std::move(message));
             }
         }
-        messages.clear();
         if (auto* session = driver.session(*session_id))
             session->drain_received(messages);
         mirror.apply_messages(messages);
