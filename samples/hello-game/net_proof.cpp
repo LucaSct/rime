@@ -7,15 +7,26 @@
 // snapshot replication or multiplayer. Replaying the server's decisions, rather than the script
 // the client hoped to send, is evidence that executed input reached authoritative game state.
 
-#include <arpa/inet.h>
-#include <fcntl.h>
 #include <fmt/core.h>
-#include <netinet/in.h>
-#include <poll.h>
+
+#if defined(_WIN32)
+// The build already passes NOMINMAX and WIN32_LEAN_AND_MEAN on the command line (top-level
+// CMakeLists.txt); redefining a macro with a different token sequence is MSVC C4005, an error under
+// /WX, so each define is guarded. LEAN_AND_MEAN also keeps <winsock.h> out of this TU: the socket
+// work goes through rime::platform, never raw Winsock, so <windows.h> is the only system header.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
 #include <signal.h>
-#include <sys/socket.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
 
 #include <array>
 #include <chrono>
@@ -34,6 +45,7 @@
 #include "rime/app/content_root.hpp"
 #include "rime/net/link.hpp"
 #include "rime/net/net_driver.hpp"
+#include "rime/platform/socket.hpp"
 #include "rime/replication/input_v2.hpp"
 #include "rime/scene/derive_transforms.hpp"
 #include "rime/scene/scene_format.hpp"
@@ -84,13 +96,105 @@ std::uint64_t now_ms() {
 }
 
 struct Child {
+#if defined(_WIN32)
+    DWORD pid = 0;
+    HANDLE process = nullptr;
+    HANDLE pipe_read = nullptr;
+#else
     pid_t pid = -1;
     int fd = -1;
+#endif
     int status = -1;
     std::string pending;
     std::vector<std::string> lines;
 
-    Child(const std::filesystem::path& binary, int ticks, const std::string& trace = {}) {
+    // CreateProcessW receives one mutable command line. Quotes and backslashes must follow the
+    // Windows argument rules so a checkout path (or trace path) with spaces reaches the game whole.
+#if defined(_WIN32)
+    static std::wstring quoted(std::wstring_view argument) {
+        std::wstring result = L"\"";
+        std::size_t slashes = 0;
+        for (const wchar_t c : argument) {
+            if (c == L'\\') {
+                ++slashes;
+            } else if (c == L'"') {
+                result.append(slashes * 2 + 1, L'\\');
+                result.push_back(c);
+                slashes = 0;
+            } else {
+                result.append(slashes, L'\\');
+                result.push_back(c);
+                slashes = 0;
+            }
+        }
+        result.append(slashes * 2, L'\\');
+        result.push_back(L'"');
+        return result;
+    }
+#endif
+
+    Child(const std::filesystem::path& binary, int ticks, const std::filesystem::path& trace = {}) {
+#if defined(_WIN32)
+        SECURITY_ATTRIBUTES inherited{};
+        inherited.nLength = sizeof(inherited);
+        inherited.bInheritHandle = TRUE;
+        HANDLE pipe_write = nullptr;
+        if (!::CreatePipe(&pipe_read, &pipe_write, &inherited, 0))
+            return;
+        if (!::SetHandleInformation(pipe_read, HANDLE_FLAG_INHERIT, 0)) {
+            ::CloseHandle(pipe_write);
+            ::CloseHandle(pipe_read);
+            pipe_read = nullptr;
+            return;
+        }
+        // A real inheritable stdin keeps STARTF_USESTDHANDLES valid even under a test runner
+        // whose own standard handles are absent or not inheritable.
+        const HANDLE input = ::CreateFileW(L"NUL",
+                                           GENERIC_READ,
+                                           FILE_SHARE_READ | FILE_SHARE_WRITE,
+                                           &inherited,
+                                           OPEN_EXISTING,
+                                           FILE_ATTRIBUTE_NORMAL,
+                                           nullptr);
+        if (input == INVALID_HANDLE_VALUE) {
+            ::CloseHandle(pipe_write);
+            ::CloseHandle(pipe_read);
+            pipe_read = nullptr;
+            return;
+        }
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        startup.dwFlags = STARTF_USESTDHANDLES;
+        startup.hStdInput = input;
+        startup.hStdOutput = pipe_write;
+        startup.hStdError = pipe_write;
+        PROCESS_INFORMATION info{};
+        const std::wstring application = binary.wstring();
+        std::wstring command = quoted(application) + L" dedicated --listen 127.0.0.1:0 --ticks " +
+                               std::to_wstring(ticks);
+        if (!trace.empty())
+            command += L" --input-trace " + quoted(trace.wstring());
+        const BOOL started = ::CreateProcessW(application.c_str(),
+                                              command.data(),
+                                              nullptr,
+                                              nullptr,
+                                              TRUE,
+                                              CREATE_NO_WINDOW,
+                                              nullptr,
+                                              nullptr,
+                                              &startup,
+                                              &info);
+        ::CloseHandle(input);
+        ::CloseHandle(pipe_write);
+        if (!started) {
+            ::CloseHandle(pipe_read);
+            pipe_read = nullptr;
+            return;
+        }
+        process = info.hProcess;
+        pid = info.dwProcessId;
+        ::CloseHandle(info.hThread);
+#else
         int pipefd[2];
         if (::pipe(pipefd) != 0)
             return;
@@ -131,24 +235,55 @@ struct Child {
             return;
         }
         (void)::fcntl(fd, F_SETFL, ::fcntl(fd, F_GETFL) | O_NONBLOCK);
+#endif
     }
 
     ~Child() {
+#if defined(_WIN32)
+        if (process) {
+            if (::WaitForSingleObject(process, 0) == WAIT_TIMEOUT) {
+                ::TerminateProcess(process, 1);
+                ::WaitForSingleObject(process, INFINITE);
+            }
+            ::CloseHandle(process);
+        }
+        if (pipe_read)
+            ::CloseHandle(pipe_read);
+#else
         if (pid > 0 && status == -1) {
             ::kill(pid, SIGKILL);
             ::waitpid(pid, &status, 0);
         }
         if (fd >= 0)
             ::close(fd);
+#endif
     }
 
     void pump() {
+#if defined(_WIN32)
+        if (pipe_read) {
+#else
         if (fd >= 0) {
+#endif
             char buffer[4096];
             for (;;) {
+#if defined(_WIN32)
+                DWORD available = 0;
+                if (!::PeekNamedPipe(pipe_read, nullptr, 0, nullptr, &available, nullptr) ||
+                    available == 0)
+                    break;
+                DWORD n = 0;
+                // Read no more than is already buffered so ReadFile can never block; the explicit
+                // cast is MSVC C4267 (size_t -> DWORD) under /W4 /WX.
+                const DWORD count =
+                    available < sizeof(buffer) ? available : static_cast<DWORD>(sizeof(buffer));
+                if (!::ReadFile(pipe_read, buffer, count, &n, nullptr) || n == 0)
+                    break;
+#else
                 const auto n = ::read(fd, buffer, sizeof(buffer));
                 if (n <= 0)
                     break;
+#endif
                 pending.append(buffer, static_cast<std::size_t>(n));
                 std::size_t pos;
                 while ((pos = pending.find('\n')) != std::string::npos) {
@@ -157,11 +292,21 @@ struct Child {
                 }
             }
         }
+#if defined(_WIN32)
+        if (process && status == -1 && ::WaitForSingleObject(process, 0) == WAIT_OBJECT_0) {
+            DWORD code = 1;
+            if (::GetExitCodeProcess(process, &code))
+                status = static_cast<int>(code);
+            else
+                status = 1;
+        }
+#else
         if (pid > 0 && status == -1) {
             int result = 0;
             if (::waitpid(pid, &result, WNOHANG) == pid)
                 status = result;
         }
+#endif
     }
 
     std::optional<std::string> event(std::string_view name) const {
@@ -198,7 +343,11 @@ struct Child {
             pump();
             if (status != -1) {
                 pump();
+#if defined(_WIN32)
+                return status == 0;
+#else
                 return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+#endif
             }
             std::this_thread::sleep_for(2ms);
         }
@@ -373,7 +522,7 @@ std::uint64_t replay(const std::vector<app::ActionState>& inputs) {
     return game.state_digest(application.world());
 }
 
-std::optional<bool> vulkan_mapped(pid_t pid) {
+std::optional<bool> vulkan_mapped(std::uint64_t pid) {
 #if defined(__linux__)
     std::ifstream maps(fmt::format("/proc/{}/maps", pid));
     if (!maps)
@@ -390,8 +539,13 @@ std::optional<bool> vulkan_mapped(pid_t pid) {
 }
 
 int positive(const std::filesystem::path& binary) {
+#if defined(_WIN32)
+    const auto trace_path =
+        binary.parent_path() / fmt::format("net-proof-{}.trace", ::GetCurrentProcessId());
+#else
     const auto trace_path = binary.parent_path() / fmt::format("net-proof-{}.trace", ::getpid());
-    Child child(binary, 240, trace_path.string());
+#endif
+    Child child(binary, 240, trace_path);
     const auto port = child.ready();
     check(port != 0, "ready parsed with nonzero port");
     // Read only by the Linux-only /proc/<pid>/maps check below; [[maybe_unused]] keeps Apple
@@ -475,21 +629,14 @@ int positive(const std::filesystem::path& binary) {
 }
 
 void send_oversized(std::uint16_t port) {
-    const int fd = ::socket(AF_INET, SOCK_DGRAM, 0);
-    if (fd < 0)
+    // The engine's own UDP socket, so POSIX and Winsock share one code path (it also does the
+    // WSAStartup the raw call would have needed). 1201 bytes is one over the 1200-byte packet cap.
+    auto udp = platform::UdpSocket::bind(0);
+    const auto endpoint = platform::Endpoint::from_string("127.0.0.1", port);
+    if (!udp || !endpoint)
         return;
-    sockaddr_in address{};
-    address.sin_family = AF_INET;
-    address.sin_port = htons(port);
-    (void)::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr);
-    std::array<char, 1201> bytes{};
-    (void)::sendto(fd,
-                   bytes.data(),
-                   bytes.size(),
-                   0,
-                   reinterpret_cast<const sockaddr*>(&address),
-                   sizeof(address));
-    ::close(fd);
+    std::array<std::byte, 1201> bytes{};
+    (void)udp->send_to(*endpoint, bytes);
 }
 
 int negative(const std::filesystem::path& binary) {
@@ -619,7 +766,8 @@ int negative(const std::filesystem::path& binary) {
 } // namespace
 
 int main(int argc, char** argv) {
-    const auto binary = std::filesystem::absolute(argv[0]).parent_path() / "hello_game";
+    auto binary = std::filesystem::absolute(argv[0]).parent_path() / "hello_game";
+    binary.replace_extension(std::filesystem::path(argv[0]).extension());
     return argc == 2 && std::string_view(argv[1]) == "--negative" ? negative(binary)
                                                                   : positive(binary);
 }
