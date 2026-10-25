@@ -149,8 +149,11 @@ struct Child {
         }
         // A real inheritable stdin keeps STARTF_USESTDHANDLES valid even under a test runner
         // whose own standard handles are absent or not inheritable.
+        // NUL serves as stdin AND stderr. stderr must not share the stdout pipe: stdout into a
+        // pipe is fully buffered and stderr is not, so a flush at a buffer boundary could split a
+        // JSON event line around a diagnostic -- POSIX redirects only stdout for the same reason.
         const HANDLE input = ::CreateFileW(L"NUL",
-                                           GENERIC_READ,
+                                           GENERIC_READ | GENERIC_WRITE,
                                            FILE_SHARE_READ | FILE_SHARE_WRITE,
                                            &inherited,
                                            OPEN_EXISTING,
@@ -167,7 +170,7 @@ struct Child {
         startup.dwFlags = STARTF_USESTDHANDLES;
         startup.hStdInput = input;
         startup.hStdOutput = pipe_write;
-        startup.hStdError = pipe_write;
+        startup.hStdError = input;
         PROCESS_INFORMATION info{};
         const std::wstring application = binary.wstring();
         std::wstring command = quoted(application) + L" dedicated --listen 127.0.0.1:0 --ticks " +
