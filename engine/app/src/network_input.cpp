@@ -187,6 +187,14 @@ void count_refusal(RunReport::NetworkInputCounters& counts, InputV2Refusal reaso
     }
 }
 
+// An ACTIVE interaction profile must name its object and both server hooks; an inactive one
+// (no spawn profile beside it) is inert and is not checked.
+bool interaction_complete(const GameDefinition::RemotePlayProfile& remote_play) {
+    const auto* interaction = remote_play.active_interaction();
+    return interaction == nullptr ||
+           (interaction->object && interaction->sample && interaction->capture);
+}
+
 } // namespace
 
 // The default one-command input buffer plus the one send period a single lost datagram costs.
@@ -207,6 +215,8 @@ struct NetworkInputServer::Impl {
         schema_hash = input_schema_identity(profile, remote_play);
         if (remote_play && remote_play->spawn_prediction)
             spawn_profile = &*remote_play->spawn_prediction;
+        if (remote_play)
+            interaction = remote_play->active_interaction();
         if (remote_play) {
             owner = remote_play->owned_player(world);
             hooks = remote_play->prediction_hooks(world, owner);
@@ -220,6 +230,12 @@ struct NetworkInputServer::Impl {
                 });
             if (const auto mapped = replicator->map().net_id_of(owner))
                 owner_net_id = *mapped;
+            if (interaction && interaction->object) {
+                object = interaction->object(world);
+                if (const auto mapped = replicator->map().net_id_of(object))
+                    object_id = PredictedEntityId{mapped->index, mapped->generation};
+                policy.emplace(interaction->params);
+            }
             replicator->set_budget(Budget{.max_bytes_per_tick = 1024});
         }
     }
@@ -493,6 +509,18 @@ struct NetworkInputServer::Impl {
     std::unique_ptr<ServerReplicator> replicator;
     PredictionHooks hooks;
     const GameDefinition::RemotePlayProfile::SpawnPredictionProfile* spawn_profile = nullptr;
+    // m20.6b: the active interaction profile (ADR-0106 §2), its one object, that object's roster
+    // id, and the leaf that decides its membership. SERVER-DECLARED MEMBERSHIP WITH HYSTERESIS:
+    // the client never decides what it predicts; it learns it from the roster and the epoch.
+    const GameDefinition::RemotePlayProfile::InteractionProfile* interaction = nullptr;
+    ecs::Entity object{};
+    PredictedEntityId object_id{};
+    std::optional<InteractionMembershipPolicy> policy;
+    // The last tick the policy ran. `linger` re-offers the final tick's checkpoint many times;
+    // counting each re-offer as another quiet tick would let the object leave during the drain.
+    std::optional<std::uint64_t> interaction_tick;
+    // Interaction epoch advances when a spawn fault started hiding its answer (see after_tick).
+    std::uint64_t fault_prior_interaction_epochs = 0;
 
     struct LiveSpawn {
         SpawnKey key{};
@@ -556,6 +584,22 @@ struct NetworkInputServer::Impl {
         return profile.to_actions(selected.command);
     }
 
+    // One policy step per server tick, from the state the tick just produced. A join or a leave
+    // changes the roster the next checkpoint carries, so it advances the epoch -- the server's
+    // statement that the set changed -- exactly as an accepted or ended spawn does.
+    void update_interaction(std::uint64_t server_tick) {
+        if (!interaction || !policy || (interaction_tick && *interaction_tick == server_tick))
+            return;
+        interaction_tick = server_tick;
+        const auto decision = policy->update(interaction->sample(world, owner, object));
+        if (decision != MembershipDecision::Stay) {
+            ++membership_epoch;
+            ++totals.interaction_epoch_advances;
+        }
+        if (policy->member())
+            ++totals.interaction_member_ticks;
+    }
+
     void receive_spawns(std::span<const SpawnReport> reports) {
         if (!spawn_profile)
             return;
@@ -563,6 +607,7 @@ struct NetworkInputServer::Impl {
             if (!fault_launch_tick && report.kind == SpawnReport::Kind::Launched) {
                 fault_launch_tick = current_server_tick;
                 fault_prior_epoch = membership_epoch;
+                fault_prior_interaction_epochs = totals.interaction_epoch_advances;
             }
             if (!admitted) {
                 ++totals.spawn_without_client;
@@ -668,7 +713,8 @@ NetworkInputServer::bind(const std::string& host,
     }
     if (remote_play &&
         (!remote_play->owned_player || !remote_play->prediction_hooks ||
-         (remote_play->spawn_prediction && !remote_play->spawn_prediction->capture_spawned))) {
+         (remote_play->spawn_prediction && !remote_play->spawn_prediction->capture_spawned) ||
+         !interaction_complete(*remote_play))) {
         error = "remote play profile is incomplete";
         return nullptr;
     }
@@ -684,6 +730,10 @@ NetworkInputServer::bind(const std::string& host,
         error = "remote play prediction hooks are incomplete";
         return nullptr;
     }
+    if (impl->interaction && impl->object_id == PredictedEntityId{}) {
+        error = "interaction object is not replicated";
+        return nullptr;
+    }
     return std::unique_ptr<NetworkInputServer>(new NetworkInputServer(std::move(impl)));
 }
 
@@ -697,7 +747,8 @@ NetworkInputServer::on_link(net::Link& link,
     if (remote_play &&
         (!remote_play->owned_player || !remote_play->prediction_hooks ||
          !world.is_alive(remote_play->owned_player(world)) ||
-         (remote_play->spawn_prediction && !remote_play->spawn_prediction->capture_spawned))) {
+         (remote_play->spawn_prediction && !remote_play->spawn_prediction->capture_spawned) ||
+         !interaction_complete(*remote_play))) {
         error = "remote play profile has no live owned player";
         return nullptr;
     }
@@ -706,6 +757,10 @@ NetworkInputServer::on_link(net::Link& link,
         (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
          !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {
         error = "remote play prediction hooks are incomplete";
+        return nullptr;
+    }
+    if (impl->interaction && impl->object_id == PredictedEntityId{}) {
+        error = "interaction object is not replicated";
         return nullptr;
     }
     return std::unique_ptr<NetworkInputServer>(new NetworkInputServer(std::move(impl)));
@@ -741,6 +796,7 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
                                     std::span<const SpawnReport> spawns) {
     impl_->current_server_tick = server_tick;
     impl_->receive_spawns(spawns);
+    impl_->update_interaction(server_tick);
     if (impl_->fault_held_ack && !impl_->duplicate_window_open()) {
         impl_->apply_ack(*impl_->fault_held_ack);
         impl_->fault_held_ack.reset();
@@ -772,6 +828,17 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
         return;
     }
     checkpoint.entities.push_back(PredictedEntityState{id, std::move(state)});
+    if (impl_->policy && impl_->policy->member()) {
+        // The member's FULL state, velocity included: the client seeds its prediction physics
+        // from these bytes on the join tick and on every correction, never from the mirror.
+        auto object_state = impl_->interaction->capture(impl_->world, impl_->object);
+        if (object_state.empty()) {
+            ++impl_->totals.interaction_capture_refused;
+            ++impl_->totals.checkpoint_capture_refused;
+            return;
+        }
+        checkpoint.entities.push_back(PredictedEntityState{impl_->object_id, std::move(object_state)});
+    }
     SpawnCheckpointExtension extension{};
     if (impl_->spawn_profile) {
         // A delayed answer is redacted as a coherent older roster. Publishing the new entity
@@ -781,7 +848,14 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
             (impl_->fault == SpawnFault::LateAlive || impl_->fault == SpawnFault::LateEnded) &&
             server_tick < *impl_->fault_launch_tick + impl_->fault_ticks;
         if (hide_spawn) {
-            checkpoint.membership_epoch = impl_->fault_prior_epoch;
+            // The redacted roster still carries the interaction object's CURRENT membership, so
+            // its epoch moves on by every interaction change since the fault began. Known limit
+            // (diagnostic only): if the object joined or left inside the window, that number may
+            // also name a roster the client saw before, and the client counts the mismatch.
+            checkpoint.membership_epoch =
+                impl_->fault_prior_epoch +
+                static_cast<std::uint32_t>(impl_->totals.interaction_epoch_advances -
+                                           impl_->fault_prior_interaction_epochs);
             if (impl_->fault == SpawnFault::LateAlive)
                 ++impl_->totals.spawn_fault_late_alive;
             else
@@ -870,6 +944,14 @@ RunReport::NetworkInputCounters NetworkInputServer::counters() const noexcept {
         counts.applied += impl_->schedule->applied();
         counts.synthesized += impl_->schedule->synthesized();
         counts.neutralized += impl_->schedule->neutralized();
+    }
+    if (impl_->policy) {
+        const auto& policy = impl_->policy->counters();
+        counts.interaction_joins = policy.joins;
+        counts.interaction_leaves = policy.leaves;
+        counts.interaction_joined_in_contact = policy.joined_in_contact;
+        counts.interaction_leave_deferred_moving = policy.leave_deferred_moving;
+        counts.interaction_leave_deferred_touching = policy.leave_deferred_touching;
     }
     counts.amplification_blocked = impl_->link.amplification_blocked();
     counts.driver_dropped = impl_->driver.datagrams_dropped();

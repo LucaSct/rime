@@ -33,6 +33,7 @@
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
 #include "rime/replication/client_replicator.hpp"
+#include "rime/replication/interaction.hpp"
 #include "rime/replication/interpolation.hpp"
 #include "rime/rhi/device.hpp"
 
@@ -247,7 +248,10 @@ RunReport run_network_client(const LaunchOptions& options,
         (options.input_tape && !definition.remote_play->diagnostic_input_tape) ||
         (options.input_tape_throw &&
          (!definition.remote_play->spawn_prediction ||
-          !definition.remote_play->spawn_prediction->diagnostic_throw_input)))
+          !definition.remote_play->spawn_prediction->diagnostic_throw_input)) ||
+        (options.input_tape_push && (!definition.remote_play->active_interaction() ||
+                                     !definition.remote_play->active_interaction()
+                                          ->diagnostic_push_input)))
         return fail(report, "game or autopilot unavailable");
 
     replication::InputWindow window;
@@ -278,6 +282,33 @@ RunReport run_network_client(const LaunchOptions& options,
     // to apply) or one whose roster lacks the mirror's player. Counted, because a client that
     // silently dropped every checkpoint would still "converge" on its own prediction (guardrail 5).
     std::uint64_t spawn_checkpoints_without_extension = 0, spawn_checkpoints_without_player = 0;
+    // m20.6b, ADR-0106 §3-§4: the interaction object. The game's decorated hooks own its
+    // prediction physics world; the engine owns what is OUTSIDE rewindable state -- the smoother
+    // and every counter -- so no restore or replay can rewrite what the player was shown.
+    //
+    // CORRECTED SIMULATION, SMOOTHED PRESENTATION: a checkpoint always moves the simulated object
+    // to the authoritative answer and replays (the hooks never blend), and the smoother records
+    // the jump as a visual offset that decays, so the object on screen glides over it instead.
+    const auto* interaction = definition.remote_play->active_interaction();
+    std::optional<GameDefinition::RemotePlayProfile::InteractionProfile::ClientHooks>
+        interaction_hooks;
+    replication::PredictedEntityId interaction_id{};
+    ecs::Entity mirror_object = ecs::kNullEntity;
+    replication::CorrectionSmoother smoother;
+    // Membership as the CLIENT saw it (applied rosters), beside the server's own counters.
+    std::uint64_t crate_joins_seen = 0, crate_leaves_seen = 0, crate_member_ticks = 0;
+    // The simulation's own correction: the predicted object before a checkpoint against the same
+    // tick replayed from it, for checkpoints where it was a member on both sides (a join is a
+    // seed, not a correction). With no server-only force this is the UNDISTURBED RESIDUAL that
+    // ADR-0106 §3 expects to be non-zero: the rebuilt world has no warm-start cache.
+    double crate_max_sim_correction = 0.0;
+    std::uint64_t crate_member_checkpoints = 0, crate_corrections_over_1cm = 0;
+    // Push response: the first predicted step in which the player touched the object, and the
+    // presented object's position just before that step.
+    std::optional<std::uint64_t> crate_push_tick;
+    core::Vec3 crate_push_pose{};
+    std::uint64_t crate_response_ticks = 0;
+    bool crate_responded = false;
     std::vector<net::SessionEvent> events;
     std::vector<net::Received> messages;
     std::vector<replication::SpawnCheckpoint> pending;
@@ -305,6 +336,55 @@ RunReport run_network_client(const LaunchOptions& options,
         max_snap = std::max(max_snap, distance);
         if (options.has_snap_bound && distance > options.snap_bound)
             ++snaps_over_bound;
+    };
+
+    const auto object_member = [&] {
+        if (!spawn_reconciler || !interaction_hooks)
+            return false;
+        const auto roster = spawn_reconciler->roster();
+        return std::find(roster.begin(), roster.end(), interaction_id) != roster.end();
+    };
+    // What the player sees of the object: the predicted simulation plus the smoother's offset
+    // while it is a predicted member, otherwise (or with --no-prediction) the mirror's authority.
+    const auto presented_object = [&] {
+        if (!options.no_prediction && interaction_hooks)
+            if (const auto simulated = interaction_hooks->object_pose()) {
+                core::Transform pose = *simulated;
+                pose.translation = smoother.presented(interaction_id, simulated->translation);
+                pose.rotation = smoother.presented(interaction_id, simulated->rotation);
+                return pose;
+            }
+        const auto* wt = mirror_world.get<ecs::WorldTransform>(mirror_object);
+        return wt ? wt->value : core::Transform{};
+    };
+    // After an applied checkpoint: count what the roster did, and hand the smoother the jump from
+    // what was on screen to what the corrected simulation now says.
+    const auto note_object_checkpoint = [&](bool was_member,
+                                            const std::optional<core::Transform>& simulated_before,
+                                            const core::Transform& shown_before) {
+        const bool member = object_member();
+        if (member && !was_member)
+            ++crate_joins_seen;
+        if (!member && was_member) {
+            ++crate_leaves_seen;
+            smoother.forget(interaction_id); // the mirror presents it again
+        }
+        if (!member)
+            return;
+        const auto simulated_after = interaction_hooks->object_pose();
+        if (!simulated_after)
+            return;
+        smoother.on_correction(interaction_id, shown_before.translation,
+                               simulated_after->translation);
+        smoother.on_correction(interaction_id, shown_before.rotation, simulated_after->rotation);
+        if (was_member && simulated_before) {
+            const double jump = static_cast<double>(
+                core::length(simulated_before->translation - simulated_after->translation));
+            crate_max_sim_correction = std::max(crate_max_sim_correction, jump);
+            ++crate_member_checkpoints;
+            if (jump > 0.01)
+                ++crate_corrections_over_1cm;
+        }
     };
 
     const auto update_presentation = [&] {
@@ -409,9 +489,17 @@ RunReport run_network_client(const LaunchOptions& options,
                     continue;
                 }
                 const auto before = presented_position();
+                const bool object_was_member = object_member();
+                const auto object_simulated_before =
+                    interaction_hooks ? interaction_hooks->object_pose() : std::nullopt;
+                const auto object_shown_before = interaction_hooks ? presented_object()
+                                                                   : core::Transform{};
                 const auto result = spawn_reconciler->apply_checkpoint(base, *checkpoint.spawns);
                 if (!result.base.applied)
                     continue;
+                if (interaction_hooks)
+                    note_object_checkpoint(
+                        object_was_member, object_simulated_before, object_shown_before);
                 for (const auto& old : spawn_bindings)
                     if (std::none_of(checkpoint.spawns->bindings.begin(),
                                      checkpoint.spawns->bindings.end(),
@@ -573,6 +661,20 @@ RunReport run_network_client(const LaunchOptions& options,
                         [&](const replication::SpawnKey& key, std::span<const std::byte> state) {
                             return spawn_reconciler->spawn_provisional(key, state);
                         });
+                    if (interaction) {
+                        // The object's roster id is its world-stream NetId, which the mirror
+                        // already holds: the server names it, the client only looks it up.
+                        mirror_object = interaction->object(mirror_world);
+                        const auto net_id = mirror_object != ecs::kNullEntity
+                                                ? mirror.map().net_id_of(mirror_object)
+                                                : std::nullopt;
+                        if (!net_id || !interaction->client_hooks)
+                            return fail(report, "interaction object unavailable");
+                        interaction_id = {net_id->index, net_id->generation};
+                        interaction_hooks = interaction->client_hooks(
+                            prediction_world, predicted_player, interaction_id, *spawn_hooks, {});
+                        spawn_hooks = interaction_hooks->hooks;
+                    }
                     if (options.spawn_debug_break == SpawnDebugBreak::NoAdopt) {
                         spawn_hooks->spawn.adopt = [&](auto provisional, auto authoritative) {
                             // Keep the old entity beside a fresh replica so the live-key gate
@@ -636,6 +738,9 @@ RunReport run_network_client(const LaunchOptions& options,
                 if (const auto* source =
                         prediction_world.get<ecs::WorldTransform>(predicted_player))
                     mirror_world.add_component(mirror_player, ecs::RenderTransform{source->value});
+                if (interaction_hooks && interaction_hooks->object_pose())
+                    mirror_world.add_component(mirror_object,
+                                               ecs::RenderTransform{presented_object()});
             }
             PresentFrameContext frame{mirror_world, ctx.frame_dt, ctx.alpha};
             game->present_frame(frame);
@@ -659,7 +764,9 @@ RunReport run_network_client(const LaunchOptions& options,
         if (disconnected)
             break;
         ActionState actions{};
-        if (options.input_tape_throw)
+        if (options.input_tape_push)
+            actions = interaction->diagnostic_push_input(report.ticks + 1);
+        else if (options.input_tape_throw)
             actions =
                 definition.remote_play->spawn_prediction->diagnostic_throw_input(report.ticks + 1);
         else if (options.input_tape)
@@ -682,8 +789,26 @@ RunReport run_network_client(const LaunchOptions& options,
             spawn_press_tick = report.ticks + 1;
         window.push(command);
         if (spawn_reconciler) {
+            const auto object_before = interaction_hooks ? presented_object().translation
+                                                         : core::Vec3{};
             spawn_reconciler->predict(command);
             update_presentation();
+            if (interaction_hooks) {
+                smoother.advance(definition.remote_play->fixed_dt);
+                if (object_member())
+                    ++crate_member_ticks;
+                if (!crate_push_tick && interaction_hooks->touching()) {
+                    crate_push_tick = report.ticks + 1;
+                    crate_push_pose = object_before;
+                }
+                // 1 mm: above the smoother's decaying residual offsets, far below a push step
+                // (4 m/s is 67 mm per tick).
+                if (crate_push_tick && !crate_responded &&
+                    core::length(presented_object().translation - crate_push_pose) > 1e-3f) {
+                    crate_response_ticks = report.ticks + 1 - *crate_push_tick;
+                    crate_responded = true;
+                }
+            }
         } else {
             reconciler->predict(command);
         }
@@ -809,6 +934,37 @@ RunReport run_network_client(const LaunchOptions& options,
             ",\"spawn_checkpoints_without_extension\":{},\"spawn_checkpoints_without_player\":{}",
             spawn_checkpoints_without_extension,
             spawn_checkpoints_without_player);
+        if (interaction_hooks) {
+            const auto& c = smoother.counters();
+            // crate_response_ticks reads the ticks run since the push when the crate never
+            // visibly moved, and the whole run when no push happened (a refusal, not a pass).
+            spawn_metrics += fmt::format(
+                ",\"interaction\":1,\"crate_member\":{},\"crate_joins_seen\":{},"
+                "\"crate_leaves_seen\":{},\"crate_member_ticks\":{},"
+                "\"crate_corrections\":{},\"crate_snaps\":{},"
+                "\"crate_max_raw_jump\":{:.6f},\"crate_max_presented_jump\":{:.6f},"
+                "\"crate_rotation_snaps\":{},\"crate_max_raw_angle\":{:.6f},"
+                "\"crate_member_checkpoints\":{},\"crate_max_sim_correction\":{:.6f},"
+                "\"crate_corrections_over_1cm\":{},\"crate_push_tick\":{},"
+                "\"crate_response_ticks\":{}",
+                object_member() ? 1 : 0,
+                crate_joins_seen,
+                crate_leaves_seen,
+                crate_member_ticks,
+                c.corrections,
+                c.snaps,
+                static_cast<double>(c.max_raw_jump),
+                static_cast<double>(c.max_presented_jump),
+                c.rotation_snaps,
+                static_cast<double>(c.max_raw_angle),
+                crate_member_checkpoints,
+                crate_max_sim_correction,
+                crate_corrections_over_1cm,
+                crate_push_tick.value_or(0),
+                crate_responded ? crate_response_ticks
+                                : (crate_push_tick ? report.ticks - *crate_push_tick
+                                                   : report.ticks));
+        }
     } else {
         spawn_metrics = ",\"prediction_path\":\"legacy\"";
     }

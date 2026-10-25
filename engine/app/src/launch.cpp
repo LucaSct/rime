@@ -116,6 +116,7 @@ std::string launch_usage(std::string_view program) {
         "  --client-port N  connected local UDP port diagnostic\n"
         "  --input-tape  connected fixed input for process diagnostics (no Throw)\n"
         "  --input-tape-throw  same tape, with one Throw on tick 12\n"
+        "  --input-tape-push  connected interaction tape: walk into the crate, push, retreat\n"
         "  --spawn-fault CASE  dedicated Throw diagnostic (refuse, lose-one, lose-all, duplicate, "
         "late-alive, late-ended)\n"
         "  --spawn-debug-break CASE  connected sensitivity control (no-ledger, no-adopt, "
@@ -173,6 +174,9 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         } else if (arg == "--input-tape-throw") {
             result.options.input_tape = true;
             result.options.input_tape_throw = true;
+        } else if (arg == "--input-tape-push") {
+            result.options.input_tape = true;
+            result.options.input_tape_push = true;
         } else if (arg == "--spawn-fault") {
             if (!has_value || result.options.spawn_fault != SpawnFault::None)
                 return fail("--spawn-fault needs one case");
@@ -823,6 +827,22 @@ RunReport run_game_mode(const LaunchOptions& options,
                     report.network_input.spawn_fault_late_ended,
                     report.network_input.launch_recovered_by_redundancy,
                     report.network_input.spawn_last_flight_ticks);
+            if (definition.remote_play && definition.remote_play->active_interaction())
+                spawn_counters += fmt::format(
+                    ",\"interaction_joins\":{},\"interaction_leaves\":{},"
+                    "\"interaction_joined_in_contact\":{},"
+                    "\"interaction_leave_deferred_moving\":{},"
+                    "\"interaction_leave_deferred_touching\":{},"
+                    "\"interaction_epoch_advances\":{},\"interaction_member_ticks\":{},"
+                    "\"interaction_capture_refused\":{}",
+                    report.network_input.interaction_joins,
+                    report.network_input.interaction_leaves,
+                    report.network_input.interaction_joined_in_contact,
+                    report.network_input.interaction_leave_deferred_moving,
+                    report.network_input.interaction_leave_deferred_touching,
+                    report.network_input.interaction_epoch_advances,
+                    report.network_input.interaction_member_ticks,
+                    report.network_input.interaction_capture_refused);
             fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
                        "\"applied\":{},\"synthesized\":{},\"neutralized\":{},"
                        "\"late\":{},\"duplicate\":{},\"future\":{},"

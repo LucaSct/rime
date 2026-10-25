@@ -108,6 +108,8 @@ struct LaunchOptions {
     bool no_prediction = false;
     bool input_tape = false;
     bool input_tape_throw = false;
+    // m20.6b: the game's interaction tape (walks the player into its pushable object).
+    bool input_tape_push = false;
     SpawnFault spawn_fault = SpawnFault::None;
     // The window of a timed fault, in server ticks: how long `duplicate` doubles checkpoints and
     // holds the client's ack, or how long `late-*` withholds the verdict. Required by exactly
@@ -236,6 +238,17 @@ struct RunReport {
         std::uint64_t launch_recovered_by_redundancy = 0;
         // Server ticks between the most recent keyed launch's report and its end's report.
         std::uint64_t spawn_last_flight_ticks = 0;
+        // m20.6b interaction group (reported only when the game's interaction profile is
+        // active). The policy's own counters -- joins, leaves, a join while touching, and leaves
+        // deferred because the object still moved or was still touched -- plus the epoch advances
+        // they caused, the ticks the object spent in the roster, and how often its capture
+        // refused a checkpoint (guardrail 5: every skip has a counter).
+        std::uint64_t interaction_joins = 0, interaction_leaves = 0;
+        std::uint64_t interaction_joined_in_contact = 0;
+        std::uint64_t interaction_leave_deferred_moving = 0;
+        std::uint64_t interaction_leave_deferred_touching = 0;
+        std::uint64_t interaction_epoch_advances = 0, interaction_member_ticks = 0;
+        std::uint64_t interaction_capture_refused = 0;
     } network_input;
 
     bool bind_failed = false;
