@@ -12,6 +12,7 @@ target_link_libraries(rime_replication_tests
 rime_add_test(rime_replication_input_tests
     input_test.cpp
     input_v2_test.cpp
+    interaction_test.cpp
     prediction_test.cpp
     spawn_prediction_test.cpp)
 
