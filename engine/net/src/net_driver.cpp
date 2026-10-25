@@ -463,7 +463,11 @@ void NetDriver::kill(Slot& slot,
     event.reason = reason;
     event.expected = expected;
     event.actual = actual;
-    out.push_back(event);
+    // The reaped session's inbox goes out with its obituary rather than with it (see
+    // SessionEvent::undrained). A ConnectFailed session never delivered anything, so this only
+    // ever carries messages for Disconnected.
+    (void)slot.session->drain_received(event.undrained);
+    out.push_back(std::move(event));
 
     slot.session.reset();
     // Bumping on the way OUT means every SessionId handed out for this slot is now stale, which is
