@@ -102,7 +102,9 @@ if(NOT WIN32)
     # that must fail. 13 sequential legs; TIMEOUT is the measured runtime times three.
     add_test(NAME hello_game_play_throw COMMAND python3
         ${CMAKE_CURRENT_SOURCE_DIR}/throw_prediction.py $<TARGET_FILE:hello_game>)
-    set_tests_properties(hello_game_play_throw PROPERTIES TIMEOUT 130 LABELS "hello_game")
+    # RUN_SERIAL: two real-time processes whose press must land inside the server's one-command input
+    # buffer; a parallel suite starving them is what the proof's rerun exists for, so do not invite it.
+    set_tests_properties(hello_game_play_throw PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE LABELS "hello_game")
     add_executable(hello_game_net_proof net_proof.cpp game.cpp)
     target_link_libraries(hello_game_net_proof
         PRIVATE rime::app_game rime::app rime::physics rime::scene rime::net rime::replication)

@@ -89,7 +89,33 @@ def finished(output):
     return next(event for event in events(output) if event["event"] == "finished")
 
 
+MAX_ATTEMPTS = 3
+
+
 def run_leg(server_extra=(), client_extra=(), throw=True, one_way=1, hold=0):
+    """One leg, rerun while its PRECONDITION failed: the press must have executed on the server.
+
+    Two real-time processes under CPU load (a parallel ctest, a slow runner) can stall the client long
+    enough that the server's one-command input buffer runs dry on the press tick and executes a
+    synthesized stand-in -- which never launches (ADR-0103 §2, ADR-0105 §5's lose-all case). That is
+    the engine behaving correctly, but the leg was meant to test something else, so it is rerun. The
+    tell is the client's own `spawn_retired_without_launch`; `lose-all` expects it and is never rerun.
+    A discarded attempt must STILL hold the invariant every leg gates -- at most one live presentation
+    per key and at most one Launch -- so a rerun can never hide a ghost. Reruns are printed.
+    """
+    expects_lost_press = "lose-all" in server_extra
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        s, c = run_leg_once(server_extra, client_extra, throw, one_way, hold)
+        if not throw or expects_lost_press or c.get("spawn_retired_without_launch", 0) == 0:
+            return s, c
+        assert c["live_presentations_max"] <= 1 and c["presentation_launch"] <= 1, (
+            "a discarded attempt broke the no-ghost invariant", c)
+        print(f"rerun: press executed as a synthesized stand-in (attempt {attempt}, "
+              f"{s.get('synthesized', '?')} synthesized ticks)", flush=True)
+    return s, c
+
+
+def run_leg_once(server_extra=(), client_extra=(), throw=True, one_way=1, hold=0):
     ticks = budget(one_way, hold)
     server = subprocess.Popen(
         [EXE, "dedicated", "--listen", "127.0.0.1:0", "--ticks", str(ticks), "--linger-ms",
