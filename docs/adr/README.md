@@ -132,3 +132,4 @@ is* to anyone who arrives later — including our future selves.
 - [ADR-0103](0103-m20.3-dedicated-network-input.md) — m20.3: InputV2 envelope, execution-acknowledged input, and the `dedicated` listening contract (LAN, unauthenticated, default port 7463)
 - [ADR-0104](0104-m20.4-play-connect-and-the-predicted-set.md) — m20.4: `play --connect`, prediction as a declared predicted set (local player first), damage never predicted, owner checkpoints reconcile on `retired_through`
 - [ADR-0105](0105-m20.5-speculative-spawn-and-a-predicted-projectile.md) — m20.5: client-keyed speculative spawn, authoritative roster + provisional overlay, exactly-once presentation; hello-game's Throw
+- [ADR-0106](0106-m20.6-one-bounded-interaction-group.md) — m20.6: one bounded interaction group (the player pushes the crate): server-declared membership with hysteresis, a rebuilt prediction physics world, corrected simulation with smoothed presentation
