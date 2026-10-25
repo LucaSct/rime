@@ -115,6 +115,8 @@ public:
     [[nodiscard]] std::uint64_t state_digest(const rime::ecs::World& world) const override;
     void present_setup(rime::app::PresentSetupContext& ctx) override;
     void present_frame(rime::app::PresentFrameContext& ctx) override;
+    void present_prediction(rime::app::PresentFrameContext& ctx,
+                            rime::ecs::World& prediction_world) override;
 
     // ── What a host may ask about the game ────────────────────────────────────────────────────
     [[nodiscard]] int score() const noexcept;
@@ -152,6 +154,7 @@ private:
     void bind_bodies(rime::ecs::World& world);
     void collect(rime::ecs::World& world);
     void throw_step(rime::app::TickContext& ctx, ReplicatedGameState& state);
+    void present_projectile(rime::ecs::World& render_world, rime::ecs::World& source_world);
 
     // The physics world is the GAME's (it was the host's before m20.1): the engine owns the loop
     // and hands the game the tick, and what the game simulates with is its own affair.
@@ -162,6 +165,7 @@ private:
     rime::ecs::Entity player_{};
     rime::ecs::Entity crate_{};
     rime::ecs::Entity camera_{}; // presentation only: spawned by present_setup, absent otherwise
+    rime::ecs::Entity projectile_visual_{}; // one visible identity across guess and adoption
     rime::ecs::Entity state_entity_{};
     rime::ecs::Entity projectile_{};
     rime::replication::SpawnKey projectile_key_{};

@@ -309,6 +309,13 @@ public:
 
     // Once per frame, before the scene is drawn: presentation-only state such as a camera.
     virtual void present_frame(PresentFrameContext& ctx) { (void)ctx; }
+
+    // Connected play may have a projectile in its prediction world before the mirror has one.
+    // The game copies only its visual pose into the render world; no prediction state is changed.
+    virtual void present_prediction(PresentFrameContext& ctx, ecs::World& prediction_world) {
+        (void)ctx;
+        (void)prediction_world;
+    }
 };
 
 // Register a game's component set into a world. The same shape as `ComponentRegistrar` on the
@@ -398,6 +405,25 @@ struct GameDefinition {
             // an entity rather than a PredictedEntityId because the server knows its own entity;
             // the id on the wire is that entity's NetId. Empty bytes refuse the checkpoint.
             std::vector<std::byte> (*capture_spawned)(const ecs::World&, ecs::Entity) = nullptr;
+
+            // The game owns projectile rules and ECS storage. The client supplies only the
+            // step-context request: SpawnReconciler alone can give a replay the same provisional
+            // identity, while these hooks keep the m20.4 PredictionHooks contract intact.
+            struct ClientHooks {
+                replication::PredictionHooks prediction;
+                replication::SpawnHooks spawn;
+                std::function<ecs::Entity(replication::PredictedEntityId)> entity_for;
+                std::function<bool(replication::PredictedEntityId)> is_live;
+            };
+
+            ClientHooks (*client_hooks)(ecs::World&,
+                                        ecs::Entity,
+                                        std::uint32_t,
+                                        std::function<std::optional<replication::PredictedEntityId>(
+                                            const replication::SpawnKey&,
+                                            std::span<const std::byte>)>) = nullptr;
+            // A second diagnostic tape keeps the older movement tape bit-for-bit throw-free.
+            ActionState (*diagnostic_throw_input)(std::uint64_t) = nullptr;
         };
 
         std::optional<SpawnPredictionProfile> spawn_prediction;

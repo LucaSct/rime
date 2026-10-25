@@ -18,6 +18,8 @@
 #include <memory>
 #include <optional>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "rime/app/application.hpp"
@@ -242,14 +244,33 @@ RunReport run_network_client(const LaunchOptions& options,
     definition.remote_play->register_replicated(prediction_world);
     auto game = definition.create();
     if (!game || (options.autopilot && !game->has_autopilot()) ||
-        (options.input_tape && !definition.remote_play->diagnostic_input_tape))
+        (options.input_tape && !definition.remote_play->diagnostic_input_tape) ||
+        (options.input_tape_throw &&
+         (!definition.remote_play->spawn_prediction ||
+          !definition.remote_play->spawn_prediction->diagnostic_throw_input)))
         return fail(report, "game or autopilot unavailable");
 
     replication::InputWindow window;
     std::unique_ptr<replication::Reconciler> reconciler;
+    // Presentation is deliberately outside the rewindable prediction world: replay must not
+    // forget that a Launch has already been shown under its provisional key.
+    replication::PresentationLedger ledger;
+    std::unique_ptr<replication::SpawnReconciler> spawn_reconciler;
+    std::optional<GameDefinition::RemotePlayProfile::SpawnPredictionProfile::ClientHooks>
+        spawn_hooks;
+    std::vector<replication::SpawnBinding> spawn_bindings;
+    std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> live_presentations;
+    std::optional<replication::SpawnKey> acknowledged_outcomes;
+    std::uint64_t presentation_launch = 0, presentation_end = 0;
+    std::uint64_t presentation_cancelled = 0, live_presentations_max = 0;
+    std::uint64_t spawn_acks_sent = 0, spawn_ack_send_refused = 0;
+    // Checkpoints the spawn path could not use: an m20.4-shaped one (no extension, so no verdicts
+    // to apply) or one whose roster lacks the mirror's player. Counted, because a client that
+    // silently dropped every checkpoint would still "converge" on its own prediction (guardrail 5).
+    std::uint64_t spawn_checkpoints_without_extension = 0, spawn_checkpoints_without_player = 0;
     std::vector<net::SessionEvent> events;
     std::vector<net::Received> messages;
-    std::vector<replication::OwnerCheckpoint> pending;
+    std::vector<replication::SpawnCheckpoint> pending;
     std::uint32_t epoch = 0;
     bool has_epoch = false, accepted = false, disconnected = false, graceful = false;
     std::string failure_reason;
@@ -276,8 +297,124 @@ RunReport run_network_client(const LaunchOptions& options,
             ++snaps_over_bound;
     };
 
+    const auto update_presentation = [&] {
+        if (!spawn_reconciler || !spawn_hooks)
+            return;
+        std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> visible;
+        std::unordered_map<replication::SpawnKey, std::uint64_t, replication::SpawnKeyHash>
+            live_per_key;
+        for (const auto& binding : spawn_bindings)
+            if (spawn_hooks->is_live(binding.id)) {
+                visible.insert(binding.key);
+                ++live_per_key[binding.key];
+            }
+        for (const auto& provisional : spawn_reconciler->provisional())
+            if (spawn_hooks->is_live(provisional.id)) {
+                visible.insert(provisional.key);
+                ++live_per_key[provisional.key];
+            }
+        // Count identities per key before the set coalesces them for ledger events. A surviving
+        // provisional ghost beside its adopted roster entity must make this diagnostic exceed 1.
+        for (const auto& [key, count] : live_per_key) {
+            (void)key;
+            live_presentations_max = std::max(live_presentations_max, count);
+        }
+        for (const auto& key : visible) {
+            if (live_presentations.insert(key).second &&
+                ledger.should_play(key, replication::PresentationEventKind::Launch, 0))
+                ++presentation_launch;
+        }
+        for (auto it = live_presentations.begin(); it != live_presentations.end();) {
+            if (visible.contains(*it)) {
+                ++it;
+                continue;
+            }
+            // Local lifetime expiry plays End once; a later authoritative verdict may still
+            // adopt the key, but the exactly-once ledger will not replay its Launch.
+            if (!ledger.cancelled(*it) &&
+                ledger.should_play(*it, replication::PresentationEventKind::End, 0))
+                ++presentation_end;
+            ledger.release(*it);
+            it = live_presentations.erase(it);
+        }
+    };
+
+    const auto apply_pending = [&] {
+        for (const auto& checkpoint : pending) {
+            const auto& base = checkpoint.base;
+            if (spawn_reconciler) {
+                if (!checkpoint.spawns) {
+                    ++spawn_checkpoints_without_extension;
+                    continue;
+                }
+                const bool has_player = std::any_of(
+                    base.entities.begin(), base.entities.end(), [&](const auto& member) {
+                        return mirror.map().resolve({member.id.index, member.id.generation}) ==
+                               mirror_player;
+                    });
+                if (!has_player) {
+                    ++spawn_checkpoints_without_player;
+                    continue;
+                }
+                const auto before = presented_position();
+                const auto result = spawn_reconciler->apply_checkpoint(base, *checkpoint.spawns);
+                if (!result.base.applied)
+                    continue;
+                // Bindings are authoritative for this applied roster only; a stale or refused
+                // checkpoint cannot replace the keys used by presentation.
+                spawn_bindings = checkpoint.spawns->bindings;
+                for (const auto& cancelled : result.cancelled) {
+                    live_presentations.erase(cancelled.key);
+                    ++presentation_cancelled;
+                }
+                record_snap(before);
+                ++checkpoints;
+                replayed += result.base.replayed;
+                max_replay = std::max<std::uint64_t>(max_replay, result.base.replayed);
+                window.apply_result(base.result);
+                // Acknowledge only applied verdicts. The held frontier cannot advance from a
+                // malformed, refused, or stale checkpoint, even if its wire bytes decoded.
+                const auto held = spawn_reconciler->outcomes_held_through();
+                if (held && (!acknowledged_outcomes || *held > *acknowledged_outcomes)) {
+                    std::array<std::byte, replication::kSpawnOutcomeAckBytes> bytes{};
+                    const auto size = replication::encode_spawn_outcome_ack({*held}, bytes);
+                    auto* session = driver.session(*session_id);
+                    if (session && session->send_reliable(std::span(bytes).first(size), now_ms())) {
+                        acknowledged_outcomes = held;
+                        ++spawn_acks_sent;
+                    } else {
+                        ++spawn_ack_send_refused;
+                    }
+                }
+                update_presentation();
+                continue;
+            }
+            if (!reconciler || base.entities.size() != 1)
+                continue;
+            const auto id = base.entities.front().id;
+            if (mirror.map().resolve({id.index, id.generation}) != mirror_player)
+                continue;
+            if (!has_epoch || base.membership_epoch != epoch) {
+                epoch = base.membership_epoch;
+                reconciler->set_membership(epoch, {id});
+                has_epoch = true;
+            }
+            const auto before = presented_position();
+            const auto result = reconciler->apply_checkpoint(base);
+            if (result.applied) {
+                record_snap(before);
+                ++checkpoints;
+                replayed += result.replayed;
+                max_replay = std::max<std::uint64_t>(max_replay, result.replayed);
+                window.apply_result(base.result);
+            }
+        }
+        pending.clear();
+    };
+
     const auto pump = [&] {
-        const auto before_mirror = reconciler ? std::optional{presented_position()} : std::nullopt;
+        const auto before_mirror =
+            (reconciler || spawn_reconciler) ? std::optional{presented_position()} : std::nullopt;
         events.clear();
         messages.clear();
         driver.update(now_ms(), events);
@@ -334,78 +471,72 @@ RunReport run_network_client(const LaunchOptions& options,
                 window.apply_result(result);
                 continue;
             }
-            // The spawn-extension decoder reads an m20.4 checkpoint unchanged and an extended one
-            // whole. Until m20.5c wires SpawnReconciler, only the base is used: the player is
-            // still predicted alone, and a checkpoint with a projectile in its roster is skipped
-            // by the single-entity rule below.
+            // Decode the whole extension before any state changes: dropping verdicts but applying
+            // their roster would leave a ghost provisional entity alive.
             replication::SpawnCheckpoint checkpoint{};
             if (replication::decode_spawn_checkpoint(message.bytes, checkpoint))
-                pending.push_back(std::move(checkpoint.base));
+                pending.push_back(std::move(checkpoint));
         }
-        if (reconciler) {
-            for (const auto& checkpoint : pending) {
-                if (checkpoint.entities.size() != 1)
-                    continue;
-                const auto id = checkpoint.entities.front().id;
-                if (mirror.map().resolve({id.index, id.generation}) != mirror_player)
-                    continue;
-                if (!has_epoch || checkpoint.membership_epoch != epoch) {
-                    epoch = checkpoint.membership_epoch;
-                    reconciler->set_membership(epoch, {id});
-                    has_epoch = true;
-                }
-                const auto before = presented_position();
-                const auto result = reconciler->apply_checkpoint(checkpoint);
-                if (result.applied) {
-                    record_snap(before);
-                    ++checkpoints;
-                    replayed += result.replayed;
-                    max_replay = std::max<std::uint64_t>(max_replay, result.replayed);
-                    window.apply_result(checkpoint.result);
-                }
-            }
-            pending.clear();
-        }
+        if (reconciler || spawn_reconciler)
+            apply_pending();
         if (before_mirror && options.no_prediction && checkpoints > 0)
             record_snap(*before_mirror);
         mirror.send_ack(driver, now_ms());
     };
 
-    while (Clock::now() < connect_deadline && !disconnected && !reconciler) {
+    while (Clock::now() < connect_deadline && !disconnected && !reconciler && !spawn_reconciler) {
         pump();
         if (accepted && mirror.deltas_applied() > 0 && !pending.empty()) {
-            const auto& checkpoint = pending.back();
-            if (checkpoint.entities.size() == 1) {
-                const auto id = checkpoint.entities.front().id;
-                mirror_player = mirror.map().resolve({id.index, id.generation});
-                if (mirror_player != ecs::kNullEntity && game->bind_remote_world(mirror_world)) {
-                    predicted_player = definition.remote_play->seed_prediction(
-                        mirror_world, prediction_world, mirror_player);
+            const auto& checkpoint = pending.back().base;
+            if (!definition.remote_play->spawn_prediction && checkpoint.entities.size() != 1)
+                continue;
+            for (const auto& member : checkpoint.entities) {
+                const auto candidate =
+                    mirror.map().resolve({member.id.index, member.id.generation});
+                if (candidate != ecs::kNullEntity &&
+                    candidate == definition.remote_play->owned_player(mirror_world)) {
+                    mirror_player = candidate;
+                    break;
+                }
+            }
+            if (mirror_player != ecs::kNullEntity && game->bind_remote_world(mirror_world)) {
+                predicted_player = definition.remote_play->seed_prediction(
+                    mirror_world, prediction_world, mirror_player);
+                if (const auto& profile = definition.remote_play->spawn_prediction) {
+                    auto* session = driver.session(*session_id);
+                    if (!session || !profile->client_hooks)
+                        return fail(report, "spawn client hooks unavailable");
+                    spawn_hooks = profile->client_hooks(
+                        prediction_world,
+                        predicted_player,
+                        session->incarnation(),
+                        [&](const replication::SpawnKey& key, std::span<const std::byte> state) {
+                            return spawn_reconciler->spawn_provisional(key, state);
+                        });
+                    spawn_reconciler = std::make_unique<replication::SpawnReconciler>(
+                        spawn_hooks->prediction,
+                        spawn_hooks->spawn,
+                        definition.remote_play->fixed_dt,
+                        session->incarnation(),
+                        &ledger);
+                    std::vector<replication::PredictedEntityId> members;
+                    for (const auto& member : checkpoint.entities)
+                        members.push_back(member.id);
+                    spawn_reconciler->set_membership(checkpoint.membership_epoch,
+                                                     std::move(members));
+                } else {
                     reconciler = std::make_unique<replication::Reconciler>(
                         definition.remote_play->prediction_hooks(prediction_world,
                                                                  predicted_player),
                         definition.remote_play->fixed_dt);
-                    // Process the first checkpoint through the same path as all later ones.
-                    const auto initial = std::move(pending);
-                    pending.clear();
-                    for (const auto& first : initial) {
-                        if (!has_epoch || first.membership_epoch != epoch) {
-                            reconciler->set_membership(first.membership_epoch,
-                                                       {first.entities.front().id});
-                            epoch = first.membership_epoch;
-                            has_epoch = true;
-                        }
-                        if (reconciler->apply_checkpoint(first).applied) {
-                            ++checkpoints;
-                            window.apply_result(first.result);
-                        }
-                    }
                 }
+                // The initial checkpoint follows the same applied-verdict and ack path.
+                apply_pending();
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    if (!reconciler)
+    if (!reconciler && !spawn_reconciler)
         return fail(report,
                     disconnected ? failure_reason
                                  : "timed out waiting for ownership and initial world");
@@ -433,6 +564,8 @@ RunReport run_network_client(const LaunchOptions& options,
             }
             PresentFrameContext frame{mirror_world, ctx.frame_dt, ctx.alpha};
             game->present_frame(frame);
+            if (spawn_reconciler && !options.no_prediction)
+                game->present_prediction(frame, prediction_world);
             ctx.present = renderer->render(*ctx.graph, mirror_world, ctx.extent, true).ldr;
         });
     }
@@ -451,7 +584,10 @@ RunReport run_network_client(const LaunchOptions& options,
         if (disconnected)
             break;
         ActionState actions{};
-        if (options.input_tape)
+        if (options.input_tape_throw)
+            actions =
+                definition.remote_play->spawn_prediction->diagnostic_throw_input(report.ticks + 1);
+        else if (options.input_tape)
             actions = definition.remote_play->diagnostic_input_tape(report.ticks + 1);
         else if (options.autopilot)
             actions = game->autopilot();
@@ -468,7 +604,12 @@ RunReport run_network_client(const LaunchOptions& options,
         }
         command.sequence = ++sequence;
         window.push(command);
-        reconciler->predict(command);
+        if (spawn_reconciler) {
+            spawn_reconciler->predict(command);
+            update_presentation();
+        } else {
+            reconciler->predict(command);
+        }
         if (first_input_tick && !responded &&
             core::length(presented_position() - *first_input_position) > 1e-5f) {
             response_ticks = report.ticks + 1 - *first_input_tick;
@@ -495,24 +636,122 @@ RunReport run_network_client(const LaunchOptions& options,
     app.finish_gpu();
     report.state_digest = definition.remote_play->digest(mirror_world);
     report.finished = disconnected;
+    const auto& base = spawn_reconciler ? spawn_reconciler->base() : *reconciler;
+    // SpawnReconciler rejects stale extended checkpoints before its inner Reconciler sees them.
+    // Keep the established JSON field tied to the active checkpoint path's refusal counter.
+    const auto stale_checkpoints =
+        spawn_reconciler ? spawn_reconciler->stale_checkpoints() : base.stale_checkpoints();
+    std::string spawn_metrics;
+    if (spawn_reconciler) {
+        const auto& s = *spawn_reconciler;
+        spawn_metrics = fmt::format(
+            ",\"prediction_path\":\"spawn\",\"presentation_launch\":{},"
+            "\"presentation_end\":{},\"presentation_cancelled\":{},"
+            "\"live_presentations_max\":{},\"spawn_acks_sent\":{},"
+            "\"spawn_ack_send_refused\":{},\"ledger_played\":{},"
+            "\"ledger_duplicates_suppressed\":{},\"ledger_suppressed_cancelled\":{},"
+            "\"ledger_adoptions\":{},\"ledger_duplicate_adoptions\":{},"
+            "\"ledger_adopt_after_cancel\":{},\"ledger_cancels\":{},"
+            "\"ledger_duplicate_cancels\":{},\"ledger_key_overflow\":{},"
+            "\"ledger_event_overflow\":{},\"ledger_tombstones_evicted\":{},"
+            "\"spawn_rejected_launches\":{},\"spawn_rejected_unpredicted\":{},"
+            "\"spawn_local_removals\":{},\"spawn_local_releases\":{},"
+            "\"spawn_authoritative_cancels\":{},\"spawn_unreplayed_guesses\":{},"
+            "\"spawn_frontier_ahead_of_client\":{},\"spawn_epoch_roster_mismatch\":{},"
+            "\"spawn_retired_without_launch\":{},\"spawn_duplicate_outcomes_ignored\":{},"
+            "\"spawn_confirmed_after_expiry_alive\":{},"
+            "\"spawn_confirmed_after_expiry_ended\":{},\"spawn_adopted\":{},"
+            "\"spawn_accepted_ended\":{},\"spawn_unpredicted_outcomes\":{},"
+            "\"spawn_contradictory_outcomes\":{},\"spawn_provisional_expired\":{},"
+            "\"spawn_pending_without_snapshot\":{},\"spawn_not_recreated\":{},"
+            "\"spawn_recreated\":{},\"spawn_respawn_suppressed\":{},"
+            "\"spawn_outside_step\":{},\"spawn_bad_key\":{},\"spawn_duplicate\":{},"
+            "\"spawn_provisional_overflow\":{},\"spawn_snapshots_evicted\":{},"
+            "\"spawn_tombstones_evicted\":{},\"spawn_stale_checkpoints\":{},"
+            "\"spawn_invalid_base\":{}",
+            presentation_launch,
+            presentation_end,
+            presentation_cancelled,
+            live_presentations_max,
+            spawn_acks_sent,
+            spawn_ack_send_refused,
+            ledger.played(),
+            ledger.duplicates_suppressed(),
+            ledger.suppressed_cancelled(),
+            ledger.adoptions(),
+            ledger.duplicate_adoptions(),
+            ledger.adopt_after_cancel(),
+            ledger.cancels(),
+            ledger.duplicate_cancels(),
+            ledger.key_overflow(),
+            ledger.event_overflow(),
+            ledger.tombstones_evicted(),
+            s.rejected_launches(),
+            s.rejected_unpredicted(),
+            s.local_removals(),
+            s.local_releases(),
+            s.authoritative_cancels(),
+            s.unreplayed_guesses(),
+            s.frontier_ahead_of_client(),
+            s.epoch_roster_mismatch(),
+            s.retired_without_launch(),
+            s.duplicate_outcomes_ignored(),
+            s.confirmed_after_expiry_alive(),
+            s.confirmed_after_expiry_ended(),
+            s.adopted(),
+            s.accepted_ended(),
+            s.unpredicted_outcomes(),
+            s.contradictory_outcomes(),
+            s.provisional_expired(),
+            s.pending_without_snapshot(),
+            s.not_recreated(),
+            s.recreated(),
+            s.respawn_suppressed(),
+            s.spawn_outside_step(),
+            s.spawn_bad_key(),
+            s.spawn_duplicate(),
+            s.provisional_overflow(),
+            s.snapshots_evicted(),
+            s.tombstones_evicted(),
+            s.stale_checkpoints(),
+            s.invalid_base());
+        for (std::size_t i = 0; i < replication::kSpawnExtensionRefusalCount; ++i)
+            spawn_metrics += fmt::format(
+                ",\"spawn_invalid_extension_{}\":{}",
+                i,
+                s.invalid_extension(static_cast<replication::SpawnExtensionRefusal>(i)));
+        spawn_metrics += fmt::format(
+            ",\"spawn_checkpoints_without_extension\":{},\"spawn_checkpoints_without_player\":{}",
+            spawn_checkpoints_without_extension,
+            spawn_checkpoints_without_player);
+    } else {
+        spawn_metrics = ",\"prediction_path\":\"legacy\"";
+    }
     fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
                "\"response_ticks\":{},\"max_snap\":{:.6f},\"snaps_over_bound\":{},"
                "\"corrections\":{},\"reseeds\":{},\"replayed\":{},\"max_replay\":{},"
                "\"stale_checkpoints\":{},\"checkpoints\":{},"
-               "\"malformed_datagrams\":{},\"oversized_datagrams\":{}}}\n",
+               "\"malformed_datagrams\":{},\"oversized_datagrams\":{},"
+               "\"epoch_mismatch\":{},\"incomplete_checkpoints\":{},"
+               "\"history_overflow\":{},\"replay_budget_exceeded\":{}{} }}\n",
                report.ticks,
                report.state_digest,
                responded ? response_ticks : report.ticks,
                max_snap,
                snaps_over_bound,
-               reconciler->corrections(),
-               reconciler->reseeds(),
+               base.corrections(),
+               base.reseeds(),
                replayed,
                max_replay,
-               reconciler->stale_checkpoints(),
+               stale_checkpoints,
                checkpoints,
                socket_link.malformed(),
-               socket_link.oversized());
+               socket_link.oversized(),
+               base.epoch_mismatch(),
+               base.incomplete_checkpoints(),
+               base.history_overflow(),
+               base.replay_budget_exceeded(),
+               spawn_metrics);
     std::fflush(stdout);
     return report;
 }

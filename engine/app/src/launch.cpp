@@ -114,7 +114,8 @@ std::string launch_usage(std::string_view program) {
         "  --profile-version-override N  connected schema refusal diagnostic\n"
         "  --fixed-dt-override S  advertise a different connected timestep\n"
         "  --client-port N  connected local UDP port diagnostic\n"
-        "  --input-tape  connected fixed input for process diagnostics\n"
+        "  --input-tape  connected fixed input for process diagnostics (no Throw)\n"
+        "  --input-tape-throw  same tape, with one Throw on tick 12\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
         "  --listen ADDR:PORT  dedicated: bind IPv4 address and port (0 = OS chosen)\n"
@@ -163,6 +164,9 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             result.options.no_prediction = true;
         } else if (arg == "--input-tape") {
             result.options.input_tape = true;
+        } else if (arg == "--input-tape-throw") {
+            result.options.input_tape = true;
+            result.options.input_tape_throw = true;
         } else if (arg == "--snap-bound") {
             if (!has_value || result.options.has_snap_bound)
                 return fail("--snap-bound needs a non-negative finite number once");

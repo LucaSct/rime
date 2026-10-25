@@ -97,6 +97,7 @@ struct LaunchOptions {
     bool no_gpu = false;
     bool no_prediction = false;
     bool input_tape = false;
+    bool input_tape_throw = false;
     std::uint32_t net_delay_ms = 0;
     std::uint32_t net_jitter_ms = 0;
     std::uint32_t net_blackout_ms = 0;
