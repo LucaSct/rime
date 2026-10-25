@@ -282,16 +282,17 @@ RunReport run_network_client(const LaunchOptions& options,
         driver.update(now_ms(), events);
         for (const auto& event : events) {
             if (event.kind == net::SessionEvent::Kind::Connected) {
+                // The overrides exist to provoke a Schema refusal on purpose; everything else uses
+                // the ONE identity function the server uses, so a game that opts into more (m20.5's
+                // spawn prediction folds itself in) cannot drift between the two ends again.
+                auto input_profile = *definition.network_input;
+                auto remote_profile = *definition.remote_play;
+                if (options.has_profile_version_override)
+                    input_profile.profile_version = options.profile_version_override;
+                if (options.has_fixed_dt_override)
+                    remote_profile.fixed_dt = options.fixed_dt_override;
                 replication::InputHello hello{
-                    2,
-                    2,
-                    replication::input_schema_hash(definition.network_input->profile_id,
-                                                   options.has_profile_version_override
-                                                       ? options.profile_version_override
-                                                       : definition.network_input->profile_version,
-                                                   options.has_fixed_dt_override
-                                                       ? options.fixed_dt_override
-                                                       : definition.remote_play->fixed_dt)};
+                    2, 2, input_schema_identity(input_profile, &remote_profile)};
                 std::array<std::byte, replication::kInputHelloBytes> bytes{};
                 const auto size = replication::encode_input_hello(hello, bytes);
                 if (auto* session = driver.session(*session_id))
@@ -328,10 +329,13 @@ RunReport run_network_client(const LaunchOptions& options,
                 window.apply_result(result);
                 continue;
             }
-            replication::OwnerCheckpoint checkpoint{};
-            if (replication::decode_owner_checkpoint(message.bytes, checkpoint) ==
-                replication::CheckpointRefusal::None)
-                pending.push_back(std::move(checkpoint));
+            // The spawn-extension decoder reads an m20.4 checkpoint unchanged and an extended one
+            // whole. Until m20.5c wires SpawnReconciler, only the base is used: the player is
+            // still predicted alone, and a checkpoint with a projectile in its roster is skipped
+            // by the single-entity rule below.
+            replication::SpawnCheckpoint checkpoint{};
+            if (replication::decode_spawn_checkpoint(message.bytes, checkpoint))
+                pending.push_back(std::move(checkpoint.base));
         }
         if (reconciler) {
             for (const auto& checkpoint : pending) {
