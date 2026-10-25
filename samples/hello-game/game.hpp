@@ -213,6 +213,10 @@ void register_components(rime::ecs::World& world);
 // The GameDefinition: the only thing `main` hands the engine.
 [[nodiscard]] rime::app::GameDefinition definition();
 
+// `definition()` plus the m20.6 interaction group (ADR-0106): the crate is predicted while the
+// server says it is near. The executable runs this one; see game.cpp for why it is separate.
+[[nodiscard]] rime::app::GameDefinition definition_with_interaction();
+
 } // namespace hello_game
 
 // Beside the declaration because World::spawn_with registers components in whichever TU sees it.

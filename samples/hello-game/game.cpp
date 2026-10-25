@@ -1425,6 +1425,23 @@ app::GameDefinition definition() {
                     actions.pressed = 1u << kButtonThrow;
                 return actions;
             }};
+    def.entry_scene = std::string{kEntryScene};
+#if defined(RIME_GAME_CONTENT_DIR) && defined(RIME_GAME_BINARY_DIR)
+    def.dev_content_dir = RIME_GAME_CONTENT_DIR;
+    def.dev_binary_dir = RIME_GAME_BINARY_DIR;
+#endif
+    return def;
+}
+
+// The shipped executable's definition: `definition()` plus the m20.6 interaction group.
+//
+// A SEPARATE function rather than folded into `definition()`, because `definition()` is also the
+// m20.5 game that existing in-process proofs pin -- one asserts its roster is exactly {player,
+// projectile} at epoch 2 -- and an always-on crate member would change that roster, not the code
+// it tests. Both processes of a connected run use this one (main.cpp and the net proof), so they
+// agree on the folded schema identity.
+app::GameDefinition definition_with_interaction() {
+    app::GameDefinition def = definition();
     // The interaction group (ADR-0106): join within contact reach plus the distance the player
     // covers in the 64-tick replay budget -- 0.85 + 4 m/s * 64/60 s = 5.12 m -- so the crate is
     // already predicted before the player can reach it; leave 1 m further out, and only after
@@ -1441,11 +1458,6 @@ app::GameDefinition definition() {
                                                       capture_crate,
                                                       interaction_client_hooks,
                                                       push_tape};
-    def.entry_scene = std::string{kEntryScene};
-#if defined(RIME_GAME_CONTENT_DIR) && defined(RIME_GAME_BINARY_DIR)
-    def.dev_content_dir = RIME_GAME_CONTENT_DIR;
-    def.dev_binary_dir = RIME_GAME_BINARY_DIR;
-#endif
     return def;
 }
 

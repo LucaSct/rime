@@ -289,7 +289,8 @@ struct Client {
     bool hello(std::uint16_t min = 2, std::uint16_t max = 2, bool wrong_schema = false) {
         if (!wait_connected())
             return false;
-        const auto def = hello_game::definition();
+        // The executable's definition, so the offered identity is the one its server folds.
+        const auto def = hello_game::definition_with_interaction();
         const auto& profile = *def.network_input;
         replication::InputHello offer{
             static_cast<std::uint8_t>(min),
