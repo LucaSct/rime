@@ -16,9 +16,9 @@
 #include <bit>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
-#include <memory>
 #include <string>
 
 #include "rime/core/math/quat.hpp"
@@ -572,19 +572,20 @@ void HelloGame::record_crate(ecs::World& world) {
         if (pair && ev.phase != physics::ContactPhase::Ended)
             touching = 1;
     }
-    const CrateBody next{body.position,
-                         body.orientation,
-                         body.linear_velocity,
-                         body.angular_velocity,
-                         touching};
+    const CrateBody next{
+        body.position, body.orientation, body.linear_velocity, body.angular_velocity, touching};
     // Field by field, not memcmp: Quat is 16-byte aligned, so CrateBody has padding bytes.
-    const auto same = [](core::Vec3 a, core::Vec3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; };
-    const bool unchanged =
-        same(record->position, next.position) && same(record->linear_velocity, next.linear_velocity) &&
-        same(record->angular_velocity, next.angular_velocity) &&
-        record->orientation.x == next.orientation.x && record->orientation.y == next.orientation.y &&
-        record->orientation.z == next.orientation.z && record->orientation.w == next.orientation.w &&
-        record->touching_player == next.touching_player;
+    const auto same = [](core::Vec3 a, core::Vec3 b) {
+        return a.x == b.x && a.y == b.y && a.z == b.z;
+    };
+    const bool unchanged = same(record->position, next.position) &&
+                           same(record->linear_velocity, next.linear_velocity) &&
+                           same(record->angular_velocity, next.angular_velocity) &&
+                           record->orientation.x == next.orientation.x &&
+                           record->orientation.y == next.orientation.y &&
+                           record->orientation.z == next.orientation.z &&
+                           record->orientation.w == next.orientation.w &&
+                           record->touching_player == next.touching_player;
     if (!unchanged) {
         *record = next;
         world.mark_changed<CrateBody>(crate_);
@@ -1269,7 +1270,8 @@ InteractionProfile::ClientHooks interaction_client_hooks(
     out.hooks = inner;
     auto& prediction = out.hooks.prediction;
     auto& spawn = out.hooks.spawn;
-    prediction.capture = [state, next = inner.prediction.capture](replication::PredictedEntityId id) {
+    prediction.capture = [state,
+                          next = inner.prediction.capture](replication::PredictedEntityId id) {
         if (!(id == state->object))
             return next(id);
         physics::BodyState body{};

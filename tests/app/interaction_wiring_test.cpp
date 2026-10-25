@@ -245,7 +245,8 @@ struct Rig {
     }
 
     // One server tick driven by `command`; returns the checkpoints the client received.
-    std::vector<replication::SpawnCheckpoint> server_tick(const replication::InputCommand& command) {
+    std::vector<replication::SpawnCheckpoint>
+    server_tick(const replication::InputCommand& command) {
         std::array<std::byte, replication::kInputV2HeaderBytes + replication::kInputV2CommandBytes>
             bytes{};
         const auto size = replication::encode_input_v2(std::span(&command, 1), bytes);
@@ -450,10 +451,12 @@ TEST_CASE("interaction: a predicted push moves the crate on the push tick; corre
     REQUIRE_FALSE(first.empty());
     rig.seed(first.back());
     replication::CorrectionSmoother smoother;
+
     struct Held {
         int release = 0;
         replication::SpawnCheckpoint checkpoint;
     };
+
     std::deque<Held> held;
     constexpr int kDelay = 3;
     std::optional<int> push_tick;
@@ -471,7 +474,8 @@ TEST_CASE("interaction: a predicted push moves the crate on the push tick; corre
             for (auto& entity : checkpoint.base.entities)
                 if (entity.id == rig.crate_id) {
                     // A server-only disturbance the client could not predict: 0.3 m sideways.
-                    const auto bits = std::bit_cast<std::uint32_t>(read_f32(entity.state, 0) + 0.3f);
+                    const auto bits =
+                        std::bit_cast<std::uint32_t>(read_f32(entity.state, 0) + 0.3f);
                     for (unsigned i = 0; i < 4; ++i)
                         entity.state[i] = std::byte{static_cast<std::uint8_t>(bits >> (8 * i))};
                 }
@@ -555,6 +559,7 @@ TEST_CASE("interaction: restore and replay twice gives identical crate bytes; no
     // Server history while the crate is awake and being pushed: per tick, the checkpoint state
     // (group, player, crate) and the command that produced the next tick.
     Server server;
+
     struct Frame {
         std::vector<std::byte> group, player, crate;
         replication::InputCommand next{};
@@ -699,7 +704,8 @@ TEST_CASE("interaction: measured resting-crate speed against the 0.05 m/s rest b
         late.step(walk(t, -1.0f));
     std::printf("interaction rest: idle max %.6f m/s, asleep (speed 0) from tick %llu; after a "
                 "push, speed stays under %.2f from tick %zu (previous tick %.6f m/s) and the "
-                "resting jitter until sleep at tick %zu is max %.6f m/s; client world (no sleep) resting max %.6f m/s; a crate "
+                "resting jitter until sleep at tick %zu is max %.6f m/s; client world (no sleep) "
+                "resting max %.6f m/s; a crate "
                 "walked into after sleeping ends at z=%.4f with the player at z=%.4f\n",
                 static_cast<double>(idle_max),
                 static_cast<unsigned long long>(idle_sleep_tick),

@@ -837,7 +837,8 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
             ++impl_->totals.checkpoint_capture_refused;
             return;
         }
-        checkpoint.entities.push_back(PredictedEntityState{impl_->object_id, std::move(object_state)});
+        checkpoint.entities.push_back(
+            PredictedEntityState{impl_->object_id, std::move(object_state)});
     }
     SpawnCheckpointExtension extension{};
     if (impl_->spawn_profile) {

@@ -828,21 +828,21 @@ RunReport run_game_mode(const LaunchOptions& options,
                     report.network_input.launch_recovered_by_redundancy,
                     report.network_input.spawn_last_flight_ticks);
             if (definition.remote_play && definition.remote_play->active_interaction())
-                spawn_counters += fmt::format(
-                    ",\"interaction_joins\":{},\"interaction_leaves\":{},"
-                    "\"interaction_joined_in_contact\":{},"
-                    "\"interaction_leave_deferred_moving\":{},"
-                    "\"interaction_leave_deferred_touching\":{},"
-                    "\"interaction_epoch_advances\":{},\"interaction_member_ticks\":{},"
-                    "\"interaction_capture_refused\":{}",
-                    report.network_input.interaction_joins,
-                    report.network_input.interaction_leaves,
-                    report.network_input.interaction_joined_in_contact,
-                    report.network_input.interaction_leave_deferred_moving,
-                    report.network_input.interaction_leave_deferred_touching,
-                    report.network_input.interaction_epoch_advances,
-                    report.network_input.interaction_member_ticks,
-                    report.network_input.interaction_capture_refused);
+                spawn_counters +=
+                    fmt::format(",\"interaction_joins\":{},\"interaction_leaves\":{},"
+                                "\"interaction_joined_in_contact\":{},"
+                                "\"interaction_leave_deferred_moving\":{},"
+                                "\"interaction_leave_deferred_touching\":{},"
+                                "\"interaction_epoch_advances\":{},\"interaction_member_ticks\":{},"
+                                "\"interaction_capture_refused\":{}",
+                                report.network_input.interaction_joins,
+                                report.network_input.interaction_leaves,
+                                report.network_input.interaction_joined_in_contact,
+                                report.network_input.interaction_leave_deferred_moving,
+                                report.network_input.interaction_leave_deferred_touching,
+                                report.network_input.interaction_epoch_advances,
+                                report.network_input.interaction_member_ticks,
+                                report.network_input.interaction_capture_refused);
             fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
                        "\"applied\":{},\"synthesized\":{},\"neutralized\":{},"
                        "\"late\":{},\"duplicate\":{},\"future\":{},"

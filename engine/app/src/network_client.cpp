@@ -249,9 +249,9 @@ RunReport run_network_client(const LaunchOptions& options,
         (options.input_tape_throw &&
          (!definition.remote_play->spawn_prediction ||
           !definition.remote_play->spawn_prediction->diagnostic_throw_input)) ||
-        (options.input_tape_push && (!definition.remote_play->active_interaction() ||
-                                     !definition.remote_play->active_interaction()
-                                          ->diagnostic_push_input)))
+        (options.input_tape_push &&
+         (!definition.remote_play->active_interaction() ||
+          !definition.remote_play->active_interaction()->diagnostic_push_input)))
         return fail(report, "game or autopilot unavailable");
 
     replication::InputWindow window;
@@ -374,8 +374,8 @@ RunReport run_network_client(const LaunchOptions& options,
         const auto simulated_after = interaction_hooks->object_pose();
         if (!simulated_after)
             return;
-        smoother.on_correction(interaction_id, shown_before.translation,
-                               simulated_after->translation);
+        smoother.on_correction(
+            interaction_id, shown_before.translation, simulated_after->translation);
         smoother.on_correction(interaction_id, shown_before.rotation, simulated_after->rotation);
         if (was_member && simulated_before) {
             const double jump = static_cast<double>(
@@ -492,8 +492,8 @@ RunReport run_network_client(const LaunchOptions& options,
                 const bool object_was_member = object_member();
                 const auto object_simulated_before =
                     interaction_hooks ? interaction_hooks->object_pose() : std::nullopt;
-                const auto object_shown_before = interaction_hooks ? presented_object()
-                                                                   : core::Transform{};
+                const auto object_shown_before =
+                    interaction_hooks ? presented_object() : core::Transform{};
                 const auto result = spawn_reconciler->apply_checkpoint(base, *checkpoint.spawns);
                 if (!result.base.applied)
                     continue;
@@ -789,8 +789,8 @@ RunReport run_network_client(const LaunchOptions& options,
             spawn_press_tick = report.ticks + 1;
         window.push(command);
         if (spawn_reconciler) {
-            const auto object_before = interaction_hooks ? presented_object().translation
-                                                         : core::Vec3{};
+            const auto object_before =
+                interaction_hooks ? presented_object().translation : core::Vec3{};
             spawn_reconciler->predict(command);
             update_presentation();
             if (interaction_hooks) {
@@ -938,32 +938,32 @@ RunReport run_network_client(const LaunchOptions& options,
             const auto& c = smoother.counters();
             // crate_response_ticks reads the ticks run since the push when the crate never
             // visibly moved, and the whole run when no push happened (a refusal, not a pass).
-            spawn_metrics += fmt::format(
-                ",\"interaction\":1,\"crate_member\":{},\"crate_joins_seen\":{},"
-                "\"crate_leaves_seen\":{},\"crate_member_ticks\":{},"
-                "\"crate_corrections\":{},\"crate_snaps\":{},"
-                "\"crate_max_raw_jump\":{:.6f},\"crate_max_presented_jump\":{:.6f},"
-                "\"crate_rotation_snaps\":{},\"crate_max_raw_angle\":{:.6f},"
-                "\"crate_member_checkpoints\":{},\"crate_max_sim_correction\":{:.6f},"
-                "\"crate_corrections_over_1cm\":{},\"crate_push_tick\":{},"
-                "\"crate_response_ticks\":{}",
-                object_member() ? 1 : 0,
-                crate_joins_seen,
-                crate_leaves_seen,
-                crate_member_ticks,
-                c.corrections,
-                c.snaps,
-                static_cast<double>(c.max_raw_jump),
-                static_cast<double>(c.max_presented_jump),
-                c.rotation_snaps,
-                static_cast<double>(c.max_raw_angle),
-                crate_member_checkpoints,
-                crate_max_sim_correction,
-                crate_corrections_over_1cm,
-                crate_push_tick.value_or(0),
-                crate_responded ? crate_response_ticks
-                                : (crate_push_tick ? report.ticks - *crate_push_tick
-                                                   : report.ticks));
+            spawn_metrics +=
+                fmt::format(",\"interaction\":1,\"crate_member\":{},\"crate_joins_seen\":{},"
+                            "\"crate_leaves_seen\":{},\"crate_member_ticks\":{},"
+                            "\"crate_corrections\":{},\"crate_snaps\":{},"
+                            "\"crate_max_raw_jump\":{:.6f},\"crate_max_presented_jump\":{:.6f},"
+                            "\"crate_rotation_snaps\":{},\"crate_max_raw_angle\":{:.6f},"
+                            "\"crate_member_checkpoints\":{},\"crate_max_sim_correction\":{:.6f},"
+                            "\"crate_corrections_over_1cm\":{},\"crate_push_tick\":{},"
+                            "\"crate_response_ticks\":{}",
+                            object_member() ? 1 : 0,
+                            crate_joins_seen,
+                            crate_leaves_seen,
+                            crate_member_ticks,
+                            c.corrections,
+                            c.snaps,
+                            static_cast<double>(c.max_raw_jump),
+                            static_cast<double>(c.max_presented_jump),
+                            c.rotation_snaps,
+                            static_cast<double>(c.max_raw_angle),
+                            crate_member_checkpoints,
+                            crate_max_sim_correction,
+                            crate_corrections_over_1cm,
+                            crate_push_tick.value_or(0),
+                            crate_responded ? crate_response_ticks
+                                            : (crate_push_tick ? report.ticks - *crate_push_tick
+                                                               : report.ticks));
         }
     } else {
         spawn_metrics = ",\"prediction_path\":\"legacy\"";
