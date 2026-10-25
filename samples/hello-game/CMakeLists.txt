@@ -90,40 +90,35 @@ assert lines[0]['error'] == 'EADDRINUSE'
 ]=] $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_listen_bind_conflict PROPERTIES TIMEOUT 15)
 
-# The process proof uses POSIX fork/exec and a pipe because engine/platform has no child-process
-# helper. Compile the game rules into this test too so its replay uses the same implementation.
-if(NOT WIN32)
-    # The production executable on both sides, with a real loopback UDP port. A child-process
-    # helper is not available on Windows yet, so this POSIX-only check uses Python subprocess.
-    add_test(NAME hello_game_play_connect COMMAND python3
-        ${CMAKE_CURRENT_SOURCE_DIR}/connect_prediction.py $<TARGET_FILE:hello_game>)
-    set_tests_properties(hello_game_play_connect PROPERTIES TIMEOUT 120 LABELS "hello_game")
-    # m20.5c2: the Throw's two-process proof -- faults, response, and the sensitivity controls
-    # that must fail. 13 sequential legs; TIMEOUT is the measured runtime times three.
-    add_test(NAME hello_game_play_throw COMMAND python3
-        ${CMAKE_CURRENT_SOURCE_DIR}/throw_prediction.py $<TARGET_FILE:hello_game>)
-    # RUN_SERIAL: two real-time processes whose press must land inside the server's one-command input
-    # buffer; a parallel suite starving them is what the proof's rerun exists for, so do not invite it.
-    set_tests_properties(hello_game_play_throw PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE LABELS "hello_game")
-    # m20.6c: the interaction group's two-process proof -- scripted membership, a server-only kick,
-    # the undisturbed residual, response, and three controls that must fail. 13 sequential legs,
-    # 122 s measured; TIMEOUT is the measured runtime times three. RUN_SERIAL for the same reason as
-    # the throw proof: a parallel suite starving a leg only costs a rerun, so do not invite it.
-    add_test(NAME hello_game_play_interaction COMMAND python3
-        ${CMAKE_CURRENT_SOURCE_DIR}/interaction_prediction.py $<TARGET_FILE:hello_game>)
-    set_tests_properties(hello_game_play_interaction PROPERTIES TIMEOUT 400 RUN_SERIAL TRUE LABELS "hello_game")
-    add_executable(hello_game_net_proof net_proof.cpp game.cpp)
-    target_link_libraries(hello_game_net_proof
-        PRIVATE rime::app_game rime::app rime::physics rime::scene rime::net rime::replication)
-    target_compile_definitions(hello_game_net_proof PRIVATE
-        RIME_GAME_CONTENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/content"
-        RIME_GAME_BINARY_DIR="${CMAKE_BINARY_DIR}/bin")
-    rime_apply_common_target_options(hello_game_net_proof)
-    add_dependencies(hello_game_net_proof hello_game)
-    add_test(NAME hello_game_net_proof COMMAND hello_game_net_proof)
-    add_test(NAME hello_game_net_proof_negative COMMAND hello_game_net_proof --negative)
-    set_tests_properties(hello_game_net_proof PROPERTIES TIMEOUT 25 LABELS "hello_game")
-    set_tests_properties(hello_game_net_proof_negative PROPERTIES TIMEOUT 75 LABELS "hello_game")
-else()
-    message(STATUS "hello_game_net_proof, hello_game_play_connect, hello_game_play_throw and hello_game_play_interaction excluded on Windows: no child-process helper")
-endif()
+# The process proofs run on every OS: net_proof.cpp carries a small fork/exec or CreateProcessW
+# Child, and connect_prediction.py uses only portable Python. The hosted Windows job is the only
+# Windows evidence there is, so these two-process proofs are what exercises the Win32 socket
+# backend end to end. The game rules are compiled into net_proof so its replay uses the same code.
+# python3 is what the other tests here already use on Windows (setup-python provides it).
+# The production executable on both sides, with a real loopback UDP port.
+add_test(NAME hello_game_play_connect COMMAND python3
+    ${CMAKE_CURRENT_SOURCE_DIR}/connect_prediction.py $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_play_connect PROPERTIES TIMEOUT 120 LABELS "hello_game")
+# m20.5c2: the Throw's two-process proof -- faults, response, and the sensitivity controls that
+# must fail. 13 sequential legs; RUN_SERIAL because two real-time processes whose press must land
+# inside the server's input buffer are exactly what a parallel suite starves.
+add_test(NAME hello_game_play_throw COMMAND python3
+    ${CMAKE_CURRENT_SOURCE_DIR}/throw_prediction.py $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_play_throw PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE LABELS "hello_game")
+# m20.6c: the interaction group's two-process proof -- scripted membership, a server-only kick,
+# and the controls that must fail. RUN_SERIAL for the same reason as the throw proof.
+add_test(NAME hello_game_play_interaction COMMAND python3
+    ${CMAKE_CURRENT_SOURCE_DIR}/interaction_prediction.py $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_play_interaction PROPERTIES TIMEOUT 400 RUN_SERIAL TRUE LABELS "hello_game")
+add_executable(hello_game_net_proof net_proof.cpp game.cpp)
+target_link_libraries(hello_game_net_proof
+    PRIVATE rime::app_game rime::app rime::physics rime::scene rime::net rime::replication)
+target_compile_definitions(hello_game_net_proof PRIVATE
+    RIME_GAME_CONTENT_DIR="${CMAKE_CURRENT_SOURCE_DIR}/content"
+    RIME_GAME_BINARY_DIR="${CMAKE_BINARY_DIR}/bin")
+rime_apply_common_target_options(hello_game_net_proof)
+add_dependencies(hello_game_net_proof hello_game)
+add_test(NAME hello_game_net_proof COMMAND hello_game_net_proof)
+add_test(NAME hello_game_net_proof_negative COMMAND hello_game_net_proof --negative)
+set_tests_properties(hello_game_net_proof PROPERTIES TIMEOUT 25 LABELS "hello_game")
+set_tests_properties(hello_game_net_proof_negative PROPERTIES TIMEOUT 75 LABELS "hello_game")

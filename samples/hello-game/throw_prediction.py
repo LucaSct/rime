@@ -1,4 +1,4 @@
-"""Two-process Throw proof for ADR-0105 §5 (m20.5c2). POSIX only until there is a child helper.
+"""Two-process Throw proof for ADR-0105 §5 (m20.5c2). Portable Python: runs on every OS.
 
 The failure this proof exists to catch is invisible to a final digest: TWO IDENTITIES SURVIVING A
 CONFIRMATION (a ghost projectile beside its adopted replica) or AN EFFECT PLAYED TWICE (a second

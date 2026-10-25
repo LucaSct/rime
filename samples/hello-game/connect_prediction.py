@@ -1,4 +1,4 @@
-"""Real UDP process proof for ADR-0104 §6. POSIX only until there is a child helper."""
+"""Real UDP process proof for ADR-0104 §6. Portable: subprocess + socket only."""
 
 import json
 import pathlib

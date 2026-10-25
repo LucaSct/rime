@@ -1,4 +1,4 @@
-"""Two-process interaction proof for ADR-0106 §5 (m20.6c). POSIX only until there is a child helper.
+"""Two-process interaction proof for ADR-0106 §5 (m20.6c). Portable Python: runs on every OS.
 
 The failure this proof exists to catch is invisible to a final digest: PHYSICS STATE THE CHECKPOINT
 DOES NOT CAPTURE. The client predicts a crate in a small physics world of its own, rebuilt from the
