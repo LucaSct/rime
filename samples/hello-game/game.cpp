@@ -15,7 +15,6 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
-#include <cstring>
 #include <limits>
 #include <optional>
 #include <span>
@@ -578,7 +577,15 @@ void HelloGame::record_crate(ecs::World& world) {
                          body.linear_velocity,
                          body.angular_velocity,
                          touching};
-    if (std::memcmp(record, &next, sizeof next) != 0) {
+    // Field by field, not memcmp: Quat is 16-byte aligned, so CrateBody has padding bytes.
+    const auto same = [](core::Vec3 a, core::Vec3 b) { return a.x == b.x && a.y == b.y && a.z == b.z; };
+    const bool unchanged =
+        same(record->position, next.position) && same(record->linear_velocity, next.linear_velocity) &&
+        same(record->angular_velocity, next.angular_velocity) &&
+        record->orientation.x == next.orientation.x && record->orientation.y == next.orientation.y &&
+        record->orientation.z == next.orientation.z && record->orientation.w == next.orientation.w &&
+        record->touching_player == next.touching_player;
+    if (!unchanged) {
         *record = next;
         world.mark_changed<CrateBody>(crate_);
     }
