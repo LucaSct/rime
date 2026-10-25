@@ -53,6 +53,92 @@ constexpr float kCrateHalf = 0.5f;
 constexpr core::Vec3 kPlayerStart{0.0f,
                                   HelloGame::kPlayerRadius + HelloGame::kPlayerHalfHeight,
                                   0.0f};
+constexpr float kThrowSpeed = 18.0f;
+constexpr float kThrowGravity = -9.8f;
+constexpr float kTargetRadius = 0.08f;
+
+using SpawnId = replication::PredictedEntityId;
+using SpawnRequest =
+    std::function<std::optional<SpawnId>(const replication::SpawnKey&, std::span<const std::byte>)>;
+
+// The mapping survives replay while the world may be restored repeatedly. Adoption changes only
+// the id here, keeping the same ECS entity and its presentation identity.
+struct ClientSpawnState {
+    ecs::World* world = nullptr;
+    std::uint32_t incarnation = 0;
+    SpawnRequest request;
+    std::vector<std::pair<SpawnId, ecs::Entity>> entities;
+
+    ecs::Entity entity_for(SpawnId id) const {
+        for (const auto& [known, entity] : entities)
+            if (known == id)
+                return entity;
+        return {};
+    }
+};
+
+std::vector<std::byte> encode_projectile(const ThrownProjectile& projectile) {
+    std::vector<std::byte> bytes;
+    bytes.reserve(28);
+    const auto append = [&](std::uint32_t value) {
+        for (unsigned shift = 0; shift < 32; shift += 8)
+            bytes.push_back(std::byte{static_cast<std::uint8_t>(value >> shift)});
+    };
+    // Match the server's capture_spawned bytes exactly so checkpoint restore is atomic.
+    append(std::bit_cast<std::uint32_t>(projectile.position.x));
+    append(std::bit_cast<std::uint32_t>(projectile.position.y));
+    append(std::bit_cast<std::uint32_t>(projectile.position.z));
+    append(std::bit_cast<std::uint32_t>(projectile.velocity.x));
+    append(std::bit_cast<std::uint32_t>(projectile.velocity.y));
+    append(std::bit_cast<std::uint32_t>(projectile.velocity.z));
+    append(projectile.age);
+    return bytes;
+}
+
+void restore_projectile(ecs::World& world, ecs::Entity entity, std::span<const std::byte> bytes) {
+    if (bytes.size() != 28 || !world.is_alive(entity))
+        return;
+    const auto read = [&](std::size_t offset) {
+        std::uint32_t bits = 0;
+        for (unsigned i = 0; i < 4; ++i)
+            bits |= std::to_integer<std::uint32_t>(bytes[offset + i]) << (8 * i);
+        return bits;
+    };
+    ThrownProjectile projectile{{std::bit_cast<float>(read(0)),
+                                 std::bit_cast<float>(read(4)),
+                                 std::bit_cast<float>(read(8))},
+                                {std::bit_cast<float>(read(12)),
+                                 std::bit_cast<float>(read(16)),
+                                 std::bit_cast<float>(read(20))},
+                                read(24)};
+    if (auto* existing = world.get<ThrownProjectile>(entity))
+        *existing = projectile;
+    else
+        world.add_component(entity, projectile);
+    core::Transform transform{};
+    transform.translation = projectile.position;
+    if (auto* wt = world.get<ecs::WorldTransform>(entity))
+        wt->value = transform;
+    else
+        world.add_component(entity, ecs::WorldTransform{transform});
+    if (auto* local = world.get<ecs::LocalTransform>(entity))
+        local->value = transform;
+    else
+        world.add_component(entity, ecs::LocalTransform{transform});
+}
+
+// A swept segment test catches a fast projectile crossing the small target BETWEEN endpoints;
+// an endpoint-only overlap would miss this fixed launch at 60 Hz.
+bool segment_hits_target(core::Vec3 from, core::Vec3 to, core::Vec3 target) {
+    const core::Vec3 delta = to - from;
+    const float length_squared = core::dot(delta, delta);
+    const float t = length_squared > 0.0f
+                        ? std::clamp(core::dot(target - from, delta) / length_squared, 0.0f, 1.0f)
+                        : 0.0f;
+    const core::Vec3 closest = from + delta * t;
+    const core::Vec3 offset = target - closest;
+    return core::dot(offset, offset) <= kTargetRadius * kTargetRadius;
+}
 
 physics::Collider box_collider(float hx, float hy, float hz) {
     return physics::Collider{.shape_type = kBoxShape, .half_x = hx, .half_y = hy, .half_z = hz};
@@ -273,6 +359,7 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
     bind_bodies(ctx.world);
     collect(ctx.world);
     if (auto* replicated = state()) {
+        throw_step(ctx, *replicated);
         ++replicated->ticks;
         if (const auto* wt = ctx.world.get<ecs::WorldTransform>(crate_)) {
             replicated->crate_position = wt->value.translation;
@@ -284,6 +371,85 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
         }
         ctx.world.mark_changed<ReplicatedGameState>(state_entity_);
     }
+}
+
+void HelloGame::throw_step(app::TickContext& ctx, ReplicatedGameState& replicated) {
+    // A cooldown measures full ticks AFTER a launch. Charges never regenerate: exactly three
+    // launches are possible per run, making the refusal arithmetic observable in the proof.
+    if (replicated.throw_cooldown > 0)
+        --replicated.throw_cooldown;
+    const core::Vec3 wished{ctx.input.axis(kAxisMoveX), 0.0f, ctx.input.axis(kAxisMoveZ)};
+    if (core::length(wished) > 1e-4f)
+        replicated.player_facing = wished * (1.0f / core::length(wished));
+
+    // A synthesized stand-in repeats levels but does not own a new edge. Guard `applied` too:
+    // no guessed server input may consume an ability the client never executed.
+    const bool real_command = !ctx.command || ctx.command->applied;
+    if (ctx.input.was_pressed(kButtonThrow) && real_command) {
+        const auto key =
+            ctx.command ? replication::SpawnKey{ctx.command->incarnation, ctx.command->sequence, 0}
+                        : replication::SpawnKey{};
+        std::uint8_t refusal = 0;
+        if (ctx.refuse_spawn || replicated.throw_charges == 0)
+            refusal = 1;
+        else if (ctx.world.is_alive(projectile_))
+            refusal = 3;
+        else if (replicated.throw_cooldown > 0)
+            refusal = 2;
+        if (refusal != 0) {
+            if (ctx.command && ctx.spawns)
+                ctx.spawns->push_back({app::SpawnReport::Kind::Refused, key, {}, refusal});
+        } else {
+            --replicated.throw_charges;
+            replicated.throw_cooldown = 60;
+            const core::Vec3 start = replicated.player_position + core::Vec3{0.0f, 0.12f, 0.0f};
+            ThrownProjectile projectile{start, replicated.player_facing * kThrowSpeed, 0};
+            core::Transform transform{};
+            transform.translation = start;
+            projectile_ = ctx.world.spawn_with(
+                ecs::LocalTransform{transform}, ecs::WorldTransform{transform}, projectile);
+            projectile_key_ = key;
+            if (ctx.command && ctx.spawns)
+                ctx.spawns->push_back({app::SpawnReport::Kind::Launched, key, projectile_, 0});
+        }
+    }
+    if (!ctx.world.is_alive(projectile_))
+        return;
+    auto* projectile = ctx.world.get<ThrownProjectile>(projectile_);
+    if (!projectile)
+        return;
+    const core::Vec3 before = projectile->position;
+    const float dt = static_cast<float>(ctx.dt);
+    projectile->velocity.y += kThrowGravity * dt;
+    projectile->position = projectile->position + projectile->velocity * dt;
+    ++projectile->age;
+    // Only the authoritative game tick awards a point. The prediction hook advances flight but
+    // never tests the target, so rollback cannot predict a hit or duplicate a score.
+    // fixed_tick only runs where the simulation is authoritative -- the dedicated server, or a
+    // local game -- while a connected client predicts through `prediction_hooks`, which has no hit
+    // test at all. So no provenance check here: local play scores too.
+    const bool hit = segment_hits_target(before, projectile->position, throw_target_);
+    if (hit)
+        ++replicated.target_score;
+    if (hit || projectile->age >= 45) {
+        if (ctx.command && ctx.spawns)
+            ctx.spawns->push_back({app::SpawnReport::Kind::Ended, projectile_key_, projectile_, 0});
+        // The server host retracts a replicated NetId when it consumes Ended. Local play owns no
+        // NetId and can despawn immediately.
+        // A listening server pump despawns it through the replicator (retracting its NetId
+        // first); with nobody listening the game owns the despawn itself.
+        if (!(ctx.command && ctx.spawns))
+            ctx.world.despawn(projectile_);
+        projectile_ = {};
+        return;
+    }
+    if (auto* transform = ctx.world.get<ecs::WorldTransform>(projectile_))
+        transform->value.translation = projectile->position;
+    if (auto* local = ctx.world.get<ecs::LocalTransform>(projectile_)) {
+        local->value.translation = projectile->position;
+        ctx.world.mark_changed<ecs::LocalTransform>(projectile_);
+    }
+    ctx.world.mark_changed<ThrownProjectile>(projectile_);
 }
 
 // Integrate the stored intent into the player's transform, and clamp it to the arena.
@@ -401,6 +567,16 @@ std::uint64_t replicated_digest(const ecs::World& world) {
             h.f32(state.crate_rotation.y);
             h.f32(state.crate_rotation.z);
             h.f32(state.crate_rotation.w);
+            h.u64(state.throw_charges);
+            h.u64(state.throw_cooldown);
+            h.u64(state.target_score);
+            h.vec3(state.player_facing);
+        });
+    readable.query<ThrownProjectile>().for_each(
+        [&](ecs::Entity, const ThrownProjectile& projectile) {
+            h.vec3(projectile.position);
+            h.vec3(projectile.velocity);
+            h.u64(projectile.age);
         });
     return h.value();
 }
@@ -456,6 +632,8 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
     // the reader having to notice.
     const render::MeshId player_mesh =
         ctx.meshes.add(render::make_uv_sphere(kPlayerRadius, 16, 24), "player");
+    const render::MeshId projectile_mesh =
+        ctx.meshes.add(render::make_uv_sphere(0.12f, 12, 16), "projectile");
 
     render::PbrMaterialDesc m{};
     m.base_color[0] = 0.32f;
@@ -484,6 +662,10 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
     m.metallic = 0.0f;
     m.roughness = 0.4f;
     const render::MaterialId player_mat = ctx.materials.add(m);
+    m.base_color[0] = 0.96f;
+    m.base_color[1] = 0.65f;
+    m.base_color[2] = 0.18f;
+    const render::MaterialId projectile_mat = ctx.materials.add(m);
 
     // The visual floor plane sits at y = 0 — the slab's TOP — while the collider is centred half a
     // slab lower. Its own entity because a plane mesh and a box collider do not share a centre, and
@@ -515,6 +697,13 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
     }
     camera_ =
         world.spawn_with(ecs::WorldTransform{chase_camera(player_position())}, render::Camera{});
+    // A single render proxy follows the predicted projectile, then its adopted roster identity.
+    // It starts outside the arena so no device work is needed when the Throw is absent.
+    core::Transform hidden{};
+    hidden.translation.y = -1000.0f;
+    projectile_visual_ = world.spawn_with(ecs::WorldTransform{hidden},
+                                          render::MeshRef{projectile_mesh},
+                                          render::MaterialRef{projectile_mat});
 }
 
 void HelloGame::present_frame(app::PresentFrameContext& ctx) {
@@ -522,6 +711,26 @@ void HelloGame::present_frame(app::PresentFrameContext& ctx) {
     if (auto* wt = ctx.world.get<ecs::WorldTransform>(camera_)) {
         wt->value = chase_camera(player_position());
     }
+    present_projectile(ctx.world, ctx.world);
+}
+
+void HelloGame::present_prediction(app::PresentFrameContext& ctx, ecs::World& prediction_world) {
+    // This second pose pass wins over the mirror in connected play, including the first local
+    // tick before the authoritative projectile exists. The proxy itself never multiplies.
+    present_projectile(ctx.world, prediction_world);
+}
+
+void HelloGame::present_projectile(ecs::World& render_world, ecs::World& source_world) {
+    auto* visual = render_world.get<ecs::WorldTransform>(projectile_visual_);
+    if (!visual)
+        return;
+    core::Vec3 position{0.0f, -1000.0f, 0.0f};
+    source_world.query<ThrownProjectile>().for_each(
+        [&](ecs::Entity, const ThrownProjectile& projectile) {
+            if (projectile.age < 45)
+                position = projectile.position;
+        });
+    visual->value.translation = position;
 }
 
 bool HelloGame::bind_remote_world(ecs::World& world) {
@@ -561,6 +770,7 @@ void register_components(ecs::World& world) {
     ecs::register_transform_components(world);
     physics::register_physics_components(world);
     (void)world.register_component<ReplicatedGameState>();
+    (void)world.register_component<ThrownProjectile>();
 }
 
 ecs::Entity owned_player(ecs::World& world) {
@@ -573,13 +783,19 @@ ecs::Entity owned_player(ecs::World& world) {
     return result;
 }
 
-replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity player) {
+replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
+                                                   ecs::Entity player,
+                                                   std::shared_ptr<ClientSpawnState> spawns) {
     ecs::Entity state_entity{};
     world.query<ReplicatedGameState>().for_each(
         [&](ecs::Entity entity, const ReplicatedGameState&) { state_entity = entity; });
     auto* bound = &world;
     replication::PredictionHooks hooks{};
-    hooks.capture = [bound, state_entity](replication::PredictedEntityId) {
+    hooks.capture = [bound, state_entity, spawns](replication::PredictedEntityId id) {
+        if (spawns && spawns->entity_for(id) != ecs::kNullEntity) {
+            const auto* projectile = bound->get<ThrownProjectile>(spawns->entity_for(id));
+            return projectile ? encode_projectile(*projectile) : std::vector<std::byte>{};
+        }
         std::vector<std::byte> bytes;
         const auto* state = bound->get<ReplicatedGameState>(state_entity);
         if (!state)
@@ -598,8 +814,12 @@ replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity pla
         append(state->player_velocity.z);
         return bytes;
     };
-    hooks.restore = [bound, state_entity, player](replication::PredictedEntityId,
-                                                  std::span<const std::byte> bytes) {
+    hooks.restore = [bound, state_entity, player, spawns](replication::PredictedEntityId id,
+                                                          std::span<const std::byte> bytes) {
+        if (spawns && spawns->entity_for(id) != ecs::kNullEntity) {
+            restore_projectile(*bound, spawns->entity_for(id), bytes);
+            return;
+        }
         if (bytes.size() != 24)
             return;
         auto* state = bound->get<ReplicatedGameState>(state_entity);
@@ -621,13 +841,47 @@ replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity pla
             bound->mark_changed<ecs::LocalTransform>(player);
         }
     };
-    // The locomotion controller has no RNG or hidden timer. Keep an explicit empty group so
-    // later interaction prediction cannot silently inherit this assumption.
-    hooks.capture_group = [] { return std::vector<std::byte>{}; };
-    hooks.restore_group = [](std::span<const std::byte>) {};
-    hooks.simulate = [bound, state_entity, player](std::span<const replication::PredictedEntityId>,
-                                                   const replication::InputCommand& command,
-                                                   const replication::PredictionStep& step) {
+    // Charges, cooldown and facing form the owner's GROUP state: a checkpoint must restore them
+    // atomically with the player and the projectile, or replay could launch using old resources.
+    hooks.capture_group = [bound, state_entity] {
+        std::vector<std::byte> bytes;
+        const auto* state = bound->get<ReplicatedGameState>(state_entity);
+        if (!state)
+            return bytes;
+        const auto append = [&](std::uint32_t value) {
+            for (unsigned shift = 0; shift < 32; shift += 8)
+                bytes.push_back(std::byte{static_cast<std::uint8_t>(value >> shift)});
+        };
+        append(state->throw_charges);
+        append(state->throw_cooldown);
+        append(std::bit_cast<std::uint32_t>(state->player_facing.x));
+        append(std::bit_cast<std::uint32_t>(state->player_facing.y));
+        append(std::bit_cast<std::uint32_t>(state->player_facing.z));
+        return bytes;
+    };
+    hooks.restore_group = [bound, state_entity](std::span<const std::byte> bytes) {
+        if (bytes.size() != 20)
+            return;
+        auto* state = bound->get<ReplicatedGameState>(state_entity);
+        if (!state)
+            return;
+        const auto read = [&](std::size_t offset) {
+            std::uint32_t value = 0;
+            for (unsigned i = 0; i < 4; ++i)
+                value |= std::to_integer<std::uint32_t>(bytes[offset + i]) << (8 * i);
+            return value;
+        };
+        state->throw_charges = read(0);
+        state->throw_cooldown = read(4);
+        state->player_facing = {std::bit_cast<float>(read(8)),
+                                std::bit_cast<float>(read(12)),
+                                std::bit_cast<float>(read(16))};
+        bound->mark_changed<ReplicatedGameState>(state_entity);
+    };
+    hooks.simulate = [bound, state_entity, player, spawns](
+                         std::span<const replication::PredictedEntityId> members,
+                         const replication::InputCommand& command,
+                         const replication::PredictionStep& step) {
         auto* state = bound->get<ReplicatedGameState>(state_entity);
         if (!state)
             return;
@@ -635,6 +889,62 @@ replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity pla
         actions.axes[kAxisMoveX] = command.move_x;
         actions.axes[kAxisMoveZ] = command.move_y;
         integrate_player(*state, intent_from(actions), static_cast<float>(step.fixed_dt));
+        if (state->throw_cooldown > 0)
+            --state->throw_cooldown;
+        const core::Vec3 wished{command.move_x, 0.0f, command.move_y};
+        if (core::length(wished) > 1e-4f)
+            state->player_facing = wished * (1.0f / core::length(wished));
+        // "At most one live projectile" asks about THIS step's simulated set, as the server asks
+        // about its own `projectile_`. A guess the reconciler has dropped for replay is still an
+        // entity in this world, holding its pre-replay age, until the replay recreates or
+        // discards it; querying the whole world would let that leftover veto its own recreation,
+        // and the guess would be lost under the very replay meant to make it again (measured:
+        // `spawn_not_recreated` 1 and `spawn_adopted` 0 whenever a replay preceded the verdict).
+        bool live_projectile = false;
+        if (spawns) {
+            for (const auto id : members) {
+                const auto* p = bound->get<ThrownProjectile>(spawns->entity_for(id));
+                live_projectile |= p != nullptr && p->age < 45;
+            }
+        } else {
+            bound->query<ThrownProjectile>().for_each(
+                [&](ecs::Entity, const ThrownProjectile& p) { live_projectile |= p.age < 45; });
+        }
+        if ((command.pressed & (1u << kButtonThrow)) != 0 && state->throw_charges > 0 &&
+            state->throw_cooldown == 0 && !live_projectile) {
+            bool launched = true;
+            if (spawns) {
+                const core::Vec3 start = state->player_position + core::Vec3{0.0f, 0.12f, 0.0f};
+                const ThrownProjectile projectile{start, state->player_facing * kThrowSpeed, 0};
+                const auto bytes = encode_projectile(projectile);
+                // This is a step-context provisional overlay request. The reconciler owns the
+                // replay-stable id; the game spends a charge only when it grants the guess.
+                launched =
+                    spawns->request({spawns->incarnation, command.sequence, 0}, bytes).has_value();
+            }
+            if (launched) {
+                --state->throw_charges;
+                state->throw_cooldown = 60;
+            }
+        }
+        if (spawns) {
+            // The supplied set contains both authoritative roster and provisional overlay members.
+            // Flight is predicted, while hit tests and scoring remain in fixed_tick alone.
+            for (const auto id : members) {
+                const auto entity = spawns->entity_for(id);
+                auto* projectile = bound->get<ThrownProjectile>(entity);
+                if (!projectile || projectile->age >= 45)
+                    continue;
+                const float dt = static_cast<float>(step.fixed_dt);
+                projectile->velocity.y += kThrowGravity * dt;
+                projectile->position = projectile->position + projectile->velocity * dt;
+                ++projectile->age;
+                if (auto* wt = bound->get<ecs::WorldTransform>(entity))
+                    wt->value.translation = projectile->position;
+                if (auto* local = bound->get<ecs::LocalTransform>(entity))
+                    local->value.translation = projectile->position;
+            }
+        }
         bound->mark_changed<ReplicatedGameState>(state_entity);
         if (auto* transform = bound->get<ecs::WorldTransform>(player))
             transform->value.translation = state->player_position;
@@ -642,6 +952,49 @@ replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity pla
             local->value.translation = state->player_position;
             bound->mark_changed<ecs::LocalTransform>(player);
         }
+    };
+    return hooks;
+}
+
+replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity player) {
+    return prediction_hooks_impl(world, player, {});
+}
+
+app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile::ClientHooks
+client_spawn_hooks(ecs::World& world,
+                   ecs::Entity player,
+                   std::uint32_t incarnation,
+                   SpawnRequest request) {
+    auto state = std::make_shared<ClientSpawnState>();
+    state->world = &world;
+    state->incarnation = incarnation;
+    state->request = std::move(request);
+    app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile::ClientHooks hooks{};
+    hooks.prediction = prediction_hooks_impl(world, player, state);
+    hooks.spawn.create = [state](SpawnId id) {
+        if (state->entity_for(id) == ecs::kNullEntity)
+            state->entities.emplace_back(id, state->world->spawn_with(ThrownProjectile{}));
+    };
+    hooks.spawn.destroy = [state](SpawnId id) {
+        const auto it = std::find_if(state->entities.begin(),
+                                     state->entities.end(),
+                                     [id](const auto& member) { return member.first == id; });
+        if (it == state->entities.end())
+            return;
+        state->world->despawn(it->second);
+        state->entities.erase(it);
+    };
+    hooks.spawn.adopt = [state](SpawnId provisional, SpawnId authoritative) {
+        for (auto& [id, entity] : state->entities)
+            if (id == provisional) {
+                id = authoritative;
+                return;
+            }
+    };
+    hooks.entity_for = [state](SpawnId id) { return state->entity_for(id); };
+    hooks.is_live = [state](SpawnId id) {
+        const auto* projectile = state->world->get<ThrownProjectile>(state->entity_for(id));
+        return projectile && projectile->age < 45;
     };
     return hooks;
 }
@@ -661,7 +1014,8 @@ app::GameDefinition definition() {
         {platform::Key::A, kAxisMoveX, -1.0f},
         {platform::Key::D, kAxisMoveX, +1.0f},
     };
-    def.input.buttons = {{platform::Key::Escape, kButtonQuit}};
+    def.input.buttons = {{platform::Key::Escape, kButtonQuit},
+                         {platform::Key::Space, kButtonThrow}};
     // InputCommand's x/y plane becomes this game's x/z plane: W is negative z, D positive x.
     // Keep held and pressed in the same button positions as the keyboard's Escape binding.
     def.network_input = app::GameDefinition::NetworkInputProfile{
@@ -714,7 +1068,23 @@ app::GameDefinition definition() {
             // resulting net drift stays inside the arena for this 300-tick proof.
             actions.axes[kAxisMoveX] = ((tick - 1) % 3) < 2 ? 1.0f : -1.0f;
             return actions;
-        }};
+        },
+        {}};
+    def.remote_play->spawn_prediction =
+        app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile{
+            1,
+            [](const ecs::World& world, ecs::Entity entity) {
+                const auto* projectile = world.get<ThrownProjectile>(entity);
+                return projectile ? encode_projectile(*projectile) : std::vector<std::byte>{};
+            },
+            client_spawn_hooks,
+            [](std::uint64_t tick) {
+                app::ActionState actions{};
+                actions.axes[kAxisMoveX] = ((tick - 1) % 3) < 2 ? 1.0f : -1.0f;
+                if (tick == 12)
+                    actions.pressed = 1u << kButtonThrow;
+                return actions;
+            }};
     def.entry_scene = std::string{kEntryScene};
 #if defined(RIME_GAME_CONTENT_DIR) && defined(RIME_GAME_BINARY_DIR)
     def.dev_content_dir = RIME_GAME_CONTENT_DIR;

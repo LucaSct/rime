@@ -136,7 +136,9 @@ CheckpointEncode encode_owner_checkpoint(const OwnerCheckpoint& checkpoint,
     return {writer.at, CheckpointRefusal::None};
 }
 
-CheckpointRefusal decode_owner_checkpoint(std::span<const std::byte> in, OwnerCheckpoint& out) {
+CheckpointRefusal decode_owner_checkpoint_prefix(std::span<const std::byte> in,
+                                                 OwnerCheckpoint& out,
+                                                 std::size_t& consumed) {
     if (in.size() > kCheckpointMaxMessageBytes)
         return CheckpointRefusal::MessageTooLarge;
     if (in.size() < kOwnerCheckpointHeaderBytes)
@@ -180,7 +182,21 @@ CheckpointRefusal decode_owner_checkpoint(std::span<const std::byte> in, OwnerCh
         return CheckpointRefusal::Truncated;
     const auto group = reader.blob(group_size);
     decoded.group_state.assign(group.begin(), group.end());
-    if (reader.at != in.size())
+    consumed = reader.at;
+    out = std::move(decoded);
+    return CheckpointRefusal::None;
+}
+
+CheckpointRefusal decode_owner_checkpoint(std::span<const std::byte> in, OwnerCheckpoint& out) {
+    // The m20.4 contract, unchanged: the checkpoint must be the WHOLE message. Trailing bytes are a
+    // BadLength refusal and `out` is untouched -- which is also why ADR-0105's spawn extension has
+    // to be negotiated rather than merely appended (spawn_prediction.hpp).
+    OwnerCheckpoint decoded{};
+    std::size_t consumed = 0;
+    const auto refusal = decode_owner_checkpoint_prefix(in, decoded, consumed);
+    if (refusal != CheckpointRefusal::None)
+        return refusal;
+    if (consumed != in.size())
         return CheckpointRefusal::BadLength;
     out = std::move(decoded);
     return CheckpointRefusal::None;

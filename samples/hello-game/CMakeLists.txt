@@ -99,6 +99,12 @@ set_tests_properties(hello_game_listen_bind_conflict PROPERTIES TIMEOUT 15)
 add_test(NAME hello_game_play_connect COMMAND python3
     ${CMAKE_CURRENT_SOURCE_DIR}/connect_prediction.py $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_play_connect PROPERTIES TIMEOUT 120 LABELS "hello_game")
+# m20.5c2: the Throw's two-process proof -- faults, response, and the sensitivity controls that
+# must fail. 13 sequential legs; RUN_SERIAL because two real-time processes whose press must land
+# inside the server's input buffer are exactly what a parallel suite starves.
+add_test(NAME hello_game_play_throw COMMAND python3
+    ${CMAKE_CURRENT_SOURCE_DIR}/throw_prediction.py $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_play_throw PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE LABELS "hello_game")
 add_executable(hello_game_net_proof net_proof.cpp game.cpp)
 target_link_libraries(hello_game_net_proof
     PRIVATE rime::app_game rime::app rime::physics rime::scene rime::net rime::replication)

@@ -73,6 +73,13 @@ struct CheckpointEncode {
                                                        std::span<std::byte> out);
 [[nodiscard]] CheckpointRefusal decode_owner_checkpoint(std::span<const std::byte> in,
                                                         OwnerCheckpoint& out);
+// Decodes one checkpoint from the FRONT of `in` and reports how many bytes it used, leaving any
+// trailing bytes to the caller (m20.5's negotiated spawn extension, ADR-0105 §2). Every bound and
+// refusal is decode_owner_checkpoint's -- including the 1200-byte bound on the whole of `in` --
+// except that trailing bytes are not a BadLength. `out` and `consumed` change only on success.
+[[nodiscard]] CheckpointRefusal decode_owner_checkpoint_prefix(std::span<const std::byte> in,
+                                                               OwnerCheckpoint& out,
+                                                               std::size_t& consumed);
 
 // What one predicted step is told, beyond the command (ADR-0104 §1). Bundled so a later brick can
 // add a field without breaking every game's hook.
