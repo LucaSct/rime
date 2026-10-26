@@ -176,7 +176,7 @@ private:
     void move_player(rime::ecs::World& world, float dt);
     [[nodiscard]] ReplicatedGameState* state() const noexcept;
     void bind_bodies(rime::ecs::World& world);
-    void collect(rime::ecs::World& world);
+    void collect(rime::ecs::World& world, std::vector<rime::ecs::Entity>* despawns);
     void throw_step(rime::app::TickContext& ctx, ReplicatedGameState& state);
     void record_crate(rime::ecs::World& world);
     void present_projectile(rime::ecs::World& render_world, rime::ecs::World& source_world);

@@ -67,7 +67,9 @@ public:
     void set_interaction_kicks(std::vector<std::uint64_t> ticks);
     [[nodiscard]] bool interaction_kick(std::uint64_t server_tick);
     [[nodiscard]] std::optional<CommandProvenance> command_provenance() const noexcept;
-    void after_tick(std::uint64_t server_tick, std::span<const SpawnReport> spawns = {});
+    void after_tick(std::uint64_t server_tick,
+                    std::span<const SpawnReport> spawns = {},
+                    std::span<const ecs::Entity> despawns = {});
     void linger(std::uint64_t final_tick, std::uint32_t duration_ms);
     [[nodiscard]] RunReport::NetworkInputCounters counters() const noexcept;
 

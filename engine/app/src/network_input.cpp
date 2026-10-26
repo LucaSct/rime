@@ -843,8 +843,23 @@ std::optional<CommandProvenance> NetworkInputServer::command_provenance() const 
 }
 
 void NetworkInputServer::after_tick(std::uint64_t server_tick,
-                                    std::span<const SpawnReport> spawns) {
+                                    std::span<const SpawnReport> spawns,
+                                    std::span<const ecs::Entity> despawns) {
     impl_->current_server_tick = server_tick;
+    // Game-ended entities go BEFORE publication, so the retraction rides this tick's records
+    // instead of the orphan backstop repairing it a tick late. Through the replicator when there
+    // is one (it retracts the NetId first), else a plain world despawn.
+    for (const ecs::Entity entity : despawns) {
+        if (!impl_->world.is_alive(entity)) {
+            ++impl_->totals.game_despawns_dead;
+            continue;
+        }
+        if (impl_->replicator)
+            impl_->replicator->despawn(entity);
+        else
+            impl_->world.despawn(entity);
+        ++impl_->totals.game_despawns;
+    }
     impl_->receive_spawns(spawns);
     impl_->update_interaction(server_tick);
     if (impl_->fault_held_ack && !impl_->duplicate_window_open()) {

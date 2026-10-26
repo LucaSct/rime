@@ -239,6 +239,13 @@ struct TickContext {
     // Where to report keyed spawns this tick; null when nobody is listening (local play, or a game
     // without `SpawnPredictionProfile`). Non-owning; valid for the duration of `fixed_tick`.
     std::vector<SpawnReport>* spawns = nullptr;
+    // Entities this tick ENDED that the HOST must remove; null when the game owns removal (local
+    // play). Why a seam rather than `world.despawn`: on a listening server a replicated entity
+    // carries a NetId, and only the replicator's `despawn` retracts it in the same tick -- a bare
+    // despawn is repaired a tick late by the orphan backstop, loudly. A game pushes here instead
+    // and the host despawns at the end of the tick. Non-owning; valid for the duration of
+    // `fixed_tick`.
+    std::vector<ecs::Entity>* despawns = nullptr;
 };
 
 // Presentation is a separate world from simulation, and these contexts exist only in a mode that

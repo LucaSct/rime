@@ -752,6 +752,7 @@ RunReport run_game_mode(const LaunchOptions& options,
     bool game_finished = false;
     std::uint64_t game_ticks = 0;
     std::vector<SpawnReport> spawn_reports;
+    std::vector<ecs::Entity> despawn_requests;
     app.on_fixed_tick([&](ecs::World& world, double dt) {
         if (game_finished) {
             // A real-clock frame can owe several ticks and the game can finish on the first; the
@@ -774,6 +775,9 @@ RunReport run_game_mode(const LaunchOptions& options,
             tick.spawns = definition.remote_play && definition.remote_play->spawn_prediction
                               ? &spawn_reports
                               : nullptr;
+            // A listening host owns removal so a replicated entity's NetId is retracted on the
+            // tick it ends; local play leaves this null and the game despawns itself.
+            tick.despawns = &despawn_requests;
             if (input_trace) {
                 // One line per committed tick: tick, applied(1)/synthesized(0), four axes,
                 // held and pressed. max_digits10 preserves the exact float for replay.
@@ -788,8 +792,9 @@ RunReport run_game_mode(const LaunchOptions& options,
         }
         game->fixed_tick(tick);
         if (network) {
-            network->after_tick(game_ticks, spawn_reports);
+            network->after_tick(game_ticks, spawn_reports, despawn_requests);
             spawn_reports.clear();
+            despawn_requests.clear();
         }
         ++game_ticks;
         if (game->finished()) {
@@ -977,7 +982,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"checkpoint_encoded\":{},\"checkpoint_encode_refused\":{},"
                        "\"checkpoint_send_refused\":{},\"input_result_send_refused\":{},"
                        "\"replication_registration_refused\":{},\"publish_missing_session\":{},"
-                       "\"checkpoint_capture_refused\":{}{},"
+                       "\"checkpoint_capture_refused\":{},"
+                       "\"game_despawns\":{},\"game_despawns_dead\":{}{},"
                        "\"input_buffer\":\"{}\",\"stalls\":{},\"gaps_retired\":{},"
                        "\"late_missed\":{},\"late_unclassified\":{},\"max_margin\":{},"
                        "\"final_margin\":{},\"pacing_sent\":{},\"pacing_send_refused\":{},"
@@ -1022,6 +1028,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                        report.network_input.replication_registration_refused,
                        report.network_input.publish_missing_session,
                        report.network_input.checkpoint_capture_refused,
+                       report.network_input.game_despawns,
+                       report.network_input.game_despawns_dead,
                        spawn_counters,
                        report.network_input.input_buffer_adaptive ? "adaptive" : "fixed",
                        report.network_input.stalls,

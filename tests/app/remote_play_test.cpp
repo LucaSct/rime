@@ -928,7 +928,16 @@ TEST_CASE("predicted Throw adopts or cancels through a pumped server and client"
             REQUIRE(client.session(*id)->send_reliable(std::span(ack_bytes).first(ack_size), now));
             pump_client();
             (void)server->before_tick(2, now);
-            server->after_tick(2, {});
+            // The host despawn seam: a live entity the game ended is removed by the host and
+            // counted; one already dead is counted and skipped, never despawned twice.
+            const ecs::Entity ended = server_world.spawn_with(hello_game::ThrownProjectile{});
+            const ecs::Entity gone = server_world.spawn_with(hello_game::ThrownProjectile{});
+            server_world.despawn(gone);
+            const std::array<ecs::Entity, 2> despawns{ended, gone};
+            server->after_tick(2, {}, despawns);
+            CHECK_FALSE(server_world.is_alive(ended));
+            CHECK(server->counters().game_despawns == 1);
+            CHECK(server->counters().game_despawns_dead == 1);
             const auto acknowledged = receive_checkpoint();
             CHECK(acknowledged.spawns->outcomes.empty());
             CHECK(server->counters().spawn_acks_applied == 1);

@@ -392,7 +392,7 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
     // Bind the markers' body ids once the bridge has created them. It cannot be done in `setup`:
     // `RigidBodyHandle` is added by `reconcile`, which first runs inside this call.
     bind_bodies(ctx.world);
-    collect(ctx.world);
+    collect(ctx.world, ctx.despawns);
     record_crate(ctx.world);
     if (auto* replicated = state()) {
         throw_step(ctx, *replicated);
@@ -538,7 +538,7 @@ void HelloGame::bind_bodies(ecs::World& world) {
 // `TriggerEvent`'s `a`/`b` are in canonical index order, so EITHER end may be the sensor and a
 // consumer has to check both — the header says so, and a consumer that checks only `b` works until
 // the day body indices happen to come out the other way round.
-void HelloGame::collect(ecs::World& world) {
+void HelloGame::collect(ecs::World& world, std::vector<ecs::Entity>* despawns) {
     auto* replicated = state();
     if (!replicated)
         return;
@@ -561,7 +561,14 @@ void HelloGame::collect(ecs::World& world) {
             // Despawning takes the RigidBodyHandle with it, which is precisely why the bridge keeps
             // its own entity↔body roster: next tick's `reconcile` destroys the orphaned sensor body
             // from that roster rather than failing to find it in a query.
-            world.despawn(p.entity);
+            // A listening host removes it through the replicator at the end of THIS tick (so its
+            // NetId is retracted now, not a tick late by the orphan backstop). That is equivalent
+            // for the body bridge: nothing between here and the end of fixed_tick reads the
+            // pickup's entity or body, and `reconcile` runs next tick either way.
+            if (despawns)
+                despawns->push_back(p.entity);
+            else
+                world.despawn(p.entity);
         }
     }
 }

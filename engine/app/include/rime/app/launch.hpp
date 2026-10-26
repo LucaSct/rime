@@ -236,6 +236,9 @@ struct RunReport {
         std::uint64_t checkpoint_send_refused = 0, input_result_send_refused = 0;
         std::uint64_t replication_registration_refused = 0, publish_missing_session = 0;
         std::uint64_t checkpoint_capture_refused = 0;
+        // Game-requested despawns the host executed (through the replicator when there is one),
+        // and requests whose entity was already dead -- counted and skipped, never silent.
+        std::uint64_t game_despawns = 0, game_despawns_dead = 0;
         // m20.5b speculative spawn (only reported when the game declares SpawnPredictionProfile).
         // Every skip, drop and refusal on the outcome path has one (guardrail 5).
         std::uint64_t spawn_accepted = 0, spawn_rejected = 0, spawn_accepted_ended = 0;
