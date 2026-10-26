@@ -508,6 +508,16 @@ struct GameDefinition {
 
         std::optional<InteractionProfile> interaction;
 
+        // Whether this tick's local actions ask the CONNECTED CLIENT to leave (hello-game: Escape).
+        // Quitting is a local decision about the player's own process, never a command: a quit bit
+        // that rode the wire would let any client end a dedicated server for everyone (measured in
+        // the m20.6 play test's code path: Escape -> pressed bit -> the server game's
+        // `finished()`). So the client asks this before building the command and leaves with a
+        // goodbye; the game keeps the bit out of `to_command`, and its server-side mapper ignores
+        // it as well. Absent, a connected client is closed only by its window or a `--frames`
+        // bound, as before.
+        bool (*local_quit)(const ActionState&) = nullptr;
+
         // Whether the interaction profile is ACTIVE: declared, and riding a declared spawn
         // profile (see InteractionProfile). One predicate so the server, the client and the
         // identity cannot disagree about it.

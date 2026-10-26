@@ -1413,8 +1413,12 @@ app::GameDefinition definition() {
             app::ActionState state{};
             state.axes[kAxisMoveX] = command.move_x;
             state.axes[kAxisMoveZ] = command.move_y;
-            state.held = command.held;
-            state.pressed = command.pressed;
+            // A remote player cannot quit the server: their Escape ends their own client
+            // (RemotePlayProfile::local_quit), and a command that carries the bit anyway -- an
+            // old or hostile client -- has it dropped here, where the server reads commands.
+            constexpr std::uint32_t kQuitBit = 1u << kButtonQuit;
+            state.held = command.held & ~kQuitBit;
+            state.pressed = command.pressed & ~kQuitBit;
             return state;
         }};
     def.create = [] { return std::make_unique<HelloGame>(); };
@@ -1433,8 +1437,10 @@ app::GameDefinition definition() {
             replication::InputCommand command{};
             command.move_x = actions.axis(kAxisMoveX);
             command.move_y = actions.axis(kAxisMoveZ);
-            command.held = actions.held;
-            command.pressed = actions.pressed;
+            // The quit button never rides the wire; the client acted on it locally.
+            constexpr std::uint32_t kQuitBit = 1u << kButtonQuit;
+            command.held = actions.held & ~kQuitBit;
+            command.pressed = actions.pressed & ~kQuitBit;
             return command;
         },
         [](ecs::World& mirror, ecs::World& prediction, ecs::Entity mirror_player) {
@@ -1461,6 +1467,10 @@ app::GameDefinition definition() {
         },
         {},
         {}};
+    // Escape leaves the connected client; it is never a command (RemotePlayProfile::local_quit).
+    def.remote_play->local_quit = [](const app::ActionState& actions) {
+        return actions.was_pressed(kButtonQuit);
+    };
     def.remote_play->spawn_prediction =
         app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile{
             1,
