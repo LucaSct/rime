@@ -306,7 +306,9 @@ struct RunReport {
         // sums). Reported as the appended `"seats":[...]` array.
         struct SeatCounters {
             std::uint16_t index = 0;
-            std::uint16_t generation = 0; // the index's current generation
+            // The generation the index's latest occupant was issued (a released index's next
+            // occupant gets this + 1).
+            std::uint16_t generation = 0;
             bool seated = false;
             std::uint64_t joins = 0, leaves = 0;
             std::uint64_t accepted = 0, applied = 0, synthesized = 0, late = 0, stalls = 0;
