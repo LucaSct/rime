@@ -198,7 +198,8 @@ public:
     // retires nothing and sets no mask bit -- those ticks count toward `synthesized()` too, so "the
     // server ran a stand-in" has one counter whichever reason it had. Once started, every call
     // retires exactly one sequence, applied or synthesized, which is what makes `retired_through`
-    // advance with server time even when the client goes silent.
+    // advance with server time in Fixed mode. Adaptive mode stalls on an empty ring and may
+    // retire a skipped range when a distant command arrives after that stall.
     [[nodiscard]] ScheduledInput step() noexcept;
     [[nodiscard]] InputResult result(std::uint64_t server_tick) const noexcept;
     [[nodiscard]] InputPacing pacing(std::uint64_t server_tick) const noexcept;
@@ -226,6 +227,11 @@ public:
     [[nodiscard]] std::uint64_t late_unclassified() const noexcept { return late_unclassified_; }
 
     [[nodiscard]] std::uint64_t stalls() const noexcept { return stalls_; }
+
+    [[nodiscard]] std::uint64_t resyncs() const noexcept { return resyncs_; }
+
+    // Sequences skipped without a simulation step when an empty adaptive ring resynchronizes.
+    [[nodiscard]] std::uint64_t resync_retired() const noexcept { return resync_retired_; }
 
     // Gaps retired as synthesized in adaptive mode (a later command was held, so waiting is
     // futile).
@@ -265,6 +271,8 @@ private:
     std::uint64_t late_missed_ = 0;
     std::uint64_t late_unclassified_ = 0;
     std::uint64_t stalls_ = 0;
+    std::uint64_t resyncs_ = 0;
+    std::uint64_t resync_retired_ = 0;
     std::uint64_t gaps_retired_ = 0;
     std::uint64_t retired_count_ = 0;
     InputBufferMode mode_ = InputBufferMode::Fixed;

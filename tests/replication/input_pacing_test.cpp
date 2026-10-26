@@ -107,3 +107,40 @@ TEST_CASE("pacer: a stale or duplicate report is counted and ignored") {
     CHECK(pacer.last_margin() == 3);
     CHECK(pacer.params().window_reports == 60);
 }
+
+TEST_CASE("pacer: a high margin drains at most sixteen ticks of buffer per episode") {
+    Rig rig;
+    for (int i = 0; i < 60; ++i) {
+        (void)rig.step(63);
+    }
+    CHECK(rig.pacer.drains() == 1);
+    CHECK(rig.pacer.drained_ticks_of_buffer() == 16);
+    for (int i = 0; i < 255; ++i) {
+        CHECK(rig.step(63) == doctest::Approx(1.0 + 1.0 / 16.0));
+    }
+    CHECK(rig.pacer.dilated_ticks() == 256);
+    CHECK(rig.step(63) == 1.0);
+    for (int i = 0; i < 59; ++i) {
+        (void)rig.step(63);
+    }
+    CHECK(rig.pacer.drains() == 2);
+    CHECK(rig.pacer.drained_ticks_of_buffer() == 32);
+}
+
+TEST_CASE("pacer: a stall rise during drain cancels the remaining dilation") {
+    Rig rig;
+    for (int i = 0; i < 60; ++i) {
+        (void)rig.step(3);
+    }
+    REQUIRE(rig.pacer.drains() == 1);
+    REQUIRE(rig.pacer.dilated_ticks() == 1);
+    ++rig.stalls;
+    CHECK(rig.step(3) == 1.0);
+    CHECK(rig.pacer.drains_cancelled() == 1);
+    CHECK(rig.pacer.dilated_ticks() == 1);
+    for (int i = 0; i < 60; ++i) {
+        (void)rig.step(3);
+    }
+    CHECK(rig.pacer.drains() == 2);
+    CHECK(rig.pacer.drains_cancelled() == 1);
+}

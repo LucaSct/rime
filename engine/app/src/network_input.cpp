@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <optional>
+#include <random>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -314,8 +315,10 @@ struct NetworkInputServer::Impl {
          std::uint32_t fault_ticks,
          std::uint32_t input_slack,
          bool adaptive_input,
-         SeatConfig seat_config)
-        : link(std::move(supplied_link)), driver(link, driver_config(seat_capacity(seat_config))),
+         SeatConfig seat_config,
+         bool production_link = false)
+        : link(std::move(supplied_link)),
+          driver(link, driver_config(seat_capacity(seat_config), production_link)),
           profile(profile), world(world), remote_play(remote_play), fault(fault),
           fault_ticks(fault_ticks), input_slack(input_slack), adaptive_input(adaptive_input),
           // m20.8b2: the SEAT COUNT selects the path, not the game's ceiling -- a 16-player game
@@ -382,8 +385,14 @@ struct NetworkInputServer::Impl {
         }
     }
 
-    static net::NetDriver::Config driver_config(std::uint16_t seat_count) {
+    static net::NetDriver::Config driver_config(std::uint16_t seat_count, bool production_link) {
         net::NetDriver::Config config{};
+        if (production_link) {
+            // Salt entropy is a transport input chosen by the app; scripted links keep the
+            // driver's fixed seed so their incarnation proofs stay reproducible.
+            std::random_device entropy;
+            config.salt_seed = (std::uint64_t{entropy()} << 32) | std::uint64_t{entropy()};
+        }
         // One transport session per seat plus one, so a peer beyond the last seat can still
         // complete the connect and receive an explicit profile-level `full` refusal (m20.3's
         // "2 sessions for 1 input source", generalised).
@@ -407,6 +416,8 @@ struct NetworkInputServer::Impl {
         totals.synthesized += schedule.synthesized();
         totals.neutralized += schedule.neutralized();
         totals.stalls += schedule.stalls();
+        totals.resyncs += schedule.resyncs();
+        totals.resync_retired += schedule.resync_retired();
         totals.gaps_retired += schedule.gaps_retired();
         totals.late_missed += schedule.late_missed();
         totals.late_unclassified += schedule.late_unclassified();
@@ -1396,7 +1407,8 @@ NetworkInputServer::bind(const std::string& host,
                                        fault_ticks,
                                        input_slack,
                                        adaptive_input,
-                                       seats);
+                                       seats,
+                                       true);
     const auto& seat0 = impl->seats[0];
     if (remote_play && !multi &&
         (seat0.owner_net_id == kNullNetId || !seat0.hooks.capture || !seat0.hooks.restore ||
@@ -1579,6 +1591,8 @@ RunReport::NetworkInputCounters NetworkInputServer::counters() const noexcept {
             counts.synthesized += schedule.synthesized();
             counts.neutralized += schedule.neutralized();
             counts.stalls += schedule.stalls();
+            counts.resyncs += schedule.resyncs();
+            counts.resync_retired += schedule.resync_retired();
             counts.gaps_retired += schedule.gaps_retired();
             counts.late_missed += schedule.late_missed();
             counts.late_unclassified += schedule.late_unclassified();

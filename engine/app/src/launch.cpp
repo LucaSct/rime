@@ -1111,7 +1111,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"replication_registration_refused\":{},\"publish_missing_session\":{},"
                        "\"checkpoint_capture_refused\":{},"
                        "\"game_despawns\":{},\"game_despawns_dead\":{}{},"
-                       "\"input_buffer\":\"{}\",\"stalls\":{},\"gaps_retired\":{},"
+                       "\"input_buffer\":\"{}\",\"stalls\":{},\"resyncs\":{},"
+                       "\"resync_retired\":{},\"gaps_retired\":{},"
                        "\"late_missed\":{},\"late_unclassified\":{},\"max_margin\":{},"
                        "\"final_margin\":{},\"pacing_sent\":{},\"pacing_send_refused\":{},"
                        "\"accepted\":{}{}}}\n",
@@ -1160,6 +1161,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                        spawn_counters,
                        report.network_input.input_buffer_adaptive ? "adaptive" : "fixed",
                        report.network_input.stalls,
+                       report.network_input.resyncs,
+                       report.network_input.resync_retired,
                        report.network_input.gaps_retired,
                        report.network_input.late_missed,
                        report.network_input.late_unclassified,

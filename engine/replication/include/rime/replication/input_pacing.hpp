@@ -21,10 +21,11 @@
 namespace rime::replication {
 
 struct InputPacerParams {
-    std::uint32_t window_reports = 60; // fresh reports that make one observation window
-    std::uint8_t drain_above = 1;      // drain when the window's minimum margin is > this
-    std::uint32_t drain_ticks = 16;    // dilated ticks per drained tick of buffer
-    double dilation = 1.0 / 16.0;      // period scale while draining = 1 + dilation
+    std::uint32_t window_reports = 60;        // fresh reports that make one observation window
+    std::uint8_t drain_above = 1;             // drain when the window's minimum margin is > this
+    std::uint32_t drain_ticks = 16;           // dilated ticks per drained tick of buffer
+    std::uint32_t max_drain_per_episode = 16; // leave the rest for another clean window
+    double dilation = 1.0 / 16.0;             // period scale while draining = 1 + dilation
 };
 
 class InputPacer {
@@ -45,6 +46,8 @@ public:
     [[nodiscard]] std::uint64_t windows_with_stall() const noexcept { return windows_with_stall_; }
 
     [[nodiscard]] std::uint64_t drains() const noexcept { return drains_; }
+
+    [[nodiscard]] std::uint64_t drains_cancelled() const noexcept { return drains_cancelled_; }
 
     [[nodiscard]] std::uint64_t dilated_ticks() const noexcept { return dilated_ticks_; }
 
@@ -70,6 +73,7 @@ private:
     std::uint64_t windows_ = 0;
     std::uint64_t windows_with_stall_ = 0;
     std::uint64_t drains_ = 0;
+    std::uint64_t drains_cancelled_ = 0;
     std::uint64_t dilated_ticks_ = 0;
     std::uint64_t drained_buffer_ = 0;
 };

@@ -17,6 +17,7 @@
 #include <cmath>
 #include <memory>
 #include <optional>
+#include <random>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -220,7 +221,11 @@ RunReport run_network_client(const LaunchOptions& options,
         impaired = std::make_unique<ImpairedLink>(*link, options);
         link = impaired.get();
     }
-    net::NetDriver driver{*link, net::NetDriver::Config{}};
+    net::NetDriver::Config driver_config{};
+    // Salt entropy is an app input; net code stays deterministic for explicitly seeded tests.
+    std::random_device entropy;
+    driver_config.salt_seed = (std::uint64_t{entropy()} << 32) | std::uint64_t{entropy()};
+    net::NetDriver driver{*link, driver_config};
     const auto session_id = driver.connect(*endpoint, now_ms());
     if (!session_id)
         return fail(report, "transport session unavailable");

@@ -357,7 +357,33 @@ void InputSchedule::offer(std::span<const InputCommand> commands) {
                 ++late_missed_;
             }
         } else if (std::uint64_t{command.sequence} >= next_ + kRing) {
-            ++future_;
+            if (mode_ == InputBufferMode::Adaptive &&
+                std::none_of(held_.begin(), held_.end(), [](bool held) { return held; })) {
+                // Nothing can advance an empty adaptive ring. Retire the blackout as unapplied
+                // so the next command has a truthful execution frontier and can run next tick.
+                const std::uint64_t skipped = std::uint64_t{command.sequence} - next_;
+                if (skipped >= 128) {
+                    applied_mask_ = {};
+                } else if (skipped >= 64) {
+                    applied_mask_[1] = applied_mask_[0] << (skipped - 64);
+                    applied_mask_[0] = 0;
+                } else {
+                    applied_mask_[1] =
+                        (applied_mask_[1] << skipped) | (applied_mask_[0] >> (64 - skipped));
+                    applied_mask_[0] <<= skipped;
+                }
+                retired_count_ += skipped;
+                resync_retired_ += skipped;
+                ++resyncs_;
+                any_retired_ = true;
+                next_ = command.sequence;
+                const std::size_t slot = command.sequence % kRing;
+                commands_[slot] = command;
+                held_[slot] = true;
+                ++accepted_;
+            } else {
+                ++future_;
+            }
         } else {
             const std::size_t slot = command.sequence % kRing;
             if (held_[slot]) {
