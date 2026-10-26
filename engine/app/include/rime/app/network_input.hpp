@@ -65,6 +65,9 @@ public:
     // object. `interaction_kick(tick)` is asked once per tick before the game runs; it counts the
     // kick and records whether the object was a member at that moment.
     void set_interaction_kicks(std::vector<std::uint64_t> ticks);
+    // `kick@cmd:N`: fire once, on the first tick whose input step retires command sequence >= N.
+    // A stall or a pre-start tick retires nothing, so it never fires; asked after `before_tick`.
+    void set_interaction_kick_commands(std::vector<std::uint32_t> sequences);
     [[nodiscard]] bool interaction_kick(std::uint64_t server_tick);
     [[nodiscard]] std::optional<CommandProvenance> command_provenance() const noexcept;
     void after_tick(std::uint64_t server_tick,

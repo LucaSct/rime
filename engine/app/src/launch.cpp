@@ -121,7 +121,9 @@ std::string launch_usage(std::string_view program) {
         "late-alive, late-ended)\n"
         "  --spawn-debug-break CASE  connected sensitivity control (no-ledger, no-adopt, "
         "authority-presentation)\n"
-        "  --interaction-fault kick@T[,kick@T2]  dedicated: kick the crate at server tick T\n"
+        "  --interaction-fault kick@T|kick@cmd:N[,...]  dedicated: kick the crate at server tick "
+        "T,\n"
+        "                     or on the tick that retires client command N (cmd:N, N >= 1)\n"
         "  --interaction-debug-break CASE  connected control (present-mirror, no-rebuild, "
         "stale-restore)\n"
         "  --interaction-trace  connected: list every crate checkpoint correction\n"
@@ -217,23 +219,35 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             else
                 return fail("--spawn-debug-break needs a known case");
         } else if (arg == "--interaction-fault") {
-            if (!has_value || !result.options.interaction_kicks.empty())
-                return fail("--interaction-fault needs one kick@T[,kick@T2] list");
+            if (!has_value || !result.options.interaction_kicks.empty() ||
+                !result.options.interaction_kick_commands.empty())
+                return fail("--interaction-fault needs one kick@T|kick@cmd:N list");
             std::string_view rest = args[++i];
             while (!rest.empty()) {
                 const auto comma = rest.find(',');
                 const auto item = rest.substr(0, comma);
                 std::uint64_t tick = 0;
-                if (!item.starts_with("kick@") || !parse_uint(item.substr(5), tick))
-                    return fail("--interaction-fault needs kick@T[,kick@T2]");
-                result.options.interaction_kicks.push_back(tick);
+                if (item.starts_with("kick@cmd:")) {
+                    // A command sequence starts at 1 (the client's `++sequence`) and is 32-bit on
+                    // the wire, so 0 can never retire and a wider number can never be reached.
+                    if (!parse_uint(item.substr(9), tick) || tick == 0 ||
+                        tick > std::numeric_limits<std::uint32_t>::max())
+                        return fail("--interaction-fault needs kick@cmd:N with N >= 1");
+                    result.options.interaction_kick_commands.push_back(
+                        static_cast<std::uint32_t>(tick));
+                } else if (item.starts_with("kick@") && parse_uint(item.substr(5), tick)) {
+                    result.options.interaction_kicks.push_back(tick);
+                } else {
+                    return fail("--interaction-fault needs kick@T or kick@cmd:N");
+                }
                 if (comma != std::string_view::npos && comma + 1 == rest.size())
-                    return fail("--interaction-fault needs kick@T[,kick@T2]"); // trailing comma
+                    return fail("--interaction-fault needs kick@T or kick@cmd:N"); // trailing comma
                 rest =
                     comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
             }
-            if (result.options.interaction_kicks.empty())
-                return fail("--interaction-fault needs kick@T[,kick@T2]");
+            if (result.options.interaction_kicks.empty() &&
+                result.options.interaction_kick_commands.empty())
+                return fail("--interaction-fault needs kick@T or kick@cmd:N");
         } else if (arg == "--interaction-debug-break") {
             if (!has_value || result.options.interaction_debug_break != InteractionDebugBreak::None)
                 return fail("--interaction-debug-break needs one case");
@@ -474,7 +488,8 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         if (timed != (result.options.spawn_fault_ticks != 0))
             return fail("--spawn-fault-ticks goes with duplicate, late-alive or late-ended only");
     }
-    if (!result.options.interaction_kicks.empty() &&
+    if ((!result.options.interaction_kicks.empty() ||
+         !result.options.interaction_kick_commands.empty()) &&
         (result.options.mode != LaunchMode::Dedicated || result.options.offline))
         return fail("--interaction-fault requires listening dedicated mode");
     if (result.options.input_buffer_given &&
@@ -690,13 +705,14 @@ RunReport run_game_mode(const LaunchOptions& options,
                           (report.bind_failed ? "UDP bind failed: " : "remote play refused: ") +
                               report.bind_error);
         }
-        if (!options.interaction_kicks.empty()) {
+        if (!options.interaction_kicks.empty() || !options.interaction_kick_commands.empty()) {
             if (!definition.remote_play || !definition.remote_play->active_interaction() ||
                 definition.remote_play->active_interaction()->j_max <= 0.0f)
                 return refuse(report,
                               RunStatus::Failed,
                               "--interaction-fault needs an interaction profile with a j_max");
             network->set_interaction_kicks(options.interaction_kicks);
+            network->set_interaction_kick_commands(options.interaction_kick_commands);
         }
         fmt::print("{{\"event\":\"ready\",\"transport\":\"udp\",\"bind\":\"{}:{}\",\"codec\":2,"
                    "\"auth\":\"none\"}}\n",
@@ -946,7 +962,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                                 "\"interaction_capture_refused\":{},"
                                 "\"interaction_leave_deferred_quiet\":{},"
                                 "\"interaction_joined_sliding\":{},\"interaction_kicks\":{},"
-                                "\"interaction_kicks_member\":{},"
+                                "\"interaction_kicks_by_command\":{},\"interaction_kick1_tick\":{},"
+                                "\"interaction_kick2_tick\":{},\"interaction_kicks_member\":{},"
                                 "\"interaction_kicks_nonmember\":{},"
                                 "\"interaction_j_max\":{:.3f},"
                                 "\"interaction_raw_bound\":{:.6f}",
@@ -961,6 +978,9 @@ RunReport run_game_mode(const LaunchOptions& options,
                                 report.network_input.interaction_leave_deferred_quiet,
                                 report.network_input.interaction_joined_sliding,
                                 report.network_input.interaction_kicks,
+                                report.network_input.interaction_kicks_by_command,
+                                report.network_input.interaction_kick1_tick,
+                                report.network_input.interaction_kick2_tick,
                                 report.network_input.interaction_kicks_member,
                                 report.network_input.interaction_kicks_nonmember,
                                 static_cast<double>(interaction->j_max),

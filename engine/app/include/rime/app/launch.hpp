@@ -137,6 +137,9 @@ struct LaunchOptions {
     // `--interaction-debug-break` (play): a sensitivity control. `--interaction-trace` (play): list
     // every member->member checkpoint correction in the `finished` line.
     std::vector<std::uint64_t> interaction_kicks;
+    // `kick@cmd:N`: kick on the server tick whose input step first retires client command N or
+    // later. Event-driven, so it does not drift with the client/server tick offset.
+    std::vector<std::uint32_t> interaction_kick_commands;
     InteractionDebugBreak interaction_debug_break = InteractionDebugBreak::None;
     bool interaction_trace = false;
     std::uint32_t spawn_unresolved_bound = 0;
@@ -281,6 +284,11 @@ struct RunReport {
         std::uint64_t interaction_joined_sliding = 0;
         std::uint64_t interaction_kicks = 0, interaction_kicks_member = 0;
         std::uint64_t interaction_kicks_nonmember = 0;
+        // Server ticks of the first two kicks (valid when interaction_kicks reaches 1 / 2). A
+        // command-driven kick lands wherever the client's tape puts it, so a proof reads the tick
+        // from here instead of guessing it from a client/server offset.
+        std::uint64_t interaction_kick1_tick = 0, interaction_kick2_tick = 0;
+        std::uint64_t interaction_kicks_by_command = 0; // the part of interaction_kicks from cmd:N
         // m20.7 adaptive input buffer (ADR-0107), accumulated across sessions like `late`.
         // `late_missed` is the part of `late` whose slot ran a stand-in; `max_margin` is a
         // maximum, `final_margin` the last session's margin when it ended.
