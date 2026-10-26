@@ -27,8 +27,11 @@ extra buffering. Every leg runs a real hitch (`play --debug-hitch 240:200`, 200 
                  hitch really reached the server as a gap in time and the buffer really grew by
                  about the hitch, so "no loss" is not a hitch that never happened.
   drained        (adaptive legs) the client's pacer drained: `pacer_drains >= 1`,
-                 `pacer_drained_buffer_ticks >= hitch_ticks - 3`, and the server's `final_margin <=
-                 drain_above + 2`. Catches a buffer that only grows (permanent input delay).
+                 `pacer_drained_buffer_ticks >= hitch_ticks - 3 - jitter_ticks`, and the server's
+                 `final_margin <= drain_above + 2`. Catches a buffer that only grows (permanent input
+                 delay). `jitter_ticks` (0 loopback, ceil(20 ms / 16.7 ms) = 2 impaired): the pacer
+                 drains to the window's MINIMUM margin, and arrival jitter puts that minimum up to
+                 jitter_ticks below the steady margin -- headroom the pacer keeps on purpose.
   control        (fixed leg, MUST fail the lossless claim) the same hitch with `--input-buffer fixed`
                  and `--input-slack 1` loses at least `hitch_ticks - 3` commands (`late_missed`) and
                  never receives a pacing report (`pacing_reports == 0`). A gate that cannot see the
@@ -54,8 +57,11 @@ TICK_HZ = 60
 DT = 1.0 / TICK_HZ
 DELAY_MS = 108
 ONE_WAY = math.ceil(DELAY_MS * TICK_HZ / 1000)   # 7
+JITTER_MS = 20
+# Arrival jitter in whole ticks: how far below the steady margin a window's minimum can read.
+JITTER_TICKS = {False: 0, True: math.ceil(JITTER_MS * TICK_HZ / 1000)}   # 0 / 2
 ROUND_TRIP = 2 * ONE_WAY                         # 14
-IMPAIR = f"delay_ms={DELAY_MS},loss=0.05,jitter_ms=20,seed=7"
+IMPAIR = f"delay_ms={DELAY_MS},loss=0.05,jitter_ms={JITTER_MS},seed=7"
 MAX_ATTEMPTS = 3
 
 # The hitch: at client tick HITCH_AT the client sleeps HITCH_MS. 200 ms / (1000/60) = 12 ticks.
@@ -200,11 +206,13 @@ def adaptive_gates(label, s, c, impaired):
     gate(f"{label} hitch absorbed", s["stalls"] >= 1 and s["max_margin"] >= HITCH_TICKS - 2,
          f"stalls {s['stalls']} >= 1, max_margin {s['max_margin']} >= hitch_ticks "
          f"{HITCH_TICKS} - 2 = {HITCH_TICKS - 2}")
+    drain_floor = HITCH_TICKS - 3 - JITTER_TICKS[impaired]
     gate(f"{label} drained",
-         c["pacer_drains"] >= 1 and c["pacer_drained_buffer_ticks"] >= HITCH_TICKS - 3 and
+         c["pacer_drains"] >= 1 and c["pacer_drained_buffer_ticks"] >= drain_floor and
          s["final_margin"] <= DRAIN_ABOVE + 2,
          f"pacer_drains {c['pacer_drains']} >= 1, drained_buffer_ticks "
-         f"{c['pacer_drained_buffer_ticks']} >= {HITCH_TICKS} - 3 = {HITCH_TICKS - 3}, "
+         f"{c['pacer_drained_buffer_ticks']} >= {HITCH_TICKS} - 3 - jitter "
+         f"{JITTER_TICKS[impaired]} = {drain_floor}, "
          f"dilated_ticks {c['pacer_dilated_ticks']}, server final_margin {s['final_margin']} <= "
          f"drain_above {DRAIN_ABOVE} + 2 = {DRAIN_ABOVE + 2} (windows {c['pacer_windows']}, "
          f"with stall {c['pacer_windows_with_stall']}, client last_margin {c['last_margin']})")
