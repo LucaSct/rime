@@ -980,7 +980,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"checkpoint_capture_refused\":{}{},"
                        "\"input_buffer\":\"{}\",\"stalls\":{},\"gaps_retired\":{},"
                        "\"late_missed\":{},\"late_unclassified\":{},\"max_margin\":{},"
-                       "\"final_margin\":{},\"pacing_sent\":{},\"pacing_send_refused\":{}}}\n",
+                       "\"final_margin\":{},\"pacing_sent\":{},\"pacing_send_refused\":{},"
+                       "\"accepted\":{}}}\n",
                        report.ticks,
                        report.state_digest,
                        report.network_input.applied,
@@ -1030,7 +1031,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                        report.network_input.max_margin,
                        report.network_input.final_margin,
                        report.network_input.pacing_sent,
-                       report.network_input.pacing_send_refused);
+                       report.network_input.pacing_send_refused,
+                       report.network_input.accepted);
             std::fflush(stdout);
         }
     }
