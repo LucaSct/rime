@@ -535,10 +535,10 @@ void HelloGame::throw_step(app::TickContext& ctx,
     // seat's checkpoint and no other. One seat leaves it default, as the host expects.
     const app::PlayerSlot owner = seats_ > 1 ? player.slot : app::PlayerSlot{};
     if (input.actions.was_pressed(kButtonThrow) && real_command) {
-        const auto key = input.command ? replication::SpawnKey{input.command->incarnation,
-                                                               input.command->sequence,
-                                                               0}
-                                       : replication::SpawnKey{};
+        const auto key =
+            input.command
+                ? replication::SpawnKey{input.command->incarnation, input.command->sequence, 0}
+                : replication::SpawnKey{};
         std::uint8_t refusal = 0;
         if (input.refuse_spawn || self->throw_charges == 0)
             refusal = 1;
@@ -1001,21 +1001,20 @@ void HelloGame::dress_remote(ecs::World& world) {
     if (!presentation_ready_ || !world.is_registered<app::PlayerOwner>())
         return;
     std::vector<std::pair<ecs::Entity, bool>> undressed; // (entity, is a player body)
-    world.query<app::PlayerOwner>().for_each([&](ecs::Entity entity, const app::PlayerOwner& owner) {
-        if (entity == player_ || world.get<render::MeshRef>(entity) != nullptr)
-            return;
-        if (world.get<PlayerState>(entity) != nullptr)
-            undressed.emplace_back(entity, true);
-        else if (world.get<ThrownProjectile>(entity) != nullptr &&
-                 !(own_seat_ && owner.owns(*own_seat_)))
-            undressed.emplace_back(entity, false);
-    });
+    world.query<app::PlayerOwner>().for_each(
+        [&](ecs::Entity entity, const app::PlayerOwner& owner) {
+            if (entity == player_ || world.get<render::MeshRef>(entity) != nullptr)
+                return;
+            if (world.get<PlayerState>(entity) != nullptr)
+                undressed.emplace_back(entity, true);
+            else if (world.get<ThrownProjectile>(entity) != nullptr &&
+                     !(own_seat_ && owner.owns(*own_seat_)))
+                undressed.emplace_back(entity, false);
+        });
     for (const auto& [entity, body] : undressed) {
-        world.add_component(entity,
-                            render::MeshRef{body ? other_player_mesh_ : projectile_mesh_});
-        world.add_component(entity,
-                            render::MaterialRef{body ? other_player_material_
-                                                     : projectile_material_});
+        world.add_component(entity, render::MeshRef{body ? other_player_mesh_ : projectile_mesh_});
+        world.add_component(
+            entity, render::MaterialRef{body ? other_player_material_ : projectile_material_});
     }
 }
 

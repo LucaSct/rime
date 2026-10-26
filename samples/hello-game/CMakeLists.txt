@@ -116,6 +116,12 @@ set_tests_properties(hello_game_play_interaction PROPERTIES TIMEOUT 400 RUN_SERI
 add_test(NAME hello_game_play_adaptive COMMAND python3
     ${CMAKE_CURRENT_SOURCE_DIR}/adaptive_input.py $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_play_adaptive PROPERTIES TIMEOUT 130 RUN_SERIAL TRUE LABELS "hello_game")
+# m20.8b2: two real seats, two different tapes, and a third peer refused full. The swapped second
+# run checks which body each tape moved; equal mirror digests alone cannot detect seat aliasing.
+add_test(NAME hello_game_multi_client_smoke COMMAND python3
+    ${CMAKE_CURRENT_SOURCE_DIR}/multi_client_smoke.py $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_multi_client_smoke PROPERTIES
+    TIMEOUT 60 RUN_SERIAL TRUE LABELS "hello_game")
 add_executable(hello_game_net_proof net_proof.cpp game.cpp)
 target_link_libraries(hello_game_net_proof
     PRIVATE rime::app_game rime::app rime::physics rime::scene rime::net rime::replication)

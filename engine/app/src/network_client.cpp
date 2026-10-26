@@ -1122,7 +1122,8 @@ RunReport run_network_client(const LaunchOptions& options,
     // digests -- but not on "seat A's body moved only along the axis seat A's tape drives".
     std::string seat_metrics;
     if (multi_seat && seat) {
-        seat_metrics = fmt::format(",\"seat\":{},\"gen\":{},\"players\":[", seat->index, seat->generation);
+        seat_metrics =
+            fmt::format(",\"seat\":{},\"gen\":{},\"players\":[", seat->index, seat->generation);
         // Collected first, resolved after: `seat_player` runs its own query, and nesting one
         // inside another's iteration is a reentrancy question this loop has no reason to ask.
         std::vector<std::pair<ecs::Entity, PlayerOwner>> owned;

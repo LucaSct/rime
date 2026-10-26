@@ -441,13 +441,16 @@ struct Client {
     bool hello(std::uint16_t min = 2, std::uint16_t max = 2, bool wrong_schema = false) {
         if (!wait_connected())
             return false;
-        // The executable's definition, so the offered identity is the one its server folds.
+        // The executable's definition, so the offered identity is the one its server folds --
+        // all of it: m20.8b2's hello-game declares 16 seats, and the "rime.seats" marker is part
+        // of its identity even on the one-seat server this proof runs.
         const auto def = hello_game::definition_with_interaction();
         const auto& profile = *def.network_input;
         replication::InputHello offer{
             static_cast<std::uint8_t>(min),
             static_cast<std::uint8_t>(max),
-            app::input_schema_identity(profile, def.remote_play ? &*def.remote_play : nullptr) ^
+            app::input_schema_identity(
+                profile, def.remote_play ? &*def.remote_play : nullptr, def.max_players) ^
                 static_cast<std::uint64_t>(wrong_schema)};
         std::array<std::byte, replication::kInputHelloBytes> bytes{};
         const auto n = replication::encode_input_hello(offer, bytes);

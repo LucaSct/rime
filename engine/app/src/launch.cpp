@@ -638,11 +638,11 @@ RunReport run_game_mode(const LaunchOptions& options,
     // ADR-0108 §5's min(16, max_players). Never above max_players: a game default is a default.
     const std::uint16_t default_clients =
         definition.default_max_clients != 0 ? definition.default_max_clients : kDefaultMaxClients;
-    const SeatConfig seat_config{
-        .max_players = max_players,
-        .max_clients = options.max_clients != 0
-                           ? options.max_clients
-                           : std::min<std::uint16_t>(default_clients, max_players)};
+    const SeatConfig seat_config{.max_players = max_players,
+                                 .max_clients =
+                                     options.max_clients != 0
+                                         ? options.max_clients
+                                         : std::min<std::uint16_t>(default_clients, max_players)};
     // m20.8b2: THE ONE-SEAT / MULTI-SEAT SELECTION. What decides the server's path is the seat
     // count this run can actually fill, not the game's ceiling: a 16-player game started with
     // `--max-clients 1` has one seat, and one seat is m20.7's server -- codec 2, the 3-byte hello
