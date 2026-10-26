@@ -127,6 +127,11 @@ std::string launch_usage(std::string_view program) {
         "  --interaction-trace  connected: list every crate checkpoint correction\n"
         "  --spawn-fault-ticks N  window of duplicate / late-alive / late-ended, in server ticks\n"
         "  --input-slack N    dedicated: commands buffered before one executes (1..8, default 1)\n"
+        "  --input-buffer M   dedicated --listen: fixed (default) or adaptive (stall on an empty\n"
+        "                     buffer instead of discarding the late command; pacing reports let "
+        "the\n"
+        "                     client drain the surplus)\n"
+        "  --debug-hitch T:MS play --connect, diagnostic: sleep MS ms (1..2000) at client tick T\n"
         "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
@@ -249,6 +254,28 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
                 !parse_uint(args[++i], result.options.input_slack) ||
                 result.options.input_slack == 0 || result.options.input_slack > 8)
                 return fail("--input-slack needs an integer 1..8 once");
+        } else if (arg == "--input-buffer") {
+            if (!has_value || result.options.input_buffer_given)
+                return fail("--input-buffer needs fixed or adaptive, once");
+            const auto value = args[++i];
+            if (value == "adaptive")
+                result.options.input_buffer_adaptive = true;
+            else if (value != "fixed")
+                return fail("--input-buffer needs fixed or adaptive, once");
+            result.options.input_buffer_given = true;
+        } else if (arg == "--debug-hitch") {
+            // T:MS -- a client frame hitch of MS milliseconds at client tick T (diagnostic).
+            if (!has_value || result.options.debug_hitch_tick != 0)
+                return fail("--debug-hitch needs T:MS once (T >= 1, MS 1..2000)");
+            const auto value = args[++i];
+            const auto colon = value.find(':');
+            std::uint64_t tick = 0;
+            std::uint32_t ms = 0;
+            if (colon == std::string_view::npos || !parse_uint(value.substr(0, colon), tick) ||
+                !parse_uint(value.substr(colon + 1), ms) || tick == 0 || ms == 0 || ms > 2000)
+                return fail("--debug-hitch needs T:MS once (T >= 1, MS 1..2000)");
+            result.options.debug_hitch_tick = tick;
+            result.options.debug_hitch_ms = ms;
         } else if (arg == "--spawn-fault-ticks") {
             if (!has_value || result.options.spawn_fault_ticks != 0 ||
                 !parse_uint(args[++i], result.options.spawn_fault_ticks) ||
@@ -449,6 +476,11 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
     if (!result.options.interaction_kicks.empty() &&
         (result.options.mode != LaunchMode::Dedicated || result.options.offline))
         return fail("--interaction-fault requires listening dedicated mode");
+    if (result.options.input_buffer_given &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline))
+        return fail("--input-buffer requires listening dedicated mode");
+    if (result.options.debug_hitch_tick != 0 && result.options.connect_host.empty())
+        return fail("--debug-hitch requires --connect");
     if ((result.options.interaction_debug_break != InteractionDebugBreak::None ||
          result.options.interaction_trace) &&
         result.options.connect_host.empty())
@@ -648,7 +680,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                                      report.bind_error,
                                      options.spawn_fault,
                                      options.spawn_fault_ticks,
-                                     options.input_slack == 0 ? 1u : options.input_slack);
+                                     options.input_slack == 0 ? 1u : options.input_slack,
+                                     options.input_buffer_adaptive);
         if (!network) {
             report.bind_failed = report.bind_error.starts_with('E');
             return refuse(report,
@@ -944,7 +977,10 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"checkpoint_encoded\":{},\"checkpoint_encode_refused\":{},"
                        "\"checkpoint_send_refused\":{},\"input_result_send_refused\":{},"
                        "\"replication_registration_refused\":{},\"publish_missing_session\":{},"
-                       "\"checkpoint_capture_refused\":{}{}}}\n",
+                       "\"checkpoint_capture_refused\":{}{},"
+                       "\"input_buffer\":\"{}\",\"stalls\":{},\"gaps_retired\":{},"
+                       "\"late_missed\":{},\"late_unclassified\":{},\"max_margin\":{},"
+                       "\"final_margin\":{},\"pacing_sent\":{},\"pacing_send_refused\":{}}}\n",
                        report.ticks,
                        report.state_digest,
                        report.network_input.applied,
@@ -985,7 +1021,16 @@ RunReport run_game_mode(const LaunchOptions& options,
                        report.network_input.replication_registration_refused,
                        report.network_input.publish_missing_session,
                        report.network_input.checkpoint_capture_refused,
-                       spawn_counters);
+                       spawn_counters,
+                       report.network_input.input_buffer_adaptive ? "adaptive" : "fixed",
+                       report.network_input.stalls,
+                       report.network_input.gaps_retired,
+                       report.network_input.late_missed,
+                       report.network_input.late_unclassified,
+                       report.network_input.max_margin,
+                       report.network_input.final_margin,
+                       report.network_input.pacing_sent,
+                       report.network_input.pacing_send_refused);
             std::fflush(stdout);
         }
     }

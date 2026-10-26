@@ -290,6 +290,58 @@ TEST_CASE("launch: interaction diagnostics parse, are off by default, and are re
     CHECK(parse({"play", "--interaction-trace"}).status == ParseStatus::Error);
 }
 
+TEST_CASE("launch: m20.7 --input-buffer and --debug-hitch parse, default off, and refuse misuse") {
+    const auto none = parse({"dedicated", "--listen", "127.0.0.1:0"});
+    REQUIRE(none.status == ParseStatus::Ok);
+    CHECK_FALSE(none.options.input_buffer_adaptive);
+    CHECK(none.options.debug_hitch_tick == 0);
+
+    const auto adaptive =
+        parse({"dedicated", "--listen", "127.0.0.1:0", "--input-buffer", "adaptive"});
+    REQUIRE(adaptive.status == ParseStatus::Ok);
+    CHECK(adaptive.options.input_buffer_adaptive);
+    const auto fixed = parse({"dedicated", "--listen", "127.0.0.1:0", "--input-buffer", "fixed"});
+    REQUIRE(fixed.status == ParseStatus::Ok);
+    CHECK_FALSE(fixed.options.input_buffer_adaptive);
+
+    // Wrong mode word, missing value, repeated, and the wrong mode of play / offline dedicated.
+    CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--input-buffer", "bogus"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--input-buffer"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"dedicated",
+                 "--listen",
+                 "127.0.0.1:0",
+                 "--input-buffer",
+                 "fixed",
+                 "--input-buffer",
+                 "adaptive"})
+              .status == ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--input-buffer", "adaptive"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"dedicated", "--offline", "--input-buffer", "adaptive"}).status ==
+          ParseStatus::Error);
+
+    const auto hitch = parse({"play", "--connect", "127.0.0.1", "--debug-hitch", "240:200"});
+    REQUIRE(hitch.status == ParseStatus::Ok);
+    CHECK(hitch.options.debug_hitch_tick == 240);
+    CHECK(hitch.options.debug_hitch_ms == 200);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--debug-hitch", "1:2000"}).status ==
+          ParseStatus::Ok);
+    for (const char* bad :
+         {"", "240", "240:", ":200", "0:200", "240:0", "240:2001", "x:200", "240:y"})
+        CHECK(parse({"play", "--connect", "127.0.0.1", "--debug-hitch", bad}).status ==
+              ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--debug-hitch"}).status == ParseStatus::Error);
+    CHECK(
+        parse(
+            {"play", "--connect", "127.0.0.1", "--debug-hitch", "240:200", "--debug-hitch", "9:9"})
+            .status == ParseStatus::Error);
+    CHECK(parse({"play", "--debug-hitch", "240:200"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--debug-hitch", "240:200"}).status ==
+          ParseStatus::Error);
+}
+
 TEST_CASE("launch: connected play and linger grammar") {
     const auto connected = parse({"play",
                                   "--connect",

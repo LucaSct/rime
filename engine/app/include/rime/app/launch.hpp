@@ -122,6 +122,14 @@ struct LaunchOptions {
     std::uint32_t spawn_fault_ticks = 0;
     // `dedicated --input-slack N` (1..8): commands buffered before one executes. 0 = unset (1).
     std::uint32_t input_slack = 0;
+    // m20.7 (ADR-0107): `dedicated --input-buffer fixed|adaptive`. Fixed (default) is ADR-0103's
+    // retire-on-schedule buffer, unchanged; adaptive stalls on an empty buffer and reports pacing.
+    bool input_buffer_adaptive = false;
+    bool input_buffer_given = false;
+    // m20.7 `play --connect --debug-hitch T:MS` (diagnostic, off by default): at client tick T,
+    // before sampling input, sleep MS ms -- a frame hitch the loop then catches up from.
+    std::uint64_t debug_hitch_tick = 0; // 0 = off (T >= 1 when given)
+    std::uint32_t debug_hitch_ms = 0;
     SpawnDebugBreak spawn_debug_break = SpawnDebugBreak::None;
     // m20.6c, all OFF by default. `--interaction-fault kick@T[,kick@T2]` (dedicated): at those
     // server ticks the game applies its declared server-only impulse to the interaction object.
@@ -269,6 +277,13 @@ struct RunReport {
         std::uint64_t interaction_joined_sliding = 0;
         std::uint64_t interaction_kicks = 0, interaction_kicks_member = 0;
         std::uint64_t interaction_kicks_nonmember = 0;
+        // m20.7 adaptive input buffer (ADR-0107), accumulated across sessions like `late`.
+        // `late_missed` is the part of `late` whose slot ran a stand-in; `max_margin` is a
+        // maximum, `final_margin` the last session's margin when it ended.
+        bool input_buffer_adaptive = false;
+        std::uint64_t stalls = 0, gaps_retired = 0, late_missed = 0, late_unclassified = 0;
+        std::uint64_t max_margin = 0, final_margin = 0;
+        std::uint64_t pacing_sent = 0, pacing_send_refused = 0;
     } network_input;
 
     bool bind_failed = false;

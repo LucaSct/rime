@@ -208,9 +208,11 @@ struct NetworkInputServer::Impl {
          const GameDefinition::RemotePlayProfile* remote_play,
          SpawnFault fault = SpawnFault::None,
          std::uint32_t fault_ticks = 0,
-         std::uint32_t input_slack = 1)
+         std::uint32_t input_slack = 1,
+         bool adaptive_input = false)
         : link(std::move(supplied_link)), driver(link, driver_config()), profile(profile),
           world(world), fault(fault), fault_ticks(fault_ticks), input_slack(input_slack),
+          adaptive_input(adaptive_input),
           neutral_after_ticks(static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz * 0.1)))) {
         driver.listen();
         schema_hash = input_schema_identity(profile, remote_play);
@@ -261,6 +263,12 @@ struct NetworkInputServer::Impl {
         totals.applied += schedule->applied();
         totals.synthesized += schedule->synthesized();
         totals.neutralized += schedule->neutralized();
+        totals.stalls += schedule->stalls();
+        totals.gaps_retired += schedule->gaps_retired();
+        totals.late_missed += schedule->late_missed();
+        totals.late_unclassified += schedule->late_unclassified();
+        totals.max_margin = std::max<std::uint64_t>(totals.max_margin, schedule->max_margin());
+        totals.final_margin = schedule->margin();
         schedule.reset();
     }
 
@@ -400,7 +408,8 @@ struct NetworkInputServer::Impl {
                         schedule.emplace(
                             std::max(input_slack,
                                      fault == SpawnFault::LoseOne ? kLoseOneSlack : 1u),
-                            neutral_after_ticks);
+                            neutral_after_ticks,
+                            adaptive_input ? InputBufferMode::Adaptive : InputBufferMode::Fixed);
                         ++totals.clients_admitted;
                         event(fmt::format("{{\"event\":\"client_connected\",\"peer\":\"{}:{}\"}}",
                                           session->peer().address_string(),
@@ -500,6 +509,8 @@ struct NetworkInputServer::Impl {
     // contract; `--input-slack` raises it for a run whose client cannot keep up with one tick of
     // slack (a starved CI VM) -- a fixed knob until the buffer adapts on its own.
     std::uint32_t input_slack = 1;
+    // m20.7 (ADR-0107): `dedicated --input-buffer adaptive`.
+    bool adaptive_input = false;
     std::optional<std::uint32_t> fault_sequence;
     // `duplicate` holds the client's ack for its window, so the verdict rides every checkpoint in
     // it -- a repeated confirmation the client must recognise -- and applies it afterwards.
@@ -715,7 +726,8 @@ NetworkInputServer::bind(const std::string& host,
                          std::string& error,
                          SpawnFault fault,
                          std::uint32_t fault_ticks,
-                         std::uint32_t input_slack) {
+                         std::uint32_t input_slack,
+                         bool adaptive_input) {
     const auto local = platform::Endpoint::from_string(host, port);
     if (!local) {
         error = "EINVAL";
@@ -744,7 +756,8 @@ NetworkInputServer::bind(const std::string& host,
                                        remote_play,
                                        fault,
                                        fault_ticks,
-                                       input_slack);
+                                       input_slack,
+                                       adaptive_input);
     if (remote_play &&
         (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
          !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {
@@ -850,6 +863,17 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
     const auto n = encode_input_result(result, bytes);
     if (!session->send_unreliable(std::span(bytes).first(n), impl_->now, kRemoteInputResultStream))
         ++impl_->totals.input_result_send_refused;
+    if (impl_->adaptive_input) {
+        // After the result, on its own stream: the client's pacer reads the margin AFTER this
+        // tick's step. Unreliable like the result -- the next tick's report replaces a lost one.
+        std::array<std::byte, kInputPacingBytes> pacing_bytes{};
+        const auto pn = encode_input_pacing(impl_->schedule->pacing(server_tick), pacing_bytes);
+        if (session->send_unreliable(
+                std::span(pacing_bytes).first(pn), impl_->now, kRemoteInputPacingStream))
+            ++impl_->totals.pacing_sent;
+        else
+            ++impl_->totals.pacing_send_refused;
+    }
     if (!impl_->replicator)
         return;
     impl_->replicator->publish(impl_->driver, impl_->now);
@@ -982,7 +1006,15 @@ RunReport::NetworkInputCounters NetworkInputServer::counters() const noexcept {
         counts.applied += impl_->schedule->applied();
         counts.synthesized += impl_->schedule->synthesized();
         counts.neutralized += impl_->schedule->neutralized();
+        counts.stalls += impl_->schedule->stalls();
+        counts.gaps_retired += impl_->schedule->gaps_retired();
+        counts.late_missed += impl_->schedule->late_missed();
+        counts.late_unclassified += impl_->schedule->late_unclassified();
+        counts.max_margin =
+            std::max<std::uint64_t>(counts.max_margin, impl_->schedule->max_margin());
+        counts.final_margin = impl_->schedule->margin();
     }
+    counts.input_buffer_adaptive = impl_->adaptive_input;
     if (impl_->policy) {
         const auto& policy = impl_->policy->counters();
         counts.interaction_joins = policy.joins;

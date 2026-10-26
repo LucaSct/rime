@@ -23,6 +23,10 @@ namespace rime::app {
 inline constexpr std::uint8_t kRemoteWorldStateStream = replication::kStreamDelta;
 inline constexpr std::uint8_t kRemoteInputResultStream = replication::kStreamInputAck;
 inline constexpr std::uint8_t kRemoteOwnerCheckpointStream = 2;
+// m20.7: the adaptive buffer's pacing report. Streams 0 and 1 are the replication ones, 2 is the
+// checkpoint; 3 is the next free (Session carries 16). Its own stream, because a newer pacing
+// report says nothing about a checkpoint or an input result and must not supersede either.
+inline constexpr std::uint8_t kRemoteInputPacingStream = 3;
 inline constexpr std::uint8_t kRemoteBaselineAckStream = replication::kStreamBaselineAck;
 inline constexpr std::uint8_t kRemoteInputCommandsStream = replication::kStreamInputCommands;
 
@@ -40,7 +44,8 @@ public:
          std::string& error,
          SpawnFault fault = SpawnFault::None,
          std::uint32_t fault_ticks = 0,
-         std::uint32_t input_slack = 1);
+         std::uint32_t input_slack = 1,
+         bool adaptive_input = false);
     // A caller-owned link and clock let deterministic tests drive the exact production pump.
     static std::unique_ptr<NetworkInputServer>
     on_link(net::Link& link,

@@ -33,6 +33,7 @@
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
 #include "rime/replication/client_replicator.hpp"
+#include "rime/replication/input_pacing.hpp"
 #include "rime/replication/interaction.hpp"
 #include "rime/replication/interpolation.hpp"
 #include "rime/rhi/device.hpp"
@@ -255,6 +256,10 @@ RunReport run_network_client(const LaunchOptions& options,
         return fail(report, "game or autopilot unavailable");
 
     replication::InputWindow window;
+    // m20.7 (ADR-0107): the client half of the adaptive input buffer. It only ever lengthens the
+    // tick, and only after a pacing report has arrived -- a fixed-buffer server never sends one,
+    // so for those runs nothing below changes the loop's pacing.
+    replication::InputPacer pacer;
     std::unique_ptr<replication::Reconciler> reconciler;
     // Presentation is deliberately outside the rewindable prediction world: replay must not
     // forget that a Launch has already been shown under its provisional key.
@@ -638,6 +643,11 @@ RunReport run_network_client(const LaunchOptions& options,
                 window.apply_result(result);
                 continue;
             }
+            replication::InputPacing pacing{};
+            if (replication::decode_input_pacing(message.bytes, pacing)) {
+                pacer.on_report(pacing);
+                continue;
+            }
             // Decode the whole extension before any state changes: dropping verdicts but applying
             // their roster would leave a ghost provisional entity alive.
             replication::SpawnCheckpoint checkpoint{};
@@ -777,6 +787,7 @@ RunReport run_network_client(const LaunchOptions& options,
 
     InputMapper mapper(definition.input);
     std::uint64_t frames_skipped = 0;
+    std::uint64_t hitch_ticks = 0;
     auto deadline = Clock::now();
     const auto period = std::chrono::duration_cast<Clock::duration>(
         std::chrono::duration<double>(definition.remote_play->fixed_dt));
@@ -784,13 +795,33 @@ RunReport run_network_client(const LaunchOptions& options,
     // request, and a loop that never asked would leave a window nobody can close.
     while (!disconnected && !app.quit_requested() &&
            (options.frames == 0 || report.frames < static_cast<std::uint64_t>(options.frames))) {
-        deadline += period;
+        // The pacer lengthens THIS tick's period by 1/16 while it drains the server's surplus.
+        // Integer Clock::duration arithmetic, and only once a report has arrived: an unscaled
+        // tick adds `period` exactly, so a fixed-buffer run's deadlines are what they always were.
+        auto this_period = period;
+        if (pacer.reports() > 0) {
+            const double scale = pacer.tick();
+            if (scale != 1.0)
+                this_period += std::chrono::duration_cast<Clock::duration>(period * (scale - 1.0));
+        }
+        deadline += this_period;
         std::this_thread::sleep_until(deadline);
         if (impaired)
             impaired->client_tick(report.ticks + 1);
         pump();
         if (disconnected)
             break;
+        // `--debug-hitch T:MS` (diagnostic): a frame hitch before this tick samples input. The
+        // loop's deadline is now in the past, so the following iterations run back to back --
+        // the burst of late commands the adaptive server must absorb instead of discarding.
+        if (options.debug_hitch_tick != 0 && report.ticks + 1 == options.debug_hitch_tick) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(options.debug_hitch_ms));
+            // Whole ticks the sleep spans. The epsilon absorbs 0.2 / (1/60) = 11.999... .
+            hitch_ticks =
+                static_cast<std::uint64_t>(std::floor(static_cast<double>(options.debug_hitch_ms) *
+                                                          1e-3 / definition.remote_play->fixed_dt +
+                                                      1e-9));
+        }
         ActionState actions{};
         if (options.input_tape_push)
             actions = interaction->diagnostic_push_input(report.ticks + 1);
@@ -1040,7 +1071,11 @@ RunReport run_network_client(const LaunchOptions& options,
         "\"stale_checkpoints\":{},\"checkpoints\":{},"
         "\"malformed_datagrams\":{},\"oversized_datagrams\":{},"
         "\"epoch_mismatch\":{},\"incomplete_checkpoints\":{},"
-        "\"history_overflow\":{},\"replay_budget_exceeded\":{}{} }}\n",
+        "\"history_overflow\":{},\"replay_budget_exceeded\":{}{}"
+        ",\"commands_sent\":{},\"pacing_reports\":{},\"pacing_stale\":{},"
+        "\"pacer_windows\":{},\"pacer_windows_with_stall\":{},\"pacer_drains\":{},"
+        "\"pacer_dilated_ticks\":{},\"pacer_drained_buffer_ticks\":{},\"last_margin\":{},"
+        "\"hitch_ticks\":{} }}\n",
         frames_skipped,
         report.ticks,
         report.state_digest,
@@ -1059,7 +1094,17 @@ RunReport run_network_client(const LaunchOptions& options,
         base.incomplete_checkpoints(),
         base.history_overflow(),
         base.replay_budget_exceeded(),
-        spawn_metrics);
+        spawn_metrics,
+        static_cast<std::uint64_t>(sequence),
+        pacer.reports(),
+        pacer.stale_reports(),
+        pacer.windows(),
+        pacer.windows_with_stall(),
+        pacer.drains(),
+        pacer.dilated_ticks(),
+        pacer.drained_ticks_of_buffer(),
+        static_cast<unsigned>(pacer.last_margin()),
+        hitch_ticks);
     std::fflush(stdout);
     return report;
 }
