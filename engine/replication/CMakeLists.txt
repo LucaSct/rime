@@ -26,6 +26,7 @@ add_library(rime_replication STATIC
     src/interpolation.cpp
     src/input.cpp
     src/input_v2.cpp
+    src/interaction.cpp
     src/prediction.cpp
     src/spawn_prediction.cpp)
 

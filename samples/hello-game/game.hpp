@@ -82,6 +82,25 @@ struct ThrownProjectile {
     std::uint32_t age = 0;
 };
 
+// The crate's full rigid-body state, copied out of the physics world after every authoritative
+// step (m20.6b, ADR-0106 §2). The pose alone is already in ReplicatedGameState; this adds what a
+// physics body cannot be restored without -- linear and angular velocity -- plus whether the
+// player touched it this tick, the fact the server's membership policy needs and only the physics
+// contact stream knows. It sits on the crate entity because it is per-object state: the server's
+// owner checkpoint captures it from here when the crate is in the interaction group. It is not in
+// the digest, which is unchanged (the crate pose it already hashes is the same body's).
+struct CrateBody {
+    rime::core::Vec3 position{};
+    rime::core::Quat orientation{};
+    rime::core::Vec3 linear_velocity{};
+    rime::core::Vec3 angular_velocity{};
+    std::uint32_t touching_player = 0;
+};
+
+// The crate's roster state bytes: position, orientation, linear and angular velocity as 13
+// little-endian float bit patterns (52 bytes).
+inline constexpr std::size_t kCrateStateBytes = 52;
+
 [[nodiscard]] std::uint64_t replicated_digest(const rime::ecs::World& world);
 [[nodiscard]] rime::ecs::Entity owned_player(rime::ecs::World& world);
 [[nodiscard]] rime::replication::PredictionHooks prediction_hooks(rime::ecs::World& world,
@@ -96,6 +115,11 @@ public:
     static constexpr float kPickupRadius = 0.6f;     // the trigger sphere the player must touch
     static constexpr int kPickupCount = 5;
     static constexpr float kRingRadius = 5.0f; // the markers sit on this circle about the origin
+    // The largest SERVER-ONLY impulse the game applies to the crate (m20.6c, ADR-0106 §4): a
+    // 12 N*s kick on the 6 kg crate is a 2 m/s velocity step. Declared once; the interaction
+    // profile's `j_max` reads it, so the kick the server applies and the raw-correction bound the
+    // proof derives cannot drift apart.
+    static constexpr float kCrateKickImpulse = 12.0f;
 
     // Where marker `index` is. Public because the autopilot steers at it, and steering at a
     // hard-coded coordinate instead would mean moving a marker silently turns the self-check into
@@ -154,6 +178,7 @@ private:
     void bind_bodies(rime::ecs::World& world);
     void collect(rime::ecs::World& world);
     void throw_step(rime::app::TickContext& ctx, ReplicatedGameState& state);
+    void record_crate(rime::ecs::World& world);
     void present_projectile(rime::ecs::World& render_world, rime::ecs::World& source_world);
 
     // The physics world is the GAME's (it was the host's before m20.1): the engine owns the loop
@@ -171,6 +196,7 @@ private:
     rime::replication::SpawnKey projectile_key_{};
     rime::core::Vec3 throw_target_{0.0f, 0.9f, -2.55f};
     rime::physics::BodyId player_body_{};
+    rime::physics::BodyId crate_body_{};
     rime::ecs::World* world_ = nullptr;
     std::vector<Pickup> pickups_;
     bool bound_ = false;
@@ -192,6 +218,10 @@ void register_components(rime::ecs::World& world);
 // The GameDefinition: the only thing `main` hands the engine.
 [[nodiscard]] rime::app::GameDefinition definition();
 
+// `definition()` plus the m20.6 interaction group (ADR-0106): the crate is predicted while the
+// server says it is near. The executable runs this one; see game.cpp for why it is separate.
+[[nodiscard]] rime::app::GameDefinition definition_with_interaction();
+
 } // namespace hello_game
 
 // Beside the declaration because World::spawn_with registers components in whichever TU sees it.
@@ -211,6 +241,13 @@ RIME_REFLECT_FIELD(throw_charges)
 RIME_REFLECT_FIELD(throw_cooldown)
 RIME_REFLECT_FIELD(target_score)
 RIME_REFLECT_FIELD(player_facing)
+RIME_REFLECT_END()
+RIME_REFLECT_BEGIN(hello_game::CrateBody)
+RIME_REFLECT_FIELD(position)
+RIME_REFLECT_FIELD(orientation)
+RIME_REFLECT_FIELD(linear_velocity)
+RIME_REFLECT_FIELD(angular_velocity)
+RIME_REFLECT_FIELD(touching_player)
 RIME_REFLECT_END()
 RIME_REFLECT_BEGIN(hello_game::ThrownProjectile)
 RIME_REFLECT_FIELD(position)

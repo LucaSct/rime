@@ -1681,6 +1681,36 @@ void PhysicsWorld::step(float dt) {
     }
     const IslandSet& isl = p.islands;
 
+    // ---- 4b. A MOVING KINEMATIC BODY WAKES WHAT IT TOUCHES. Kinematic bodies are anchors, not
+    // island members (stage 4), so stage 5's "any awake member reactivates the island" can never
+    // hear one: a player capsule walking into a crate that had settled would pass straight through
+    // it, the crate frozen by its own sleep while the solver skips its island. Measured in m20.6b:
+    // hello-game's crate sleeps 30 ticks after spawn, and a dedicated server's player then walked
+    // through it for the rest of the run. So a contact between a kinematic body that is MOVING
+    // (nonzero velocity -- PhysicsSync hands it (new - old) / dt, and set_body_state sets it) and a
+    // sleeping dynamic body wakes the dynamic one here, before stage 5, which then reactivates its
+    // whole island exactly as it would for an awake neighbour. A kinematic body at rest wakes
+    // nothing, so a resting pile leaning on a parked platform still costs nothing. Wake events
+    // come from the snapshot diff at the tail, so this transition is reported like any other.
+    {
+        const auto kinematic = static_cast<std::uint8_t>(MotionType::Kinematic);
+        const auto dynamic = static_cast<std::uint8_t>(MotionType::Dynamic);
+        const auto wake_if_pushed = [&](std::uint32_t pusher, std::uint32_t body) {
+            if (p.motion[pusher] != kinematic || p.motion[body] != dynamic || p.asleep[body] == 0)
+                return;
+            const core::Vec3 v = p.linear_velocity[pusher];
+            const core::Vec3 w = p.angular_velocity[pusher];
+            if (core::dot(v, v) == 0.0f && core::dot(w, w) == 0.0f)
+                return;
+            p.asleep[body] = 0;
+            p.clear_rest(body);
+        };
+        for (const ContactConstraint& c : constraints) {
+            wake_if_pushed(c.body_a, c.body_b);
+            wake_if_pushed(c.body_b, c.body_a);
+        }
+    }
+
     // ---- 5. Decide which islands are ACTIVE this tick. An island is active unless every one of
     // its bodies is still asleep; a single awake member (e.g. a body that just fell in and merged
     // at stage 4) reactivates the whole island, and reactivated bodies restart their sleep timer.

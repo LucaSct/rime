@@ -107,6 +107,16 @@ std::uint64_t input_schema_identity(const GameDefinition::NetworkInputProfile& i
     const std::uint32_t version = remote_play->spawn_prediction->version;
     for (unsigned shift = 0; shift < 32; shift += 8)
         mix(static_cast<std::uint8_t>(version >> shift));
+    const auto* interaction = remote_play->active_interaction();
+    if (interaction == nullptr)
+        return hash; // m20.5's identity, bit for bit
+    // An active interaction group (m20.6b) changes what a checkpoint's roster may hold -- a
+    // physics object with 52 state bytes beside the player -- so it negotiates the same way:
+    // continue the same FNV-1a over a second marker and its version.
+    for (const char c : std::string_view{"rime.interaction"})
+        mix(static_cast<std::uint8_t>(c));
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        mix(static_cast<std::uint8_t>(interaction->version >> shift));
     return hash;
 }
 

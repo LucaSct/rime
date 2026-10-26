@@ -69,6 +69,11 @@ enum class SpawnFault : std::uint8_t {
     LateEnded
 };
 enum class SpawnDebugBreak : std::uint8_t { None, NoLedger, NoAdopt, AuthorityPresentation };
+// m20.6c sensitivity controls for the interaction group (ADR-0106 §5): each removes one defence so
+// the proof can show its gate going red. PresentMirror shows the mirrored (round-trip-old) object
+// while predicting; NoRebuild reuses the prediction physics world across restores; StaleRestore
+// restores the object from the PREVIOUS checkpoint's bytes.
+enum class InteractionDebugBreak : std::uint8_t { None, PresentMirror, NoRebuild, StaleRestore };
 
 [[nodiscard]] std::string_view to_string(LaunchMode mode) noexcept;
 
@@ -108,6 +113,8 @@ struct LaunchOptions {
     bool no_prediction = false;
     bool input_tape = false;
     bool input_tape_throw = false;
+    // m20.6b: the game's interaction tape (walks the player into its pushable object).
+    bool input_tape_push = false;
     SpawnFault spawn_fault = SpawnFault::None;
     // The window of a timed fault, in server ticks: how long `duplicate` doubles checkpoints and
     // holds the client's ack, or how long `late-*` withholds the verdict. Required by exactly
@@ -116,6 +123,13 @@ struct LaunchOptions {
     // `dedicated --input-slack N` (1..8): commands buffered before one executes. 0 = unset (1).
     std::uint32_t input_slack = 0;
     SpawnDebugBreak spawn_debug_break = SpawnDebugBreak::None;
+    // m20.6c, all OFF by default. `--interaction-fault kick@T[,kick@T2]` (dedicated): at those
+    // server ticks the game applies its declared server-only impulse to the interaction object.
+    // `--interaction-debug-break` (play): a sensitivity control. `--interaction-trace` (play): list
+    // every member->member checkpoint correction in the `finished` line.
+    std::vector<std::uint64_t> interaction_kicks;
+    InteractionDebugBreak interaction_debug_break = InteractionDebugBreak::None;
+    bool interaction_trace = false;
     std::uint32_t spawn_unresolved_bound = 0;
     std::uint32_t net_delay_ms = 0;
     std::uint32_t net_jitter_ms = 0;
@@ -238,6 +252,23 @@ struct RunReport {
         std::uint64_t launch_recovered_by_redundancy = 0;
         // Server ticks between the most recent keyed launch's report and its end's report.
         std::uint64_t spawn_last_flight_ticks = 0;
+        // m20.6b interaction group (reported only when the game's interaction profile is
+        // active). The policy's own counters -- joins, leaves, a join while touching, and leaves
+        // deferred because the object still moved or was still touched -- plus the epoch advances
+        // they caused, the ticks the object spent in the roster, and how often its capture
+        // refused a checkpoint (guardrail 5: every skip has a counter).
+        std::uint64_t interaction_joins = 0, interaction_leaves = 0;
+        std::uint64_t interaction_joined_in_contact = 0;
+        std::uint64_t interaction_leave_deferred_moving = 0;
+        std::uint64_t interaction_leave_deferred_touching = 0;
+        std::uint64_t interaction_epoch_advances = 0, interaction_member_ticks = 0;
+        std::uint64_t interaction_capture_refused = 0;
+        // m20.6c: leaves delayed only by the quiet window; joins taken while the object still
+        // moved; server-only kicks applied (and whether the object was a member at that tick).
+        std::uint64_t interaction_leave_deferred_quiet = 0;
+        std::uint64_t interaction_joined_sliding = 0;
+        std::uint64_t interaction_kicks = 0, interaction_kicks_member = 0;
+        std::uint64_t interaction_kicks_nonmember = 0;
     } network_input;
 
     bool bind_failed = false;

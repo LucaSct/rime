@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "rime/app/launch.hpp"
 #include "rime/replication/snapshot.hpp"
@@ -55,6 +56,11 @@ public:
     [[nodiscard]] ActionState before_tick(std::uint64_t server_tick, std::uint64_t now_ms);
     [[nodiscard]] bool last_applied() const noexcept;
     [[nodiscard]] bool refuse_spawn() const noexcept;
+    // m20.6c `--interaction-fault kick@T`: the server ticks at which to kick the interaction
+    // object. `interaction_kick(tick)` is asked once per tick before the game runs; it counts the
+    // kick and records whether the object was a member at that moment.
+    void set_interaction_kicks(std::vector<std::uint64_t> ticks);
+    [[nodiscard]] bool interaction_kick(std::uint64_t server_tick);
     [[nodiscard]] std::optional<CommandProvenance> command_provenance() const noexcept;
     void after_tick(std::uint64_t server_tick, std::span<const SpawnReport> spawns = {});
     void linger(std::uint64_t final_tick, std::uint32_t duration_ms);
