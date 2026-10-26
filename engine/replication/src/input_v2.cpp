@@ -272,8 +272,47 @@ bool decode_input_result(std::span<const std::byte> in, InputResult& out) {
     return true;
 }
 
-InputSchedule::InputSchedule(std::uint32_t slack_ticks, std::uint32_t neutral_after_ticks) noexcept
-    : slack_ticks_(slack_ticks), neutral_after_ticks_(neutral_after_ticks) {}
+std::size_t encode_input_pacing(const InputPacing& pacing, std::span<std::byte> out) {
+    if (out.size() < kInputPacingBytes) {
+        return 0;
+    }
+    Writer writer{out};
+    writer.u8(kInputPacingTag);
+    writer.u64(pacing.server_tick);
+    writer.u8(pacing.margin);
+    writer.u32(pacing.stalls);
+    return writer.at;
+}
+
+bool decode_input_pacing(std::span<const std::byte> in, InputPacing& out) {
+    if (in.size() != kInputPacingBytes || std::to_integer<std::uint8_t>(in[0]) != kInputPacingTag) {
+        return false;
+    }
+    Reader reader{in};
+    (void)reader.u8();
+    InputPacing decoded{};
+    decoded.server_tick = reader.u64();
+    decoded.margin = reader.u8();
+    decoded.stalls = reader.u32();
+    out = decoded;
+    return true;
+}
+
+InputSchedule::InputSchedule(std::uint32_t slack_ticks,
+                             std::uint32_t neutral_after_ticks,
+                             InputBufferMode mode) noexcept
+    : slack_ticks_(slack_ticks), neutral_after_ticks_(neutral_after_ticks), mode_(mode) {}
+
+void InputSchedule::record_margin() noexcept {
+    // Walk the ring from next_ while slots are held. held_ is only true for sequences in
+    // [next_, next_ + kRing), so the walk is bounded by the ring and the 255 cap never binds.
+    std::size_t run = 0;
+    while (run < kRing && held_[static_cast<std::size_t>((next_ + run) % kRing)]) {
+        ++run;
+    }
+    margin_ = static_cast<std::uint8_t>(std::min<std::size_t>(run, 255));
+    max_margin_ = std::max(max_margin_, margin_);
+}
 
 void InputSchedule::offer(std::span<const InputCommand> commands) {
     for (const InputCommand& command : commands) {
@@ -283,6 +322,16 @@ void InputSchedule::offer(std::span<const InputCommand> commands) {
         }
         if (std::uint64_t{command.sequence} < next_) {
             ++late_;
+            // Classify with the execution mask: if the slot this command belonged to ran a
+            // stand-in (bit 0), the command truly missed its tick; if it was applied, this is just
+            // one of the two redundant copies every packet carries. A slot older than the mask, or
+            // one that was never retired (it precedes the first accepted sequence), cannot be told.
+            const std::uint64_t offset = next_ - 1 - std::uint64_t{command.sequence};
+            if (offset >= 128 || offset >= retired_count_) {
+                ++late_unclassified_;
+            } else if ((applied_mask_[offset / 64] & (std::uint64_t{1} << (offset % 64))) == 0) {
+                ++late_missed_;
+            }
         } else if (std::uint64_t{command.sequence} >= next_ + kRing) {
             ++future_;
         } else {
@@ -301,6 +350,7 @@ void InputSchedule::offer(std::span<const InputCommand> commands) {
 ScheduledInput InputSchedule::step() noexcept {
     if (!has_first_ || (!started_ && accepted_ < slack_ticks_)) {
         ++synthesized_;
+        record_margin();
         return {};
     }
     started_ = true;
@@ -308,6 +358,28 @@ ScheduledInput InputSchedule::step() noexcept {
     scheduled.started = true;
     scheduled.command.sequence = static_cast<std::uint32_t>(next_);
     const std::size_t slot = static_cast<std::size_t>(next_ % kRing);
+    bool gap = false;
+    if (!held_[slot] && mode_ == InputBufferMode::Adaptive) {
+        gap = false;
+        for (std::size_t i = 1; i < kRing; ++i) {
+            if (held_[static_cast<std::size_t>((next_ + i) % kRing)]) {
+                gap = true;
+                break;
+            }
+        }
+        if (!gap) {
+            // STALL. Nothing at or after next_ is here: the client is behind or silent. Retiring
+            // now would doom the command to arrive "late", so run a NEUTRAL stand-in (not the held
+            // axes: the player's path then stays a function of the command sequence alone) and
+            // leave next_, the mask, silence_ticks_ and any_retired_ untouched.
+            scheduled.stalled = true;
+            ++synthesized_;
+            ++stalls_;
+            record_margin();
+            return scheduled;
+        }
+        ++gaps_retired_;
+    }
     if (held_[slot]) {
         scheduled.command = commands_[slot];
         scheduled.applied = true;
@@ -334,8 +406,14 @@ ScheduledInput InputSchedule::step() noexcept {
     applied_mask_[1] = (applied_mask_[1] << 1) | (applied_mask_[0] >> 63);
     applied_mask_[0] = (applied_mask_[0] << 1) | (scheduled.applied ? 1u : 0u);
     any_retired_ = true;
+    ++retired_count_;
     ++next_;
+    record_margin();
     return scheduled;
+}
+
+InputPacing InputSchedule::pacing(std::uint64_t server_tick) const noexcept {
+    return {server_tick, margin_, static_cast<std::uint32_t>(stalls_ & 0xFFFFFFFFu)};
 }
 
 InputResult InputSchedule::result(std::uint64_t server_tick) const noexcept {
