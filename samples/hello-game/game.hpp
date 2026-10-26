@@ -197,6 +197,13 @@ public:
     // A test moves the target off the known flight path as a sensitivity control for the sweep.
     void set_throw_target(rime::core::Vec3 target) noexcept { throw_target_ = target; }
 
+    // A sensitivity control for the controller proof: the same fixed ticks without crate clipping.
+    void set_crate_clip_enabled(bool enabled) noexcept { crate_clip_enabled_ = enabled; }
+
+    [[nodiscard]] float player_crate_overlap_before_step() const noexcept {
+        return player_crate_overlap_before_step_;
+    }
+
 private:
     struct Pickup {
         rime::ecs::Entity entity{};
@@ -272,6 +279,10 @@ private:
     rime::ecs::World* world_ = nullptr;
     std::vector<Pickup> pickups_;
     bool bound_ = false;
+    bool crate_clip_enabled_ = true;
+    float player_crate_overlap_before_step_ = 0.0f;
+    float maximum_player_crate_overlap_ = 0.0f;
+    float minimum_player_distance_ = 1000.0f;
     bool quit_ = false;
     std::uint64_t presentation_calls_ = 0;
 };
