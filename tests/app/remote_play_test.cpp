@@ -77,7 +77,9 @@ TEST_CASE("hello-game remote commands round-trip its action slots") {
     app::ActionState actions{};
     actions.axes[hello_game::kAxisMoveX] = -0.5f;
     actions.axes[hello_game::kAxisMoveZ] = 0.75f;
-    actions.held = 1u << hello_game::kButtonQuit;
+    // The throw button, not quit: quit is deliberately the one slot that does NOT round-trip
+    // (next case).
+    actions.held = 1u << hello_game::kButtonThrow;
     actions.pressed = actions.held;
     const auto command = definition.remote_play->to_command(actions);
     const auto again = definition.network_input->to_actions(command);
@@ -85,6 +87,30 @@ TEST_CASE("hello-game remote commands round-trip its action slots") {
     CHECK(again.axis(hello_game::kAxisMoveZ) == actions.axis(hello_game::kAxisMoveZ));
     CHECK(again.held == actions.held);
     CHECK(again.pressed == actions.pressed);
+}
+
+TEST_CASE("hello-game quit is local to the client: never sent, ignored by the server") {
+    const auto definition = hello_game::definition();
+    REQUIRE(definition.remote_play.has_value());
+    REQUIRE(definition.remote_play->local_quit != nullptr);
+    constexpr std::uint32_t quit = 1u << hello_game::kButtonQuit;
+    constexpr std::uint32_t throw_bit = 1u << hello_game::kButtonThrow;
+    app::ActionState actions{};
+    actions.held = quit | throw_bit;
+    actions.pressed = quit | throw_bit;
+    CHECK(definition.remote_play->local_quit(actions));
+    const auto command = definition.remote_play->to_command(actions);
+    CHECK(command.held == throw_bit);
+    CHECK(command.pressed == throw_bit);
+    // A client that sends the bit anyway (old or hostile) cannot end the server's game.
+    replication::InputCommand hostile{};
+    hostile.held = quit;
+    hostile.pressed = quit;
+    const auto served = definition.network_input->to_actions(hostile);
+    CHECK_FALSE(served.was_pressed(hello_game::kButtonQuit));
+    CHECK_FALSE(served.is_held(hello_game::kButtonQuit));
+    app::ActionState idle{};
+    CHECK_FALSE(definition.remote_play->local_quit(idle));
 }
 
 TEST_CASE("owner checkpoints refuse a wrong membership and a truncated wire message") {

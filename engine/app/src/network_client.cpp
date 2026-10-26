@@ -805,6 +805,12 @@ RunReport run_network_client(const LaunchOptions& options,
             mapper.update(app.frame_input());
             actions = mapper.take();
         }
+        // The player's own quit key ends THIS process, through the same goodbye as closing the
+        // window; it is never sent (see RemotePlayProfile::local_quit).
+        if (definition.remote_play->local_quit && definition.remote_play->local_quit(actions)) {
+            app.request_quit();
+            break;
+        }
         auto command = definition.remote_play->to_command(actions);
         const bool non_neutral =
             command.move_x != 0 || command.move_y != 0 || command.held != 0 || command.pressed != 0;
