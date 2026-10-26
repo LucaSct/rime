@@ -570,6 +570,10 @@ public:
 
     [[nodiscard]] std::uint64_t invalid_base() const noexcept { return invalid_base_; }
 
+    [[nodiscard]] std::uint64_t checkpoints_refused_invalid() const noexcept {
+        return checkpoints_refused_invalid_;
+    }
+
     [[nodiscard]] std::uint64_t invalid_extension(SpawnExtensionRefusal reason) const noexcept {
         return reason < SpawnExtensionRefusal::Count
                    ? invalid_extension_[static_cast<std::size_t>(reason)]
@@ -657,6 +661,7 @@ private:
     std::uint64_t tombstones_evicted_ = 0;
     std::uint64_t stale_checkpoints_ = 0;
     std::uint64_t invalid_base_ = 0;
+    std::uint64_t checkpoints_refused_invalid_ = 0;
     std::array<std::uint64_t, kSpawnExtensionRefusalCount> invalid_extension_{};
 };
 

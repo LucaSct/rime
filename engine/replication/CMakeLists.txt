@@ -28,6 +28,7 @@ add_library(rime_replication STATIC
     src/input_v2.cpp
     src/input_pacing.cpp
     src/interaction.cpp
+    src/contention_context.cpp
     src/prediction.cpp
     src/spawn_prediction.cpp)
 

@@ -435,6 +435,9 @@ PredictionHooks forwarding_hooks(PredictionHooks hooks,
                                                     const InputCommand&,
                                                     const PredictionStep&)> simulate) {
     hooks.simulate = std::move(simulate);
+    // The outer reconciler prepares before adoption, roster changes and ledger writes. The inner
+    // reconciler must not prepare a second time after those changes have begun.
+    hooks.prepare_checkpoint = {};
     return hooks;
 }
 
@@ -571,11 +574,13 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
     if (checkpoint.result.server_tick != checkpoint.server_tick || duplicate ||
         checkpoint.entities.size() > kCheckpointMaxEntities) {
         ++invalid_base_;
+        ++checkpoints_refused_invalid_;
         return out;
     }
     if (const auto refusal = validate_spawn_extension(checkpoint, ext);
         refusal != SpawnExtensionRefusal::None) {
         ++invalid_extension_[static_cast<std::size_t>(refusal)];
+        ++checkpoints_refused_invalid_;
         return out;
     }
 
@@ -596,6 +601,14 @@ SpawnReconcileOutcome SpawnReconciler::apply_checkpoint(const OwnerCheckpoint& c
              return !contains(roster_, id);
          }))) {
         ++epoch_roster_mismatch_;
+        ++checkpoints_refused_invalid_;
+        return out;
+    }
+
+    // Validate-then-commit includes the spawn overlay: even the LAST malformed member must be
+    // found before a verdict adopts a guess or changes the presentation ledger.
+    if (hooks_.prepare_checkpoint && !hooks_.prepare_checkpoint(checkpoint)) {
+        ++checkpoints_refused_invalid_;
         return out;
     }
 

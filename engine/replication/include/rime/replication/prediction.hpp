@@ -102,7 +102,10 @@ struct PredictionStep {
 
 struct PredictionHooks {
     // Capture/restore must cover all simulation state, including hidden per-entity and group state.
-    // Hooks are synchronous and must not throw; restore is called only after complete validation.
+    // Hooks are synchronous and must not throw. A game with typed payloads uses the optional
+    // validate-then-commit hooks: prepare examines the COMPLETE checkpoint and may stage a new
+    // prediction world without changing the live one; commit installs it after entity restores.
+    // Absent hooks retain the original restore path for games without typed validation.
     std::function<std::vector<std::byte>(PredictedEntityId)> capture;
     std::function<void(PredictedEntityId, std::span<const std::byte>)> restore;
     std::function<std::vector<std::byte>()> capture_group;
@@ -111,6 +114,8 @@ struct PredictionHooks {
     std::function<
         void(std::span<const PredictedEntityId>, const InputCommand&, const PredictionStep&)>
         simulate;
+    std::function<bool(const OwnerCheckpoint&)> prepare_checkpoint = {};
+    std::function<void()> commit_checkpoint = {};
 };
 
 struct ReconcilerBudget {
@@ -162,6 +167,14 @@ public:
 
     [[nodiscard]] std::uint64_t reseeds() const noexcept { return reseeds_; }
 
+    [[nodiscard]] std::uint64_t checkpoints_refused_invalid() const noexcept {
+        return checkpoints_refused_invalid_;
+    }
+
+    [[nodiscard]] std::size_t history_size() const noexcept { return history_.size(); }
+
+    [[nodiscard]] std::uint64_t last_checkpoint_tick() const noexcept { return last_server_tick_; }
+
 private:
     PredictionHooks hooks_;
     ReconcilerBudget budget_;
@@ -182,6 +195,7 @@ private:
     std::uint64_t history_overflow_ = 0;
     std::uint64_t replay_budget_exceeded_ = 0;
     std::uint64_t reseeds_ = 0;
+    std::uint64_t checkpoints_refused_invalid_ = 0;
 };
 
 } // namespace rime::replication

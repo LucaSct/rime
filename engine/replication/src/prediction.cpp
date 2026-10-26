@@ -234,6 +234,7 @@ ReconcileOutcome Reconciler::apply_checkpoint(const OwnerCheckpoint& checkpoint)
     if (checkpoint.result.server_tick != checkpoint.server_tick ||
         checkpoint.entities.size() != members_.size() || duplicate_id(checkpoint.entities)) {
         ++incomplete_checkpoints_;
+        ++checkpoints_refused_invalid_;
         return outcome;
     }
     for (const auto& member : members_) {
@@ -241,8 +242,14 @@ ReconcileOutcome Reconciler::apply_checkpoint(const OwnerCheckpoint& checkpoint)
                           checkpoint.entities.end(),
                           [&](const auto& entity) { return entity.id == member; }) != 1) {
             ++incomplete_checkpoints_;
+            ++checkpoints_refused_invalid_;
             return outcome;
         }
+    }
+    // Two-phase restore: a refusal happens before capture, history pruning or any game mutation.
+    if (hooks_.prepare_checkpoint && !hooks_.prepare_checkpoint(checkpoint)) {
+        ++checkpoints_refused_invalid_;
+        return outcome;
     }
     if (needs_reseed_) {
         // A checkpoint IS the predicted set's full authoritative state, which is exactly what a
@@ -253,6 +260,8 @@ ReconcileOutcome Reconciler::apply_checkpoint(const OwnerCheckpoint& checkpoint)
         hooks_.restore_group(checkpoint.group_state);
         for (const auto& entity : checkpoint.entities)
             hooks_.restore(entity.id, entity.state);
+        if (hooks_.commit_checkpoint)
+            hooks_.commit_checkpoint();
         history_.clear();
         needs_reseed_ = false;
         ++reseeds_;
@@ -272,6 +281,8 @@ ReconcileOutcome Reconciler::apply_checkpoint(const OwnerCheckpoint& checkpoint)
     hooks_.restore_group(checkpoint.group_state);
     for (const auto& entity : checkpoint.entities)
         hooks_.restore(entity.id, entity.state);
+    if (hooks_.commit_checkpoint)
+        hooks_.commit_checkpoint();
     if (checkpoint.result.any_retired) {
         const auto first_live =
             std::find_if(history_.begin(), history_.end(), [&](const auto& cmd) {

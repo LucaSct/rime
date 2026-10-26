@@ -13,6 +13,7 @@
 #include "game.hpp"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -32,6 +33,7 @@
 #include "rime/render/material.hpp"
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
+#include "rime/replication/contention_context.hpp"
 
 namespace hello_game {
 namespace {
@@ -1367,6 +1369,32 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
                          std::bit_cast<float>(read(16))};
         bound->mark_changed<PlayerState>(state_entity);
     };
+    hooks.prepare_checkpoint = [](const replication::OwnerCheckpoint& checkpoint) {
+        // Validate-then-commit begins with every typed member, including the last projectile.
+        // The server writes the owner first, then spawned members; a malformed length or NaN
+        // cannot be allowed to turn a restore into a silent partial update.
+        if (checkpoint.group_state.size() != 20 || checkpoint.entities.empty())
+            return false;
+        const auto finite_words =
+            [](std::span<const std::byte> bytes, std::size_t first, std::size_t count) {
+                for (std::size_t i = first; i < first + count; ++i) {
+                    std::uint32_t bits = 0;
+                    for (unsigned j = 0; j < 4; ++j)
+                        bits |= std::to_integer<std::uint32_t>(bytes[4 * i + j]) << (8 * j);
+                    if (!std::isfinite(std::bit_cast<float>(bits)))
+                        return false;
+                }
+                return true;
+            };
+        if (!finite_words(checkpoint.group_state, 2, 3))
+            return false;
+        for (std::size_t i = 0; i < checkpoint.entities.size(); ++i) {
+            const auto& bytes = checkpoint.entities[i].state;
+            if (bytes.size() != (i == 0 ? 24u : 28u) || !finite_words(bytes, 0, 6))
+                return false;
+        }
+        return true;
+    };
     hooks.simulate = [bound, state_entity, player, spawns](
                          std::span<const replication::PredictedEntityId> members,
                          const replication::InputCommand& command,
@@ -1601,6 +1629,8 @@ std::vector<std::byte> capture_crate(const ecs::World& world, ecs::Entity object
     const auto* crate = world.get<CrateBody>(object);
     if (!crate)
         return {};
+    // m20.9a accepts a versioned context on restore, but capture keeps the v1 crate bytes until
+    // m20.9b supplies executed remote commands and can populate the proxy records truthfully.
     return encode_crate(physics::BodyState{
         crate->position, crate->orientation, crate->linear_velocity, crate->angular_velocity});
 }
@@ -1663,6 +1693,106 @@ struct InteractionPhysics {
     physics::BodyId crate_body{};
     bool touching = false;
 
+    struct Prepared {
+        std::unique_ptr<physics::PhysicsWorld> world;
+        physics::BodyId player_body{};
+        physics::BodyId crate_body{};
+        std::vector<std::byte> crate_bytes;
+    };
+
+    std::optional<Prepared> prepared;
+    std::array<std::uint64_t, replication::kContentionRefusalCount> context_refusals{};
+
+    [[nodiscard]] bool
+    prepare(const replication::OwnerCheckpoint& checkpoint,
+            const std::function<bool(const replication::OwnerCheckpoint&)>& next) {
+        prepared.reset();
+        replication::OwnerCheckpoint without_crate = checkpoint;
+        const auto object_it =
+            std::find_if(without_crate.entities.begin(),
+                         without_crate.entities.end(),
+                         [this](const auto& entity) { return entity.id == object; });
+        const bool has_object = object_it != without_crate.entities.end();
+        std::vector<std::byte> raw;
+        if (has_object) {
+            raw = object_it->state;
+            without_crate.entities.erase(object_it);
+        }
+        if (next && !next(without_crate))
+            return false;
+        if (!has_object)
+            return true;
+        std::array<std::byte, replication::kContentionCrateBytes> decoded_crate{};
+        std::span<const std::byte> crate_bytes = raw;
+        if (raw.size() == replication::kContentionCrateBytes) {
+            const auto reason = replication::validate_contention_crate(raw);
+            if (reason != replication::ContentionRefusal::None) {
+                ++context_refusals[static_cast<std::size_t>(reason)];
+                return false;
+            }
+        } else {
+            replication::ContentionContext decoded{};
+            const auto reason = replication::decode_contention_context(raw, decoded);
+            if (reason != replication::ContentionRefusal::None) {
+                ++context_refusals[static_cast<std::size_t>(reason)];
+                return false;
+            }
+            decoded_crate = decoded.crate;
+            crate_bytes = decoded_crate;
+        }
+        const auto* player_bytes =
+            without_crate.entities.empty() ? nullptr : &without_crate.entities.front().state;
+        if (!player_bytes || player_bytes->size() != 24)
+            return false;
+        const auto read = [](std::span<const std::byte> bytes, std::size_t offset) {
+            std::uint32_t bits = 0;
+            for (unsigned i = 0; i < 4; ++i)
+                bits |= std::to_integer<std::uint32_t>(bytes[offset + i]) << (8 * i);
+            return std::bit_cast<float>(bits);
+        };
+        physics::BodyState player_state{};
+        player_state.position = {
+            read(*player_bytes, 0), read(*player_bytes, 4), read(*player_bytes, 8)};
+        player_state.linear_velocity = {
+            read(*player_bytes, 12), read(*player_bytes, 16), read(*player_bytes, 20)};
+        // Build a fresh replacement world from the checkpoint before the live world or roster
+        // changes. The no-rebuild diagnostic intentionally keeps its old contact cache.
+        if (!rebuild_on_restore)
+            return true;
+        auto chosen = stale_restore && !previous_bytes.empty()
+                          ? std::span<const std::byte>{previous_bytes}
+                          : crate_bytes;
+        const auto crate = decode_crate(chosen);
+        if (!crate)
+            return false;
+        Prepared stage{};
+        stage.world = std::make_unique<physics::PhysicsWorld>();
+        stage.world->set_sleeping_enabled(false);
+        physics::BodyState floor{};
+        floor.position = {0.0f, -kFloorHalfY, 0.0f};
+        (void)stage.world->create_body(body_desc(kFloorRigidBody, floor_collider(), floor));
+        stage.player_body =
+            stage.world->create_body(body_desc(kPlayerRigidBody, player_collider(), player_state));
+        stage.crate_body =
+            stage.world->create_body(body_desc(kCrateRigidBody, crate_collider(), *crate));
+        // Keep the 52-byte physics state for the stale-seed diagnostic even when the envelope is
+        // v2; its previous checkpoint must remain decodable by the crate-state reader.
+        stage.crate_bytes.assign(crate_bytes.begin(), crate_bytes.end());
+        prepared = std::move(stage);
+        return true;
+    }
+
+    void commit() {
+        if (!prepared)
+            return;
+        physics = std::move(prepared->world);
+        player_body = prepared->player_body;
+        crate_body = prepared->crate_body;
+        previous_bytes = std::move(prepared->crate_bytes);
+        touching = false;
+        prepared.reset();
+    }
+
     void rebuild(const physics::BodyState& crate) {
         physics = std::make_unique<physics::PhysicsWorld>();
         physics->set_sleeping_enabled(false);
@@ -1681,9 +1811,18 @@ struct InteractionPhysics {
     }
 
     void restore(std::span<const std::byte> bytes) {
+        if (prepared)
+            return; // the staged world is installed by commit after every entity restore
         // The control restores from the PREVIOUS restore's bytes: one checkpoint old, so every
         // replay starts from a state the server has already left.
         std::vector<std::byte> current(bytes.begin(), bytes.end());
+        if (current.size() != kCrateStateBytes) {
+            replication::ContentionContext decoded{};
+            if (replication::decode_contention_context(current, decoded) !=
+                replication::ContentionRefusal::None)
+                return;
+            current.assign(decoded.crate.begin(), decoded.crate.end());
+        }
         const auto crate =
             decode_crate(stale_restore && !previous_bytes.empty() ? previous_bytes : current);
         previous_bytes = std::move(current);
@@ -1745,6 +1884,15 @@ InteractionProfile::ClientHooks interaction_client_hooks(
         else
             next(id, bytes);
     };
+    prediction.prepare_checkpoint = [state, next = inner.prediction.prepare_checkpoint](
+                                        const replication::OwnerCheckpoint& checkpoint) {
+        return state->prepare(checkpoint, next);
+    };
+    prediction.commit_checkpoint = [state, next = inner.prediction.commit_checkpoint] {
+        state->commit();
+        if (next)
+            next();
+    };
     // The crate steps AFTER the player's controller, in the same order the server's fixed_tick
     // uses (move the player, then step physics), and only while the crate is in the set.
     prediction.simulate = [state, next = inner.prediction.simulate](
@@ -1770,6 +1918,7 @@ InteractionProfile::ClientHooks interaction_client_hooks(
     spawn.destroy = [state, next = inner.spawn.destroy](replication::PredictedEntityId id) {
         if (id == state->object) {
             state->physics.reset();
+            state->prepared.reset();
             state->previous_bytes.clear();
             state->touching = false;
         } else {
@@ -1792,6 +1941,11 @@ InteractionProfile::ClientHooks interaction_client_hooks(
         return pose;
     };
     out.touching = [state] { return state->touching; };
+    out.context_refusals = [state](replication::ContentionRefusal reason) {
+        return reason < replication::ContentionRefusal::Count
+                   ? state->context_refusals[static_cast<std::size_t>(reason)]
+                   : 0;
+    };
     return out;
 }
 
@@ -1975,7 +2129,9 @@ app::GameDefinition definition_with_interaction() {
     interaction.player_max_speed = HelloGame::kPlayerSpeed;
     interaction.replay_ticks = 64;
     interaction.fixed_dt = 1.0 / 60.0;
-    def.remote_play->interaction = InteractionProfile{1,
+    // The profile identity advertises a v2-capable restore contract. The emitted crate payload
+    // stays v1 for this brick; contention capture begins in m20.9b.
+    def.remote_play->interaction = InteractionProfile{2,
                                                       interaction,
                                                       interaction_object,
                                                       interaction_sample,

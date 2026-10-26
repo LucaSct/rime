@@ -21,6 +21,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/platform/event.hpp"
 #include "rime/platform/keyboard.hpp"
+#include "rime/replication/contention_context.hpp"
 #include "rime/replication/input_v2.hpp"
 #include "rime/replication/interaction.hpp"
 #include "rime/replication/prediction.hpp"
@@ -572,6 +573,9 @@ struct GameDefinition {
                 // Whether the predicted player touched the object in the most recent step: the
                 // client's "push started" for its response diagnostic.
                 std::function<bool()> touching;
+                // Named codec refusals are counted at the game boundary, where a malformed
+                // payload can refuse the complete checkpoint before any roster mutation.
+                std::function<std::uint64_t(replication::ContentionRefusal)> context_refusals;
             };
 
             ClientHooks (*client_hooks)(ecs::World& prediction,

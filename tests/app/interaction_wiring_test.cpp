@@ -30,6 +30,7 @@
 #include "rime/net/link.hpp"
 #include "rime/net/net_driver.hpp"
 #include "rime/replication/client_replicator.hpp"
+#include "rime/replication/contention_context.hpp"
 #include "rime/replication/interaction.hpp"
 #include "rime/replication/prediction.hpp"
 #include "rime/replication/spawn_prediction.hpp"
@@ -275,7 +276,7 @@ struct Rig {
     }
 
     // Seed the client's prediction from one checkpoint, as network_client does.
-    void seed(const replication::SpawnCheckpoint& first) {
+    void seed(const replication::SpawnCheckpoint& first, bool skip_prepare = false) {
         const auto mirror_player = server.definition.remote_play->owned_player(mirror_world);
         REQUIRE(mirror_player != ecs::kNullEntity);
         predicted_player = server.definition.remote_play->seed_prediction(
@@ -291,6 +292,8 @@ struct Rig {
                 return reconciler->spawn_provisional(key, state);
             });
         hooks = profile().client_hooks(predicted_world, predicted_player, crate_id, inner, {});
+        if (skip_prepare)
+            hooks->hooks.prediction.prepare_checkpoint = {}; // sensitivity control
         reconciler =
             std::make_unique<replication::SpawnReconciler>(hooks->hooks.prediction,
                                                            hooks->hooks.spawn,
@@ -319,6 +322,208 @@ struct Rig {
 };
 
 } // namespace
+
+TEST_CASE("two-phase v1 restore matches the legacy world after each replay") {
+    Server server;
+    Client staged(server.definition, {});
+    Client legacy(server.definition, {});
+    legacy.hooks.hooks.prediction.prepare_checkpoint = {}; // timing control
+    replication::Reconciler staged_reconciler(staged.hooks.hooks.prediction, kDt);
+    replication::Reconciler legacy_reconciler(legacy.hooks.hooks.prediction, kDt);
+    staged_reconciler.set_membership(4, {kPlayerId, kCrateId});
+    legacy_reconciler.set_membership(4, {kPlayerId, kCrateId});
+    const auto checkpoint = [&](std::uint32_t retired) {
+        replication::OwnerCheckpoint value{};
+        value.server_tick = server.tick;
+        value.membership_epoch = 4;
+        value.result.server_tick = server.tick;
+        value.result.any_retired = retired != 0;
+        value.result.retired_through = retired;
+        value.result.applied_mask[0] = retired != 0 ? 1 : 0;
+        value.entities.push_back({kPlayerId, server.hooks.capture(kPlayerId)});
+        value.entities.push_back({kCrateId, server.crate_bytes()});
+        value.group_state = server.hooks.capture_group();
+        return value;
+    };
+    REQUIRE(staged_reconciler.apply_checkpoint(checkpoint(0)).applied);
+    REQUIRE(legacy_reconciler.apply_checkpoint(checkpoint(0)).applied);
+    std::deque<replication::OwnerCheckpoint> delayed;
+    for (std::uint32_t tick = 1; tick <= 160; ++tick) {
+        const auto command = walk(tick, tick <= 45 ? -1.0f : (tick <= 80 ? 1.0f : 0.0f));
+        staged_reconciler.predict(command);
+        legacy_reconciler.predict(command);
+        CHECK(staged.crate_bytes() == legacy.crate_bytes());
+        server.step(command);
+        delayed.push_back(checkpoint(tick));
+        if (delayed.size() > 4) {
+            const auto answer = std::move(delayed.front());
+            delayed.pop_front();
+            const auto staged_result = staged_reconciler.apply_checkpoint(answer);
+            const auto legacy_result = legacy_reconciler.apply_checkpoint(answer);
+            REQUIRE(staged_result.applied);
+            REQUIRE(legacy_result.applied);
+            CHECK(staged_result.replayed == 4);
+            CHECK(legacy_result.replayed == 4);
+        }
+        CHECK(staged.crate_bytes() == legacy.crate_bytes());
+        CHECK(staged.hooks.hooks.prediction.capture(kPlayerId) ==
+              legacy.hooks.hooks.prediction.capture(kPlayerId));
+    }
+}
+
+TEST_CASE("interaction accepts a valid v2 crate context and restores its v1 body state") {
+    Rig rig(7895);
+    rig.connect();
+    auto first = rig.server_tick(walk(++rig.sequence, 0.0f));
+    REQUIRE_FALSE(first.empty());
+    rig.seed(first.back());
+    auto second = rig.server_tick(walk(++rig.sequence, 0.0f));
+    REQUIRE_FALSE(second.empty());
+    auto checkpoint = second.back();
+    REQUIRE(checkpoint.spawns);
+    const auto crate = std::find_if(checkpoint.base.entities.begin(),
+                                    checkpoint.base.entities.end(),
+                                    [&](const auto& entity) { return entity.id == rig.crate_id; });
+    REQUIRE(crate != checkpoint.base.entities.end());
+    REQUIRE(crate->state.size() == replication::kContentionCrateBytes);
+    const auto v1 = crate->state;
+    replication::ContentionContext context{};
+    std::copy(v1.begin(), v1.end(), context.crate.begin());
+    context.owner_seat = 0;
+    context.owner_generation = 1;
+    context.context_revision = 7;
+    for (std::uint16_t seat = 1; seat <= 3; ++seat) {
+        replication::ContentionProxy proxy{};
+        proxy.seat = seat;
+        proxy.seat_generation = 1;
+        proxy.net_id = {static_cast<std::uint32_t>(seat + 20), 1};
+        context.proxies.push_back(proxy);
+    }
+    std::array<std::byte, replication::kContentionMaxBytes> encoded{};
+    std::size_t written = 0;
+    REQUIRE(replication::encode_contention_context(context, encoded, written) ==
+            replication::ContentionRefusal::None);
+    crate->state.assign(encoded.begin(), encoded.begin() + static_cast<std::ptrdiff_t>(written));
+    CHECK(rig.reconciler->apply_checkpoint(checkpoint.base, *checkpoint.spawns).base.applied);
+    CHECK(rig.hooks->hooks.prediction.capture(rig.crate_id) == v1);
+    CHECK(rig.reconciler->checkpoints_refused_invalid() == 0);
+}
+
+TEST_CASE("a malformed final context record refuses the entire checkpoint before any mutation") {
+    const auto corrupt_last_proxy = [](std::vector<std::byte>& crate_state) {
+        REQUIRE(crate_state.size() == replication::kContentionCrateBytes);
+        replication::ContentionContext context{};
+        std::copy(crate_state.begin(), crate_state.end(), context.crate.begin());
+        context.owner_seat = 0;
+        context.owner_generation = 1;
+        context.context_revision = 1;
+        for (std::uint16_t seat = 1; seat <= 3; ++seat) {
+            replication::ContentionProxy proxy{};
+            proxy.seat = seat;
+            proxy.seat_generation = 1;
+            proxy.net_id = {static_cast<std::uint32_t>(seat + 20), 1};
+            context.proxies.push_back(proxy);
+        }
+        std::array<std::byte, replication::kContentionMaxBytes> encoded{};
+        std::size_t written = 0;
+        REQUIRE(replication::encode_contention_context(context, encoded, written) ==
+                replication::ContentionRefusal::None);
+        crate_state.assign(encoded.begin(), encoded.begin() + static_cast<std::ptrdiff_t>(written));
+        // The LAST record's velocity x is NaN. Earlier records and the crate are valid.
+        crate_state[64 + 2 * 48 + 24 + 2] = std::byte{0xC0};
+        crate_state[64 + 2 * 48 + 24 + 3] = std::byte{0x7F};
+    };
+    for (int fault = 0; fault < 4; ++fault) {
+        Rig rig(static_cast<std::uint16_t>(7890 + fault));
+        rig.connect();
+        auto first = rig.server_tick(walk(++rig.sequence, 0.0f));
+        REQUIRE_FALSE(first.empty());
+        rig.seed(first.back());
+        const auto command = walk(++rig.sequence, -1.0f);
+        rig.reconciler->predict(command);
+        auto second = rig.server_tick(command);
+        REQUIRE_FALSE(second.empty());
+        auto checkpoint = second.back();
+        REQUIRE(checkpoint.spawns);
+        const replication::SpawnKey verdict_key{999, 999, 0};
+        checkpoint.spawns->outcomes.push_back(
+            {verdict_key, replication::SpawnOutcomeKind::Rejected, {}, 1});
+        REQUIRE(rig.ledger.should_play(verdict_key, replication::PresentationEventKind::Launch, 0));
+        auto& entities = checkpoint.base.entities;
+        const auto crate = std::find_if(entities.begin(), entities.end(), [&](const auto& entity) {
+            return entity.id == rig.crate_id;
+        });
+        REQUIRE(crate != entities.end());
+        if (fault == 0) {
+            corrupt_last_proxy(crate->state);
+        } else if (fault == 1) {
+            crate->state[28 + 2] = std::byte{0xC0}; // v1 crate linear velocity x = NaN
+            crate->state[28 + 3] = std::byte{0x7F};
+        } else if (fault == 2) {
+            crate->state.pop_back();
+        } else {
+            crate->state.clear();
+        }
+        const auto player_before = rig.hooks->hooks.prediction.capture(kPlayerId);
+        const auto crate_before = rig.hooks->hooks.prediction.capture(rig.crate_id);
+        const std::vector roster_before(rig.reconciler->roster().begin(),
+                                        rig.reconciler->roster().end());
+        const auto history_before = rig.reconciler->base().history_size();
+        const auto tick_before = rig.reconciler->base().last_checkpoint_tick();
+        const auto ledger_played = rig.ledger.played();
+        const auto ledger_adoptions = rig.ledger.adoptions();
+        const auto ledger_cancels = rig.ledger.cancels();
+        const auto held_before = rig.reconciler->outcomes_held_through();
+        const auto tombstone_before = rig.reconciler->has_tombstone(verdict_key);
+        CHECK_FALSE(
+            rig.reconciler->apply_checkpoint(checkpoint.base, *checkpoint.spawns).base.applied);
+        CHECK(rig.reconciler->checkpoints_refused_invalid() == 1);
+        CHECK(rig.reconciler->base().history_size() == history_before);
+        CHECK(rig.reconciler->base().last_checkpoint_tick() == tick_before);
+        CHECK(std::vector(rig.reconciler->roster().begin(), rig.reconciler->roster().end()) ==
+              roster_before);
+        CHECK(rig.ledger.played() == ledger_played);
+        CHECK(rig.ledger.adoptions() == ledger_adoptions);
+        CHECK(rig.ledger.cancels() == ledger_cancels);
+        CHECK_FALSE(rig.ledger.cancelled(verdict_key));
+        CHECK(rig.reconciler->outcomes_held_through() == held_before);
+        CHECK(rig.reconciler->has_tombstone(verdict_key) == tombstone_before);
+        CHECK(rig.hooks->hooks.prediction.capture(kPlayerId) == player_before);
+        CHECK(rig.hooks->hooks.prediction.capture(rig.crate_id) == crate_before);
+        if (fault == 0)
+            CHECK(rig.hooks->context_refusals(replication::ContentionRefusal::NonFinite) == 1);
+        if (fault == 1)
+            CHECK(rig.hooks->context_refusals(replication::ContentionRefusal::NonFinite) == 1);
+        if (fault >= 2)
+            CHECK(rig.hooks->context_refusals(replication::ContentionRefusal::BadLength) == 1);
+    }
+
+    // With prepare deliberately skipped, the same malformed checkpoint reaches the old restore
+    // path and retires history. This proves the immutable observations above are sensitive.
+    Rig control(7894);
+    control.connect();
+    auto first = control.server_tick(walk(++control.sequence, 0.0f));
+    REQUIRE_FALSE(first.empty());
+    control.seed(first.back(), true);
+    const auto command = walk(++control.sequence, -1.0f);
+    control.reconciler->predict(command);
+    auto second = control.server_tick(command);
+    REQUIRE_FALSE(second.empty());
+    auto checkpoint = second.back();
+    REQUIRE(checkpoint.spawns);
+    const replication::SpawnKey verdict_key{999, 999, 0};
+    checkpoint.spawns->outcomes.push_back(
+        {verdict_key, replication::SpawnOutcomeKind::Rejected, {}, 1});
+    REQUIRE(control.ledger.should_play(verdict_key, replication::PresentationEventKind::Launch, 0));
+    for (auto& entity : checkpoint.base.entities)
+        if (entity.id == control.crate_id)
+            corrupt_last_proxy(entity.state);
+    const auto tick_before = control.reconciler->base().last_checkpoint_tick();
+    CHECK(control.reconciler->apply_checkpoint(checkpoint.base, *checkpoint.spawns).base.applied);
+    CHECK(control.reconciler->base().last_checkpoint_tick() != tick_before);
+    CHECK(control.ledger.cancelled(verdict_key));
+    CHECK(control.ledger.cancels() == 1);
+}
 
 TEST_CASE("interaction: the server declares membership with hysteresis and the client follows") {
     Rig rig(7851);
@@ -623,7 +828,7 @@ TEST_CASE("interaction: without the profile, or without spawns beside it, nothin
     const auto m20_6 = app::input_schema_identity(*opted.network_input, &*opted.remote_play);
     CHECK(m20_6 != m20_5);
     auto bumped = opted;
-    bumped.remote_play->interaction->version = 2;
+    bumped.remote_play->interaction->version = 3;
     CHECK(app::input_schema_identity(*bumped.network_input, &*bumped.remote_play) != m20_6);
     // Inert without a spawn profile: the identity is m20.4's, bit for bit.
     auto inert = opted;
