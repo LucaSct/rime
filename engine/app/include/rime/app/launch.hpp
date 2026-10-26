@@ -117,6 +117,8 @@ struct LaunchOptions {
     // m20.6b: the game's interaction tape (walks the player into its pushable object).
     bool input_tape_push = false;
     bool input_tape_collision = false;
+    // Keep the separated-seat proof's input distinct from the contact diagnostic.
+    bool input_tape_isolation = false;
     SpawnFault spawn_fault = SpawnFault::None;
     // The window of a timed fault, in server ticks: how long `duplicate` doubles checkpoints and
     // holds the client's ack, or how long `late-*` withholds the verdict. Required by exactly

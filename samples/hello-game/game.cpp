@@ -614,6 +614,15 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
     bind_bodies(ctx.world);
     collect(ctx.world, ctx.despawns);
     record_crate(ctx.world);
+    if (const auto* crate = ctx.world.get<CrateBody>(crate_))
+        for (const Player& player : players_)
+            if (const auto* self = ctx.world.get<PlayerState>(player.entity)) {
+                const core::Vec3 delta{self->position.x - crate->position.x,
+                                       0.0f,
+                                       self->position.z - crate->position.z};
+                minimum_player_crate_distance_ =
+                    std::min(minimum_player_crate_distance_, core::length(delta));
+            }
     if (auto* replicated = state()) {
         for (std::size_t i = 0; i < players_.size(); ++i)
             throw_step(ctx, players_[i], inputs_[i], *replicated);
@@ -628,12 +637,15 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
         }
         ctx.world.mark_changed<ReplicatedGameState>(state_entity_);
     }
-    // An opt-in process diagnostic reports geometry from the authoritative server. It is read
-    // after the two-seat tape; client mirrors cannot establish the server's smallest separation.
-    if (ctx.tick == 899 && std::getenv("RIME_COLLISION_DIAGNOSTIC"))
+    // The opt-in diagnostic samples the whole authoritative leg at its requested last tick.
+    // Client mirrors can miss a close approach during delay or blackout.
+    const char* diagnostic_tick = std::getenv("RIME_COLLISION_DIAGNOSTIC");
+    if (diagnostic_tick && ctx.tick + 1 == std::strtoull(diagnostic_tick, nullptr, 10))
         std::printf("{\"event\":\"collision_diagnostic\",\"min_player_distance\":%.6f,"
+                    "\"min_player_crate_distance\":%.6f,"
                     "\"max_player_crate_overlap\":%.6f,\"crate_z\":%.6f}\n",
                     static_cast<double>(minimum_player_distance_),
+                    static_cast<double>(minimum_player_crate_distance_),
                     static_cast<double>(maximum_player_crate_overlap_),
                     static_cast<double>(ctx.world.get<CrateBody>(crate_)->position.z));
 }
@@ -1836,6 +1848,19 @@ app::ActionState collision_tape(std::uint64_t tick, std::uint16_t seat) {
     return actions;
 }
 
+// The isolation leg keeps every seat in its own lane while all three keep sending movement.
+// First walk outward; later reversals stay beyond that initial 1.6 m offset, so even a frozen
+// mirror during seat one's blackout cannot turn another seat's movement into a contact.
+app::ActionState isolation_tape(std::uint64_t tick, std::uint16_t seat) {
+    app::ActionState actions{};
+    const float outward = tick <= 24 || (tick - 25) % 48 < 24 ? 1.0f : -1.0f;
+    if (seat == 1)
+        actions.axes[kAxisMoveZ] = outward;
+    else
+        actions.axes[kAxisMoveX] = seat == 0 ? -outward : outward;
+    return actions;
+}
+
 } // namespace
 
 // ── The definition ────────────────────────────────────────────────────────────────────────────
@@ -1934,6 +1959,7 @@ app::GameDefinition definition() {
     def.default_max_clients = 1;
     def.remote_play->seat_player = seat_player;
     def.remote_play->diagnostic_collision_input = collision_tape;
+    def.remote_play->diagnostic_isolation_input = isolation_tape;
     def.remote_play->spawn_prediction =
         app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile{
             1,

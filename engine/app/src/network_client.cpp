@@ -259,7 +259,8 @@ RunReport run_network_client(const LaunchOptions& options,
         (options.input_tape_push &&
          (!definition.remote_play->active_interaction() ||
           !definition.remote_play->active_interaction()->diagnostic_push_input)) ||
-        (options.input_tape_collision && !definition.remote_play->diagnostic_collision_input))
+        (options.input_tape_collision && !definition.remote_play->diagnostic_collision_input) ||
+        (options.input_tape_isolation && !definition.remote_play->diagnostic_isolation_input))
         return fail(report, "game or autopilot unavailable");
 
     replication::InputWindow window;
@@ -874,7 +875,12 @@ RunReport run_network_client(const LaunchOptions& options,
                                                       1e-9));
         }
         ActionState actions{};
-        if (options.input_tape_collision)
+        // Choose the per-seat isolation path before the shared tapes so a blackout cannot
+        // create physical contact in a proof of network isolation.
+        if (options.input_tape_isolation)
+            actions = definition.remote_play->diagnostic_isolation_input(report.ticks + 1,
+                                                                         seat ? seat->index : 0);
+        else if (options.input_tape_collision)
             actions = definition.remote_play->diagnostic_collision_input(report.ticks + 1,
                                                                          seat ? seat->index : 0);
         else if (options.input_tape_push)

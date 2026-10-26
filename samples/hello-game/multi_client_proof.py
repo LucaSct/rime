@@ -8,6 +8,7 @@ Each gate reports measured numbers; a control that passes its challenged gate fa
 """
 
 import json
+import os
 import select
 import subprocess
 import sys
@@ -18,6 +19,10 @@ EXE = sys.argv[1]
 PROBE = EXE.rsplit("/", 1)[0] + "/hello_game_net_proof"
 TAPES = ("--input-tape-throw", "--input-tape-push", "--input-tape")
 IMPAIR = ("delay_ms=30,seed=101", "delay_ms=60,seed=202", "delay_ms=100,loss=0.05,seed=303")
+ISOLATION_TAPES = ("--input-tape-isolation",) * 3
+# Player radius is 0.35 m (game.hpp). At 1.10 m centre distance, the 0.40 m
+# margin also clears the crate's 0.5 m half-extent even at its closest corner.
+ISOLATION_REACH = 2 * 0.35 + 0.40
 
 
 def events(output):
@@ -42,12 +47,15 @@ def server_event(server, name, seen):
     raise AssertionError(f"server did not emit {name}: {seen}")
 
 
-def launch(ticks, cap=3, swap=False):
+def launch(ticks, cap=3, swap=False, diagnostic=False):
     args = [EXE, "dedicated", "--listen", "127.0.0.1:0", "--max-clients", str(cap),
             "--ticks", str(ticks), "--linger-ms", "1200", "--input-slack", "3"]
     if swap:
         args += ["--seat-debug-break", "swap"]
-    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    env = os.environ.copy()
+    if diagnostic:
+        env["RIME_COLLISION_DIAGNOSTIC"] = str(ticks)
+    process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
                                text=True, bufsize=1)
     seen = []
     port = server_event(process, "ready", seen)["bind"].rsplit(":", 1)[1]
@@ -68,7 +76,11 @@ def client(port, tape=None, impairment=None, frames=None):
 def collect(process, timeout=25):
     out, err = process.communicate(timeout=timeout)
     assert process.returncode == 0, (process.args, process.returncode, out, err)
-    return finished(out)
+    result = finished(out)
+    diagnostic = [e for e in events(out) if e["event"] == "collision_diagnostic"]
+    if diagnostic:
+        result["collision_diagnostic"] = diagnostic[-1]
+    return result
 
 
 def joined(server, seen, slot, gen=0):
@@ -83,9 +95,10 @@ def cleanup(processes):
             process.communicate()
 
 
-def run(tapes=TAPES, blackout=False, swap=False, ticks=440, negatives=False):
+def run(tapes=TAPES, blackout=False, swap=False, ticks=440, negatives=False,
+        diagnostic=False):
     start = time.monotonic()
-    server, port, seen = launch(ticks, swap=swap)
+    server, port, seen = launch(ticks, swap=swap, diagnostic=diagnostic)
     clients = []
     try:
         for seat, tape in enumerate(tapes):
@@ -202,6 +215,25 @@ def one_client_control(tape, impairment):
         cleanup([sole, server])
 
 
+def isolation_leg(blackout):
+    # These are server-side minima over every fixed tick. A final pose would miss a brief
+    # contact; a client mirror could miss it during the blackout. Discard a failed scenario,
+    # never relax the healthy-client correction envelope below.
+    for attempt in range(1, 4):
+        authority, clients, runtime = run(ISOLATION_TAPES, blackout=blackout, ticks=540,
+                                          diagnostic=True)
+        assert agreement(authority, clients), ("isolation digest", attempt)
+        diagnostic = authority["collision_diagnostic"]
+        pair = diagnostic["min_player_distance"]
+        crate = diagnostic["min_player_crate_distance"]
+        print("PRECONDITION isolation", "blackout" if blackout else "baseline",
+              "attempt", attempt, "min_pairwise_m", pair, "min_crate_center_m", crate,
+              "required_m", ISOLATION_REACH, flush=True)
+        if pair >= ISOLATION_REACH and crate >= ISOLATION_REACH:
+            return authority, clients, runtime
+    raise AssertionError("isolation players or crate came within the 0.40 m margin in three attempts")
+
+
 def main():
     # The controls have their own processes, so their digest cannot be inherited from a main leg.
     idle_server, _, _ = launch(440)
@@ -266,8 +298,8 @@ def main():
                accepted=swapped["spawn_accepted"],
                adoptions=[c["ledger_adoptions"] for c in mirrors])
 
-    normal, baseline, base_runtime = run(TAPES, ticks=540)
-    dark, impaired, dark_runtime = run(TAPES, blackout=True, ticks=540)
+    normal, baseline, base_runtime = isolation_leg(False)
+    dark, impaired, dark_runtime = isolation_leg(True)
     # Each healthy client's own no-blackout maximum is its measured envelope. A small scheduling
     # allowance covers real-clock jitter; the blackout must not impose seconds of corrections.
     envelopes = [(baseline[i]["corrections"], baseline[i]["max_snap"]) for i in (0, 2)]
@@ -279,6 +311,8 @@ def main():
                dark["seats"][1]["resyncs"] >= 1 and dark["seats"][1]["applied"] > 0,
                baseline=envelopes,
                blackout=[(impaired[i]["corrections"], impaired[i]["max_snap"]) for i in (0, 2)],
+               min_pairwise_m=(normal["collision_diagnostic"]["min_player_distance"],
+                               dark["collision_diagnostic"]["min_player_distance"]),
                resyncs=dark["resyncs"], runtime_s=round(base_runtime + dark_runtime, 2))
 
     for attempt in range(1, 4):
