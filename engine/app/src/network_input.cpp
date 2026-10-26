@@ -368,7 +368,17 @@ struct NetworkInputServer::Impl {
                 if (!multi_seat)
                     seats[0].policy.emplace(interaction->params);
             }
-            replicator->set_budget(Budget{.max_bytes_per_tick = 1024});
+            // The per-client world-stream budget must cover the WHOLE world a joining client is
+            // owed, or the stream never completes a tick: ServerReplicator clamps each client's
+            // baseline to the newest tick it was sent IN FULL, so a budget below the world's size
+            // defers some record every tick, the baseline never advances, and every tick re-sends
+            // "everything since the old baseline" -- permanent catch-up, one rotating entity a
+            // tick stale. Measured (m20.8b2, rime_remote_play_tests' hello-game mirror test): at
+            // 1024 B, 60 of 60 ticks deferred a record (on the pre-m20.8b2 code too, where the
+            // stale entity happened to be one the digest did not read); at 2048 B, none. 4096 B
+            // leaves room for a several-player hello-game (each body ~150 B, its throw ~60 B) --
+            // a bound, not a rate: once a baseline completes, a tick sends only what changed.
+            replicator->set_budget(Budget{.max_bytes_per_tick = 4096});
         }
     }
 
