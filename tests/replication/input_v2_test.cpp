@@ -173,6 +173,77 @@ TEST_CASE("hello, reply, selection, and schema hash are deterministic") {
     CHECK_FALSE(decode_input_hello_reply(std::vector<std::byte>(4), reply));
 }
 
+TEST_CASE("hello reply v3 carries a seat only on a codec-3 acceptance (m20.8b)") {
+    const std::uint64_t hash = 0x1234;
+    // A multi-seat server speaks codec 3 only: a codec-2 client is a version refusal, and a
+    // client offering both is answered in 3.
+    CHECK(select_input_codec({2, 2, hash}, hash, false, kInputCodecV3).refusal ==
+          InputHelloRefusal::Version);
+    CHECK(select_input_codec({2, 3, hash}, hash, false, kInputCodecV3).codec == kInputCodecV3);
+    // ...and a one-seat server keeps codec 2: a codec-3-only client is refused as version.
+    CHECK(select_input_codec({3, 3, hash}, hash, false).refusal == InputHelloRefusal::Version);
+    CHECK(select_input_codec({2, 3, hash}, hash, false).codec == kInputCodecV2);
+
+    InputHelloReply seated{};
+    seated.codec = kInputCodecV3;
+    seated.seated = true;
+    seated.seat = 0x0102;
+    seated.seat_generation = 0xA0B0;
+    std::array<std::byte, kInputHelloReplyV3Bytes> bytes{};
+    REQUIRE(encode_input_hello_reply(seated, bytes) == kInputHelloReplyV3Bytes);
+    // Little-endian seat and generation after m20.3's three bytes.
+    CHECK(bytes[3] == std::byte{0x02});
+    CHECK(bytes[4] == std::byte{0x01});
+    CHECK(bytes[5] == std::byte{0xB0});
+    CHECK(bytes[6] == std::byte{0xA0});
+    InputHelloReply decoded{};
+    REQUIRE(decode_input_hello_reply(bytes, decoded));
+    CHECK(decoded.codec == kInputCodecV3);
+    CHECK(decoded.refusal == InputHelloRefusal::None);
+    CHECK(decoded.seated);
+    CHECK(decoded.seat == 0x0102);
+    CHECK(decoded.seat_generation == 0xA0B0);
+    // An output too small for the seat writes nothing rather than a truncated reply.
+    std::array<std::byte, kInputHelloReplyBytes> short_out{};
+    CHECK(encode_input_hello_reply(seated, short_out) == 0);
+
+    // A refusal never carries a seat and stays 3 bytes, so every client can decode it -- the new
+    // seat refusals included.
+    for (const auto refusal : {InputHelloRefusal::Full,
+                               InputHelloRefusal::DuplicateEndpoint,
+                               InputHelloRefusal::RateLimited,
+                               InputHelloRefusal::GameRefused}) {
+        InputHelloReply refused{};
+        refused.refusal = refusal;
+        refused.seated = true; // ignored: a refusal has no seat
+        REQUIRE(encode_input_hello_reply(refused, bytes) == kInputHelloReplyBytes);
+        InputHelloReply out{};
+        REQUIRE(decode_input_hello_reply(std::span{bytes}.first(kInputHelloReplyBytes), out));
+        CHECK(out.refusal == refusal);
+        CHECK_FALSE(out.seated);
+    }
+    // A codec-2 acceptance stays m20.3's 3 bytes even if asked to carry a seat.
+    InputHelloReply v2{};
+    v2.codec = kInputCodecV2;
+    v2.seated = true;
+    CHECK(encode_input_hello_reply(v2, bytes) == kInputHelloReplyBytes);
+
+    // Seven bytes that are not a codec-3 acceptance are malformed, not "a seat we ignore".
+    REQUIRE(encode_input_hello_reply(seated, bytes) == kInputHelloReplyV3Bytes);
+    auto wrong_codec = bytes;
+    wrong_codec[1] = std::byte{kInputCodecV2};
+    CHECK_FALSE(decode_input_hello_reply(wrong_codec, decoded));
+    auto refusal_with_seat = bytes;
+    refusal_with_seat[2] = std::byte{static_cast<std::uint8_t>(InputHelloRefusal::Full)};
+    CHECK_FALSE(decode_input_hello_reply(refusal_with_seat, decoded));
+    // Unknown refusal codes and other lengths stay refused.
+    auto unknown = bytes;
+    unknown[2] = std::byte{static_cast<std::uint8_t>(InputHelloRefusal::GameRefused) + 1};
+    CHECK_FALSE(decode_input_hello_reply(std::span{unknown}.first(3), decoded));
+    CHECK_FALSE(decode_input_hello_reply(std::span{bytes}.first(5), decoded));
+    CHECK_FALSE(decode_input_hello_reply(std::vector<std::byte>(8), decoded));
+}
+
 TEST_CASE("schedule waits for slack then applies in order with an execution mask") {
     InputSchedule schedule(2);
     CHECK_FALSE(schedule.step().started);

@@ -382,6 +382,62 @@ TEST_CASE("launch: connected play and linger grammar") {
     CHECK(parse({"dedicated", "--linger-ms", "1"}).status == ParseStatus::Error);
 }
 
+TEST_CASE("launch: m20.8b --max-clients parses 1..128, once, and only for listening dedicated") {
+    const auto unset = parse({"dedicated", "--listen", "127.0.0.1:0"});
+    REQUIRE(unset.status == ParseStatus::Ok);
+    CHECK(unset.options.max_clients == 0); // resolved by the runner against the game
+    const auto four = parse({"dedicated", "--listen", "127.0.0.1:0", "--max-clients", "4"});
+    REQUIRE(four.status == ParseStatus::Ok);
+    CHECK(four.options.max_clients == 4);
+    CHECK(parse({"dedicated", "--max-clients", "128"}).status == ParseStatus::Ok);
+    CHECK(parse({"dedicated", "--max-clients", "0"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--max-clients", "129"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--max-clients", "x"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--max-clients"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--max-clients", "2", "--max-clients", "3"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"dedicated", "--offline", "--max-clients", "2"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--max-clients", "2"}).status == ParseStatus::Error);
+}
+
+TEST_CASE("launch: m20.8b the operator may lower the game's seat count, never raise it") {
+    // Refused before any socket is bound: the game's own ceiling is the only one that matters.
+    const auto listening = [](std::uint16_t max_clients) {
+        LaunchOptions o = bounded(LaunchMode::Dedicated, 5);
+        o.offline = false;
+        o.listen_host = "127.0.0.1";
+        o.port = 0;
+        o.max_clients = max_clients;
+        return o;
+    };
+    const auto with_input = [](Observed& seen, std::uint16_t max_players) {
+        GameDefinition def = probe_definition(seen);
+        def.network_input = GameDefinition::NetworkInputProfile{
+            "probe", 1, [](const replication::InputCommand&) { return ActionState{}; }};
+        def.max_players = max_players;
+        return def;
+    };
+    CountingFactory factory;
+    Observed one_seen, four_seen;
+    // A one-player game (every game before m20.8) cannot be raised to 2 seats.
+    const RunReport one = run_game_mode(listening(2), with_input(one_seen, 1), factory.hooks());
+    CHECK(one.status == RunStatus::Failed);
+    CHECK(one.usage_error);
+    CHECK(one.message.find("never raise") != std::string::npos);
+    CHECK(one_seen.setups == 0);
+    const RunReport four = run_game_mode(listening(5), with_input(four_seen, 4), factory.hooks());
+    CHECK(four.status == RunStatus::Failed);
+    CHECK(four.usage_error);
+    // The one-seat diagnostics are refused on a multi-seat game: each names ONE client.
+    Observed traced_seen;
+    LaunchOptions traced = listening(2);
+    traced.input_trace = "unused-trace.txt";
+    const RunReport trace = run_game_mode(traced, with_input(traced_seen, 4), factory.hooks());
+    CHECK(trace.status == RunStatus::Failed);
+    CHECK(trace.message.find("one-seat diagnostics") != std::string::npos);
+    CHECK(factory.calls == 0);
+}
+
 TEST_CASE("launch: input trace needs a listening dedicated run") {
     const auto valid =
         parse({"dedicated", "--listen", "127.0.0.1:0", "--input-trace", "trace.txt"});
