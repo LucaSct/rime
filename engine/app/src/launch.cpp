@@ -75,6 +75,46 @@ template <typename T> [[nodiscard]] bool parse_uint(std::string_view text, T& ou
     return r;
 }
 
+// ADR-0108 §5: the owner's default client cap (2026-10-25), before the game's own ceiling.
+constexpr std::uint16_t kDefaultMaxClients = 16;
+
+// m20.8b: the seat counters, APPENDED to the `finished` line so every field an m20.7 reader looks
+// for keeps its place and value. `seats` is one record per seat index, accumulated over everyone
+// who sat there; the totals before it are their sums.
+std::string seat_fields(const RunReport::NetworkInputCounters& n) {
+    std::string out = fmt::format(",\"max_clients\":{},\"hello_full\":{},\"duplicate_endpoint\":{},"
+                                  "\"join_rate_limited\":{},\"game_refused_join\":{},"
+                                  "\"seats_abandoned\":{},\"seat_owner_refused\":{},\"seats\":[",
+                                  n.max_clients,
+                                  n.hello_full,
+                                  n.duplicate_endpoint,
+                                  n.join_rate_limited,
+                                  n.game_refused_join,
+                                  n.seats_abandoned,
+                                  n.seat_owner_refused);
+    for (std::size_t i = 0; i < n.seats.size(); ++i) {
+        const auto& seat = n.seats[i];
+        out += fmt::format("{}{{\"seat\":{},\"gen\":{},\"seated\":{},\"joins\":{},\"leaves\":{},"
+                           "\"accepted\":{},\"applied\":{},\"synthesized\":{},\"late\":{},"
+                           "\"stalls\":{},\"checkpoints\":{},\"epoch\":{}}}",
+                           i == 0 ? "" : ",",
+                           seat.index,
+                           seat.generation,
+                           seat.seated ? "true" : "false",
+                           seat.joins,
+                           seat.leaves,
+                           seat.accepted,
+                           seat.applied,
+                           seat.synthesized,
+                           seat.late,
+                           seat.stalls,
+                           seat.checkpoints,
+                           seat.membership_epoch);
+    }
+    out += "]";
+    return out;
+}
+
 } // namespace
 
 std::string_view to_string(LaunchMode mode) noexcept {
@@ -130,6 +170,8 @@ std::string launch_usage(std::string_view program) {
         "  --input-buffer M   dedicated --listen: adaptive (default: stall on an empty buffer\n"
         "                     instead of discarding the late command; pacing reports let the\n"
         "                     client drain the surplus) or fixed (retire on schedule)\n"
+        "  --max-clients N    dedicated --listen: seat at most N players (1..128; default\n"
+        "                     min(16, the game's max players); may lower it, never raise it)\n"
         "  --debug-hitch T:MS play --connect, diagnostic: sleep MS ms (1..2000) at client tick T\n"
         "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
@@ -264,6 +306,14 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             else
                 return fail("--input-buffer needs fixed or adaptive, once");
             result.options.input_buffer_given = true;
+        } else if (arg == "--max-clients") {
+            // The range check that needs no game; the game's own ceiling is checked by the
+            // runner, which knows `max_players`.
+            if (!has_value || result.options.max_clients != 0 ||
+                !parse_uint(args[++i], result.options.max_clients) ||
+                result.options.max_clients == 0 ||
+                result.options.max_clients > SeatTable::kMaxSeatsLimit)
+                return fail("--max-clients needs an integer 1..128 once");
         } else if (arg == "--debug-hitch") {
             // T:MS -- a client frame hitch of MS milliseconds at client tick T (diagnostic).
             if (!has_value || result.options.debug_hitch_tick != 0)
@@ -480,6 +530,9 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
     if (result.options.input_buffer_given &&
         (result.options.mode != LaunchMode::Dedicated || result.options.offline))
         return fail("--input-buffer requires listening dedicated mode");
+    if (result.options.max_clients != 0 &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline))
+        return fail("--max-clients requires listening dedicated mode");
     if (result.options.debug_hitch_tick != 0 && result.options.connect_host.empty())
         return fail("--debug-hitch requires --connect");
     if ((result.options.interaction_debug_break != InteractionDebugBreak::None ||
@@ -552,6 +605,35 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (!options.input_trace.empty() && !listening) {
         report.usage_error = true;
         return refuse(report, RunStatus::Failed, "--input-trace requires listening dedicated mode");
+    }
+    // m20.8b (ADR-0108 §5): the seat count. The game sets the ceiling, the operator may only
+    // lower it -- a game written for 4 players must not be handed 16 because a flag said so.
+    const std::uint16_t max_players = std::max<std::uint16_t>(definition.max_players, 1);
+    if (listening && options.max_clients > max_players) {
+        report.usage_error = true;
+        return refuse(report,
+                      RunStatus::Failed,
+                      fmt::format("--max-clients {} exceeds this game's max players ({}); the "
+                                  "launcher may lower the seat count, never raise it",
+                                  options.max_clients,
+                                  max_players));
+    }
+    const SeatConfig seat_config{
+        .max_players = max_players,
+        .max_clients = options.max_clients != 0
+                           ? options.max_clients
+                           : std::min<std::uint16_t>(kDefaultMaxClients, max_players)};
+    // The one-seat diagnostics: each names ONE client (its trace line, its spawn fault, its
+    // crate kick). On a multi-seat server they would mix players, so they are refused there until
+    // a per-seat form exists (m20.8c's per-seat applied trace).
+    if (listening && max_players > 1 &&
+        (!options.input_trace.empty() || options.spawn_fault != SpawnFault::None ||
+         !options.interaction_kicks.empty())) {
+        report.usage_error = true;
+        return refuse(report,
+                      RunStatus::Failed,
+                      "--input-trace, --spawn-fault and --interaction-fault are one-seat "
+                      "diagnostics; this game seats more than one player");
     }
 
     // ── 1b. The content root, before anything is constructed (m20.2) ─────────────────────────────
@@ -682,7 +764,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                                      options.spawn_fault,
                                      options.spawn_fault_ticks,
                                      options.input_slack == 0 ? 1u : options.input_slack,
-                                     options.input_buffer_adaptive);
+                                     options.input_buffer_adaptive,
+                                     seat_config);
         if (!network) {
             report.bind_failed = report.bind_error.starts_with('E');
             return refuse(report,
@@ -698,10 +781,13 @@ RunReport run_game_mode(const LaunchOptions& options,
                               "--interaction-fault needs an interaction profile with a j_max");
             network->set_interaction_kicks(options.interaction_kicks);
         }
-        fmt::print("{{\"event\":\"ready\",\"transport\":\"udp\",\"bind\":\"{}:{}\",\"codec\":2,"
+        // The codec this server speaks: 2, or 3 (a seat in the hello reply) for a multi-seat
+        // game. The m20.3 line is unchanged for every one-player game.
+        fmt::print("{{\"event\":\"ready\",\"transport\":\"udp\",\"bind\":\"{}:{}\",\"codec\":{},"
                    "\"auth\":\"none\"}}\n",
                    options.listen_host,
-                   network->local_port());
+                   network->local_port(),
+                   max_players > 1 ? 3 : 2);
         std::fflush(stdout);
         fmt::print(stderr,
                    "{}: unauthenticated server reachable on {}:{}\n",
@@ -771,6 +857,9 @@ RunReport run_game_mode(const LaunchOptions& options,
             tick.command = network->command_provenance();
             tick.refuse_spawn = network->refuse_spawn();
             tick.interaction_kick = network->interaction_kick(game_ticks);
+            // m20.8b: the seat changes (multi-seat: the game's leave/join hooks, run here at the
+            // start of the tick, before it sees any input) and every seat's input.
+            network->begin_seat_tick(*game, tick);
             // The report list lives through publication, so a keyed launch and its first
             // checkpoint describe the same tick rather than disagreeing for one frame.
             tick.spawns = definition.remote_play && definition.remote_play->spawn_prediction
@@ -988,7 +1077,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"input_buffer\":\"{}\",\"stalls\":{},\"gaps_retired\":{},"
                        "\"late_missed\":{},\"late_unclassified\":{},\"max_margin\":{},"
                        "\"final_margin\":{},\"pacing_sent\":{},\"pacing_send_refused\":{},"
-                       "\"accepted\":{}}}\n",
+                       "\"accepted\":{}{}}}\n",
                        report.ticks,
                        report.state_digest,
                        report.network_input.applied,
@@ -1041,7 +1130,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                        report.network_input.final_margin,
                        report.network_input.pacing_sent,
                        report.network_input.pacing_send_refused,
-                       report.network_input.accepted);
+                       report.network_input.accepted,
+                       seat_fields(report.network_input));
             std::fflush(stdout);
         }
     }

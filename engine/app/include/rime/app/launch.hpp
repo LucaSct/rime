@@ -9,6 +9,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "rime/app/content_root.hpp"
 #include "rime/app/game_definition.hpp"
@@ -127,6 +128,10 @@ struct LaunchOptions {
     // ADR-0103's retire-on-schedule buffer, kept as the control that shows what adaptive saves.
     bool input_buffer_adaptive = true;
     bool input_buffer_given = false;
+    // m20.8b `dedicated --max-clients N` (1..128): the operator's seat cap. 0 = unset, resolved by
+    // the runner to min(16, GameDefinition::max_players); a value above the game's max_players is
+    // refused there (the parser does not know the game).
+    std::uint16_t max_clients = 0;
     // m20.7 `play --connect --debug-hitch T:MS` (diagnostic, off by default): at client tick T,
     // before sampling input, sleep MS ms -- a frame hitch the loop then catches up from.
     std::uint64_t debug_hitch_tick = 0; // 0 = off (T >= 1 when given)
@@ -288,6 +293,28 @@ struct RunReport {
         std::uint64_t stalls = 0, gaps_retired = 0, late_missed = 0, late_unclassified = 0;
         std::uint64_t max_margin = 0, final_margin = 0;
         std::uint64_t pacing_sent = 0, pacing_send_refused = 0;
+        // m20.8b seats (ADR-0108 §5). `max_clients` is the resolved seat count. Every refusal at
+        // the seat has its own counter; each also counts in `clients_refused` (which, with one
+        // seat, only `hello_full` can reach -- its m20.7 meaning). `seats_abandoned`: a session
+        // that left while its join waited for the game. `seat_owner_refused`: the game accepted a
+        // join but named no live, replicable body with complete prediction hooks for the seat.
+        std::uint64_t max_clients = 0;
+        std::uint64_t hello_full = 0, duplicate_endpoint = 0, join_rate_limited = 0;
+        std::uint64_t game_refused_join = 0, seats_abandoned = 0, seat_owner_refused = 0;
+
+        // Per seat INDEX, accumulated over every occupant of that index (the totals above are the
+        // sums). Reported as the appended `"seats":[...]` array.
+        struct SeatCounters {
+            std::uint16_t index = 0;
+            std::uint16_t generation = 0; // the index's current generation
+            bool seated = false;
+            std::uint64_t joins = 0, leaves = 0;
+            std::uint64_t accepted = 0, applied = 0, synthesized = 0, late = 0, stalls = 0;
+            std::uint64_t checkpoints = 0;
+            std::uint32_t membership_epoch = 0;
+        };
+
+        std::vector<SeatCounters> seats;
     } network_input;
 
     bool bind_failed = false;

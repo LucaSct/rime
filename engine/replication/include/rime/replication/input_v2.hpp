@@ -40,11 +40,21 @@
 namespace rime::replication {
 
 inline constexpr std::uint8_t kInputCodecV2 = 2;
+// m20.8b (ADR-0108 §4): codec 3 is codec 2 plus a SEAT in the accepting hello reply. The command
+// packets, the result and the pacing report keep codec 2's layout and its codec byte (2): the seat
+// is a fact about the session, said once at admission, and nothing per tick needs it -- the server
+// already knows which seat a datagram belongs to from the session it arrived on. A server whose
+// game seats more than one player speaks ONLY codec 3, so an older client is refused as `Version`
+// at the hello instead of being admitted without knowing which player it is.
+inline constexpr std::uint8_t kInputCodecV3 = 3;
 inline constexpr std::size_t kInputV2MaxCommands = 16;
 inline constexpr std::size_t kInputV2CommandBytes = 28;
 inline constexpr std::size_t kInputV2HeaderBytes = 4;
 inline constexpr std::size_t kInputHelloBytes = 11;
 inline constexpr std::size_t kInputHelloReplyBytes = 3;
+// The codec-3 ACCEPTING reply: the 3 bytes above plus seat:u16 and generation:u16. A refusal never
+// carries a seat, so every refusal stays 3 bytes and decodes on every client, old or new.
+inline constexpr std::size_t kInputHelloReplyV3Bytes = 7;
 inline constexpr std::size_t kInputResultBytes = 30;
 inline constexpr std::size_t kInputPacingBytes = 14;
 
@@ -88,11 +98,28 @@ struct InputHello {
     std::uint64_t schema_hash = 0;
 };
 
-enum class InputHelloRefusal : std::uint8_t { None, Version, Schema, Full };
+// The last three (m20.8b) are seat-admission refusals. Only a codec-3 server sends them, and it has
+// already refused every codec-2 client as `Version` before seat admission runs, so a client that
+// cannot decode them never receives one. A one-seat (codec-2) server reports a refused seat as
+// `Full`, as it always has.
+enum class InputHelloRefusal : std::uint8_t {
+    None,
+    Version,
+    Schema,
+    Full,
+    DuplicateEndpoint,
+    RateLimited,
+    GameRefused,
+};
 
 struct InputHelloReply {
     std::uint8_t codec = 0;
     InputHelloRefusal refusal = InputHelloRefusal::None;
+    // Codec 3, accepted only: the seat the server gave this session (app::PlayerSlot's two halves,
+    // spelled out because this leaf does not depend on the app layer).
+    bool seated = false;
+    std::uint16_t seat = 0;
+    std::uint16_t seat_generation = 0;
 };
 
 [[nodiscard]] std::size_t encode_input_hello(const InputHello& hello, std::span<std::byte> out);
@@ -100,9 +127,16 @@ struct InputHelloReply {
 [[nodiscard]] std::size_t encode_input_hello_reply(const InputHelloReply& reply,
                                                    std::span<std::byte> out);
 [[nodiscard]] bool decode_input_hello_reply(std::span<const std::byte> in, InputHelloReply& out);
-[[nodiscard]] InputHelloReply select_input_codec(const InputHello& hello,
-                                                 std::uint64_t server_schema_hash,
-                                                 bool server_full) noexcept;
+// `server_codec` is the ONE codec this server speaks (2, or 3 for a multi-seat game); the hello's
+// [codec_min, codec_max] must contain it. Encode writes kInputHelloReplyV3Bytes for an accepting
+// codec-3 reply that is `seated` and kInputHelloReplyBytes otherwise; decode accepts exactly those
+// two shapes and nothing else (a 7-byte reply naming codec 2, or a refusal with a seat, is
+// refused).
+[[nodiscard]] InputHelloReply
+select_input_codec(const InputHello& hello,
+                   std::uint64_t server_schema_hash,
+                   bool server_full,
+                   std::uint8_t server_codec = kInputCodecV2) noexcept;
 
 // FNV-1a 64 over the profile ID's bytes, followed by the version's four LITTLE-ENDIAN bytes.
 // No terminator or length prefix enters the hash, so every platform hashes the same profile.

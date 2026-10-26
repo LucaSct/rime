@@ -168,18 +168,27 @@ bool decode_input_hello(std::span<const std::byte> in, InputHello& out) {
 }
 
 std::size_t encode_input_hello_reply(const InputHelloReply& reply, std::span<std::byte> out) {
-    if (out.size() < kInputHelloReplyBytes) {
+    const bool with_seat =
+        reply.codec == kInputCodecV3 && reply.refusal == InputHelloRefusal::None && reply.seated;
+    const std::size_t size = with_seat ? kInputHelloReplyV3Bytes : kInputHelloReplyBytes;
+    if (out.size() < size) {
         return 0;
     }
     Writer writer{out};
     writer.u8(kInputHelloReplyTag);
     writer.u8(reply.codec);
     writer.u8(static_cast<std::uint8_t>(reply.refusal));
+    if (with_seat) {
+        writer.u8(static_cast<std::uint8_t>(reply.seat));
+        writer.u8(static_cast<std::uint8_t>(reply.seat >> 8));
+        writer.u8(static_cast<std::uint8_t>(reply.seat_generation));
+        writer.u8(static_cast<std::uint8_t>(reply.seat_generation >> 8));
+    }
     return writer.at;
 }
 
 bool decode_input_hello_reply(std::span<const std::byte> in, InputHelloReply& out) {
-    if (in.size() != kInputHelloReplyBytes ||
+    if ((in.size() != kInputHelloReplyBytes && in.size() != kInputHelloReplyV3Bytes) ||
         std::to_integer<std::uint8_t>(in[0]) != kInputHelloReplyTag) {
         return false;
     }
@@ -188,18 +197,33 @@ bool decode_input_hello_reply(std::span<const std::byte> in, InputHelloReply& ou
     InputHelloReply decoded{};
     decoded.codec = reader.u8();
     const std::uint8_t refusal = reader.u8();
-    if (refusal > static_cast<std::uint8_t>(InputHelloRefusal::Full)) {
+    if (refusal > static_cast<std::uint8_t>(InputHelloRefusal::GameRefused)) {
         return false;
     }
     decoded.refusal = static_cast<InputHelloRefusal>(refusal);
+    if (in.size() == kInputHelloReplyV3Bytes) {
+        // The seat exists only on a codec-3 acceptance; any other 7-byte shape is malformed
+        // rather than "a reply with a seat we ignore", so the two ends cannot half-agree.
+        if (decoded.codec != kInputCodecV3 || decoded.refusal != InputHelloRefusal::None) {
+            return false;
+        }
+        const auto u16 = [&reader] {
+            const std::uint16_t low = reader.u8();
+            return static_cast<std::uint16_t>(low | (std::uint16_t{reader.u8()} << 8));
+        };
+        decoded.seated = true;
+        decoded.seat = u16();
+        decoded.seat_generation = u16();
+    }
     out = decoded;
     return true;
 }
 
 InputHelloReply select_input_codec(const InputHello& hello,
                                    std::uint64_t server_schema_hash,
-                                   bool server_full) noexcept {
-    if (hello.codec_min > kInputCodecV2 || hello.codec_max < kInputCodecV2) {
+                                   bool server_full,
+                                   std::uint8_t server_codec) noexcept {
+    if (hello.codec_min > server_codec || hello.codec_max < server_codec) {
         return {0, InputHelloRefusal::Version};
     }
     if (hello.schema_hash != server_schema_hash) {
@@ -208,7 +232,7 @@ InputHelloReply select_input_codec(const InputHello& hello,
     if (server_full) {
         return {0, InputHelloRefusal::Full};
     }
-    return {kInputCodecV2, InputHelloRefusal::None};
+    return {server_codec, InputHelloRefusal::None};
 }
 
 std::uint64_t input_schema_hash(std::string_view profile_id,
