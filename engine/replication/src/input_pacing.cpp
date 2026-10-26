@@ -26,6 +26,11 @@ void InputPacer::on_report(const InputPacing& report) noexcept {
     // During a drain episode the margin on the wire is the PRE-drain past (reports lag the client's
     // slowdown by a round trip), so folding it into a window would re-trigger on its own tail.
     if (drain_remaining_ > 0) {
+        if (rose) {
+            // An underrun proves the planned surplus is gone; do not keep slowing the client.
+            drain_remaining_ = 0;
+            ++drains_cancelled_;
+        }
         return;
     }
     window_min_ = std::min(window_min_, report.margin);
@@ -41,8 +46,11 @@ void InputPacer::on_report(const InputPacing& report) noexcept {
         // but stalls (which only add) moves it, so draining the whole surplus
         // (min - drain_above ticks of buffer) at once can never push the margin below drain_above.
         // It also pays a 12-tick hitch back in ~3 s rather than ~15 s of one-tick-at-a-time
-        // episodes.
-        const std::uint64_t surplus = std::uint64_t{window_min_} - params_.drain_above;
+        // episodes. CAPPED per episode, though (review, 2026-10-26): a 62-tick surplus would
+        // otherwise dilate the client for 992 ticks (~17.6 s) on one stale reading; another clean
+        // window drains what remains, and a stall inside the episode cancels it (above).
+        const std::uint64_t surplus = std::min<std::uint64_t>(
+            std::uint64_t{window_min_} - params_.drain_above, params_.max_drain_per_episode);
         drain_remaining_ = surplus * params_.drain_ticks;
         drained_buffer_ += surplus;
         ++drains_;

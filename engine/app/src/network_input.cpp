@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <optional>
+#include <random>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -209,10 +210,11 @@ struct NetworkInputServer::Impl {
          SpawnFault fault = SpawnFault::None,
          std::uint32_t fault_ticks = 0,
          std::uint32_t input_slack = 1,
-         bool adaptive_input = false)
-        : link(std::move(supplied_link)), driver(link, driver_config()), profile(profile),
-          world(world), fault(fault), fault_ticks(fault_ticks), input_slack(input_slack),
-          adaptive_input(adaptive_input),
+         bool adaptive_input = false,
+         bool production_link = false)
+        : link(std::move(supplied_link)), driver(link, driver_config(production_link)),
+          profile(profile), world(world), fault(fault), fault_ticks(fault_ticks),
+          input_slack(input_slack), adaptive_input(adaptive_input),
           neutral_after_ticks(static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz * 0.1)))) {
         driver.listen();
         schema_hash = input_schema_identity(profile, remote_play);
@@ -243,8 +245,14 @@ struct NetworkInputServer::Impl {
         }
     }
 
-    static net::NetDriver::Config driver_config() {
+    static net::NetDriver::Config driver_config(bool production_link) {
         net::NetDriver::Config config{};
+        if (production_link) {
+            // Salt entropy is a transport input chosen by the app; scripted links keep the
+            // driver's fixed seed so their incarnation proofs stay reproducible.
+            std::random_device entropy;
+            config.salt_seed = (std::uint64_t{entropy()} << 32) | std::uint64_t{entropy()};
+        }
         // Two transport sessions let a second peer receive an explicit profile-level `full`
         // refusal while the simulation still admits exactly one input source.
         config.max_sessions = 2;
@@ -264,6 +272,8 @@ struct NetworkInputServer::Impl {
         totals.synthesized += schedule->synthesized();
         totals.neutralized += schedule->neutralized();
         totals.stalls += schedule->stalls();
+        totals.resyncs += schedule->resyncs();
+        totals.resync_retired += schedule->resync_retired();
         totals.gaps_retired += schedule->gaps_retired();
         totals.late_missed += schedule->late_missed();
         totals.late_unclassified += schedule->late_unclassified();
@@ -767,7 +777,8 @@ NetworkInputServer::bind(const std::string& host,
                                        fault,
                                        fault_ticks,
                                        input_slack,
-                                       adaptive_input);
+                                       adaptive_input,
+                                       true);
     if (remote_play &&
         (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
          !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {
@@ -1058,6 +1069,8 @@ RunReport::NetworkInputCounters NetworkInputServer::counters() const noexcept {
         counts.synthesized += impl_->schedule->synthesized();
         counts.neutralized += impl_->schedule->neutralized();
         counts.stalls += impl_->schedule->stalls();
+        counts.resyncs += impl_->schedule->resyncs();
+        counts.resync_retired += impl_->schedule->resync_retired();
         counts.gaps_retired += impl_->schedule->gaps_retired();
         counts.late_missed += impl_->schedule->late_missed();
         counts.late_unclassified += impl_->schedule->late_unclassified();

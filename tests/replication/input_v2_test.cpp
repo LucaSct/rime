@@ -461,6 +461,54 @@ TEST_CASE(
     CHECK(schedule.late() == 0);
 }
 
+TEST_CASE("adaptive blackout resynchronizes an empty ring and acknowledges skipped commands") {
+    InputSchedule adaptive(1, 6, InputBufferMode::Adaptive);
+    InputSchedule fixed(1, 6, InputBufferMode::Fixed);
+    const InputCommand first = command(10);
+    for (InputSchedule* schedule : {&adaptive, &fixed}) {
+        schedule->offer(std::span{&first, 1});
+        REQUIRE(schedule->step().applied);
+    }
+    for (int i = 0; i < 100; ++i) {
+        CHECK(adaptive.step().stalled);
+        CHECK_FALSE(fixed.step().stalled);
+    }
+    const InputCommand resumed = command(111);
+    adaptive.offer(std::span{&resumed, 1});
+    const InputResult frontier = adaptive.result(0);
+    CHECK(frontier.retired_through == resumed.sequence - 1);
+    CHECK(frontier.applied_mask[0] == 0);
+    CHECK(frontier.applied_mask[1] == (std::uint64_t{1} << 36));
+    CHECK(adaptive.resyncs() == 1);
+    CHECK(adaptive.resync_retired() == 100);
+    CHECK(adaptive.future() == 0);
+    const ScheduledInput applied = adaptive.step();
+    REQUIRE(applied.applied);
+    CHECK(applied.command.sequence == resumed.sequence);
+
+    // Fixed already retired the silent ticks, so the same arrival needs no resync.
+    fixed.offer(std::span{&resumed, 1});
+    CHECK(fixed.resyncs() == 0);
+    CHECK(fixed.resync_retired() == 0);
+    CHECK(fixed.result(0).retired_through == resumed.sequence - 1);
+    CHECK(fixed.step().applied);
+}
+
+TEST_CASE("adaptive keeps a future command out while its ring still holds input") {
+    InputSchedule schedule(1, 6, InputBufferMode::Adaptive);
+    const InputCommand first = command(50);
+    const InputCommand held = command(51);
+    const InputCommand future = command(115);
+    schedule.offer(std::span{&first, 1});
+    schedule.offer(std::span{&held, 1});
+    REQUIRE(schedule.step().applied);
+    schedule.offer(std::span{&future, 1});
+    CHECK(schedule.future() == 1);
+    CHECK(schedule.resyncs() == 0);
+    CHECK(schedule.resync_retired() == 0);
+    CHECK(schedule.step().applied);
+}
+
 TEST_CASE("margin counts contiguous held commands at next, in both modes") {
     for (InputBufferMode mode : {InputBufferMode::Fixed, InputBufferMode::Adaptive}) {
         InputSchedule schedule(1, 6, mode);

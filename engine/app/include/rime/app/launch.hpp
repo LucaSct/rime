@@ -293,7 +293,8 @@ struct RunReport {
         // `late_missed` is the part of `late` whose slot ran a stand-in; `max_margin` is a
         // maximum, `final_margin` the last session's margin when it ended.
         bool input_buffer_adaptive = false;
-        std::uint64_t stalls = 0, gaps_retired = 0, late_missed = 0, late_unclassified = 0;
+        std::uint64_t stalls = 0, resyncs = 0, resync_retired = 0;
+        std::uint64_t gaps_retired = 0, late_missed = 0, late_unclassified = 0;
         std::uint64_t max_margin = 0, final_margin = 0;
         std::uint64_t pacing_sent = 0, pacing_send_refused = 0;
     } network_input;
