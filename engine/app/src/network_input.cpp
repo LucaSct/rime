@@ -881,6 +881,16 @@ struct NetworkInputServer::Impl {
         return input;
     }
 
+    // before_tick's answer. One-seat: select now (m20.7's order). Multi-seat: the selection waits
+    // for begin_seat_tick, after the join/leave hooks, so last tick's `players` must not linger
+    // into this one; the single-player answer is neutral.
+    [[nodiscard]] ActionState begin_selection() {
+        if (!multi_seat)
+            return select_actions();
+        players.clear();
+        return {};
+    }
+
     // One-seat selection, in before_tick (m20.7's order).
     [[nodiscard]] ActionState select_actions() {
         last_applied = false;
@@ -1417,13 +1427,13 @@ std::uint16_t NetworkInputServer::local_port() const noexcept {
 ActionState NetworkInputServer::before_tick(std::uint64_t server_tick) {
     impl_->admission_tick = server_tick;
     impl_->pump();
-    return impl_->multi_seat ? ActionState{} : impl_->select_actions();
+    return impl_->begin_selection();
 }
 
 ActionState NetworkInputServer::before_tick(std::uint64_t server_tick, std::uint64_t now_ms) {
     impl_->admission_tick = server_tick;
     impl_->pump(now_ms);
-    return impl_->multi_seat ? ActionState{} : impl_->select_actions();
+    return impl_->begin_selection();
 }
 
 void NetworkInputServer::begin_seat_tick(Game& game, TickContext& ctx) {

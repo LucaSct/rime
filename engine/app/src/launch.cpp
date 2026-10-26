@@ -857,9 +857,6 @@ RunReport run_game_mode(const LaunchOptions& options,
             tick.command = network->command_provenance();
             tick.refuse_spawn = network->refuse_spawn();
             tick.interaction_kick = network->interaction_kick(game_ticks);
-            // m20.8b: the seat changes (multi-seat: the game's leave/join hooks, run here at the
-            // start of the tick, before it sees any input) and every seat's input.
-            network->begin_seat_tick(*game, tick);
             // The report list lives through publication, so a keyed launch and its first
             // checkpoint describe the same tick rather than disagreeing for one frame.
             tick.spawns = definition.remote_play && definition.remote_play->spawn_prediction
@@ -868,6 +865,11 @@ RunReport run_game_mode(const LaunchOptions& options,
             // A listening host owns removal so a replicated entity's NetId is retracted on the
             // tick it ends; local play leaves this null and the game despawns itself.
             tick.despawns = &despawn_requests;
+            // m20.8b: the seat changes (multi-seat: the game's leave/join hooks, run here at the
+            // start of the tick, before it sees any input) and every seat's input. After the
+            // report seams are set, so a hook that ends a replicated body can hand it to
+            // `despawns` and have its NetId retracted this tick.
+            network->begin_seat_tick(*game, tick);
             if (input_trace) {
                 // One line per committed tick: tick, applied(1)/synthesized(0), four axes,
                 // held and pressed. max_digits10 preserves the exact float for replay.
