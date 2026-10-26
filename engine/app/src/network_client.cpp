@@ -258,7 +258,8 @@ RunReport run_network_client(const LaunchOptions& options,
           !definition.remote_play->spawn_prediction->diagnostic_throw_input)) ||
         (options.input_tape_push &&
          (!definition.remote_play->active_interaction() ||
-          !definition.remote_play->active_interaction()->diagnostic_push_input)))
+          !definition.remote_play->active_interaction()->diagnostic_push_input)) ||
+        (options.input_tape_collision && !definition.remote_play->diagnostic_collision_input))
         return fail(report, "game or autopilot unavailable");
 
     replication::InputWindow window;
@@ -873,7 +874,10 @@ RunReport run_network_client(const LaunchOptions& options,
                                                       1e-9));
         }
         ActionState actions{};
-        if (options.input_tape_push)
+        if (options.input_tape_collision)
+            actions = definition.remote_play->diagnostic_collision_input(report.ticks + 1,
+                                                                         seat ? seat->index : 0);
+        else if (options.input_tape_push)
             actions = interaction->diagnostic_push_input(report.ticks + 1);
         else if (options.input_tape_throw)
             actions =

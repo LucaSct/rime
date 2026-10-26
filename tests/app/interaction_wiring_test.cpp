@@ -18,6 +18,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -718,4 +719,131 @@ TEST_CASE("interaction: measured resting-crate speed against the 0.05 m/s rest b
                 static_cast<double>(late.crate_body().position.z),
                 static_cast<double>(late.game.player_position().z));
     CHECK(idle_sleep_tick > 0);
+}
+
+TEST_CASE("crate contact skin bounds overlap for 120 held ticks and still pushes") {
+    const auto run = [](bool clip) {
+        Server server;
+        server.game.set_crate_clip_enabled(clip);
+        float maximum = 0.0f;
+        std::uint32_t touching_ticks = 0;
+        for (std::uint32_t tick = 1; tick <= 120; ++tick) {
+            server.step(walk(tick, -1.0f));
+            maximum = std::max(maximum, server.game.player_crate_overlap_before_step());
+            touching_ticks += server.crate_body().touching_player != 0 ? 1u : 0u;
+        }
+        return std::tuple{maximum, server.crate_body().position.z, touching_ticks};
+    };
+    const auto [clipped_overlap, clipped_z, clipped_contacts] = run(true);
+    const auto [control_overlap, control_z, control_contacts] = run(false);
+    CHECK(clipped_overlap <= 0.015f); // 1 cm skin + 5 mm solver/rounding allowance
+    CHECK(clipped_z < -2.6f);
+    CHECK(clipped_contacts > 0);
+    CHECK(control_overlap > 0.015f);
+    std::printf("crate skin: clipped max %.6f m, crate z %.6f m, contacts %u; control max %.6f m, "
+                "crate z %.6f m, contacts %u\n",
+                static_cast<double>(clipped_overlap),
+                static_cast<double>(clipped_z),
+                clipped_contacts,
+                static_cast<double>(control_overlap),
+                static_cast<double>(control_z),
+                control_contacts);
+}
+
+TEST_CASE("crate move and slide preserves motion along its side") {
+    Server server;
+    auto* state = server.world().get<hello_game::PlayerState>(server.player);
+    auto* transform = server.world().get<ecs::WorldTransform>(server.player);
+    auto* local = server.world().get<ecs::LocalTransform>(server.player);
+    REQUIRE(state != nullptr);
+    REQUIRE(transform != nullptr);
+    REQUIRE(local != nullptr);
+    state->position = {0.80f, state->position.y, -1.0f};
+    transform->value.translation = state->position;
+    local->value.translation = state->position;
+    float maximum = 0.0f;
+    for (std::uint32_t tick = 1; tick <= 36; ++tick) {
+        server.step(walk(tick, -1.0f));
+        maximum = std::max(maximum, server.game.player_crate_overlap_before_step());
+    }
+    const auto* after = server.world().get<hello_game::PlayerState>(server.player);
+    REQUIRE(after != nullptr);
+    CHECK(after->position.x > 0.81f); // the side normal actually clipped the x overlap
+    CHECK(after->position.z < -2.0f);
+    CHECK(maximum <= 0.015f);
+    std::printf("crate slide: z %.6f -> %.6f m, max overlap %.6f m\n",
+                -1.0,
+                static_cast<double>(after->position.z),
+                static_cast<double>(maximum));
+}
+
+TEST_CASE("crate footprint follows yaw rather than an axis aligned square") {
+    Server server;
+    auto* player = server.world().get<hello_game::PlayerState>(server.player);
+    auto* player_world = server.world().get<ecs::WorldTransform>(server.player);
+    auto* player_local = server.world().get<ecs::LocalTransform>(server.player);
+    auto* crate = server.world().get<hello_game::CrateBody>(server.crate);
+    auto* crate_world = server.world().get<ecs::WorldTransform>(server.crate);
+    auto* crate_local = server.world().get<ecs::LocalTransform>(server.crate);
+    REQUIRE(player != nullptr);
+    REQUIRE(player_world != nullptr);
+    REQUIRE(player_local != nullptr);
+    REQUIRE(crate != nullptr);
+    REQUIRE(crate_world != nullptr);
+    REQUIRE(crate_local != nullptr);
+    player->position = {1.0f, player->position.y, -2.5f};
+    player_world->value.translation = player->position;
+    player_local->value.translation = player->position;
+    const auto yaw = core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, 0.785398163f);
+    crate->orientation = yaw;
+    crate_world->value.rotation = yaw;
+    crate_local->value.rotation = yaw;
+    server.step(walk(1, 0.0f));
+    const auto* moved = server.world().get<hello_game::PlayerState>(server.player);
+    REQUIRE(moved != nullptr);
+    CHECK(moved->position.x > 1.04f);
+    CHECK(server.game.player_crate_overlap_before_step() <= 0.015f);
+}
+
+TEST_CASE("two kinematic players stop at contact and neither passes through") {
+    app::Application application{server_config()};
+    auto& world = application.world();
+    hello_game::register_components(world);
+    hello_game::build_arena(world);
+    scene::derive_world_transforms(world, application.jobs());
+    hello_game::HelloGame game;
+    app::SetupContext setup{world, application.jobs(), kDt, {}};
+    setup.seats = 2;
+    REQUIRE(game.setup(setup));
+    const app::PlayerSlot left{0, 0};
+    const app::PlayerSlot right{1, 0};
+    app::TickContext joined{world, kDt, 0};
+    REQUIRE(game.on_player_joined(joined, left));
+    REQUIRE(game.on_player_joined(joined, right));
+    const auto a = hello_game::seat_player(world, left);
+    const auto b = hello_game::seat_player(world, right);
+    REQUIRE(world.is_alive(a));
+    REQUIRE(world.is_alive(b));
+    float minimum = 100.0f;
+    for (std::uint64_t tick = 0; tick < 60; ++tick) {
+        std::array<app::PlayerInput, 2> inputs{};
+        inputs[0].slot = left;
+        inputs[0].actions.axes[hello_game::kAxisMoveX] = 1.0f;
+        inputs[1].slot = right;
+        inputs[1].actions.axes[hello_game::kAxisMoveX] = -1.0f;
+        app::TickContext context{world, kDt, tick};
+        context.players = inputs;
+        game.fixed_tick(context);
+        const auto* first = world.get<hello_game::PlayerState>(a);
+        const auto* second = world.get<hello_game::PlayerState>(b);
+        REQUIRE(first != nullptr);
+        REQUIRE(second != nullptr);
+        const float distance = std::abs(second->position.x - first->position.x);
+        minimum = std::min(minimum, distance);
+        CHECK(first->position.x < second->position.x);
+    }
+    CHECK(minimum >= 0.699f); // 2r - 1 mm floating-point allowance
+    std::printf("players contact: minimum distance %.6f m, required %.6f m\n",
+                static_cast<double>(minimum),
+                0.699);
 }

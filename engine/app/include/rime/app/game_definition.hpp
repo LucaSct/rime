@@ -608,6 +608,10 @@ struct GameDefinition {
         // `owned_player` serves every occupant of its one seat, as before.
         ecs::Entity (*seat_player)(ecs::World&, PlayerSlot) = nullptr;
 
+        // A two-seat process diagnostic can choose each seat's path without teaching the host
+        // the game's axes or spawn geometry.
+        ActionState (*diagnostic_collision_input)(std::uint64_t, std::uint16_t) = nullptr;
+
         // Whether the interaction profile is ACTIVE: declared, and riding a declared spawn
         // profile (see InteractionProfile). One predicate so the server, the client and the
         // identity cannot disagree about it.

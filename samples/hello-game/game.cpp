@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -49,6 +51,8 @@ constexpr std::uint32_t kCapsuleShape = static_cast<std::uint32_t>(physics::Shap
 constexpr float kArenaHalf = 9.0f;
 constexpr float kFloorHalfY = 0.5f;
 constexpr float kCrateHalf = 0.5f;
+// A shallow overlap keeps a solver contact while the kinematic pose stays visually outside.
+constexpr float kContactSkin = 0.01f;
 // The CENTRE of the ring, not a point on it. Starting on the ring would put the player inside
 // marker 0 at tick zero and collect it for free — which passed the self-check and made the first
 // reported collection tick 1, a number that looks like a working trigger and is really a spawn
@@ -238,7 +242,63 @@ std::uint64_t collection_time(const ReplicatedGameState& state, std::size_t inde
 
 // Fixed tick and prediction call this exact arithmetic, so a replay cannot drift because its
 // controller used a separately maintained interpretation of movement or clamping.
-void integrate_player(PlayerState& state, const Intent& intent, float dt) {
+struct CratePose {
+    core::Vec3 position;
+    core::Quat rotation;
+};
+
+// The prediction world owns only this player's body. Its mirror supplies the latest known other
+// seats and crate; replay must use that same snapshot until a newer world update arrives.
+struct PredictionMirror {
+    ecs::World* world = nullptr;
+    ecs::Entity own_player{};
+};
+
+struct PredictionCratePose {
+    CratePose pose{};
+    bool valid = false;
+};
+
+// Local x/z coordinates make the same circle-vs-oriented-square rule work as the crate yaws.
+// Return the outward normal and overlap depth, including a deterministic nearest-face choice
+// when the circle centre is inside the square.
+float crate_overlap(core::Vec3 position, const CratePose& crate, core::Vec3& normal) {
+    // Only yaw defines the requested floor footprint. A dynamic crate may acquire pitch/roll;
+    // folding those into x/z would shrink or tilt the square seen by the character.
+    const core::Vec3 forward = core::rotate(crate.rotation, {0.0f, 0.0f, 1.0f});
+    const float yaw = std::atan2(forward.x, forward.z);
+    const core::Quat floor_rotation = core::quat_from_axis_angle({0.0f, 1.0f, 0.0f}, yaw);
+    const core::Vec3 local =
+        core::rotate(core::conjugate(floor_rotation), position - crate.position);
+    const float nearest_x = std::clamp(local.x, -kCrateHalf, kCrateHalf);
+    const float nearest_z = std::clamp(local.z, -kCrateHalf, kCrateHalf);
+    const float dx = local.x - nearest_x;
+    const float dz = local.z - nearest_z;
+    const float distance = std::sqrt(dx * dx + dz * dz);
+    float depth = HelloGame::kPlayerRadius - distance;
+    core::Vec3 local_normal{};
+    if (distance > 1e-6f) {
+        local_normal = {dx / distance, 0.0f, dz / distance};
+    } else {
+        const float x_clearance = kCrateHalf - std::abs(local.x);
+        const float z_clearance = kCrateHalf - std::abs(local.z);
+        if (x_clearance <= z_clearance) {
+            local_normal = {local.x < 0.0f ? -1.0f : 1.0f, 0.0f, 0.0f};
+            depth += x_clearance;
+        } else {
+            local_normal = {0.0f, 0.0f, local.z < 0.0f ? -1.0f : 1.0f};
+            depth += z_clearance;
+        }
+    }
+    normal = core::rotate(floor_rotation, local_normal);
+    return depth;
+}
+
+void integrate_player(PlayerState& state,
+                      const Intent& intent,
+                      float dt,
+                      std::optional<CratePose> crate,
+                      std::span<const core::Vec3> others) {
     const core::Vec3 before = state.position;
     core::Vec3 dir = intent.move;
     const float len = core::length(dir);
@@ -254,9 +314,36 @@ void integrate_player(PlayerState& state, const Intent& intent, float dt) {
     state.position.x = std::clamp(state.position.x, -limit, limit);
     state.position.z = std::clamp(state.position.z, -limit, limit);
     state.position.y = kPlayerStart.y;
-    // The clamp can stop motion even while an axis stays held. Record actual displacement per
-    // second, which is the kinematic velocity the physics bridge sees, not the unfulfilled wish.
-    state.velocity = (state.position - before) * (1.0f / dt);
+    core::Vec3 push_velocity{};
+    const auto clip_crate = [&] {
+        if (!crate)
+            return;
+        core::Vec3 normal{};
+        const float depth = crate_overlap(state.position, *crate, normal);
+        if (depth <= kContactSkin)
+            return;
+        state.position = state.position + normal * (depth - kContactSkin);
+        // Kinematic character move and slide keeps the tangential displacement. The contact
+        // skin lets the solver see a contact; its velocity still carries the intended inward
+        // component, so the dynamic crate is pushed at walking speed instead of being teleported.
+        const float inward = std::min(0.0f, core::dot(dir, normal));
+        push_velocity = normal * (inward * HelloGame::kPlayerSpeed);
+    };
+    clip_crate();
+    for (const core::Vec3 other : others) {
+        core::Vec3 away{state.position.x - other.x, 0.0f, state.position.z - other.z};
+        const float distance = core::length(away);
+        const float reach = 2.0f * HelloGame::kPlayerRadius;
+        if (distance >= reach)
+            continue;
+        // Another kinematic capsule cannot yield to the solver. Separate this seat in roster
+        // order; projecting only onto the separating normal preserves motion along the contact.
+        away = distance > 1e-6f ? away * (1.0f / distance) : core::Vec3{1.0f, 0.0f, 0.0f};
+        state.position = state.position + away * (reach - distance);
+    }
+    // A neighbouring player can push the result toward the crate. Restore the crate invariant.
+    clip_crate();
+    state.velocity = (state.position - before) * (1.0f / dt) + push_velocity;
 }
 
 // A player's state at its start pose: at rest, facing -z, with its own three throws.
@@ -471,6 +558,7 @@ void HelloGame::gather_inputs(const app::TickContext& ctx) {
 // per-player loop runs in ascending seat index, the order both a server and a replay see.
 void HelloGame::fixed_tick(app::TickContext& ctx) {
     gather_inputs(ctx);
+    player_crate_overlap_before_step_ = 0.0f;
     // Quitting is the LOCAL player's wish: one seat only. A remote player's quit bit never
     // reaches a server (hello-game's command mapper drops it), and with several seats there is no
     // one player whose Escape may end the round for everyone.
@@ -490,7 +578,37 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
     }
     for (std::size_t i = 0; i < players_.size(); ++i)
         move_player(ctx.world, players_[i], intent_from(inputs_[i].actions), step);
-    sync_.step(ctx.world, physics_, step);
+    maximum_player_crate_overlap_ =
+        std::max(maximum_player_crate_overlap_, player_crate_overlap_before_step_);
+    for (std::size_t i = 0; i < players_.size(); ++i)
+        for (std::size_t j = i + 1; j < players_.size(); ++j) {
+            const auto* a = ctx.world.get<PlayerState>(players_[i].entity);
+            const auto* b = ctx.world.get<PlayerState>(players_[j].entity);
+            if (a && b) {
+                const core::Vec3 delta{
+                    a->position.x - b->position.x, 0.0f, a->position.z - b->position.z};
+                minimum_player_distance_ = std::min(minimum_player_distance_, core::length(delta));
+            }
+        }
+    sync_.reconcile(ctx.world, physics_);
+    sync_.push_in(ctx.world, physics_, step);
+    // PhysicsSync normally derives kinematic velocity from the pose delta. At the contact skin
+    // that delta is nearly zero, though the player still intends to push. Give the solver the
+    // controller's intended contact velocity after the bridge has placed the bodies.
+    for (const Player& player : players_) {
+        const auto* self = ctx.world.get<PlayerState>(player.entity);
+        const auto* handle = ctx.world.get<physics::RigidBodyHandle>(player.entity);
+        if (!self || !handle)
+            continue;
+        physics::BodyState body{};
+        if (physics_.get_body_state(handle->body, body) &&
+            core::length_squared(body.linear_velocity - self->velocity) > 1e-8f) {
+            body.linear_velocity = self->velocity;
+            (void)physics_.set_body_state(handle->body, body);
+        }
+    }
+    physics_.step(step);
+    sync_.write_back(ctx.world, physics_);
     // Bind the markers' body ids once the bridge has created them. It cannot be done in `setup`:
     // `RigidBodyHandle` is added by `reconcile`, which first runs inside this call.
     bind_bodies(ctx.world);
@@ -510,6 +628,14 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
         }
         ctx.world.mark_changed<ReplicatedGameState>(state_entity_);
     }
+    // An opt-in process diagnostic reports geometry from the authoritative server. It is read
+    // after the two-seat tape; client mirrors cannot establish the server's smallest separation.
+    if (ctx.tick == 899 && std::getenv("RIME_COLLISION_DIAGNOSTIC"))
+        std::printf("{\"event\":\"collision_diagnostic\",\"min_player_distance\":%.6f,"
+                    "\"max_player_crate_overlap\":%.6f,\"crate_z\":%.6f}\n",
+                    static_cast<double>(minimum_player_distance_),
+                    static_cast<double>(maximum_player_crate_overlap_),
+                    static_cast<double>(ctx.world.get<CrateBody>(crate_)->position.z));
 }
 
 void HelloGame::throw_step(app::TickContext& ctx,
@@ -623,7 +749,23 @@ void HelloGame::move_player(ecs::World& world,
     auto* self = world.get<PlayerState>(player.entity);
     if (!self)
         return;
-    integrate_player(*self, intent, dt);
+    std::optional<CratePose> crate;
+    if (crate_clip_enabled_)
+        if (const auto* body = world.get<CrateBody>(crate_))
+            crate = CratePose{body->position, body->orientation};
+    std::vector<core::Vec3> others;
+    others.reserve(players_.size() - 1);
+    for (const Player& other : players_)
+        if (other.entity != player.entity)
+            if (const auto* state = world.get<PlayerState>(other.entity))
+                others.push_back(state->position);
+    integrate_player(*self, intent, dt, crate, others);
+    if (const auto* body = world.get<CrateBody>(crate_)) {
+        core::Vec3 normal{};
+        player_crate_overlap_before_step_ =
+            std::max(player_crate_overlap_before_step_,
+                     crate_overlap(self->position, {body->position, body->orientation}, normal));
+    }
     world.mark_changed<PlayerState>(player.entity);
     if (auto* wt = world.get<ecs::WorldTransform>(player.entity)) {
         wt->value.translation = self->position;
@@ -1235,7 +1377,33 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
         app::ActionState actions{};
         actions.axes[kAxisMoveX] = command.move_x;
         actions.axes[kAxisMoveZ] = command.move_y;
-        integrate_player(*state, intent_from(actions), static_cast<float>(step.fixed_dt));
+        std::optional<CratePose> crate;
+        if (const auto* predicted = bound->get<PredictionCratePose>(player);
+            predicted && predicted->valid)
+            crate = predicted->pose;
+        std::vector<core::Vec3> others;
+        if (const auto* mirror = bound->get<PredictionMirror>(player); mirror && mirror->world) {
+            std::vector<std::pair<std::uint16_t, core::Vec3>> seats;
+            mirror->world->query<PlayerState, app::PlayerOwner>().for_each(
+                [&](ecs::Entity entity, const PlayerState& other, const app::PlayerOwner& owner) {
+                    if (entity != mirror->own_player)
+                        seats.emplace_back(owner.index, other.position);
+                });
+            std::sort(seats.begin(), seats.end(), [](const auto& a, const auto& b) {
+                return a.first < b.first;
+            });
+            for (const auto& [index, position] : seats) {
+                (void)index;
+                others.push_back(position);
+            }
+            if (!crate)
+                mirror->world->query<ReplicatedGameState>().for_each(
+                    [&](ecs::Entity, const ReplicatedGameState& shared) {
+                        crate = CratePose{shared.crate_position, shared.crate_rotation};
+                    });
+        }
+        integrate_player(
+            *state, intent_from(actions), static_cast<float>(step.fixed_dt), crate, others);
         if (state->throw_cooldown > 0)
             --state->throw_cooldown;
         const core::Vec3 wished{command.move_x, 0.0f, command.move_y};
@@ -1472,9 +1640,10 @@ physics::BodyDesc body_desc(const physics::RigidBody& rb,
 //      warm-start contact cache and the solver state of the timeline the correction just threw
 //      away, and replaying from "the same" checkpoint would then depend on what happened before.
 //   2. DIRECT KINEMATIC DRIVE. The player body is set with `set_body_state` from the predicted
-//      controller state each step -- position, and the velocity the controller already computed
-//      as actual displacement / dt (`integrate_player`), which is exactly what PhysicsSync derives
-//      on the server. Never `PhysicsSync::push_in`: it differentiates against a private
+//      controller state each step -- position, and the velocity `integrate_player` computed from
+//      displacement plus intended push at the contact skin. The server overrides PhysicsSync's
+//      displacement velocity with that same value before stepping. Never `PhysicsSync::push_in`
+//      here: it differentiates against a private
 //      last-pushed pose, so after a restore it would invent a velocity the size of the correction
 //      and fire the crate off.
 //   3. SLEEPING OFF. A sleeping body is state no checkpoint carries.
@@ -1582,6 +1751,11 @@ InteractionProfile::ClientHooks interaction_client_hooks(
                               std::span<const replication::PredictedEntityId> members,
                               const replication::InputCommand& command,
                               const replication::PredictionStep& step) {
+        physics::BodyState crate{};
+        const bool valid =
+            state->physics && state->physics->get_body_state(state->crate_body, crate);
+        state->world->add_component(
+            state->player, PredictionCratePose{{crate.position, crate.orientation}, valid});
         next(members, command, step);
         state->touching = false;
         if (std::find(members.begin(), members.end(), state->object) != members.end())
@@ -1635,18 +1809,29 @@ InteractionProfile::ClientHooks interaction_client_hooks(
 //                            pushes it ~2.7 m for the last 40 ticks: the crate moves at 4 m/s
 //  246-275  retreat 2 m      back to ~3.3 m away, still a member (inside 6.117 m)
 //  276-315  stand            the crate rests; KICK #1 lands here, the crate being a member
-//  316-405  retreat 6 m      beyond 6.117 m, at rest: leaves (t ~ 358)
-//  406-425  stand
-//  426-520  walk back -z     KICK #2 lands ~15 ticks before the unkicked join (t ~ 501): the crate
-//                            slides toward the player (0.41 m, ~24 ticks at mu 0.5) and the
-//                            player's closing speed drags the join inside that window -- a JOIN
-//                            WHILE SLIDING
+//  316-381  retreat 4.4 m    beyond 6.117 m, at rest: leaves; the clipped controller has pushed
+//                            the crate 1.57 m farther than the old penetration-driven path
+//  382-425  stand            keep the second approach's timing so KICK #2 is still a non-member
+//  426-520  walk back -z     the shorter retreat puts the re-join inside the sliding window again
 //  521-600  stand            the crate comes to rest as a member
 app::ActionState push_tape(std::uint64_t tick) {
     app::ActionState actions{};
-    if ((tick >= 11 && tick <= 90) || (tick >= 246 && tick <= 275) || (tick >= 316 && tick <= 405))
+    if ((tick >= 11 && tick <= 90) || (tick >= 246 && tick <= 275) || (tick >= 316 && tick <= 381))
         actions.axes[kAxisMoveZ] = 1.0f;
     else if ((tick >= 101 && tick <= 245) || (tick >= 426 && tick <= 520))
+        actions.axes[kAxisMoveZ] = -1.0f;
+    return actions;
+}
+
+// Two seated clients first meet on x, then seat 1 turns toward the crate. Both paths are fixed
+// by client tick so the process proof can measure the server contact, independent of mirror lag.
+app::ActionState collision_tape(std::uint64_t tick, std::uint16_t seat) {
+    app::ActionState actions{};
+    if (tick <= 18)
+        actions.axes[kAxisMoveX] = seat == 0 ? 1.0f : -1.0f;
+    else if (seat == 1 && tick >= 25 && tick <= 42)
+        actions.axes[kAxisMoveX] = 1.0f;
+    else if (seat == 1 && tick >= 45 && tick <= 200)
         actions.axes[kAxisMoveZ] = -1.0f;
     return actions;
 }
@@ -1714,7 +1899,8 @@ app::GameDefinition definition() {
             // prediction world still contains exactly one entity.
             const auto* state = mirror.get<PlayerState>(mirror_player);
             return prediction.spawn_with(wt ? *wt : ecs::WorldTransform{},
-                                         state ? *state : PlayerState{});
+                                         state ? *state : PlayerState{},
+                                         PredictionMirror{&mirror, mirror_player});
         },
         [](const ecs::World& world, ecs::Entity player) {
             core::Transform pose{};
@@ -1747,6 +1933,7 @@ app::GameDefinition definition() {
     def.max_players = 16;
     def.default_max_clients = 1;
     def.remote_play->seat_player = seat_player;
+    def.remote_play->diagnostic_collision_input = collision_tape;
     def.remote_play->spawn_prediction =
         app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile{
             1,
