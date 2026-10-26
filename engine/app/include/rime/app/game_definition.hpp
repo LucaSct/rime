@@ -12,6 +12,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "rime/app/seat_table.hpp"
@@ -163,6 +164,15 @@ private:
 // (a network session, an asset bridge) without touching every game's signature.
 
 struct SetupContext {
+    // A constructor for the m20.1/m20.2 fields, for TickContext's reason: every host and proof
+    // brace-initialises `{world, jobs, fixed_dt, content_root}`, and a trailing field that list
+    // omits would be a -Wmissing-field-initializers error at each of them. `seats` is set by name.
+    SetupContext(ecs::World& world_,
+                 core::JobSystem& jobs_,
+                 double fixed_dt_,
+                 std::filesystem::path content_root_ = {})
+        : world(world_), jobs(jobs_), fixed_dt(fixed_dt_), content_root(std::move(content_root_)) {}
+
     ecs::World& world;
     core::JobSystem& jobs;
     // The constant every tick advances by — the fixed-tick contract, available before the first
@@ -171,6 +181,14 @@ struct SetupContext {
     // Where this run's content lives (m20.2) — the root the entry scene was loaded from, for a game
     // that reads more files than its entry scene. Empty when the game declares no content.
     std::filesystem::path content_root{};
+    // m20.8b2: how many players THIS RUN may seat -- `min(--max-clients, max_players)` on a
+    // listening server, 1 everywhere else (local play, offline, the autopilot). It is the one fact
+    // a game cannot learn later: with 1, the game builds its single player here, before anyone
+    // connects, exactly as every game before m20.8 did (and the one-seat server binds that body);
+    // above 1, every player arrives through `on_player_joined`, so setup must build none -- an
+    // unowned body in the world would be simulated, digested and replicated as a ghost. A game
+    // with `max_players == 1` never sees anything but 1.
+    std::uint16_t seats = 1;
 };
 
 // COMMAND PROVENANCE (m20.5b, ADR-0105 Consequences): which client command a server tick executed.
@@ -351,6 +369,16 @@ public:
     // keeps its own entity handles; binding them here lets its normal presentation and autopilot
     // read that mirror without simulating or duplicating it.
     [[nodiscard]] virtual bool bind_remote_world(ecs::World&) { return false; }
+
+    // m20.8b2: the same, on a multi-seat server, for the client seated at `seat`. The mirror then
+    // holds several players and only the seat says which one is "mine" (the one the camera
+    // follows, the one presentation dresses as the local player). A distinct name rather than an
+    // overload of the one above, so a game overriding one does not hide the other. The default
+    // ignores the seat, which is right for a game whose presentation has no "own player".
+    [[nodiscard]] virtual bool bind_remote_seat(ecs::World& world, PlayerSlot seat) {
+        (void)seat;
+        return bind_remote_world(world);
+    }
 
     // A hash of the game's SIMULATED state — what a dedicated server and a player must agree on.
     // Game-defined because only the game knows which state is authoritative (a camera pose is not,
@@ -597,6 +625,13 @@ struct GameDefinition {
     // through `TickContext::players` and the seat hooks. The operator may lower the cap at launch,
     // never raise it: a game that was not written for 64 players must not be handed 64.
     std::uint16_t max_players = 1;
+
+    // m20.8b2: the seat count a listening server uses when the operator names none (`dedicated
+    // --listen` without `--max-clients`). 0 means ADR-0108 §5's default, `min(16, max_players)`.
+    // A game may ask for less -- hello-game asks for 1, because every m20.3-m20.7 proof runs it
+    // as ONE seat with one-seat diagnostics -- and the operator may still raise it up to
+    // `max_players` with `--max-clients`. Clamped to `max_players`; never a ceiling of its own.
+    std::uint16_t default_max_clients = 0;
 
     // Make a fresh game. Required.
     std::function<std::unique_ptr<Game>()> create;

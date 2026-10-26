@@ -292,8 +292,8 @@ struct NetworkInputServer::Impl {
         // is what keeps a one-seat reconnect's checkpoint bytes unchanged.
         std::uint32_t membership_epoch = 0;
         // The interaction membership leaf for THIS seat's player (membership is "is this player
-        // near the object", so two players are two policies). One-seat: built once and kept, as
-        // m20.6b did. Multi-seat: rebuilt for each occupant, whose body is a different one.
+        // near the object"). One-seat: built once and kept, as m20.6b did. Multi-seat: never
+        // built (m20.8b2, bind_owner) -- the object is mirrored until contention has a rule.
         std::optional<InteractionMembershipPolicy> policy;
         RunReport::NetworkInputCounters::SeatCounters counts{};
     };
@@ -318,7 +318,9 @@ struct NetworkInputServer::Impl {
         : link(std::move(supplied_link)), driver(link, driver_config(seat_capacity(seat_config))),
           profile(profile), world(world), remote_play(remote_play), fault(fault),
           fault_ticks(fault_ticks), input_slack(input_slack), adaptive_input(adaptive_input),
-          multi_seat(seat_config.max_players > 1),
+          // m20.8b2: the SEAT COUNT selects the path, not the game's ceiling -- a 16-player game
+          // run with one seat is m20.7's server (launch.cpp's run_seats has the argument).
+          multi_seat(seat_capacity(seat_config) > 1),
           neutral_after_ticks(static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz * 0.1)))),
           // A one-seat table never rate-limits (window 0): one seat cannot be hoarded, and m20.7
           // admitted every reconnect. Multi-seat: `join_burst` admissions per second of ticks.
@@ -329,6 +331,9 @@ struct NetworkInputServer::Impl {
                   multi_seat ? static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz)))
                              : 0u}) {
         driver.listen();
+        // The GAME's ceiling, whatever this run seats: "a client of this game must be ready for
+        // a seat" is the contract the marker names, and a client offering both codecs follows the
+        // one this server picks.
         schema_hash = input_schema_identity(profile, remote_play, seat_config.max_players);
         server_codec = multi_seat ? kInputCodecV3 : kInputCodecV2;
         seats.resize(table.max_seats());
@@ -939,8 +944,12 @@ struct NetworkInputServer::Impl {
         seat.owner = owner;
         seat.owner_net_id = net_id;
         seat.hooks = std::move(hooks);
-        if (interaction && interaction->object)
-            seat.policy.emplace(interaction->params);
+        // m20.8b2: NO interaction policy on a multi-seat server. Membership is "is this player
+        // near the object", and two seats near one crate would be two clients each predicting
+        // it and each corrected by the other's pushes -- contention, which ADR-0106's one-owner
+        // group has no rule for (a later brick's). Until then the object is MIRRORED for every
+        // seat: no seat's roster ever names it, so each client draws the server's crate, and the
+        // client's decorated hooks simply never see it join.
         return true;
     }
 
@@ -1359,11 +1368,11 @@ NetworkInputServer::bind(const std::string& host,
     }
     // The fault state names ONE client's sequence, ack and epoch; on a multi-seat server it would
     // be shared between players. A diagnostic must not be the aliasing bug it exists to find.
-    if (seats.max_players > 1 && fault != SpawnFault::None) {
+    const bool multi = Impl::seat_capacity(seats) > 1;
+    if (multi && fault != SpawnFault::None) {
         error = "spawn faults are one-seat diagnostics";
         return nullptr;
     }
-    const bool multi = seats.max_players > 1;
     if (remote_play && !multi && !world.is_alive(remote_play->owned_player(world))) {
         error = "owned player is not alive";
         return nullptr;
@@ -1401,7 +1410,7 @@ NetworkInputServer::on_link(net::Link& link,
                             std::string& error,
                             SeatConfig seats,
                             bool adaptive_input) {
-    const bool multi = seats.max_players > 1;
+    const bool multi = Impl::seat_capacity(seats) > 1;
     if (remote_play_incomplete(remote_play, seats) != nullptr ||
         (remote_play && !multi && !world.is_alive(remote_play->owned_player(world)))) {
         error = "remote play profile has no live owned player";

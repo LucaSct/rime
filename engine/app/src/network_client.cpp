@@ -24,6 +24,7 @@
 
 #include "rime/app/application.hpp"
 #include "rime/app/network_input.hpp"
+#include "rime/app/player_owner.hpp"
 #include "rime/ecs/render_transform.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/net/link.hpp"
@@ -328,11 +329,17 @@ RunReport run_network_client(const LaunchOptions& options,
     std::uint32_t epoch = 0;
     bool has_epoch = false, accepted = false, disconnected = false, graceful = false;
     // m20.8b: the seat a multi-seat (codec 3) server gave this client, as its hello reply said.
-    // Recorded and announced; finding the seat's own body in the mirror (a replicated owner
-    // component and `owned_player(World&, PlayerSlot)`) is m20.8b2's, with the first game that
-    // seats more than one player. A one-player game's server sends no seat and this stays empty.
+    // m20.8b2 uses it to find this client's own body in the mirror (`seat_player`, which a game
+    // answers from the replicated `PlayerOwner`). A one-seat server sends no seat; it stays empty.
     std::optional<PlayerSlot> seat;
-    const bool multi_seat = definition.max_players > 1;
+    // m20.8b2: a game that CAN seat several players offers both codecs and follows the server's
+    // pick: codec 3 means a multi-seat server (a seat in the reply, the body found by seat), codec
+    // 2 a one-seat server of the same game (`--max-clients 1`: m20.7's path, `owned_player`). The
+    // pick is the only input to the choice, so the two ends cannot disagree about it -- and a
+    // build that disagrees about whether the GAME seats players at all differs in the identity's
+    // "rime.seats" marker and is refused as `schema`, counted, before anything flows.
+    const bool seat_capable = definition.max_players > 1;
+    bool multi_seat = false;
     std::string failure_reason;
     std::uint64_t checkpoints = 0, replayed = 0, max_replay = 0;
     std::uint64_t response_ticks = 0, snaps_over_bound = 0;
@@ -607,14 +614,13 @@ RunReport run_network_client(const LaunchOptions& options,
                     input_profile.profile_version = options.profile_version_override;
                 if (options.has_fixed_dt_override)
                     remote_profile.fixed_dt = options.fixed_dt_override;
-                // One codec, the one this game's server speaks: 3 (a seat in the reply) for a
-                // multi-seat game, else m20.3's 2. Offering only that one keeps a mismatch a
-                // counted `version` refusal on the server rather than a silent downgrade.
-                const std::uint8_t codec =
-                    multi_seat ? replication::kInputCodecV3 : replication::kInputCodecV2;
+                // A one-player game offers codec 2 alone, m20.3's hello byte for byte. A game
+                // that can seat several offers 2..3 and lets the server's seat count decide (see
+                // `seat_capable`): not a silent downgrade, because codec 2 IS this game's
+                // one-seat server, and the identity already refused every other disagreement.
                 replication::InputHello hello{
-                    codec,
-                    codec,
+                    replication::kInputCodecV2,
+                    seat_capable ? replication::kInputCodecV3 : replication::kInputCodecV2,
                     input_schema_identity(input_profile, &remote_profile, definition.max_players)};
                 std::array<std::byte, replication::kInputHelloBytes> bytes{};
                 const auto size = replication::encode_input_hello(hello, bytes);
@@ -652,13 +658,14 @@ RunReport run_network_client(const LaunchOptions& options,
                                      : reply.refusal == Refusal::RateLimited ? "rate_limited"
                                      : reply.refusal == Refusal::GameRefused ? "game_refused"
                                                                              : "full";
-                } else if (multi_seat && reply.seated && !seat) {
+                } else if (reply.codec == replication::kInputCodecV3 && reply.seated && !seat) {
+                    multi_seat = true;
                     seat = PlayerSlot{reply.seat, reply.seat_generation};
                     fmt::print("{{\"event\":\"seated\",\"seat\":{},\"gen\":{}}}\n",
                                seat->index,
                                seat->generation);
                     std::fflush(stdout);
-                } else if (multi_seat && !reply.seated) {
+                } else if (reply.codec == replication::kInputCodecV3 && !reply.seated) {
                     // A codec-3 server always names the seat; an acceptance without one is a
                     // server we cannot attribute input to, so it is refused rather than guessed.
                     accepted = false;
@@ -696,16 +703,25 @@ RunReport run_network_client(const LaunchOptions& options,
             const auto& checkpoint = pending.back().base;
             if (!definition.remote_play->spawn_prediction && checkpoint.entities.size() != 1)
                 continue;
+            // Which body is mine: one-seat, the game's single `owned_player`; multi-seat, the
+            // body the game says this seat owns -- the mirror holds every player's, so "the
+            // player" no longer names one.
+            if (multi_seat && !definition.remote_play->seat_player)
+                return fail(report, "a multi-seat server needs the game's seat_player");
+            const ecs::Entity own = multi_seat
+                                        ? definition.remote_play->seat_player(mirror_world, *seat)
+                                        : definition.remote_play->owned_player(mirror_world);
             for (const auto& member : checkpoint.entities) {
                 const auto candidate =
                     mirror.map().resolve({member.id.index, member.id.generation});
-                if (candidate != ecs::kNullEntity &&
-                    candidate == definition.remote_play->owned_player(mirror_world)) {
+                if (candidate != ecs::kNullEntity && candidate == own) {
                     mirror_player = candidate;
                     break;
                 }
             }
-            if (mirror_player != ecs::kNullEntity && game->bind_remote_world(mirror_world)) {
+            if (mirror_player != ecs::kNullEntity &&
+                (multi_seat ? game->bind_remote_seat(mirror_world, *seat)
+                            : game->bind_remote_world(mirror_world))) {
                 predicted_player = definition.remote_play->seed_prediction(
                     mirror_world, prediction_world, mirror_player);
                 if (const auto& profile = definition.remote_play->spawn_prediction) {
@@ -1099,6 +1115,41 @@ RunReport run_network_client(const LaunchOptions& options,
     } else {
         spawn_metrics = ",\"prediction_path\":\"legacy\"";
     }
+    // m20.8b2, multi-seat only (a one-seat line keeps m20.7's bytes): this client's seat, and the
+    // final mirrored pose of EVERY seated body, read through the replicated PlayerOwner. The
+    // poses are the attribution evidence a digest cannot give: every client mirrors the same
+    // authority, so a server that applied seat A's commands to seat B's body is still green on
+    // digests -- but not on "seat A's body moved only along the axis seat A's tape drives".
+    std::string seat_metrics;
+    if (multi_seat && seat) {
+        seat_metrics = fmt::format(",\"seat\":{},\"gen\":{},\"players\":[", seat->index, seat->generation);
+        // Collected first, resolved after: `seat_player` runs its own query, and nesting one
+        // inside another's iteration is a reentrancy question this loop has no reason to ask.
+        std::vector<std::pair<ecs::Entity, PlayerOwner>> owned;
+        if (mirror_world.is_registered<PlayerOwner>())
+            mirror_world.query<PlayerOwner>().for_each(
+                [&](ecs::Entity entity, const PlayerOwner& owner) {
+                    owned.emplace_back(entity, owner);
+                });
+        bool first = true;
+        for (const auto& [entity, owner] : owned) {
+            if (!definition.remote_play->seat_player ||
+                definition.remote_play->seat_player(mirror_world, owner.slot()) != entity)
+                continue; // an owned entity that is not the seat's body (a projectile)
+            const core::Vec3 p =
+                definition.remote_play->player_pose(mirror_world, entity).translation;
+            seat_metrics += fmt::format("{}{{\"seat\":{},\"gen\":{},\"x\":{:.9g},"
+                                        "\"y\":{:.9g},\"z\":{:.9g}}}",
+                                        first ? "" : ",",
+                                        owner.index,
+                                        owner.generation,
+                                        static_cast<double>(p.x),
+                                        static_cast<double>(p.y),
+                                        static_cast<double>(p.z));
+            first = false;
+        }
+        seat_metrics += "]";
+    }
     fmt::print(
         "{{\"event\":\"finished\",\"frames_skipped\":{},\"ticks\":{},\"digest\":\"0x{:016x}\","
         "\"response_ticks\":{},\"max_snap\":{:.6f},\"snaps_over_bound\":{},"
@@ -1110,7 +1161,7 @@ RunReport run_network_client(const LaunchOptions& options,
         ",\"commands_sent\":{},\"pacing_reports\":{},\"pacing_stale\":{},"
         "\"pacer_windows\":{},\"pacer_windows_with_stall\":{},\"pacer_drains\":{},"
         "\"pacer_dilated_ticks\":{},\"pacer_drained_buffer_ticks\":{},\"last_margin\":{},"
-        "\"hitch_ticks\":{} }}\n",
+        "\"hitch_ticks\":{}{} }}\n",
         frames_skipped,
         report.ticks,
         report.state_digest,
@@ -1139,7 +1190,8 @@ RunReport run_network_client(const LaunchOptions& options,
         pacer.dilated_ticks(),
         pacer.drained_ticks_of_buffer(),
         static_cast<unsigned>(pacer.last_margin()),
-        hitch_ticks);
+        hitch_ticks,
+        seat_metrics);
     std::fflush(stdout);
     return report;
 }

@@ -173,7 +173,8 @@ std::string launch_usage(std::string_view program) {
         "                     instead of discarding the late command; pacing reports let the\n"
         "                     client drain the surplus) or fixed (retire on schedule)\n"
         "  --max-clients N    dedicated --listen: seat at most N players (1..128; default\n"
-        "                     min(16, the game's max players); may lower it, never raise it)\n"
+        "                     the game's default, else min(16, its max players); may lower\n"
+        "                     the game's max players, never raise it; 1 = one-seat server)\n"
         "  --debug-hitch T:MS play --connect, diagnostic: sleep MS ms (1..2000) at client tick T\n"
         "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
@@ -633,22 +634,35 @@ RunReport run_game_mode(const LaunchOptions& options,
                                   options.max_clients,
                                   max_players));
     }
+    // The operator's number, else the game's own default (m20.8b2: hello-game asks for 1), else
+    // ADR-0108 §5's min(16, max_players). Never above max_players: a game default is a default.
+    const std::uint16_t default_clients =
+        definition.default_max_clients != 0 ? definition.default_max_clients : kDefaultMaxClients;
     const SeatConfig seat_config{
         .max_players = max_players,
         .max_clients = options.max_clients != 0
                            ? options.max_clients
-                           : std::min<std::uint16_t>(kDefaultMaxClients, max_players)};
+                           : std::min<std::uint16_t>(default_clients, max_players)};
+    // m20.8b2: THE ONE-SEAT / MULTI-SEAT SELECTION. What decides the server's path is the seat
+    // count this run can actually fill, not the game's ceiling: a 16-player game started with
+    // `--max-clients 1` has one seat, and one seat is m20.7's server -- codec 2, the 3-byte hello
+    // reply, the player built in `setup`, and every one-seat diagnostic available. Only the
+    // IDENTITY keeps the game's ceiling (input_schema_identity's "rime.seats" marker is a fact
+    // about the game, not the run), and the client learns which path it is on from the codec the
+    // server picks (network_client.cpp), so the two ends cannot disagree about it.
+    const std::uint16_t run_seats = listening ? std::min(seat_config.max_clients, max_players) : 1;
     // The one-seat diagnostics: each names ONE client (its trace line, its spawn fault, its
     // crate kick). On a multi-seat server they would mix players, so they are refused there until
     // a per-seat form exists (m20.8c's per-seat applied trace).
-    if (listening && max_players > 1 &&
+    if (listening && run_seats > 1 &&
         (!options.input_trace.empty() || options.spawn_fault != SpawnFault::None ||
          !options.interaction_kicks.empty())) {
         report.usage_error = true;
         return refuse(report,
                       RunStatus::Failed,
                       "--input-trace, --spawn-fault and --interaction-fault are one-seat "
-                      "diagnostics; this game seats more than one player");
+                      "diagnostics; this run seats more than one player (--max-clients 1 "
+                      "runs one seat)");
     }
 
     // ── 1b. The content root, before anything is constructed (m20.2) ─────────────────────────────
@@ -749,6 +763,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                       fmt::format("--autopilot: '{}' ships no autopilot", definition.name));
     }
     SetupContext setup{app.world(), app.jobs(), app.fixed_dt(), report.content.dir};
+    setup.seats = run_seats;
     if (!game->setup(setup)) {
         return refuse(report, RunStatus::Failed, "the game's setup() refused to start");
     }
@@ -803,7 +818,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                    "\"auth\":\"none\"}}\n",
                    options.listen_host,
                    network->local_port(),
-                   max_players > 1 ? 3 : 2);
+                   run_seats > 1 ? 3 : 2);
         std::fflush(stdout);
         fmt::print(stderr,
                    "{}: unauthenticated server reachable on {}:{}\n",
