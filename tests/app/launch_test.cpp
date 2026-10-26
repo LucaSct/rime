@@ -293,7 +293,7 @@ TEST_CASE("launch: interaction diagnostics parse, are off by default, and are re
 TEST_CASE("launch: m20.7 --input-buffer and --debug-hitch parse, default off, and refuse misuse") {
     const auto none = parse({"dedicated", "--listen", "127.0.0.1:0"});
     REQUIRE(none.status == ParseStatus::Ok);
-    CHECK_FALSE(none.options.input_buffer_adaptive);
+    CHECK(none.options.input_buffer_adaptive); // the default since ADR-0107 was accepted
     CHECK(none.options.debug_hitch_tick == 0);
 
     const auto adaptive =

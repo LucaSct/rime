@@ -127,10 +127,9 @@ std::string launch_usage(std::string_view program) {
         "  --interaction-trace  connected: list every crate checkpoint correction\n"
         "  --spawn-fault-ticks N  window of duplicate / late-alive / late-ended, in server ticks\n"
         "  --input-slack N    dedicated: commands buffered before one executes (1..8, default 1)\n"
-        "  --input-buffer M   dedicated --listen: fixed (default) or adaptive (stall on an empty\n"
-        "                     buffer instead of discarding the late command; pacing reports let "
-        "the\n"
-        "                     client drain the surplus)\n"
+        "  --input-buffer M   dedicated --listen: adaptive (default: stall on an empty buffer\n"
+        "                     instead of discarding the late command; pacing reports let the\n"
+        "                     client drain the surplus) or fixed (retire on schedule)\n"
         "  --debug-hitch T:MS play --connect, diagnostic: sleep MS ms (1..2000) at client tick T\n"
         "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
@@ -260,7 +259,9 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             const auto value = args[++i];
             if (value == "adaptive")
                 result.options.input_buffer_adaptive = true;
-            else if (value != "fixed")
+            else if (value == "fixed")
+                result.options.input_buffer_adaptive = false;
+            else
                 return fail("--input-buffer needs fixed or adaptive, once");
             result.options.input_buffer_given = true;
         } else if (arg == "--debug-hitch") {

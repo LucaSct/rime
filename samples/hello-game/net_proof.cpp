@@ -739,8 +739,13 @@ int negative(const std::filesystem::path& binary) {
         const std::string key = name == "hello_version"  ? "hello_version"
                                 : name == "hello_schema" ? "hello_schema"
                                 : name == "full"         ? "clients_refused"
-                                : name == "silence"      ? "neutralized"
-                                                         : std::string(name);
+                                // Silence under the default ADAPTIVE buffer (ADR-0107) stalls:
+                                // each stalled tick runs a NEUTRAL stand-in by construction, so
+                                // "a silent client's held keys stop" is the stall count here. The
+                                // fixed buffer's neutral-after-six-ticks path is the leaf test
+                                // "schedule neutralizes after six silent ticks".
+                                : name == "silence" ? "stalls"
+                                                    : std::string(name);
         bool good = sent && refusal_reply && exited && finished && number(*finished, key) > 0;
         if (finished) {
             if (name == "silence")

@@ -122,9 +122,10 @@ struct LaunchOptions {
     std::uint32_t spawn_fault_ticks = 0;
     // `dedicated --input-slack N` (1..8): commands buffered before one executes. 0 = unset (1).
     std::uint32_t input_slack = 0;
-    // m20.7 (ADR-0107): `dedicated --input-buffer fixed|adaptive`. Fixed (default) is ADR-0103's
-    // retire-on-schedule buffer, unchanged; adaptive stalls on an empty buffer and reports pacing.
-    bool input_buffer_adaptive = false;
+    // m20.7 (ADR-0107): `dedicated --input-buffer fixed|adaptive`. Adaptive (the default since the
+    // owner accepted ADR-0107, 2026-10-26) stalls on an empty buffer and reports pacing; fixed is
+    // ADR-0103's retire-on-schedule buffer, kept as the control that shows what adaptive saves.
+    bool input_buffer_adaptive = true;
     bool input_buffer_given = false;
     // m20.7 `play --connect --debug-hitch T:MS` (diagnostic, off by default): at client tick T,
     // before sampling input, sleep MS ms -- a frame hitch the loop then catches up from.
