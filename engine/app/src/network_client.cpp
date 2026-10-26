@@ -327,6 +327,12 @@ RunReport run_network_client(const LaunchOptions& options,
     std::vector<replication::SpawnCheckpoint> pending;
     std::uint32_t epoch = 0;
     bool has_epoch = false, accepted = false, disconnected = false, graceful = false;
+    // m20.8b: the seat a multi-seat (codec 3) server gave this client, as its hello reply said.
+    // Recorded and announced; finding the seat's own body in the mirror (a replicated owner
+    // component and `owned_player(World&, PlayerSlot)`) is m20.8b2's, with the first game that
+    // seats more than one player. A one-player game's server sends no seat and this stays empty.
+    std::optional<PlayerSlot> seat;
+    const bool multi_seat = definition.max_players > 1;
     std::string failure_reason;
     std::uint64_t checkpoints = 0, replayed = 0, max_replay = 0;
     std::uint64_t response_ticks = 0, snaps_over_bound = 0;
@@ -601,8 +607,15 @@ RunReport run_network_client(const LaunchOptions& options,
                     input_profile.profile_version = options.profile_version_override;
                 if (options.has_fixed_dt_override)
                     remote_profile.fixed_dt = options.fixed_dt_override;
+                // One codec, the one this game's server speaks: 3 (a seat in the reply) for a
+                // multi-seat game, else m20.3's 2. Offering only that one keeps a mismatch a
+                // counted `version` refusal on the server rather than a silent downgrade.
+                const std::uint8_t codec =
+                    multi_seat ? replication::kInputCodecV3 : replication::kInputCodecV2;
                 replication::InputHello hello{
-                    2, 2, input_schema_identity(input_profile, &remote_profile)};
+                    codec,
+                    codec,
+                    input_schema_identity(input_profile, &remote_profile, definition.max_players)};
                 std::array<std::byte, replication::kInputHelloBytes> bytes{};
                 const auto size = replication::encode_input_hello(hello, bytes);
                 if (auto* session = driver.session(*session_id))
@@ -631,10 +644,26 @@ RunReport run_network_client(const LaunchOptions& options,
                 accepted = reply.refusal == replication::InputHelloRefusal::None;
                 if (!accepted) {
                     disconnected = true;
-                    failure_reason =
-                        reply.refusal == replication::InputHelloRefusal::Schema    ? "schema"
-                        : reply.refusal == replication::InputHelloRefusal::Version ? "version"
-                                                                                   : "full";
+                    using Refusal = replication::InputHelloRefusal;
+                    failure_reason = reply.refusal == Refusal::Schema    ? "schema"
+                                     : reply.refusal == Refusal::Version ? "version"
+                                     : reply.refusal == Refusal::DuplicateEndpoint
+                                         ? "duplicate_endpoint"
+                                     : reply.refusal == Refusal::RateLimited ? "rate_limited"
+                                     : reply.refusal == Refusal::GameRefused ? "game_refused"
+                                                                             : "full";
+                } else if (multi_seat && reply.seated && !seat) {
+                    seat = PlayerSlot{reply.seat, reply.seat_generation};
+                    fmt::print("{{\"event\":\"seated\",\"seat\":{},\"gen\":{}}}\n",
+                               seat->index,
+                               seat->generation);
+                    std::fflush(stdout);
+                } else if (multi_seat && !reply.seated) {
+                    // A codec-3 server always names the seat; an acceptance without one is a
+                    // server we cannot attribute input to, so it is refused rather than guessed.
+                    accepted = false;
+                    disconnected = true;
+                    failure_reason = "version";
                 }
                 continue;
             }
