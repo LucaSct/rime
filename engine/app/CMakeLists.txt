@@ -8,7 +8,8 @@
 # a buildable app (guardrail #2).
 
 add_library(rime_app STATIC
-    src/application.cpp)
+    src/application.cpp
+    src/seat_table.cpp)
 
 # Namespaced alias so dependents link rime::app (matching the other modules).
 add_library(rime::app ALIAS rime_app)
