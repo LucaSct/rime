@@ -25,8 +25,9 @@
 //     state (input history, score, schedule) must survive that, so it cannot hang off the entity.
 //
 // Admission is where a server meets hostile or merely careless clients, so it has three refusals,
-// checked in this order and each counted: Full (no free seat), DuplicateEndpoint (one seat per
-// source endpoint, so one machine cannot hold the table), then RateLimited (a sliding window of
+// checked in this order and each counted: DuplicateEndpoint (one seat per source endpoint, so one
+// machine cannot hold the table -- checked first, so a duplicate is named even when the table is
+// also full), Full (no free seat), then RateLimited (a sliding window of
 // `join_window_ticks` that allows `join_burst` SUCCESSFUL admissions). Only successes spend the
 // rate budget, so a flood of refused joins cannot lock out honest ones.
 //
