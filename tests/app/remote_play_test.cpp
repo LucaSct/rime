@@ -35,6 +35,9 @@ struct DelayedBatch {
 // Retain m20.4's exact digest recipe as a measurement of the deliberate Throw-state change.
 // This hashes the same authoritative fields before charges, cooldown, target score and facing
 // were appended; it never asks a second executable to run a different simulation.
+//
+// m20.8b2 moved the player's position onto its body (hello_game::PlayerState); the recipe reads
+// it from there, at the same position in the byte stream, so the number it measures is unchanged.
 std::uint64_t legacy_hello_digest(ecs::World& world) {
     std::uint64_t hash = 0xcbf29ce484222325ull;
     const auto bytes = [&](const void* data, std::size_t size) {
@@ -49,6 +52,11 @@ std::uint64_t legacy_hello_digest(ecs::World& world) {
         f32(value.y);
         f32(value.z);
     };
+    core::Vec3 player_position{};
+    world.query<hello_game::PlayerState>().for_each(
+        [&](ecs::Entity, const hello_game::PlayerState& player) {
+            player_position = player.position;
+        });
     world.query<hello_game::ReplicatedGameState>().for_each(
         [&](ecs::Entity, const hello_game::ReplicatedGameState& state) {
             u64(state.ticks);
@@ -58,7 +66,7 @@ std::uint64_t legacy_hello_digest(ecs::World& world) {
             u64(state.collected2);
             u64(state.collected3);
             u64(state.collected4);
-            vec3(state.player_position);
+            vec3(player_position);
             vec3(state.crate_position);
             f32(state.crate_rotation.x);
             f32(state.crate_rotation.y);
@@ -244,9 +252,11 @@ TEST_CASE("hello-game publishes a convergent mirror and a leading predicted play
 
     ecs::World predicted_world;
     definition.remote_play->register_replicated(predicted_world);
-    const auto predicted_player = predicted_world.spawn_with(ecs::WorldTransform{});
-    const auto predicted_state_entity =
-        predicted_world.spawn_with(hello_game::ReplicatedGameState{});
+    // m20.8b2: the controller state lives on the player itself (hello_game::PlayerState), as
+    // seed_prediction builds it; the prediction hooks bind to that one entity.
+    const auto predicted_player =
+        predicted_world.spawn_with(ecs::WorldTransform{}, hello_game::PlayerState{});
+    const auto predicted_state_entity = predicted_player;
     replication::Reconciler reconciler{
         definition.remote_play->prediction_hooks(predicted_world, predicted_player),
         definition.remote_play->fixed_dt};
@@ -360,19 +370,16 @@ TEST_CASE("hello-game publishes a convergent mirror and a leading predicted play
         }
         mirror.send_ack(client, virtual_now);
         if (has_membership) {
-            const auto* mirror_state = [&]() -> const hello_game::ReplicatedGameState* {
-                const hello_game::ReplicatedGameState* result = nullptr;
-                mirror_world.query<hello_game::ReplicatedGameState>().for_each(
-                    [&](ecs::Entity, const hello_game::ReplicatedGameState& state) {
-                        result = &state;
-                    });
+            const auto* mirror_state = [&]() -> const hello_game::PlayerState* {
+                const hello_game::PlayerState* result = nullptr;
+                mirror_world.query<hello_game::PlayerState>().for_each(
+                    [&](ecs::Entity, const hello_game::PlayerState& state) { result = &state; });
                 return result;
             }();
             const auto* predicted_state =
-                predicted_world.get<hello_game::ReplicatedGameState>(predicted_state_entity);
+                predicted_world.get<hello_game::PlayerState>(predicted_state_entity);
             if (mirror_state && predicted_state)
-                predicted_lead |=
-                    predicted_state->player_position.x > mirror_state->player_position.x;
+                predicted_lead |= predicted_state->position.x > mirror_state->position.x;
         }
     }
     for (int drain = 0; drain < 40; ++drain) {
@@ -486,7 +493,10 @@ TEST_CASE("Throw spends three charges, sweeps a target, and never fires a stand-
         world.query<hello_game::ReplicatedGameState>().for_each(
             [&](ecs::Entity, const hello_game::ReplicatedGameState& state) {
                 score = state.target_score;
-                charges = state.throw_charges;
+            });
+        world.query<hello_game::PlayerState>().for_each(
+            [&](ecs::Entity, const hello_game::PlayerState& player) {
+                charges = player.throw_charges;
             });
         CHECK(launches == 3);
         CHECK(refusals == 3);
@@ -856,10 +866,10 @@ TEST_CASE("predicted Throw adopts or cancels through a pumped server and client"
             REQUIRE(predicted->apply_checkpoint(initial.base, *initial.spawns).base.applied);
             const auto epoch_before = predicted->epoch();
             if (refuse) {
-                server_world.query<hello_game::ReplicatedGameState>().for_each(
-                    [&](ecs::Entity entity, hello_game::ReplicatedGameState& state) {
+                server_world.query<hello_game::PlayerState>().for_each(
+                    [&](ecs::Entity entity, hello_game::PlayerState& state) {
                         state.throw_charges = 0;
-                        server_world.mark_changed<hello_game::ReplicatedGameState>(entity);
+                        server_world.mark_changed<hello_game::PlayerState>(entity);
                     });
             }
             replication::InputCommand command{};
@@ -904,8 +914,7 @@ TEST_CASE("predicted Throw adopts or cancels through a pumped server and client"
                 CHECK(result.rejected == 1);
                 CHECK_FALSE(predicted->provisional_id(key));
                 CHECK(ledger.cancelled(key));
-                const auto* state =
-                    predicted_world.get<hello_game::ReplicatedGameState>(predicted_player);
+                const auto* state = predicted_world.get<hello_game::PlayerState>(predicted_player);
                 REQUIRE(state);
                 CHECK(state->throw_charges == 0);
                 CHECK_FALSE(result.cancelled.empty());

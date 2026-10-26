@@ -238,8 +238,8 @@ std::uint64_t collection_time(const ReplicatedGameState& state, std::size_t inde
 
 // Fixed tick and prediction call this exact arithmetic, so a replay cannot drift because its
 // controller used a separately maintained interpretation of movement or clamping.
-void integrate_player(ReplicatedGameState& state, const Intent& intent, float dt) {
-    const core::Vec3 before = state.player_position;
+void integrate_player(PlayerState& state, const Intent& intent, float dt) {
+    const core::Vec3 before = state.position;
     core::Vec3 dir = intent.move;
     const float len = core::length(dir);
     // Normalising prevents diagonal speed gain; the zero guard prevents a NaN from entering
@@ -249,14 +249,21 @@ void integrate_player(ReplicatedGameState& state, const Intent& intent, float dt
     } else {
         dir = {0.0f, 0.0f, 0.0f};
     }
-    state.player_position = state.player_position + dir * (HelloGame::kPlayerSpeed * dt);
+    state.position = state.position + dir * (HelloGame::kPlayerSpeed * dt);
     const float limit = kArenaHalf - HelloGame::kPlayerRadius;
-    state.player_position.x = std::clamp(state.player_position.x, -limit, limit);
-    state.player_position.z = std::clamp(state.player_position.z, -limit, limit);
-    state.player_position.y = kPlayerStart.y;
+    state.position.x = std::clamp(state.position.x, -limit, limit);
+    state.position.z = std::clamp(state.position.z, -limit, limit);
+    state.position.y = kPlayerStart.y;
     // The clamp can stop motion even while an axis stays held. Record actual displacement per
     // second, which is the kinematic velocity the physics bridge sees, not the unfulfilled wish.
-    state.player_velocity = (state.player_position - before) * (1.0f / dt);
+    state.velocity = (state.position - before) * (1.0f / dt);
+}
+
+// A player's state at its start pose: at rest, facing -z, with its own three throws.
+PlayerState player_at(core::Vec3 start) {
+    PlayerState state{};
+    state.position = start;
+    return state;
 }
 
 // A fixed-angle chase camera: behind and above the player, looking down at it. Fixed rather than
@@ -287,6 +294,7 @@ bool HelloGame::setup(app::SetupContext& ctx) {
     using ecs::WorldTransform;
     ecs::World& world = ctx.world;
     world_ = &world;
+    seats_ = ctx.seats;
     physics::register_physics_components(world);
     physics_.set_job_system(&ctx.jobs);
     physics_.set_sleeping_enabled(true);
@@ -310,11 +318,22 @@ bool HelloGame::setup(app::SetupContext& ctx) {
     // The player: KINEMATIC, so the game owns its pose and `PhysicsSync::push_in` drives the body
     // from it. Dynamic would mean the solver owns the pose and the game would be fighting it for
     // control of a character — the thing a character controller exists not to do.
-    {
+    //
+    // ONE seat builds its player here, before anyone connects, as every run before m20.8 did --
+    // and as the one-seat server needs, since it binds the body at listen time. Its PlayerOwner
+    // {0, 0} is a label, not a live handle: a one-seat server's seat generation moves on every
+    // reconnect while this body stays, which is why one-seat lookups use `owned_player`. Several
+    // seats build none: each player's body arrives with `on_player_joined`.
+    if (seats_ <= 1) {
         core::Transform tf{};
         tf.translation = kPlayerStart;
-        player_ = world.spawn_with(
-            ecs::LocalTransform{tf}, WorldTransform{tf}, kPlayerRigidBody, player_collider());
+        player_ = world.spawn_with(ecs::LocalTransform{tf},
+                                   WorldTransform{tf},
+                                   kPlayerRigidBody,
+                                   player_collider(),
+                                   player_at(kPlayerStart),
+                                   app::PlayerOwner{});
+        players_.push_back(Player{app::PlayerSlot{}, player_});
     }
 
     // The crate: the one DYNAMIC body, and the reason the player is kinematic-with-velocity rather
@@ -348,7 +367,6 @@ bool HelloGame::setup(app::SetupContext& ctx) {
         pickups_.push_back(Pickup{e, physics::BodyId{}});
     }
     ReplicatedGameState state{};
-    state.player_position = kPlayerStart;
     if (const auto* wt = world.get<WorldTransform>(crate_)) {
         state.crate_position = wt->value.translation;
         state.crate_rotation = wt->value.rotation;
@@ -357,24 +375,107 @@ bool HelloGame::setup(app::SetupContext& ctx) {
     return true;
 }
 
-// Receive the player's wish for the next tick. Before m20.1 a host called this per FRAME and the
-// tick read what was stored; now the engine delivers an ActionState per TICK and the game reads it
-// here at the top of the tick — the frame-versus-tick split is the engine's to get right, which is
-// the point of the engine owning input.
-void HelloGame::apply_intent(const Intent& intent) {
-    intent_ = intent;
-    if (intent.quit) {
-        quit_ = true;
+// Seat `index`'s start: a 4-wide grid of 1.2 m spacing in front of the ring's centre (z >= 0, away
+// from the crate at z = -2.5), clear of every marker (the nearest, marker 0 at (0, 5), is 2.3 m
+// from the farthest corner) and of each other (two capsules overlap below 0.7 m). Sixteen seats
+// fill the grid; a reader can find seat N on the floor without a table.
+core::Vec3 seat_start(std::uint16_t index) {
+    const auto column = static_cast<float>(index % 4);
+    const auto row = static_cast<float>((index / 4) % 4);
+    return {-1.8f + 1.2f * column, kPlayerStart.y, 1.2f * row};
+}
+
+// A seat was filled (m20.8b2, multi-seat only): spawn that player's body, owned by the slot. The
+// whole replicated player is ONE entity -- body, PlayerState, PlayerOwner -- because the server
+// replicates exactly the body `seat_player` names (network_input.cpp, bind_owner); state on a
+// second entity would never reach the mirror.
+bool HelloGame::on_player_joined(app::TickContext& ctx, app::PlayerSlot slot) {
+    if (seats_ <= 1)
+        return false; // never called on one seat; refusing is the safe answer if it ever were
+    const bool taken = std::any_of(players_.begin(), players_.end(), [&](const Player& player) {
+        return player.slot.index == slot.index;
+    });
+    if (taken)
+        return false; // the engine left a body in this index: refuse rather than alias two
+    const core::Vec3 start = seat_start(slot.index);
+    core::Transform tf{};
+    tf.translation = start;
+    const ecs::Entity body = ctx.world.spawn_with(ecs::LocalTransform{tf},
+                                                  ecs::WorldTransform{tf},
+                                                  kPlayerRigidBody,
+                                                  player_collider(),
+                                                  player_at(start),
+                                                  app::PlayerOwner::of(slot));
+    const auto at = std::find_if(players_.begin(), players_.end(), [&](const Player& player) {
+        return player.slot.index > slot.index;
+    });
+    players_.insert(at, Player{slot, body});
+    return true;
+}
+
+// A seat was vacated: its body and its in-flight throw go, through the host's despawn seam so
+// their NetIds are retracted this tick. The departed player's charges leave with the body; the
+// round's shared score stays.
+void HelloGame::on_player_left(app::TickContext& ctx, app::PlayerSlot slot) {
+    const auto it = std::find_if(players_.begin(), players_.end(), [&](const Player& player) {
+        return player.slot == slot;
+    });
+    if (it == players_.end())
+        return;
+    for (const ecs::Entity entity : {it->projectile, it->entity}) {
+        if (!ctx.world.is_alive(entity))
+            continue;
+        if (ctx.despawns)
+            ctx.despawns->push_back(entity);
+        else
+            ctx.world.despawn(entity);
+    }
+    players_.erase(it);
+}
+
+// Who wants what this tick. One seat reads the single-player fields, exactly as before m20.8 (on
+// a one-seat server they equal `players[0]`, and local play has no `players` at all); several read
+// each seat's own `PlayerInput`, matched by the FULL slot so a stale entry cannot drive a
+// newcomer's body. A seated player with no entry this tick stands still and launches nothing.
+void HelloGame::gather_inputs(const app::TickContext& ctx) {
+    inputs_.assign(players_.size(), PlayerTick{});
+    if (seats_ <= 1) {
+        if (!inputs_.empty())
+            inputs_[0] = PlayerTick{ctx.input,
+                                    ctx.command,
+                                    ctx.refuse_spawn,
+                                    ctx.command.has_value() && ctx.spawns != nullptr};
+        return;
+    }
+    for (std::size_t i = 0; i < players_.size(); ++i) {
+        inputs_[i].hosted = ctx.spawns != nullptr;
+        for (const app::PlayerInput& input : ctx.players) {
+            if (input.slot == players_[i].slot) {
+                inputs_[i].actions = input.actions;
+                inputs_[i].command = input.command;
+                inputs_[i].refuse_spawn = input.refuse_spawn;
+            }
+        }
+        // No provenance from the host means no command ran for this seat: mark it so, so the
+        // "only a real command spends a charge" rule below cannot read silence as consent.
+        if (!inputs_[i].command && inputs_[i].hosted)
+            inputs_[i].command = app::CommandProvenance{};
     }
 }
 
 // One fixed simulation step, and the rules.
 //
-// Order matters and is the canonical one (`docs/design/simulation-tick.md`): move the player (the
-// game owns a kinematic pose), then let the bridge push that pose in and step, then read what the
-// step reported. Reading triggers before the step would read the previous tick's.
+// Order matters and is the canonical one (`docs/design/simulation-tick.md`): move the players (the
+// game owns kinematic poses), then let the bridge push those poses in and step, then read what the
+// step reported. Reading triggers before the step would read the previous tick's. Every
+// per-player loop runs in ascending seat index, the order both a server and a replay see.
 void HelloGame::fixed_tick(app::TickContext& ctx) {
-    apply_intent(intent_from(ctx.input));
+    gather_inputs(ctx);
+    // Quitting is the LOCAL player's wish: one seat only. A remote player's quit bit never
+    // reaches a server (hello-game's command mapper drops it), and with several seats there is no
+    // one player whose Escape may end the round for everyone.
+    if (seats_ <= 1 && intent_from(ctx.input).quit)
+        quit_ = true;
     const float step = static_cast<float>(ctx.dt);
     // `--interaction-fault kick@T`: a SERVER-ONLY impulse on the crate (m20.6c). Nothing in the
     // client's input, prediction or checkpoint knows about it until the next checkpoint carries
@@ -387,7 +488,8 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
             physics_.apply_impulse(
                 crate_body_, core::Vec3{0.0f, 0.0f, kCrateKickImpulse}, crate.position);
     }
-    move_player(ctx.world, step);
+    for (std::size_t i = 0; i < players_.size(); ++i)
+        move_player(ctx.world, players_[i], intent_from(inputs_[i].actions), step);
     sync_.step(ctx.world, physics_, step);
     // Bind the markers' body ids once the bridge has created them. It cannot be done in `setup`:
     // `RigidBodyHandle` is added by `reconcile`, which first runs inside this call.
@@ -395,7 +497,8 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
     collect(ctx.world, ctx.despawns);
     record_crate(ctx.world);
     if (auto* replicated = state()) {
-        throw_step(ctx, *replicated);
+        for (std::size_t i = 0; i < players_.size(); ++i)
+            throw_step(ctx, players_[i], inputs_[i], *replicated);
         ++replicated->ticks;
         if (const auto* wt = ctx.world.get<ecs::WorldTransform>(crate_)) {
             replicated->crate_position = wt->value.translation;
@@ -409,49 +512,66 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
     }
 }
 
-void HelloGame::throw_step(app::TickContext& ctx, ReplicatedGameState& replicated) {
+void HelloGame::throw_step(app::TickContext& ctx,
+                           Player& player,
+                           const PlayerTick& input,
+                           ReplicatedGameState& replicated) {
+    auto* self = ctx.world.get<PlayerState>(player.entity);
+    if (!self)
+        return;
     // A cooldown measures full ticks AFTER a launch. Charges never regenerate: exactly three
-    // launches are possible per run, making the refusal arithmetic observable in the proof.
-    if (replicated.throw_cooldown > 0)
-        --replicated.throw_cooldown;
-    const core::Vec3 wished{ctx.input.axis(kAxisMoveX), 0.0f, ctx.input.axis(kAxisMoveZ)};
+    // launches are possible per player per run, making the refusal arithmetic observable.
+    if (self->throw_cooldown > 0)
+        --self->throw_cooldown;
+    const core::Vec3 wished{input.actions.axis(kAxisMoveX), 0.0f, input.actions.axis(kAxisMoveZ)};
     if (core::length(wished) > 1e-4f)
-        replicated.player_facing = wished * (1.0f / core::length(wished));
+        self->facing = wished * (1.0f / core::length(wished));
+    ctx.world.mark_changed<PlayerState>(player.entity);
 
     // A synthesized stand-in repeats levels but does not own a new edge. Guard `applied` too:
     // no guessed server input may consume an ability the client never executed.
-    const bool real_command = !ctx.command || ctx.command->applied;
-    if (ctx.input.was_pressed(kButtonThrow) && real_command) {
-        const auto key =
-            ctx.command ? replication::SpawnKey{ctx.command->incarnation, ctx.command->sequence, 0}
-                        : replication::SpawnKey{};
+    const bool real_command = !input.command || input.command->applied;
+    // Every report names its OWNER (SpawnReport::owner): the host routes the verdict to that
+    // seat's checkpoint and no other. One seat leaves it default, as the host expects.
+    const app::PlayerSlot owner = seats_ > 1 ? player.slot : app::PlayerSlot{};
+    if (input.actions.was_pressed(kButtonThrow) && real_command) {
+        const auto key = input.command ? replication::SpawnKey{input.command->incarnation,
+                                                               input.command->sequence,
+                                                               0}
+                                       : replication::SpawnKey{};
         std::uint8_t refusal = 0;
-        if (ctx.refuse_spawn || replicated.throw_charges == 0)
+        if (input.refuse_spawn || self->throw_charges == 0)
             refusal = 1;
-        else if (ctx.world.is_alive(projectile_))
+        else if (ctx.world.is_alive(player.projectile))
             refusal = 3;
-        else if (replicated.throw_cooldown > 0)
+        else if (self->throw_cooldown > 0)
             refusal = 2;
         if (refusal != 0) {
-            if (ctx.command && ctx.spawns)
-                ctx.spawns->push_back({app::SpawnReport::Kind::Refused, key, {}, refusal});
+            if (input.command && ctx.spawns)
+                ctx.spawns->push_back({app::SpawnReport::Kind::Refused, key, {}, refusal, owner});
         } else {
-            --replicated.throw_charges;
-            replicated.throw_cooldown = 60;
-            const core::Vec3 start = replicated.player_position + core::Vec3{0.0f, 0.12f, 0.0f};
-            ThrownProjectile projectile{start, replicated.player_facing * kThrowSpeed, 0};
+            --self->throw_charges;
+            self->throw_cooldown = 60;
+            const core::Vec3 start = self->position + core::Vec3{0.0f, 0.12f, 0.0f};
+            ThrownProjectile projectile{start, self->facing * kThrowSpeed, 0};
             core::Transform transform{};
             transform.translation = start;
-            projectile_ = ctx.world.spawn_with(
+            player.projectile = ctx.world.spawn_with(
                 ecs::LocalTransform{transform}, ecs::WorldTransform{transform}, projectile);
-            projectile_key_ = key;
-            if (ctx.command && ctx.spawns)
-                ctx.spawns->push_back({app::SpawnReport::Kind::Launched, key, projectile_, 0});
+            // Several seats: the throw carries its thrower, so a client can tell its own (drawn
+            // from its prediction) from another player's (drawn from the mirror). One seat keeps
+            // m20.5's projectile entity exactly.
+            if (seats_ > 1)
+                ctx.world.add_component(player.projectile, app::PlayerOwner::of(player.slot));
+            player.projectile_key = key;
+            if (input.command && ctx.spawns)
+                ctx.spawns->push_back(
+                    {app::SpawnReport::Kind::Launched, key, player.projectile, 0, owner});
         }
     }
-    if (!ctx.world.is_alive(projectile_))
+    if (!ctx.world.is_alive(player.projectile))
         return;
-    auto* projectile = ctx.world.get<ThrownProjectile>(projectile_);
+    auto* projectile = ctx.world.get<ThrownProjectile>(player.projectile);
     if (!projectile)
         return;
     const core::Vec3 before = projectile->position;
@@ -468,47 +588,70 @@ void HelloGame::throw_step(app::TickContext& ctx, ReplicatedGameState& replicate
     if (hit)
         ++replicated.target_score;
     if (hit || projectile->age >= 45) {
-        if (ctx.command && ctx.spawns)
-            ctx.spawns->push_back({app::SpawnReport::Kind::Ended, projectile_key_, projectile_, 0});
-        // The server host retracts a replicated NetId when it consumes Ended. Local play owns no
-        // NetId and can despawn immediately.
+        if (input.hosted)
+            ctx.spawns->push_back({app::SpawnReport::Kind::Ended,
+                                   player.projectile_key,
+                                   player.projectile,
+                                   0,
+                                   owner});
         // A listening server pump despawns it through the replicator (retracting its NetId
         // first); with nobody listening the game owns the despawn itself.
-        if (!(ctx.command && ctx.spawns))
-            ctx.world.despawn(projectile_);
-        projectile_ = {};
+        if (!input.hosted)
+            ctx.world.despawn(player.projectile);
+        player.projectile = {};
         return;
     }
-    if (auto* transform = ctx.world.get<ecs::WorldTransform>(projectile_))
+    if (auto* transform = ctx.world.get<ecs::WorldTransform>(player.projectile))
         transform->value.translation = projectile->position;
-    if (auto* local = ctx.world.get<ecs::LocalTransform>(projectile_)) {
+    if (auto* local = ctx.world.get<ecs::LocalTransform>(player.projectile)) {
         local->value.translation = projectile->position;
-        ctx.world.mark_changed<ecs::LocalTransform>(projectile_);
+        ctx.world.mark_changed<ecs::LocalTransform>(player.projectile);
     }
-    ctx.world.mark_changed<ThrownProjectile>(projectile_);
+    ctx.world.mark_changed<ThrownProjectile>(player.projectile);
 }
 
-// Integrate the stored intent into the player's transform, and clamp it to the arena.
+// Integrate one player's intent into its transform, and clamp it to the arena.
 //
 // The clamp is a game rule rather than a wall, on purpose: an arena fenced with static boxes would
 // be more realistic and would also mean a kinematic body pressed into a static one every time the
 // player holds a direction, which is a contact the solver cannot resolve (neither body yields) and
 // a permanent source of jitter. Games clamp.
-void HelloGame::move_player(ecs::World& world, float dt) {
-    auto* replicated = state();
-    if (!replicated)
+void HelloGame::move_player(ecs::World& world,
+                            const Player& player,
+                            const Intent& intent,
+                            float dt) {
+    auto* self = world.get<PlayerState>(player.entity);
+    if (!self)
         return;
-    integrate_player(*replicated, intent_, dt);
-    if (auto* wt = world.get<ecs::WorldTransform>(player_)) {
-        wt->value.translation = replicated->player_position;
+    integrate_player(*self, intent, dt);
+    world.mark_changed<PlayerState>(player.entity);
+    if (auto* wt = world.get<ecs::WorldTransform>(player.entity)) {
+        wt->value.translation = self->position;
     }
-    if (auto* local = world.get<ecs::LocalTransform>(player_)) {
-        local->value.translation = replicated->player_position;
-        world.mark_changed<ecs::LocalTransform>(player_);
+    if (auto* local = world.get<ecs::LocalTransform>(player.entity)) {
+        local->value.translation = self->position;
+        world.mark_changed<ecs::LocalTransform>(player.entity);
     }
 }
 
+HelloGame::Player* HelloGame::player_with_body(physics::BodyId body) noexcept {
+    for (Player& player : players_)
+        if (player.body_bound && player.body == body)
+            return &player;
+    return nullptr;
+}
+
 void HelloGame::bind_bodies(ecs::World& world) {
+    // Players first and always: a seat that joined this tick got its body inside this tick's
+    // step, so binding it here, before `collect`, lets it collect on its very first tick.
+    for (Player& player : players_) {
+        if (player.body_bound)
+            continue;
+        if (const auto* handle = world.get<physics::RigidBodyHandle>(player.entity)) {
+            player.body = handle->body;
+            player.body_bound = true;
+        }
+    }
     if (bound_) {
         return;
     }
@@ -520,11 +663,6 @@ void HelloGame::bind_bodies(ecs::World& world) {
             all = false;
         }
     }
-    if (const auto* handle = world.get<physics::RigidBodyHandle>(player_)) {
-        player_body_ = handle->body;
-    } else {
-        all = false;
-    }
     if (const auto* handle = world.get<physics::RigidBodyHandle>(crate_)) {
         crate_body_ = handle->body;
     } else {
@@ -533,11 +671,13 @@ void HelloGame::bind_bodies(ecs::World& world) {
     bound_ = all;
 }
 
-// Read the tick's trigger stream and collect whatever the player entered.
+// Read the tick's trigger stream and collect whatever a player entered.
 //
 // `TriggerEvent`'s `a`/`b` are in canonical index order, so EITHER end may be the sensor and a
 // consumer has to check both — the header says so, and a consumer that checks only `b` works until
-// the day body indices happen to come out the other way round.
+// the day body indices happen to come out the other way round. Any player collects into the one
+// shared score; the earlier seat wins a marker two players enter on the same tick, because the
+// trigger stream is the solver's order and the first event takes it.
 void HelloGame::collect(ecs::World& world, std::vector<ecs::Entity>* despawns) {
     auto* replicated = state();
     if (!replicated)
@@ -546,11 +686,12 @@ void HelloGame::collect(ecs::World& world, std::vector<ecs::Entity>* despawns) {
         if (ev.phase != physics::ContactPhase::Began) {
             continue; // Persisted/Ended would collect the same marker again, or on the way out
         }
-        const bool player_involved = ev.a == player_body_ || ev.b == player_body_;
-        if (!player_involved) {
+        const Player* by_a = player_with_body(ev.a);
+        const Player* by_b = by_a ? nullptr : player_with_body(ev.b);
+        if (!by_a && !by_b) {
             continue; // a trigger the crate rolled through is not a pickup
         }
-        const physics::BodyId other = ev.a == player_body_ ? ev.b : ev.a;
+        const physics::BodyId other = by_a ? ev.b : ev.a;
         for (std::size_t index = 0; index < pickups_.size(); ++index) {
             Pickup& p = pickups_[index];
             if (collection_time(*replicated, index) != 0 || !(p.body == other)) {
@@ -576,7 +717,8 @@ void HelloGame::collect(ecs::World& world, std::vector<ecs::Entity>* despawns) {
 // Copy the crate's solver state into its CrateBody after the step (ADR-0106 §2): the owner
 // checkpoint needs the velocity the physics world keeps privately, and the membership policy needs
 // to know whether the player is touching it -- a contact REGION between the two bodies that is
-// Began or Persisted this tick (an Ended region is the tick they separated). Marked changed only
+// Began or Persisted this tick (an Ended region is the tick they separated). With several players
+// "the player" is any of them (only the one-seat membership policy reads it). Marked changed only
 // when something changed, so a sleeping crate costs the world stream nothing.
 void HelloGame::record_crate(ecs::World& world) {
     auto* record = world.get<CrateBody>(crate_);
@@ -585,8 +727,8 @@ void HelloGame::record_crate(ecs::World& world) {
         return;
     std::uint32_t touching = 0;
     for (const physics::ContactEvent& ev : physics_.contact_events()) {
-        const bool pair = (ev.a == player_body_ && ev.b == crate_body_) ||
-                          (ev.a == crate_body_ && ev.b == player_body_);
+        const bool pair = (ev.b == crate_body_ && player_with_body(ev.a) != nullptr) ||
+                          (ev.a == crate_body_ && player_with_body(ev.b) != nullptr);
         if (pair && ev.phase != physics::ContactPhase::Ended)
             touching = 1;
     }
@@ -636,33 +778,66 @@ app::ActionState HelloGame::autopilot() const {
 // What a dedicated server and a player must agree on: the rules' state and the one pose the
 // SOLVER owns (the crate — the player's pose is the game's own arithmetic, the crate's is physics).
 // Not the camera, not anything presentation touched.
+//
+// m20.8b2: the players' fields hash in the SAME POSITIONS they held in the singleton -- every
+// player's position where `player_position` was, every player's charges and cooldown where those
+// were, every facing last -- so with one player the byte stream, and the digest, is m20.7's. Two
+// orders are made explicit because a world's query order is not shared between hosts: players by
+// (seat index, generation), throws by their owner. A server and a mirror build archetypes in
+// different orders (the mirror adds components as records arrive), and a digest that hashed in
+// query order would disagree on two honest worlds.
 std::uint64_t replicated_digest(const ecs::World& world) {
     Fnv1a h;
     // Query is read-only here; World currently exposes query() only on a non-const object.
     auto& readable = const_cast<ecs::World&>(world);
+    std::vector<std::pair<app::PlayerOwner, const PlayerState*>> players;
+    readable.query<PlayerState, app::PlayerOwner>().for_each(
+        [&](ecs::Entity, const PlayerState& state, const app::PlayerOwner& owner) {
+            players.emplace_back(owner, &state);
+        });
+    std::sort(players.begin(), players.end(), [](const auto& a, const auto& b) {
+        return a.first.index != b.first.index ? a.first.index < b.first.index
+                                              : a.first.generation < b.first.generation;
+    });
     readable.query<ReplicatedGameState>().for_each(
         [&](ecs::Entity, const ReplicatedGameState& state) {
             h.u64(state.ticks);
             h.u64(static_cast<std::uint64_t>(state.score));
             for (std::size_t i = 0; i < HelloGame::kPickupCount; ++i)
                 h.u64(collection_time(state, i));
-            h.vec3(state.player_position);
+            for (const auto& player : players)
+                h.vec3(player.second->position);
             h.vec3(state.crate_position);
             h.f32(state.crate_rotation.x);
             h.f32(state.crate_rotation.y);
             h.f32(state.crate_rotation.z);
             h.f32(state.crate_rotation.w);
-            h.u64(state.throw_charges);
-            h.u64(state.throw_cooldown);
+            for (const auto& player : players) {
+                h.u64(player.second->throw_charges);
+                h.u64(player.second->throw_cooldown);
+            }
             h.u64(state.target_score);
-            h.vec3(state.player_facing);
+            for (const auto& player : players)
+                h.vec3(player.second->facing);
         });
+    // At most one live throw per player, so the owner orders them completely. A one-seat throw
+    // carries no owner and is alone (key 0 sorts it first either way).
+    std::vector<std::pair<std::uint64_t, const ThrownProjectile*>> throws;
     readable.query<ThrownProjectile>().for_each(
-        [&](ecs::Entity, const ThrownProjectile& projectile) {
-            h.vec3(projectile.position);
-            h.vec3(projectile.velocity);
-            h.u64(projectile.age);
+        [&](ecs::Entity entity, const ThrownProjectile& projectile) {
+            const auto* owner = readable.get<app::PlayerOwner>(entity);
+            const std::uint64_t key =
+                owner ? ((std::uint64_t{owner->index} << 32) | owner->generation) + 1 : 0;
+            throws.emplace_back(key, &projectile);
         });
+    std::stable_sort(throws.begin(), throws.end(), [](const auto& a, const auto& b) {
+        return a.first < b.first;
+    });
+    for (const auto& [key, projectile] : throws) {
+        h.vec3(projectile->position);
+        h.vec3(projectile->velocity);
+        h.u64(projectile->age);
+    }
     return h.value();
 }
 
@@ -685,8 +860,8 @@ std::uint64_t HelloGame::ticks() const noexcept {
 }
 
 core::Vec3 HelloGame::player_position() const noexcept {
-    const auto* replicated = state();
-    return replicated ? replicated->player_position : core::Vec3{};
+    const auto* self = world_ ? world_->get<PlayerState>(player_) : nullptr;
+    return self ? self->position : core::Vec3{};
 }
 
 std::uint64_t HelloGame::collected_on(std::size_t index) const {
@@ -751,6 +926,18 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
     m.base_color[1] = 0.65f;
     m.base_color[2] = 0.18f;
     const render::MaterialId projectile_mat = ctx.materials.add(m);
+    // Every OTHER player (m20.8b2): the same sphere in red-violet, so a glance tells "me" from
+    // "them". Red and blue both beat green, so the headless check's green-dominant marker test
+    // still has nothing else in the scene to mistake for a marker.
+    m.base_color[0] = 0.85f;
+    m.base_color[1] = 0.22f;
+    m.base_color[2] = 0.48f;
+    const render::MaterialId other_player_mat = ctx.materials.add(m);
+    other_player_mesh_ = player_mesh;
+    other_player_material_ = other_player_mat;
+    projectile_mesh_ = projectile_mesh;
+    projectile_material_ = projectile_mat;
+    presentation_ready_ = true;
 
     // The visual floor plane sits at y = 0 — the slab's TOP — while the collider is centred half a
     // slab lower. Its own entity because a plane mesh and a box collider do not share a centre, and
@@ -760,8 +947,10 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
                            render::MeshRef{floor_mesh},
                            render::MaterialRef{floor_mat});
 
-    world.add_component(player_, render::MeshRef{player_mesh});
-    world.add_component(player_, render::MaterialRef{player_mat});
+    if (world.is_alive(player_)) {
+        world.add_component(player_, render::MeshRef{player_mesh});
+        world.add_component(player_, render::MaterialRef{player_mat});
+    }
     world.add_component(crate_, render::MeshRef{crate_mesh});
     world.add_component(crate_, render::MaterialRef{crate_mat});
     for (const Pickup& p : pickups_) {
@@ -793,10 +982,41 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
 
 void HelloGame::present_frame(app::PresentFrameContext& ctx) {
     ++presentation_calls_;
+    dress_remote(ctx.world);
     if (auto* wt = ctx.world.get<ecs::WorldTransform>(camera_)) {
         wt->value = chase_camera(player_position());
     }
     present_projectile(ctx.world, ctx.world);
+}
+
+// Other players, and their throws, appear in a multi-seat mirror whenever the server says so --
+// a seat joins mid-session, another player launches -- long after present_setup ran. So they are
+// dressed on ARRIVAL, here, once each (an entity that already has a mesh is left alone). They are
+// drawn where the mirror puts them: the client's interpolated RenderTransform, never a
+// prediction, because this client predicts only what its own commands move. Its own throw is the
+// one proxy below, which follows the prediction; another player's throw is a mesh on the mirrored
+// entity itself. Collected first and added after: adding a component inside the query that
+// found it would restructure the archetype being scanned.
+void HelloGame::dress_remote(ecs::World& world) {
+    if (!presentation_ready_ || !world.is_registered<app::PlayerOwner>())
+        return;
+    std::vector<std::pair<ecs::Entity, bool>> undressed; // (entity, is a player body)
+    world.query<app::PlayerOwner>().for_each([&](ecs::Entity entity, const app::PlayerOwner& owner) {
+        if (entity == player_ || world.get<render::MeshRef>(entity) != nullptr)
+            return;
+        if (world.get<PlayerState>(entity) != nullptr)
+            undressed.emplace_back(entity, true);
+        else if (world.get<ThrownProjectile>(entity) != nullptr &&
+                 !(own_seat_ && owner.owns(*own_seat_)))
+            undressed.emplace_back(entity, false);
+    });
+    for (const auto& [entity, body] : undressed) {
+        world.add_component(entity,
+                            render::MeshRef{body ? other_player_mesh_ : projectile_mesh_});
+        world.add_component(entity,
+                            render::MaterialRef{body ? other_player_material_
+                                                     : projectile_material_});
+    }
 }
 
 void HelloGame::present_prediction(app::PresentFrameContext& ctx, ecs::World& prediction_world) {
@@ -811,7 +1031,13 @@ void HelloGame::present_projectile(ecs::World& render_world, ecs::World& source_
         return;
     core::Vec3 position{0.0f, -1000.0f, 0.0f};
     source_world.query<ThrownProjectile>().for_each(
-        [&](ecs::Entity, const ThrownProjectile& projectile) {
+        [&](ecs::Entity entity, const ThrownProjectile& projectile) {
+            // A multi-seat mirror holds every player's throws; the proxy is THIS client's. (A
+            // prediction world's throws carry no owner: they are all this client's.)
+            if (own_seat_)
+                if (const auto* owner = source_world.get<app::PlayerOwner>(entity);
+                    owner && !owner->owns(*own_seat_))
+                    return;
             if (projectile.age < 45)
                 position = projectile.position;
         });
@@ -819,9 +1045,22 @@ void HelloGame::present_projectile(ecs::World& render_world, ecs::World& source_
 }
 
 bool HelloGame::bind_remote_world(ecs::World& world) {
+    player_ = owned_player(world);
+    return bind_mirror(world);
+}
+
+// The multi-seat client's bind: the mirror holds every seat's body, and this client's is the one
+// its seat owns -- index AND generation, so a departed occupant's body still in flight out of the
+// mirror is never mistaken for the newcomer's.
+bool HelloGame::bind_remote_seat(ecs::World& world, app::PlayerSlot seat) {
+    own_seat_ = seat;
+    player_ = seat_player(world, seat);
+    return bind_mirror(world);
+}
+
+bool HelloGame::bind_mirror(ecs::World& world) {
     world_ = &world;
     pickups_.clear();
-    player_ = owned_player(world);
     world.query<ReplicatedGameState>().for_each(
         [&](ecs::Entity entity, const ReplicatedGameState&) { state_entity_ = entity; });
     world.query<physics::RigidBody, physics::Collider>().for_each(
@@ -860,9 +1099,15 @@ void register_components(ecs::World& world) {
     physics::register_physics_components(world);
     (void)world.register_component<ReplicatedGameState>();
     (void)world.register_component<ThrownProjectile>();
-    (void)world.register_component<CrateBody>(); // last: earlier component ids do not move
+    (void)world.register_component<CrateBody>();
+    // m20.8b2, appended so every earlier component id stays where m20.7 put it.
+    (void)world.register_component<PlayerState>();
+    (void)world.register_component<app::PlayerOwner>(); // last: earlier component ids do not move
 }
 
+// The ONE-SEAT lookup, unchanged since m20.4: the kinematic capsule. With several seats there are
+// several capsules and this names an arbitrary one, which is why a multi-seat host and client ask
+// `seat_player` instead and never this.
 ecs::Entity owned_player(ecs::World& world) {
     ecs::Entity result{};
     world.query<physics::RigidBody, physics::Collider>().for_each(
@@ -873,12 +1118,25 @@ ecs::Entity owned_player(ecs::World& world) {
     return result;
 }
 
+// A player's throws carry its PlayerOwner too, so "owned by the slot" is not enough: the body is
+// the owned entity that holds PlayerState.
+ecs::Entity seat_player(ecs::World& world, app::PlayerSlot slot) {
+    ecs::Entity result{};
+    app::for_each_owned_by(world, slot, [&](ecs::Entity entity) {
+        if (world.get<PlayerState>(entity) != nullptr)
+            result = entity;
+    });
+    return result;
+}
+
 replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
                                                    ecs::Entity player,
                                                    std::shared_ptr<ClientSpawnState> spawns) {
-    ecs::Entity state_entity{};
-    world.query<ReplicatedGameState>().for_each(
-        [&](ecs::Entity entity, const ReplicatedGameState&) { state_entity = entity; });
+    // m20.8b2: the player's state is ON the player (PlayerState), so the hooks bind to one entity
+    // and nothing else. Before, they found "the" ReplicatedGameState in the world -- right while
+    // there was one player, and on a multi-seat server the very aliasing ADR-0108 warns of: every
+    // seat's checkpoint capturing one shared record.
+    const ecs::Entity state_entity = player;
     auto* bound = &world;
     replication::PredictionHooks hooks{};
     hooks.capture = [bound, state_entity, spawns](replication::PredictedEntityId id) {
@@ -887,7 +1145,7 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
             return projectile ? encode_projectile(*projectile) : std::vector<std::byte>{};
         }
         std::vector<std::byte> bytes;
-        const auto* state = bound->get<ReplicatedGameState>(state_entity);
+        const auto* state = bound->get<PlayerState>(state_entity);
         if (!state)
             return bytes;
         bytes.reserve(24);
@@ -896,12 +1154,12 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
             for (unsigned shift = 0; shift < 32; shift += 8)
                 bytes.push_back(std::byte{static_cast<std::uint8_t>(bits >> shift)});
         };
-        append(state->player_position.x);
-        append(state->player_position.y);
-        append(state->player_position.z);
-        append(state->player_velocity.x);
-        append(state->player_velocity.y);
-        append(state->player_velocity.z);
+        append(state->position.x);
+        append(state->position.y);
+        append(state->position.z);
+        append(state->velocity.x);
+        append(state->velocity.y);
+        append(state->velocity.z);
         return bytes;
     };
     hooks.restore = [bound, state_entity, player, spawns](replication::PredictedEntityId id,
@@ -912,7 +1170,7 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
         }
         if (bytes.size() != 24)
             return;
-        auto* state = bound->get<ReplicatedGameState>(state_entity);
+        auto* state = bound->get<PlayerState>(state_entity);
         if (!state)
             return;
         const auto read = [&](std::size_t offset) {
@@ -921,13 +1179,13 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
                 bits |= std::to_integer<std::uint32_t>(bytes[offset + i]) << (i * 8);
             return std::bit_cast<float>(bits);
         };
-        state->player_position = {read(0), read(4), read(8)};
-        state->player_velocity = {read(12), read(16), read(20)};
-        bound->mark_changed<ReplicatedGameState>(state_entity);
+        state->position = {read(0), read(4), read(8)};
+        state->velocity = {read(12), read(16), read(20)};
+        bound->mark_changed<PlayerState>(state_entity);
         if (auto* transform = bound->get<ecs::WorldTransform>(player))
-            transform->value.translation = state->player_position;
+            transform->value.translation = state->position;
         if (auto* local = bound->get<ecs::LocalTransform>(player)) {
-            local->value.translation = state->player_position;
+            local->value.translation = state->position;
             bound->mark_changed<ecs::LocalTransform>(player);
         }
     };
@@ -935,7 +1193,7 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
     // atomically with the player and the projectile, or replay could launch using old resources.
     hooks.capture_group = [bound, state_entity] {
         std::vector<std::byte> bytes;
-        const auto* state = bound->get<ReplicatedGameState>(state_entity);
+        const auto* state = bound->get<PlayerState>(state_entity);
         if (!state)
             return bytes;
         const auto append = [&](std::uint32_t value) {
@@ -944,15 +1202,15 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
         };
         append(state->throw_charges);
         append(state->throw_cooldown);
-        append(std::bit_cast<std::uint32_t>(state->player_facing.x));
-        append(std::bit_cast<std::uint32_t>(state->player_facing.y));
-        append(std::bit_cast<std::uint32_t>(state->player_facing.z));
+        append(std::bit_cast<std::uint32_t>(state->facing.x));
+        append(std::bit_cast<std::uint32_t>(state->facing.y));
+        append(std::bit_cast<std::uint32_t>(state->facing.z));
         return bytes;
     };
     hooks.restore_group = [bound, state_entity](std::span<const std::byte> bytes) {
         if (bytes.size() != 20)
             return;
-        auto* state = bound->get<ReplicatedGameState>(state_entity);
+        auto* state = bound->get<PlayerState>(state_entity);
         if (!state)
             return;
         const auto read = [&](std::size_t offset) {
@@ -963,16 +1221,16 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
         };
         state->throw_charges = read(0);
         state->throw_cooldown = read(4);
-        state->player_facing = {std::bit_cast<float>(read(8)),
-                                std::bit_cast<float>(read(12)),
-                                std::bit_cast<float>(read(16))};
-        bound->mark_changed<ReplicatedGameState>(state_entity);
+        state->facing = {std::bit_cast<float>(read(8)),
+                         std::bit_cast<float>(read(12)),
+                         std::bit_cast<float>(read(16))};
+        bound->mark_changed<PlayerState>(state_entity);
     };
     hooks.simulate = [bound, state_entity, player, spawns](
                          std::span<const replication::PredictedEntityId> members,
                          const replication::InputCommand& command,
                          const replication::PredictionStep& step) {
-        auto* state = bound->get<ReplicatedGameState>(state_entity);
+        auto* state = bound->get<PlayerState>(state_entity);
         if (!state)
             return;
         app::ActionState actions{};
@@ -983,7 +1241,7 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
             --state->throw_cooldown;
         const core::Vec3 wished{command.move_x, 0.0f, command.move_y};
         if (core::length(wished) > 1e-4f)
-            state->player_facing = wished * (1.0f / core::length(wished));
+            state->facing = wished * (1.0f / core::length(wished));
         // "At most one live projectile" asks about THIS step's simulated set, as the server asks
         // about its own `projectile_`. A guess the reconciler has dropped for replay is still an
         // entity in this world, holding its pre-replay age, until the replay recreates or
@@ -1004,8 +1262,8 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
             state->throw_cooldown == 0 && !live_projectile) {
             bool launched = true;
             if (spawns) {
-                const core::Vec3 start = state->player_position + core::Vec3{0.0f, 0.12f, 0.0f};
-                const ThrownProjectile projectile{start, state->player_facing * kThrowSpeed, 0};
+                const core::Vec3 start = state->position + core::Vec3{0.0f, 0.12f, 0.0f};
+                const ThrownProjectile projectile{start, state->facing * kThrowSpeed, 0};
                 const auto bytes = encode_projectile(projectile);
                 // This is a step-context provisional overlay request. The reconciler owns the
                 // replay-stable id; the game spends a charge only when it grants the guess.
@@ -1035,11 +1293,11 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
                     local->value.translation = projectile->position;
             }
         }
-        bound->mark_changed<ReplicatedGameState>(state_entity);
+        bound->mark_changed<PlayerState>(state_entity);
         if (auto* transform = bound->get<ecs::WorldTransform>(player))
-            transform->value.translation = state->player_position;
+            transform->value.translation = state->position;
         if (auto* local = bound->get<ecs::LocalTransform>(player)) {
-            local->value.translation = state->player_position;
+            local->value.translation = state->position;
             bound->mark_changed<ecs::LocalTransform>(player);
         }
     };
@@ -1226,7 +1484,7 @@ physics::BodyDesc body_desc(const physics::RigidBody& rb,
 // crates are not bit-identical even with nothing disturbing them. That residual is measured.
 struct InteractionPhysics {
     ecs::World* world = nullptr;
-    ecs::Entity player{}; // the predicted player, which also holds its ReplicatedGameState
+    ecs::Entity player{}; // the predicted player, which also holds its PlayerState
     replication::PredictedEntityId object{};
     bool rebuild_on_restore = true;
     // The `stale-restore` control and the bytes it restores from.
@@ -1244,9 +1502,9 @@ struct InteractionPhysics {
         floor.position = {0.0f, -kFloorHalfY, 0.0f};
         (void)physics->create_body(body_desc(kFloorRigidBody, floor_collider(), floor));
         physics::BodyState player_state{};
-        if (const auto* state = world->get<ReplicatedGameState>(player)) {
-            player_state.position = state->player_position;
-            player_state.linear_velocity = state->player_velocity;
+        if (const auto* state = world->get<PlayerState>(player)) {
+            player_state.position = state->position;
+            player_state.linear_velocity = state->velocity;
         }
         player_body =
             physics->create_body(body_desc(kPlayerRigidBody, player_collider(), player_state));
@@ -1270,12 +1528,12 @@ struct InteractionPhysics {
     }
 
     void step(float dt) {
-        const auto* state = world->get<ReplicatedGameState>(player);
+        const auto* state = world->get<PlayerState>(player);
         if (!physics || !state)
             return;
         physics::BodyState drive{};
-        drive.position = state->player_position;
-        drive.linear_velocity = state->player_velocity;
+        drive.position = state->position;
+        drive.linear_velocity = state->velocity;
         (void)physics->set_body_state(player_body, drive);
         physics->step(dt);
         touching = false;
@@ -1452,12 +1710,12 @@ app::GameDefinition definition() {
         },
         [](ecs::World& mirror, ecs::World& prediction, ecs::Entity mirror_player) {
             const auto* wt = mirror.get<ecs::WorldTransform>(mirror_player);
-            ReplicatedGameState initial{};
-            mirror.query<ReplicatedGameState>().for_each(
-                [&](ecs::Entity, const ReplicatedGameState& state) { initial = state; });
-            // The controller state lives on a separate entity in the authoritative world. Place
-            // its prediction copy on the player so this world still contains exactly one entity.
-            return prediction.spawn_with(wt ? *wt : ecs::WorldTransform{}, initial);
+            // The controller state is on the player's own body (m20.8b2), so the copy is of THIS
+            // client's player -- never another seat's, whatever else the mirror holds -- and the
+            // prediction world still contains exactly one entity.
+            const auto* state = mirror.get<PlayerState>(mirror_player);
+            return prediction.spawn_with(wt ? *wt : ecs::WorldTransform{},
+                                         state ? *state : PlayerState{});
         },
         [](const ecs::World& world, ecs::Entity player) {
             core::Transform pose{};
@@ -1478,6 +1736,18 @@ app::GameDefinition definition() {
     def.remote_play->local_quit = [](const app::ActionState& actions) {
         return actions.was_pressed(kButtonQuit);
     };
+    // m20.8b2 (ADR-0108): hello-game seats up to 16 players -- the owner's default client cap --
+    // each with its own body (`on_player_joined`), state and throws, found by seat.
+    //
+    // But it DEFAULTS to one seat. Every m20.3-m20.7 proof runs `dedicated --listen` as one seat,
+    // several with one-seat diagnostics (`--spawn-fault`, `--interaction-fault`, `--input-trace`)
+    // that a multi-seat server refuses; with one seat the server is m20.7's, byte for byte bar the
+    // identity's "rime.seats" marker. A session for several players asks for it:
+    // `dedicated --listen ... --max-clients 2`. A default of 16 (ADR-0108 §5's) would have turned
+    // every existing proof into a multi-seat run testing something else under the same name.
+    def.max_players = 16;
+    def.default_max_clients = 1;
+    def.remote_play->seat_player = seat_player;
     def.remote_play->spawn_prediction =
         app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile{
             1,

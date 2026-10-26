@@ -110,7 +110,7 @@ struct Client {
 
     Client(const app::GameDefinition& definition, InteractionProfile::ClientOptions options) {
         definition.remote_play->register_replicated(world);
-        player = world.spawn_with(ecs::WorldTransform{}, hello_game::ReplicatedGameState{});
+        player = world.spawn_with(ecs::WorldTransform{}, hello_game::PlayerState{});
         auto inner = definition.remote_play->spawn_prediction->client_hooks(
             world, player, 1, [](const replication::SpawnKey&, std::span<const std::byte>) {
                 return std::optional<replication::PredictedEntityId>{};
