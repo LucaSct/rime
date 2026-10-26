@@ -39,10 +39,14 @@ correction per checkpoint, tagged with the server tick it restored) and gates th
 THE TAPE (see game.cpp `push_tape`): start inside the group, retreat until the crate leaves, walk back
 until it joins, push it, retreat, rest, retreat until it leaves, walk back; the server kicks it once
 at rest while a member and once while it is not, timed so the player's approach drags the re-join
-inside the ~24 ticks the kicked crate keeps sliding. Kick times are SERVER ticks, but the tape runs
-in CLIENT ticks, which start `offset` server ticks later (measured: 4 loopback; 36-42 plus lost
-commands under 108 ms delay). A leg whose kicks did not land as scripted (kick #1 as a member, kick
-#2 as a non-member, the re-join sliding) lost the race against that offset; it is RERUN (max 3), and
+inside the ~24 ticks the kicked crate keeps sliding. The kicks are EVENT-DRIVEN: `kick@cmd:N` fires
+on the server tick that retires client command N, and the client's tape tick t sends sequence t, so
+each kick lands on its tape tick however far the server clock has drifted from the client's (it
+used to be scheduled in SERVER ticks, which start `offset` ticks before the tape's -- measured 4
+loopback, 36-42 plus lost commands under 108 ms delay -- and a starved machine let that offset drift
+past the ~24-tick slide window). The server reports the ticks the kicks landed on (`interaction_kick1_tick`), which the analysis
+windows (`k1`) use; the offset survives for the tick budget and as the fallback estimate. A leg whose kicks still did not land as
+scripted (kick #1 as a member, kick #2 as a non-member, the re-join sliding) is RERUN (max 3), and
 a discarded attempt must still hold the invariants (equal digests, no join in contact, epochs =
 roster changes).
 
@@ -108,11 +112,13 @@ def finished(output):
 def run_leg_once(client_extra, impaired, kicks, tape):
     offset = OFFSET_IMPAIRED if impaired else OFFSET_LOOPBACK
     ticks = budget(ONE_WAY if impaired else 1, offset)
+    # k1/k2 are ESTIMATES of the server ticks the kicks land on (analysis windows only); the kicks
+    # themselves fire on command retirement, so they no longer depend on the offset being right.
     k1, k2 = offset + TAPE_KICK1, offset + TAPE_KICK2
     server = subprocess.Popen(
         [EXE, "dedicated", "--listen", "127.0.0.1:0", "--ticks", str(ticks), "--linger-ms",
          "1000", "--input-slack", str(INPUT_SLACK),
-         *(["--interaction-fault", f"kick@{k1},kick@{k2}"] if kicks else [])],
+         *(["--interaction-fault", f"kick@cmd:{TAPE_KICK1},kick@cmd:{TAPE_KICK2}"] if kicks else [])],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
     client = None
     try:
@@ -131,6 +137,10 @@ def run_leg_once(client_extra, impaired, kicks, tape):
             client_err[-500:])
         s, c = finished(server_out), finished(client_out)
         assert s["ticks"] == ticks, s
+        if kicks and s["interaction_kicks"] == 2:
+            # The kicks fired on command retirement, so the server says where they landed; the
+            # offset estimate above is only the fallback for a leg whose kicks did not both fire.
+            k1, k2 = s["interaction_kick1_tick"], s["interaction_kick2_tick"]
         assert s["digest"] == c["digest"] and int(c["digest"], 16) != 0, (s, c)
         return s, c, k1, k2
     finally:
@@ -142,7 +152,7 @@ def run_leg_once(client_extra, impaired, kicks, tape):
 
 def scripted(s):
     """Did the kicks land as scripted? The PRECONDITION of every push-tape leg."""
-    return (s["interaction_kicks"] == 2 and s["interaction_kicks_member"] == 1 and
+    return (s["interaction_kicks"] == 2 and s["interaction_kicks_by_command"] == 2 and s["interaction_kicks_member"] == 1 and
             s["interaction_kicks_nonmember"] == 1 and s["interaction_joined_sliding"] == 1 and
             s["interaction_joins"] == 3 and s["interaction_leaves"] == 2)
 

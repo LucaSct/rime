@@ -823,6 +823,11 @@ struct NetworkInputServer::Impl {
     std::vector<std::uint64_t> kick_ticks;
     // Policy counts of occupants that have left (multi-seat; a one-seat policy never leaves).
     InteractionCounters policy_totals{};
+    // `kick@cmd:N` items and whether each has fired; `retired_now` is the sequence THIS tick's
+    // input step retired (nullopt on a stall, before start, or with no schedule).
+    std::vector<std::uint32_t> kick_commands;
+    std::vector<bool> kick_command_fired;
+    std::optional<std::uint32_t> retired_now;
 
     // ── The seats ─────────────────────────────────────────────────────────────────────────────
     SeatTable table;
@@ -866,6 +871,11 @@ struct NetworkInputServer::Impl {
         input.slot = seat.slot;
         const ScheduledInput selected = seat.schedule->step();
         applied = selected.applied;
+        // `kick@cmd:N` (one-seat diagnostic): the sequence THIS step retired. The step's own
+        // command carries sequence 0 when a retirement was synthesized with a neutral stand-in,
+        // so ask the schedule what it retired instead of trusting the command.
+        if (!multi_seat && selected.started && !selected.stalled)
+            retired_now = seat.schedule->result(0).retired_through;
         if (const auto* session = driver.session(*seat.session))
             input.command = CommandProvenance{
                 session->incarnation(), selected.command.sequence, selected.applied};
@@ -896,6 +906,7 @@ struct NetworkInputServer::Impl {
         last_applied = false;
         selected_refuse = false;
         selected_provenance.reset();
+        retired_now.reset();
         players.clear();
         Seat& seat = seats[0];
         if (!seat.admitted || !seat.schedule) {
@@ -1458,14 +1469,40 @@ void NetworkInputServer::set_interaction_kicks(std::vector<std::uint64_t> ticks)
     impl_->kick_ticks = std::move(ticks);
 }
 
+void NetworkInputServer::set_interaction_kick_commands(std::vector<std::uint32_t> sequences) {
+    impl_->kick_commands = std::move(sequences);
+    impl_->kick_command_fired.assign(impl_->kick_commands.size(), false);
+}
+
 bool NetworkInputServer::interaction_kick(std::uint64_t server_tick) {
     // A one-seat diagnostic: "was the object a member" is a question about one player.
     const auto& policy = impl_->seats[0].policy;
-    if (!impl_->interaction || impl_->multi_seat || !policy ||
-        std::find(impl_->kick_ticks.begin(), impl_->kick_ticks.end(), server_tick) ==
-            impl_->kick_ticks.end())
+    if (!impl_->interaction || impl_->multi_seat || !policy)
+        return false;
+    const bool by_tick =
+        std::find(impl_->kick_ticks.begin(), impl_->kick_ticks.end(), server_tick) !=
+        impl_->kick_ticks.end();
+    // Event-driven: an item fires on the first tick that retires its sequence or a later one, so
+    // the kick follows the CLIENT's tape (command N is the tape's tick N) however far the server
+    // clock has drifted from it. Every unfired item that is due fires now; one tick kicks once.
+    bool by_command = false;
+    if (impl_->retired_now) {
+        for (std::size_t i = 0; i < impl_->kick_commands.size(); ++i) {
+            if (!impl_->kick_command_fired[i] && *impl_->retired_now >= impl_->kick_commands[i]) {
+                impl_->kick_command_fired[i] = true;
+                by_command = true;
+            }
+        }
+    }
+    if (!by_tick && !by_command)
         return false;
     ++impl_->totals.interaction_kicks;
+    if (impl_->totals.interaction_kicks == 1)
+        impl_->totals.interaction_kick1_tick = server_tick;
+    else if (impl_->totals.interaction_kicks == 2)
+        impl_->totals.interaction_kick2_tick = server_tick;
+    if (by_command)
+        ++impl_->totals.interaction_kicks_by_command;
     // Membership as of the previous tick's policy step: the state the client's roster reflects.
     ++(policy->member() ? impl_->totals.interaction_kicks_member
                         : impl_->totals.interaction_kicks_nonmember);

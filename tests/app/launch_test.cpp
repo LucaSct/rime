@@ -269,6 +269,32 @@ TEST_CASE("launch: interaction diagnostics parse, are off by default, and are re
     REQUIRE(kicks.options.interaction_kicks.size() == 2);
     CHECK(kicks.options.interaction_kicks[0] == 300);
     CHECK(kicks.options.interaction_kicks[1] == 489);
+    // m20.7: kick@cmd:N fires on command retirement, not a server tick; the forms mix freely.
+    const auto by_command = parse({"dedicated",
+                                   "--listen",
+                                   "127.0.0.1:0",
+                                   "--interaction-fault",
+                                   "kick@cmd:306,kick@cmd:485"});
+    REQUIRE(by_command.status == ParseStatus::Ok);
+    CHECK(by_command.options.interaction_kicks.empty());
+    REQUIRE(by_command.options.interaction_kick_commands.size() == 2);
+    CHECK(by_command.options.interaction_kick_commands[0] == 306);
+    CHECK(by_command.options.interaction_kick_commands[1] == 485);
+    const auto mixed =
+        parse({"dedicated", "--listen", "127.0.0.1:0", "--interaction-fault", "kick@7,kick@cmd:9"});
+    REQUIRE(mixed.status == ParseStatus::Ok);
+    CHECK(mixed.options.interaction_kicks == std::vector<std::uint64_t>{7});
+    CHECK(mixed.options.interaction_kick_commands == std::vector<std::uint32_t>{9});
+    for (const char* bad : {"kick@cmd:",
+                            "kick@cmd:x",
+                            "kick@cmd:0",
+                            "kick@cmd:4294967296",
+                            "kick@cmd:1,",
+                            "kick@cmd:1,,kick@2"})
+        CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--interaction-fault", bad}).status ==
+              ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--interaction-fault", "kick@cmd:3"}).status ==
+          ParseStatus::Error);
     for (const char* bad : {"kick@", "kick@x", "kick@1,", "kick@1,,kick@2", "boom@3", ""})
         CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--interaction-fault", bad}).status ==
               ParseStatus::Error);
