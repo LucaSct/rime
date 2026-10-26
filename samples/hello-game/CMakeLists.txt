@@ -110,6 +110,12 @@ set_tests_properties(hello_game_play_throw PROPERTIES TIMEOUT 300 RUN_SERIAL TRU
 add_test(NAME hello_game_play_interaction COMMAND python3
     ${CMAKE_CURRENT_SOURCE_DIR}/interaction_prediction.py $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_play_interaction PROPERTIES TIMEOUT 400 RUN_SERIAL TRUE LABELS "hello_game")
+# m20.7c (ADR-0107): the adaptive input buffer's two-process proof -- a scripted client hitch,
+# loopback and impaired, plus a fixed-buffer control that must lose the hitch's commands.
+# RUN_SERIAL for the same reason as the proofs above. Measured ~43 s; TIMEOUT is 3x that.
+add_test(NAME hello_game_play_adaptive COMMAND python3
+    ${CMAKE_CURRENT_SOURCE_DIR}/adaptive_input.py $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_play_adaptive PROPERTIES TIMEOUT 130 RUN_SERIAL TRUE LABELS "hello_game")
 add_executable(hello_game_net_proof net_proof.cpp game.cpp)
 target_link_libraries(hello_game_net_proof
     PRIVATE rime::app_game rime::app rime::physics rime::scene rime::net rime::replication)
