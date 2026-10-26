@@ -186,6 +186,7 @@ struct Client {
     std::optional<replication::InputHelloReply> reply;
     std::vector<std::byte> reply_bytes;
     std::vector<replication::OwnerCheckpoint> checkpoints;
+    std::vector<replication::SpawnCheckpoint> spawn_checkpoints;
     std::vector<replication::InputResult> results;
     bool connected = false;
     bool disconnected = false;
@@ -219,6 +220,14 @@ struct Client {
                 continue;
             }
             replication::OwnerCheckpoint checkpoint{};
+            replication::SpawnCheckpoint spawn_checkpoint{};
+            if (!message.bytes.empty() &&
+                message.bytes[0] == std::byte{replication::kOwnerCheckpointTag} &&
+                replication::decode_spawn_checkpoint(message.bytes, spawn_checkpoint) &&
+                spawn_checkpoint.spawns.has_value()) {
+                spawn_checkpoints.push_back(std::move(spawn_checkpoint));
+                continue;
+            }
             if (!message.bytes.empty() &&
                 message.bytes[0] == std::byte{replication::kOwnerCheckpointTag} &&
                 replication::decode_owner_checkpoint(message.bytes, checkpoint) ==
@@ -602,6 +611,67 @@ TEST_CASE("seats: a join the game refuses is answered game_refused and frees the
     CHECK(counts.game_refused_join == 1);
     CHECK(counts.clients_refused == 1);
     CHECK(counts.clients_admitted == 1);
+}
+
+TEST_CASE("seats: a shared body refuses the second owner before binding its checkpoint") {
+    Harness h({.max_players = 2, .max_clients = 2}, false, /*start_now=*/false);
+    // Deliberately wrong game hook: even after the second join creates its pawn, it names
+    // seat zero's body. Two valid checkpoints would conceal this mistake from digest tests.
+    h.profile.seat_player = [](ecs::World& world, app::PlayerSlot) {
+        return pawn_for(world, {0, 0});
+    };
+    h.start();
+    Client& first = h.join_seat(7901);
+    Client& second = h.join_seat(7902);
+    REQUIRE(first.reply->refusal == replication::InputHelloRefusal::None);
+    CHECK(second.reply->refusal == replication::InputHelloRefusal::GameRefused);
+    CHECK(h.server->counters().seat_owner_shared == 1);
+    CHECK(h.server->counters().clients_admitted == 1);
+    CHECK(h.world.is_alive(pawn_for(h.world, {0, 0})));
+    CHECK_FALSE(h.world.is_alive(pawn_for(h.world, {1, 0})));
+}
+
+TEST_CASE("seats: an ended projectile after its owner leaves retracts without another verdict") {
+    Harness h({.max_players = 2, .max_clients = 2}, false, /*start_now=*/false);
+    h.profile.spawn_prediction = app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile{};
+    h.profile.spawn_prediction->capture_spawned = [](const ecs::World&, ecs::Entity) {
+        return std::vector<std::byte>{std::byte{1}};
+    };
+    h.start();
+    Client& owner = h.join_seat(7901);
+    Client& other = h.join_seat(7902);
+    core::Transform transform{};
+    const ecs::Entity projectile =
+        h.world.spawn_with(ecs::LocalTransform{transform}, ecs::WorldTransform{transform});
+    const replication::SpawnKey key{owner.driver->session(*owner.id)->incarnation(), 1, 0};
+    const app::SpawnReport launched{app::SpawnReport::Kind::Launched, key, projectile, 0, {0, 0}};
+    h.server->after_tick(h.tick++, std::span{&launched, 1});
+    CHECK(h.server->counters().spawn_accepted == 1);
+    owner.driver->session(*owner.id)->disconnect();
+    h.step_until([&] { return !h.seen.left.empty(); }, "projectile owner left");
+    Client& replacement = h.join_seat(7903);
+    REQUIRE(replacement.reply->seat == 0);
+    REQUIRE(replacement.reply->seat_generation == 1);
+    const app::SpawnReport ended{app::SpawnReport::Kind::Ended, key, projectile, 0, {0, 0}};
+    h.server->after_tick(h.tick++, std::span{&ended, 1});
+    CHECK_FALSE(h.world.is_alive(projectile));
+    CHECK(h.server->counters().spawns_ended_after_owner_left == 1);
+    // A launch report delayed past departure is equally unable to name a recipient; it must
+    // not leave a newly created entity behind for the successor to inherit.
+    const ecs::Entity delayed =
+        h.world.spawn_with(ecs::LocalTransform{transform}, ecs::WorldTransform{transform});
+    const app::SpawnReport late_launch{app::SpawnReport::Kind::Launched, key, delayed, 0, {0, 0}};
+    h.server->after_tick(h.tick++, std::span{&late_launch, 1});
+    CHECK_FALSE(h.world.is_alive(delayed));
+    for (int i = 0; i < 4; ++i)
+        h.step();
+    for (const Client* observer : {&other, &replacement}) {
+        REQUIRE(!observer->spawn_checkpoints.empty());
+        for (const auto& checkpoint : observer->spawn_checkpoints) {
+            REQUIRE(checkpoint.spawns.has_value());
+            CHECK(checkpoint.spawns->outcomes.empty());
+        }
+    }
 }
 
 TEST_CASE("seats: max_players == 1 keeps the m20.7 hello, input fields and no seat hooks") {

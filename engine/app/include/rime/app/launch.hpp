@@ -132,6 +132,8 @@ struct LaunchOptions {
     // the runner to min(16, GameDefinition::max_players); a value above the game's max_players is
     // refused there (the parser does not know the game).
     std::uint16_t max_clients = 0;
+    // Diagnostic: exchange the first two seats' selected commands after scheduling.
+    bool seat_debug_break_swap = false;
     // m20.7 `play --connect --debug-hitch T:MS` (diagnostic, off by default): at client tick T,
     // before sampling input, sleep MS ms -- a frame hitch the loop then catches up from.
     std::uint64_t debug_hitch_tick = 0; // 0 = off (T >= 1 when given)
@@ -261,6 +263,8 @@ struct RunReport {
         // the replicator could not name (or named in the provisional range), or no client.
         std::uint64_t spawn_foreign_key = 0, spawn_out_of_order = 0, spawn_end_unknown = 0;
         std::uint64_t spawn_roster_refused = 0, spawn_without_client = 0;
+        // A stale owner's final report still retracts the entity, without making a verdict.
+        std::uint64_t spawns_ended_after_owner_left = 0;
         std::uint64_t spawn_extension_refused = 0;
         // SpawnOutcomeAck: applied, and every reason one was refused.
         std::uint64_t spawn_acks_applied = 0, spawn_ack_malformed = 0, spawn_ack_wrong_channel = 0;
@@ -310,6 +314,7 @@ struct RunReport {
         std::uint64_t max_clients = 0;
         std::uint64_t hello_full = 0, duplicate_endpoint = 0, join_rate_limited = 0;
         std::uint64_t game_refused_join = 0, seats_abandoned = 0, seat_owner_refused = 0;
+        std::uint64_t seat_owner_shared = 0;
 
         // Per seat INDEX, accumulated over every occupant of that index (the totals above are the
         // sums). Reported as the appended `"seats":[...]` array.
@@ -321,6 +326,7 @@ struct RunReport {
             bool seated = false;
             std::uint64_t joins = 0, leaves = 0;
             std::uint64_t accepted = 0, applied = 0, synthesized = 0, late = 0, stalls = 0;
+            std::uint64_t resyncs = 0;
             std::uint64_t checkpoints = 0;
             std::uint32_t membership_epoch = 0;
         };

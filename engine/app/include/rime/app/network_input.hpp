@@ -96,6 +96,7 @@ public:
     // `before_tick`). Multi-seat: runs `game.on_player_left` / `on_player_joined` first and
     // answers each pending hello with the game's verdict.
     void begin_seat_tick(Game& game, TickContext& ctx);
+    void set_seat_debug_break_swap(bool enabled);
     [[nodiscard]] std::span<const PlayerInput> players() const noexcept;
     void after_tick(std::uint64_t server_tick,
                     std::span<const SpawnReport> spawns = {},

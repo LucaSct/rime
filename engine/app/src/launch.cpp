@@ -84,19 +84,21 @@ constexpr std::uint16_t kDefaultMaxClients = 16;
 std::string seat_fields(const RunReport::NetworkInputCounters& n) {
     std::string out = fmt::format(",\"max_clients\":{},\"hello_full\":{},\"duplicate_endpoint\":{},"
                                   "\"join_rate_limited\":{},\"game_refused_join\":{},"
-                                  "\"seats_abandoned\":{},\"seat_owner_refused\":{},\"seats\":[",
+                                  "\"seats_abandoned\":{},\"seat_owner_refused\":{},"
+                                  "\"seat_owner_shared\":{},\"seats\":[",
                                   n.max_clients,
                                   n.hello_full,
                                   n.duplicate_endpoint,
                                   n.join_rate_limited,
                                   n.game_refused_join,
                                   n.seats_abandoned,
-                                  n.seat_owner_refused);
+                                  n.seat_owner_refused,
+                                  n.seat_owner_shared);
     for (std::size_t i = 0; i < n.seats.size(); ++i) {
         const auto& seat = n.seats[i];
         out += fmt::format("{}{{\"seat\":{},\"gen\":{},\"seated\":{},\"joins\":{},\"leaves\":{},"
                            "\"accepted\":{},\"applied\":{},\"synthesized\":{},\"late\":{},"
-                           "\"stalls\":{},\"checkpoints\":{},\"epoch\":{}}}",
+                           "\"stalls\":{},\"resyncs\":{},\"checkpoints\":{},\"epoch\":{}}}",
                            i == 0 ? "" : ",",
                            seat.index,
                            seat.generation,
@@ -108,6 +110,7 @@ std::string seat_fields(const RunReport::NetworkInputCounters& n) {
                            seat.synthesized,
                            seat.late,
                            seat.stalls,
+                           seat.resyncs,
                            seat.checkpoints,
                            seat.membership_epoch);
     }
@@ -175,6 +178,7 @@ std::string launch_usage(std::string_view program) {
         "  --max-clients N    dedicated --listen: seat at most N players (1..128; default\n"
         "                     the game's default, else min(16, its max players); may lower\n"
         "                     the game's max players, never raise it; 1 = one-seat server)\n"
+        "  --seat-debug-break swap  dedicated --max-clients > 1: exchange two seats' commands\n"
         "  --debug-hitch T:MS play --connect, diagnostic: sleep MS ms (1..2000) at client tick T\n"
         "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
@@ -329,6 +333,10 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
                 result.options.max_clients == 0 ||
                 result.options.max_clients > SeatTable::kMaxSeatsLimit)
                 return fail("--max-clients needs an integer 1..128 once");
+        } else if (arg == "--seat-debug-break") {
+            if (!has_value || result.options.seat_debug_break_swap || args[++i] != "swap")
+                return fail("--seat-debug-break needs swap once");
+            result.options.seat_debug_break_swap = true;
         } else if (arg == "--debug-hitch") {
             // T:MS -- a client frame hitch of MS milliseconds at client tick T (diagnostic).
             if (!has_value || result.options.debug_hitch_tick != 0)
@@ -549,6 +557,10 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
     if (result.options.max_clients != 0 &&
         (result.options.mode != LaunchMode::Dedicated || result.options.offline))
         return fail("--max-clients requires listening dedicated mode");
+    if (result.options.seat_debug_break_swap &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline ||
+         result.options.max_clients <= 1))
+        return fail("--seat-debug-break swap requires dedicated --max-clients > 1");
     if (result.options.debug_hitch_tick != 0 && result.options.connect_host.empty())
         return fail("--debug-hitch requires --connect");
     if ((result.options.interaction_debug_break != InteractionDebugBreak::None ||
@@ -803,6 +815,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                           (report.bind_failed ? "UDP bind failed: " : "remote play refused: ") +
                               report.bind_error);
         }
+        network->set_seat_debug_break_swap(options.seat_debug_break_swap);
         if (!options.interaction_kicks.empty() || !options.interaction_kick_commands.empty()) {
             if (!definition.remote_play || !definition.remote_play->active_interaction() ||
                 definition.remote_play->active_interaction()->j_max <= 0.0f)
@@ -1009,7 +1022,9 @@ RunReport run_game_mode(const LaunchOptions& options,
                                   "\"spawn_outcomes_deferred\":{},\"spawn_outcomes_dropped\":{},"
                                   "\"spawn_foreign_key\":{},\"spawn_out_of_order\":{},"
                                   "\"spawn_end_unknown\":{},\"spawn_roster_refused\":{},"
-                                  "\"spawn_without_client\":{},\"spawn_extension_refused\":{},"
+                                  "\"spawn_without_client\":{},"
+                                  "\"spawns_ended_after_owner_left\":{},"
+                                  "\"spawn_extension_refused\":{},"
                                   "\"spawn_acks_applied\":{},\"spawn_ack_malformed\":{},"
                                   "\"spawn_ack_wrong_channel\":{},"
                                   "\"spawn_ack_wrong_incarnation\":{},\"spawn_ack_ahead\":{},"
@@ -1025,6 +1040,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                                   report.network_input.spawn_end_unknown,
                                   report.network_input.spawn_roster_refused,
                                   report.network_input.spawn_without_client,
+                                  report.network_input.spawns_ended_after_owner_left,
                                   report.network_input.spawn_extension_refused,
                                   report.network_input.spawn_acks_applied,
                                   report.network_input.spawn_ack_malformed,

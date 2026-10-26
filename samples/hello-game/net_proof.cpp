@@ -778,6 +778,23 @@ int negative(const std::filesystem::path& binary) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 4 && std::string_view(argv[1]) == "--codec2-to" &&
+        std::string_view(argv[3]) == "--no-gpu") {
+        std::uint16_t port = 0;
+        try {
+            port = static_cast<std::uint16_t>(std::stoul(argv[2]));
+        } catch (...) {
+            return 2;
+        }
+        Client client(port);
+        // An older codec's refusal must be observable on the wire, not inferred from a
+        // server-side count that could rise for a different connection.
+        const bool refused =
+            client.hello(2, 2) && client.reply.refusal == replication::InputHelloRefusal::Version;
+        fmt::print("{{\"event\":\"codec2_probe\",\"version_refused\":{}}}\n",
+                   refused ? "true" : "false");
+        return refused ? 0 : 1;
+    }
     auto binary = std::filesystem::absolute(argv[0]).parent_path() / "hello_game";
     binary.replace_extension(std::filesystem::path(argv[0]).extension());
     return argc == 2 && std::string_view(argv[1]) == "--negative" ? negative(binary)

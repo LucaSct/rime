@@ -122,6 +122,15 @@ add_test(NAME hello_game_multi_client_smoke COMMAND python3
     ${CMAKE_CURRENT_SOURCE_DIR}/multi_client_smoke.py $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_multi_client_smoke PROPERTIES
     TIMEOUT 60 RUN_SERIAL TRUE LABELS "hello_game")
+# m20.8c: three independent UDP processes, a swapped-routing sensitivity run, a measured
+# no-blackout envelope and churn. Its runtime is measured by the direct proof gate; keep CTest
+# serial so host scheduling noise cannot masquerade as another seat's correction.
+if(UNIX)
+    add_test(NAME hello_game_multi_client COMMAND python3
+        ${CMAKE_CURRENT_SOURCE_DIR}/multi_client_proof.py $<TARGET_FILE:hello_game>)
+    set_tests_properties(hello_game_multi_client PROPERTIES
+        TIMEOUT 273 RUN_SERIAL TRUE LABELS "hello_game")
+endif()
 add_executable(hello_game_net_proof net_proof.cpp game.cpp)
 target_link_libraries(hello_game_net_proof
     PRIVATE rime::app_game rime::app rime::physics rime::scene rime::net rime::replication)

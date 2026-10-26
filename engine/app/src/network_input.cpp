@@ -428,6 +428,7 @@ struct NetworkInputServer::Impl {
         seat.counts.synthesized += schedule.synthesized();
         seat.counts.late += schedule.late();
         seat.counts.stalls += schedule.stalls();
+        seat.counts.resyncs += schedule.resyncs();
         seat.schedule.reset();
     }
 
@@ -870,6 +871,7 @@ struct NetworkInputServer::Impl {
     bool selected_refuse = false;
 
     RunReport::NetworkInputCounters totals{}; // run totals: the per-seat records sum into these
+    bool seat_debug_break_swap = false;
     // Scratch buffers, cleared before every use; nothing survives from one session to the next.
     std::vector<net::SessionEvent> events;
     std::vector<net::Received> messages;
@@ -955,6 +957,14 @@ struct NetworkInputServer::Impl {
             remote_play->seat_player ? remote_play->seat_player(world, seat.slot) : ecs::Entity{};
         if (!world.is_alive(owner))
             return false;
+        // A game can accidentally return its first pawn for every slot. Check the body before
+        // binding hooks: two checkpoints bound to one entity would still agree on every digest.
+        for (const Seat& other : seats) {
+            if (&other != &seat && other.admitted && other.owner == owner) {
+                ++totals.seat_owner_shared;
+                return false;
+            }
+        }
         const NetId net_id = replicator->replicate(owner);
         if (net_id == kNullNetId)
             return false;
@@ -1020,6 +1030,13 @@ struct NetworkInputServer::Impl {
             if (seat.admitted && seat.schedule)
                 players.push_back(step_seat(seat, applied));
         }
+        // The proof's off-by-default fault changes only which body consumes each selected
+        // command. Every replica still agrees, exposing why a digest cannot prove attribution.
+        if (seat_debug_break_swap && players.size() >= 2) {
+            std::swap(players[0].actions, players[1].actions);
+            std::swap(players[0].command, players[1].command);
+            std::swap(players[0].refuse_spawn, players[1].refuse_spawn);
+        }
         // The tick nobody drove, counted as the one-seat path counts it.
         if (players.empty())
             ++totals.synthesized;
@@ -1079,6 +1096,14 @@ struct NetworkInputServer::Impl {
             Seat* seat = spawn_seat(report);
             if (seat == nullptr) {
                 ++totals.spawn_without_client;
+                // Departure clears the seat's launch ledger, but a delayed report may still
+                // name its entity. Retract any such live entity without a verdict: the old
+                // generation cannot address the new occupant's outcome ledger. An Ended report
+                // also retracts a mapped entity if the game already removed its world body.
+                if (world.is_alive(report.entity) || report.kind == SpawnReport::Kind::Ended)
+                    replicator->despawn(report.entity);
+                if (report.kind == SpawnReport::Kind::Ended)
+                    ++totals.spawns_ended_after_owner_left;
                 continue;
             }
             const auto* session = driver.session(*seat->session);
@@ -1484,6 +1509,10 @@ void NetworkInputServer::begin_seat_tick(Game& game, TickContext& ctx) {
     ctx.players = impl_->players;
 }
 
+void NetworkInputServer::set_seat_debug_break_swap(bool enabled) {
+    impl_->seat_debug_break_swap = enabled;
+}
+
 std::span<const PlayerInput> NetworkInputServer::players() const noexcept {
     return impl_->players;
 }
@@ -1603,6 +1632,7 @@ RunReport::NetworkInputCounters NetworkInputServer::counters() const noexcept {
             record.synthesized += schedule.synthesized();
             record.late += schedule.late();
             record.stalls += schedule.stalls();
+            record.resyncs += schedule.resyncs();
         }
         counts.seats.push_back(record);
     }
