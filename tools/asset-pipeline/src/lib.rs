@@ -35,7 +35,7 @@ pub mod texture;
 pub mod virtual_geometry;
 pub mod virtual_geometry_dag;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
@@ -116,7 +116,15 @@ pub struct CookOutput {
     pub sources_cooked: usize,
     /// Source files whose unchanged bytes were served from the content-hash cache.
     pub sources_cached: usize,
+    /// glTF textures that were NOT written because byte-identical cooked bytes (same content id)
+    /// already exist in this cook; their manifest entries point at the first file. Filled by
+    /// `cook_gltf` and `cook_path`.
+    pub textures_shared: usize,
 }
+
+/// Content id → the cooked file that first carried it, for ONE cook invocation. It is what lets a
+/// second glTF (or a second image of the same glTF) reuse a texture instead of rewriting it.
+type WrittenTextures = HashMap<u64, String>;
 
 /// Import (and cook) a glTF's materials + textures from a path — the path-based convenience over
 /// `gltf_material::import_materials`, symmetric with `gltf_import::import_primitives`. Handy for tools
@@ -157,10 +165,24 @@ pub fn import_gltf_clips(path: &Path) -> Result<Vec<clip::Clip>, PipelineError> 
 /// material becomes a `<stem>.mat<N>.rmat`, and each unique texture a `<stem>.img<N>.<srgb|lin>.rtex`
 /// (M6.4). Meshes whose material carries a normal map cook tangents. Returns every cooked file plus
 /// the manifest entries describing them. `block_compress` BC7-compresses the file's images.
+///
+/// Textures are shared within the file: two images that cook to the same bytes are written once.
+/// `cook_path` extends that across all the glTFs of one cook.
 pub fn cook_gltf(
     input: &Path,
     out_dir: &Path,
     block_compress: bool,
+) -> Result<CookOutput, PipelineError> {
+    cook_gltf_shared(input, out_dir, block_compress, &mut WrittenTextures::new())
+}
+
+/// [`cook_gltf`] with the texture ledger of the surrounding cook, so identical textures are
+/// deduplicated across glTF files too.
+fn cook_gltf_shared(
+    input: &Path,
+    out_dir: &Path,
+    block_compress: bool,
+    written: &mut WrittenTextures,
 ) -> Result<CookOutput, PipelineError> {
     // One decode of the glTF, shared by the material import (which needs the decoded images) and the
     // geometry walk (which needs the buffers) — importing twice would re-decode every texture.
@@ -253,13 +275,26 @@ pub fn cook_gltf(
     }
 
     for t in &mats.textures {
-        std::fs::write(out_dir.join(&t.cooked_file), &t.bytes)?;
-        out.cooked_files.push(out_dir.join(&t.cooked_file));
+        // The id is a hash of the cooked bytes, so an id already in the ledger IS this texture:
+        // point the manifest at the first file instead of writing a second copy. The first
+        // occurrence keeps its normal name, so nothing already cooked is renamed.
+        let cooked_file = match written.get(&t.id) {
+            Some(first) => {
+                out.textures_shared += 1;
+                first.clone()
+            }
+            None => {
+                std::fs::write(out_dir.join(&t.cooked_file), &t.bytes)?;
+                out.cooked_files.push(out_dir.join(&t.cooked_file));
+                written.insert(t.id, t.cooked_file.clone());
+                t.cooked_file.clone()
+            }
+        };
         out.manifest.push(ManifestEntry {
             source_path: t.source_label.clone(),
             kind: "texture",
             id: t.id,
-            cooked_file: t.cooked_file.clone(),
+            cooked_file,
         });
     }
 
@@ -492,13 +527,14 @@ fn cook_one(
     out_dir: &Path,
     color_space: ColorSpace,
     block_compress: bool,
+    written: &mut WrittenTextures,
 ) -> Result<CookOutput, PipelineError> {
     match cook_kind_for(input) {
         // `color_space` is NOT forwarded to a glTF: gltf_material picks each map's colour space from
         // how a material uses it (base colour sRGB, normals linear), and one CLI-wide flag would
         // get half of every file wrong. `block_compress` is only an encoding, so it is safe to
         // forward -- BC7 has an sRGB and a UNORM variant and keeps that per-usage choice intact.
-        Some(SourceKind::GltfMesh) => cook_gltf(input, out_dir, block_compress),
+        Some(SourceKind::GltfMesh) => cook_gltf_shared(input, out_dir, block_compress, written),
         Some(SourceKind::StlMesh) => cook_stl(input, out_dir),
         Some(SourceKind::Texture) => cook_texture(input, out_dir, color_space, block_compress),
         None => Err(PipelineError::Unsupported(format!(
@@ -506,6 +542,60 @@ fn cook_one(
             input.display()
         ))),
     }
+}
+
+/// Re-emit a cache-hit source's manifest entries, applying this run's texture sharing. Each entry
+/// comes back with `true` if it is a shared texture (no file of its own in this run). `None` means
+/// the record cannot be trusted and the source must be re-cooked.
+///
+/// The cache records which file a shared texture points at, but `CacheRecord::is_fresh` only checks
+/// that file EXISTS, not that it still holds the recorded id. If the glTF that owned the file changed
+/// (or left the input set), the pointer would silently resolve to other bytes -- the same lie the
+/// name-collision check guards against. So a texture entry is trusted only if the ledger of this run
+/// already vouches for that exact (id, file) pair, or the file is this source's own.
+fn reuse_cached_entries(
+    source: &Path,
+    entries: &[ManifestEntry],
+    written: &mut WrittenTextures,
+) -> Option<Vec<(ManifestEntry, bool)>> {
+    // Only glTF cooks go through the ledger; a standalone texture's file is always its own.
+    if !matches!(cook_kind_for(source), Some(SourceKind::GltfMesh)) {
+        return Some(entries.iter().map(|e| (e.clone(), false)).collect());
+    }
+    let own_prefix = format!(
+        "{}.",
+        source
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mesh")
+    );
+    // Validate against a scratch copy of the ledger so a rejected record leaves no trace in it.
+    let mut ledger = written.clone();
+    let mut out = Vec::with_capacity(entries.len());
+    for e in entries {
+        if e.kind != "texture" {
+            out.push((e.clone(), false));
+            continue;
+        }
+        match ledger.get(&e.id) {
+            // Already on disk from earlier this run: share it, whichever file the record named.
+            Some(first) => {
+                let mut shared = e.clone();
+                shared.cooked_file = first.clone();
+                out.push((shared, true));
+            }
+            // First sighting, and the file is ours: it is the file that carries this id.
+            None if e.cooked_file.starts_with(&own_prefix) => {
+                ledger.insert(e.id, e.cooked_file.clone());
+                out.push((e.clone(), false));
+            }
+            // First sighting but the record points into another source's file, which this run has
+            // not vouched for.
+            None => return None,
+        }
+    }
+    *written = ledger;
+    Some(out)
 }
 
 /// Fingerprint of the cook REQUEST — everything that changes the output but is not the input bytes.
@@ -564,6 +654,9 @@ pub fn cook_path(
     let params_hash = cook_params_hash(color_space, block_compress);
 
     let mut combined = CookOutput::default();
+    // Which textures this run has already put on disk (written now, or vouched for by a cache hit).
+    // Sources cook in sorted order, so which file is "first" is the same on every run.
+    let mut written = WrittenTextures::new();
     let mut records: BTreeMap<String, CacheRecord> = BTreeMap::new();
     for source in &inputs {
         let src_key = source.to_string_lossy().into_owned();
@@ -573,11 +666,21 @@ pub fn cook_path(
         // manifest entries and leave the cooked files on disk untouched — no write, so it is fast and
         // mtime-independent.
         if let Some(rec) = prior.get(&src_key) {
-            if rec.is_fresh(src_hash, params_hash, out_dir) {
-                combined.manifest.extend(rec.entries.iter().cloned());
-                combined
-                    .cooked_files
-                    .extend(rec.entries.iter().map(|e| out_dir.join(&e.cooked_file)));
+            let reused = if rec.is_fresh(src_hash, params_hash, out_dir) {
+                reuse_cached_entries(source, &rec.entries, &mut written)
+            } else {
+                None
+            };
+            if let Some(entries) = reused {
+                for (entry, is_shared) in &entries {
+                    if *is_shared {
+                        combined.textures_shared += 1;
+                    } else {
+                        combined.cooked_files.push(out_dir.join(&entry.cooked_file));
+                    }
+                }
+                let entries: Vec<ManifestEntry> = entries.into_iter().map(|(e, _)| e).collect();
+                combined.manifest.extend(entries.iter().cloned());
                 combined.sources_cached += 1;
                 records.insert(
                     src_key,
@@ -585,7 +688,7 @@ pub fn cook_path(
                         src_hash,
                         params_hash,
                         cooker_version: cooked::COOKER_VERSION,
-                        entries: rec.entries.clone(),
+                        entries,
                     },
                 );
                 continue;
@@ -593,8 +696,9 @@ pub fn cook_path(
         }
 
         // Miss: cook it, and record what it produced so the next run can skip it.
-        let out = cook_one(source, out_dir, color_space, block_compress)?;
+        let out = cook_one(source, out_dir, color_space, block_compress, &mut written)?;
         combined.sources_cooked += 1;
+        combined.textures_shared += out.textures_shared;
         records.insert(
             src_key,
             CacheRecord {
@@ -622,10 +726,18 @@ pub fn cook_path(
     // An error rather than a warning: this breaks the invariant the whole identity design rests on
     // (an asset IS its cooked bytes), the failure is silent at every later stage, and the fix is
     // for the author to rename one file.
-    let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
+    //
+    // The one sanctioned sharing is a texture entry pointing at another entry's file with the SAME
+    // content id (see `WrittenTextures`): the bytes are identical, so nothing can resolve wrongly.
+    let mut claimed: BTreeMap<&str, (&str, u64)> = BTreeMap::new();
     for entry in &combined.manifest {
-        if let Some(first) = claimed.insert(entry.cooked_file.as_str(), entry.source_path.as_str())
-        {
+        if let Some((first, first_id)) = claimed.insert(
+            entry.cooked_file.as_str(),
+            (entry.source_path.as_str(), entry.id),
+        ) {
+            if entry.kind == "texture" && first_id == entry.id {
+                continue;
+            }
             return Err(PipelineError::NameCollision(format!(
                 "'{}' would be written by both '{}' and '{}' — cooked names come from the source \
                  stem, so these two sources cannot live in one cook. Rename one.",
