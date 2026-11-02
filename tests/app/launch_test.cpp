@@ -215,6 +215,7 @@ TEST_CASE("launch: dedicated listen grammar and conflicts") {
     CHECK(defaults.options.listen_host == "0.0.0.0");
     CHECK(defaults.options.port == kDefaultListenPort);
     CHECK_FALSE(defaults.options.offline);
+    CHECK_FALSE(defaults.options.endless);
     CHECK_FALSE(defaults.options.explicit_listen);
 
     const auto listen = parse({"dedicated", "--listen", "127.0.0.1:0"});
@@ -231,6 +232,11 @@ TEST_CASE("launch: dedicated listen grammar and conflicts") {
     CHECK(port.options.listen_host == shorthand.options.listen_host);
     CHECK(port.options.port == shorthand.options.port);
     CHECK(parse({"dedicated", "--offline"}).options.offline);
+    const auto endless = parse({"dedicated", "--listen", "127.0.0.1:0", "--endless"});
+    REQUIRE(endless.status == ParseStatus::Ok);
+    CHECK(endless.options.endless);
+    CHECK(parse({"dedicated", "--offline", "--endless"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--endless"}).status == ParseStatus::Error);
 
     CHECK(parse({"dedicated", "--listen", "127.0.0.1:1", "--port", "2"}).status ==
           ParseStatus::Error);

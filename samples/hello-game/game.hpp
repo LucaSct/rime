@@ -159,7 +159,8 @@ public:
                                         rime::app::PlayerSlot slot) override;
     void on_player_left(rime::app::TickContext& ctx, rime::app::PlayerSlot slot) override;
 
-    [[nodiscard]] bool finished() const override { return won() || quit_; }
+    [[nodiscard]] bool finished() const override;
+    bool restart_round(rime::app::TickContext& ctx) override;
 
     [[nodiscard]] bool has_autopilot() const override { return true; }
 
@@ -246,6 +247,7 @@ private:
     void record_crate(rime::ecs::World& world);
     void present_projectile(rime::ecs::World& render_world, rime::ecs::World& source_world);
     void dress_remote(rime::ecs::World& world);
+    void refresh_remote_pickups(rime::ecs::World& world);
     [[nodiscard]] bool bind_mirror(rime::ecs::World& world);
 
     // The physics world is the GAME's (it was the host's before m20.1): the engine owns the loop
@@ -275,6 +277,8 @@ private:
     std::uint32_t other_player_material_ = 0;
     std::uint32_t projectile_mesh_ = 0;
     std::uint32_t projectile_material_ = 0;
+    std::uint32_t marker_mesh_ = 0;
+    std::uint32_t marker_material_ = 0;
     bool presentation_ready_ = false;
     rime::ecs::World* world_ = nullptr;
     std::vector<Pickup> pickups_;
@@ -286,6 +290,12 @@ private:
     // The process proof needs the closest authoritative approach, not a final mirror pose.
     float minimum_player_crate_distance_ = 1000.0f;
     bool quit_ = false;
+    bool endless_rounds_ = false;
+    bool remote_bound_ = false;
+    std::uint64_t win_tick_ = 0;
+    mutable std::uint32_t last_remote_score_ = 0;
+    mutable bool awaiting_remote_pickups_ = false;
+    mutable std::uint32_t remote_rounds_seen_ = 0;
     std::uint64_t presentation_calls_ = 0;
 };
 

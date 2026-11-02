@@ -291,6 +291,11 @@ struct TickContext {
     // and the host despawns at the end of the tick. Non-owning; valid for the duration of
     // `fixed_tick`.
     std::vector<ecs::Entity>* despawns = nullptr;
+    // New simulated entities need a NetId before this tick's publication. The host consumes
+    // these after removals, beside `despawns`; local play already owns its new entities.
+    std::vector<ecs::Entity>* spawns_to_replicate = nullptr;
+    // Only a listening dedicated host opts a game into repeated rounds.
+    bool endless_rounds = false;
 };
 
 // Presentation is a separate world from simulation, and these contexts exist only in a mode that
@@ -333,9 +338,14 @@ public:
     // docs/design/simulation-tick.md), so structural world changes are legal here.
     virtual void fixed_tick(TickContext& ctx) = 0;
 
-    // The game asks to stop: it was won, lost, or quit. Checked after every tick; once true the
-    // engine ends the run and ticks the game no further.
+    // The game asks to stop: it was won, lost, or quit. Checked after every tick. A listening
+    // dedicated host with --endless first offers restart_round; all other runs stop here.
     [[nodiscard]] virtual bool finished() const { return false; }
+
+    // Called after `finished()` on an endless dedicated host. A game that supports another
+    // round resets its own rules and reports new entities through the tick context. False keeps
+    // the ordinary terminal behavior, so existing games do not acquire a restart policy.
+    virtual bool restart_round(TickContext&) { return false; }
 
     // An optional in-process player: a deterministic input source the engine can use when no human
     // or network peer is driving — a self-check, an attract mode, a dedicated-server soak run

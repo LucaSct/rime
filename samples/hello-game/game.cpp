@@ -557,6 +557,7 @@ void HelloGame::gather_inputs(const app::TickContext& ctx) {
 // step reported. Reading triggers before the step would read the previous tick's. Every
 // per-player loop runs in ascending seat index, the order both a server and a replay see.
 void HelloGame::fixed_tick(app::TickContext& ctx) {
+    endless_rounds_ = ctx.endless_rounds;
     gather_inputs(ctx);
     player_crate_overlap_before_step_ = 0.0f;
     // Quitting is the LOCAL player's wish: one seat only. A remote player's quit bit never
@@ -636,6 +637,8 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
             }
         }
         ctx.world.mark_changed<ReplicatedGameState>(state_entity_);
+        if (endless_rounds_ && replicated->score == kPickupCount && win_tick_ == 0)
+            win_tick_ = replicated->ticks;
     }
     // The opt-in diagnostic samples the whole authoritative leg at its requested last tick.
     // Client mirrors can miss a close approach during delay or blackout.
@@ -648,6 +651,43 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
                     static_cast<double>(minimum_player_crate_distance_),
                     static_cast<double>(maximum_player_crate_overlap_),
                     static_cast<double>(ctx.world.get<CrateBody>(crate_)->position.z));
+}
+
+bool HelloGame::finished() const {
+    // The ordinary game still stops on the winning tick. Only an endless host lets the
+    // authoritative win state live for three seconds before asking for a new round.
+    return quit_ || (won() && (!endless_rounds_ || (win_tick_ != 0 && ticks() - win_tick_ >= 180)));
+}
+
+bool HelloGame::restart_round(app::TickContext& ctx) {
+    if (!won() || !ctx.endless_rounds || !ctx.spawns_to_replicate)
+        return false;
+    auto* replicated = state();
+    if (!replicated)
+        return false;
+    // Rebuild only the round's sensors. Player bodies, throws and the crate remain in the
+    // same world, and the shared clock stays monotonic across rounds for the state digest.
+    pickups_.clear();
+    for (int i = 0; i < kPickupCount; ++i) {
+        core::Transform tf{};
+        tf.translation = marker_position(i);
+        const ecs::Entity entity = ctx.world.spawn_with(
+            ecs::LocalTransform{tf},
+            ecs::WorldTransform{tf},
+            physics::RigidBody{.motion = kStatic},
+            physics::Collider{.shape_type = kSphereShape, .radius = kPickupRadius, .sensor = true});
+        pickups_.push_back(Pickup{entity, physics::BodyId{}});
+        ctx.spawns_to_replicate->push_back(entity);
+    }
+    replicated->score = 0;
+    for (std::size_t i = 0; i < kPickupCount; ++i)
+        collection_time(*replicated, i) = 0;
+    ctx.world.mark_changed<ReplicatedGameState>(state_entity_);
+    // bind_bodies normally runs only once. Fresh sensors need their new solver handles on
+    // the next reconcile before trigger events can identify them as pickups.
+    bound_ = false;
+    win_tick_ = 0;
+    return true;
 }
 
 void HelloGame::throw_step(app::TickContext& ctx,
@@ -915,6 +955,22 @@ void HelloGame::record_crate(ecs::World& world) {
 // carrying its own copy of the scene keeps passing after the scene moves.
 app::ActionState HelloGame::autopilot() const {
     app::ActionState input{};
+    if (remote_bound_ && world_) {
+        const_cast<HelloGame*>(this)->refresh_remote_pickups(*world_);
+        const auto current_score = static_cast<std::uint32_t>(score());
+        if (current_score < last_remote_score_)
+            awaiting_remote_pickups_ = true;
+        last_remote_score_ = current_score;
+        if (awaiting_remote_pickups_ && pickups_.size() == kPickupCount) {
+            awaiting_remote_pickups_ = false;
+            std::printf("{\"event\":\"round_pickups_visible\",\"round\":%u,"
+                        "\"pickups\":%zu,\"score\":%u}\n",
+                        ++remote_rounds_seen_,
+                        pickups_.size(),
+                        current_score);
+            std::fflush(stdout);
+        }
+    }
     for (int i = 0; i < kPickupCount; ++i) {
         if (collected_on(static_cast<std::size_t>(i)) != 0) {
             continue;
@@ -925,7 +981,10 @@ app::ActionState HelloGame::autopilot() const {
         input.axes[kAxisMoveZ] = target.z - position.z;
         return input;
     }
-    input.pressed = 1u << kButtonQuit; // everything collected: ask to stop
+    // A connected autopilot waits for the server's next score reset; a local run still quits
+    // after its first win, as the existing self-check expects.
+    if (!remote_bound_)
+        input.pressed = 1u << kButtonQuit;
     return input;
 }
 
@@ -1091,6 +1150,8 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
     other_player_material_ = other_player_mat;
     projectile_mesh_ = projectile_mesh;
     projectile_material_ = projectile_mat;
+    marker_mesh_ = marker_mesh;
+    marker_material_ = marker_mat;
     presentation_ready_ = true;
 
     // The visual floor plane sits at y = 0 — the slab's TOP — while the collider is centred half a
@@ -1152,8 +1213,17 @@ void HelloGame::present_frame(app::PresentFrameContext& ctx) {
 // entity itself. Collected first and added after: adding a component inside the query that
 // found it would restructure the archetype being scanned.
 void HelloGame::dress_remote(ecs::World& world) {
+    if (remote_bound_)
+        refresh_remote_pickups(world);
     if (!presentation_ready_ || !world.is_registered<app::PlayerOwner>())
         return;
+    // New round sensors arrive after present_setup. Dress their mirrored entities exactly as
+    // the initial sensors were dressed, while keeping the physics stream authoritative.
+    for (const Pickup& pickup : pickups_)
+        if (world.is_alive(pickup.entity) && !world.get<render::MeshRef>(pickup.entity)) {
+            world.add_component(pickup.entity, render::MeshRef{marker_mesh_});
+            world.add_component(pickup.entity, render::MaterialRef{marker_material_});
+        }
     std::vector<std::pair<ecs::Entity, bool>> undressed; // (entity, is a player body)
     world.query<app::PlayerOwner>().for_each(
         [&](ecs::Entity entity, const app::PlayerOwner& owner) {
@@ -1213,6 +1283,7 @@ bool HelloGame::bind_remote_seat(ecs::World& world, app::PlayerSlot seat) {
 
 bool HelloGame::bind_mirror(ecs::World& world) {
     world_ = &world;
+    remote_bound_ = true;
     pickups_.clear();
     world.query<ReplicatedGameState>().for_each(
         [&](ecs::Entity entity, const ReplicatedGameState&) { state_entity_ = entity; });
@@ -1231,6 +1302,15 @@ bool HelloGame::bind_mirror(ecs::World& world) {
     // arithmetic.
     return world.is_alive(player_) && world.is_alive(state_entity_) && world.is_alive(crate_) &&
            pickups_.size() <= kPickupCount;
+}
+
+void HelloGame::refresh_remote_pickups(ecs::World& world) {
+    pickups_.clear();
+    world.query<physics::RigidBody, physics::Collider>().for_each(
+        [&](ecs::Entity entity, const physics::RigidBody&, const physics::Collider& collider) {
+            if (collider.sensor)
+                pickups_.push_back(Pickup{entity, physics::BodyId{}});
+        });
 }
 
 // ── The content ───────────────────────────────────────────────────────────────────────────────

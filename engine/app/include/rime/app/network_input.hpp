@@ -100,7 +100,8 @@ public:
     [[nodiscard]] std::span<const PlayerInput> players() const noexcept;
     void after_tick(std::uint64_t server_tick,
                     std::span<const SpawnReport> spawns = {},
-                    std::span<const ecs::Entity> despawns = {});
+                    std::span<const ecs::Entity> despawns = {},
+                    std::span<const ecs::Entity> spawns_to_replicate = {});
     void linger(std::uint64_t final_tick, std::uint32_t duration_ms);
     [[nodiscard]] RunReport::NetworkInputCounters counters() const noexcept;
 

@@ -148,6 +148,7 @@ std::string launch_usage(std::string_view program) {
         "  --ticks N     bound the run to N fixed ticks\n"
         "  --frames N    play: run N real-clock frames, then stop\n"
         "  --autopilot   drive the game from its built-in autopilot\n"
+        "  --endless     listening dedicated: restart supported games after a win\n"
         "  --headless    play: render off-screen instead of opening a window\n"
         "  --connect HOST[:PORT]  play on a remote server (default port 7463)\n"
         "  --no-gpu     connected play without a device or window\n"
@@ -223,6 +224,8 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         }
         if (arg == "--autopilot") {
             result.options.autopilot = true;
+        } else if (arg == "--endless") {
+            result.options.endless = true;
         } else if (arg == "--headless") {
             result.options.headless = true;
         } else if (arg == "--no-gpu") {
@@ -538,6 +541,9 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
     if (result.options.offline && (result.options.explicit_listen || port_given)) {
         return fail("--offline cannot be combined with --listen or --port");
     }
+    if (result.options.endless &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline))
+        return fail("--endless requires listening dedicated mode");
     if (result.options.mode != LaunchMode::Dedicated &&
         (result.options.offline || result.options.explicit_listen)) {
         return fail("--listen and --offline require dedicated mode");
@@ -893,6 +899,7 @@ RunReport run_game_mode(const LaunchOptions& options,
     std::uint64_t game_ticks = 0;
     std::vector<SpawnReport> spawn_reports;
     std::vector<ecs::Entity> despawn_requests;
+    std::vector<ecs::Entity> replicate_requests;
     app.on_fixed_tick([&](ecs::World& world, double dt) {
         if (game_finished) {
             // A real-clock frame can owe several ticks and the game can finish on the first; the
@@ -918,6 +925,8 @@ RunReport run_game_mode(const LaunchOptions& options,
             // A listening host owns removal so a replicated entity's NetId is retracted on the
             // tick it ends; local play leaves this null and the game despawns itself.
             tick.despawns = &despawn_requests;
+            tick.spawns_to_replicate = &replicate_requests;
+            tick.endless_rounds = options.endless;
             // m20.8b: the seat changes (multi-seat: the game's leave/join hooks, run here at the
             // start of the tick, before it sees any input) and every seat's input. After the
             // report seams are set, so a hook that ends a replicated body can hand it to
@@ -936,16 +945,23 @@ RunReport run_game_mode(const LaunchOptions& options,
             }
         }
         game->fixed_tick(tick);
+        // A supported game owns the reset and its brief win display. The host only decides
+        // whether this finish is terminal, before publishing the resulting world once.
+        if (game->finished()) {
+            if (options.endless && game->restart_round(tick))
+                ++report.rounds_completed;
+            else {
+                game_finished = true;
+                app.request_quit();
+            }
+        }
         if (network) {
-            network->after_tick(game_ticks, spawn_reports, despawn_requests);
+            network->after_tick(game_ticks, spawn_reports, despawn_requests, replicate_requests);
             spawn_reports.clear();
             despawn_requests.clear();
+            replicate_requests.clear();
         }
         ++game_ticks;
-        if (game->finished()) {
-            game_finished = true;
-            app.request_quit();
-        }
     });
 
     // ── 7. The frame — installed only when there is a device to present with ───────────────────
@@ -1140,7 +1156,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"resync_retired\":{},\"gaps_retired\":{},"
                        "\"late_missed\":{},\"late_unclassified\":{},\"max_margin\":{},"
                        "\"final_margin\":{},\"pacing_sent\":{},\"pacing_send_refused\":{},"
-                       "\"accepted\":{}{}}}\n",
+                       "\"accepted\":{}{},\"rounds_completed\":{}}}\n",
                        report.ticks,
                        report.state_digest,
                        report.network_input.applied,
@@ -1196,7 +1212,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                        report.network_input.pacing_sent,
                        report.network_input.pacing_send_refused,
                        report.network_input.accepted,
-                       seat_fields(report.network_input));
+                       seat_fields(report.network_input),
+                       report.rounds_completed);
             std::fflush(stdout);
         }
     }

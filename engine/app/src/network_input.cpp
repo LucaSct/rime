@@ -1289,7 +1289,8 @@ struct NetworkInputServer::Impl {
 
     void after_tick(std::uint64_t server_tick,
                     std::span<const SpawnReport> spawns,
-                    std::span<const ecs::Entity> despawns) {
+                    std::span<const ecs::Entity> despawns,
+                    std::span<const ecs::Entity> spawns_to_replicate) {
         current_server_tick = server_tick;
         // Game-ended entities go BEFORE publication, so the retraction rides this tick's records
         // instead of the orphan backstop repairing it a tick late. Through the replicator when
@@ -1305,6 +1306,12 @@ struct NetworkInputServer::Impl {
                 world.despawn(entity);
             ++totals.game_despawns;
         }
+        // Give a restarted round's entities identities before publish discovers the new roster.
+        // This is the symmetric path to the NetId retractions above.
+        if (replicator)
+            for (const ecs::Entity entity : spawns_to_replicate)
+                if (replicator->replicate(entity) == kNullNetId)
+                    ++totals.replication_registration_refused;
         receive_spawns(spawns);
         update_interaction(server_tick);
         if (fault_held_ack && !duplicate_window_open()) {
@@ -1575,8 +1582,9 @@ std::optional<CommandProvenance> NetworkInputServer::command_provenance() const 
 
 void NetworkInputServer::after_tick(std::uint64_t server_tick,
                                     std::span<const SpawnReport> spawns,
-                                    std::span<const ecs::Entity> despawns) {
-    impl_->after_tick(server_tick, spawns, despawns);
+                                    std::span<const ecs::Entity> despawns,
+                                    std::span<const ecs::Entity> spawns_to_replicate) {
+    impl_->after_tick(server_tick, spawns, despawns, spawns_to_replicate);
 }
 
 void NetworkInputServer::linger(std::uint64_t final_tick, std::uint32_t duration_ms) {

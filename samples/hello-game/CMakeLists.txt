@@ -122,6 +122,12 @@ add_test(NAME hello_game_multi_client_smoke COMMAND python3
     ${CMAKE_CURRENT_SOURCE_DIR}/multi_client_smoke.py $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_multi_client_smoke PROPERTIES
     TIMEOUT 60 RUN_SERIAL TRUE LABELS "hello_game")
+# The bounded listener and one GPU-free client cross two wins. The client counts five live
+# mirrored sensors after each reset, so a digest alone cannot hide an unregistered respawn.
+add_test(NAME hello_game_endless_rounds COMMAND python3
+    ${CMAKE_CURRENT_SOURCE_DIR}/endless_rounds.py $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_endless_rounds PROPERTIES
+    TIMEOUT 105 RUN_SERIAL TRUE LABELS "hello_game")
 # m20.8c: three independent UDP processes, a swapped-routing sensitivity run, a measured
 # no-blackout envelope and churn. Its runtime is measured by the direct proof gate; keep CTest
 # serial so host scheduling noise cannot masquerade as another seat's correction.

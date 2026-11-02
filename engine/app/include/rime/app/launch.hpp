@@ -96,6 +96,7 @@ struct LaunchOptions {
     std::string listen_host = "0.0.0.0";
     std::uint16_t port = kDefaultListenPort;
     bool offline = false;
+    bool endless = false; // listening dedicated only: ask the game to begin another round
     bool explicit_listen = false;
     // > 0: bound by this many fixed ticks. Listening dedicated runs them at the real tick rate;
     // offline dedicated and play keep the deterministic, unpaced one-tick-per-step path.
@@ -210,8 +211,9 @@ struct RunReport {
     std::uint64_t ticks = 0;  // fixed ticks the GAME took
     std::uint64_t frames = 0; // loop iterations (frames), rendered or not
     bool finished = false;    // the game asked to stop (vs. a tick/frame bound or window close)
-    bool had_device = false;  // a device existed for the run
-    bool windowed = false;    // a window actually came up (not merely requested)
+    std::uint64_t rounds_completed = 0; // successful restart_round calls on an endless host
+    bool had_device = false;            // a device existed for the run
+    bool windowed = false;              // a window actually came up (not merely requested)
 
     // How many times the device factory was entered. Zero in `dedicated` — asserted by the tests,
     // not assumed — and at most one otherwise.
