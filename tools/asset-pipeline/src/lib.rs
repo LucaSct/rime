@@ -124,7 +124,8 @@ pub struct CookOutput {
 pub fn import_gltf_materials(path: &Path) -> Result<gltf_material::MaterialImport, PipelineError> {
     let (document, _buffers, images) = gltf::import(path)?;
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("mesh");
-    gltf_material::import_materials(&document, &images, stem)
+    // Uncompressed: this is the structured-import view, not a cook, and nothing it returns is written.
+    gltf_material::import_materials(&document, &images, stem, false)
 }
 
 /// Import a glTF's first skin as a skeleton (with its joint/node remaps) from a path — the path-based
@@ -155,8 +156,12 @@ pub fn import_gltf_clips(path: &Path) -> Result<Vec<clip::Clip>, PipelineError> 
 /// mesh (one submesh per primitive, tagged with a material slot) written as `<stem>.rmesh`; each
 /// material becomes a `<stem>.mat<N>.rmat`, and each unique texture a `<stem>.img<N>.<srgb|lin>.rtex`
 /// (M6.4). Meshes whose material carries a normal map cook tangents. Returns every cooked file plus
-/// the manifest entries describing them.
-pub fn cook_gltf(input: &Path, out_dir: &Path) -> Result<CookOutput, PipelineError> {
+/// the manifest entries describing them. `block_compress` BC7-compresses the file's images.
+pub fn cook_gltf(
+    input: &Path,
+    out_dir: &Path,
+    block_compress: bool,
+) -> Result<CookOutput, PipelineError> {
     // One decode of the glTF, shared by the material import (which needs the decoded images) and the
     // geometry walk (which needs the buffers) — importing twice would re-decode every texture.
     let (document, buffers, images) = gltf::import(input)?;
@@ -164,7 +169,7 @@ pub fn cook_gltf(input: &Path, out_dir: &Path) -> Result<CookOutput, PipelineErr
 
     // Materials first: whether a primitive's material carries a normal map decides if the mesh needs
     // tangents, and that has to be known before the mesh is cooked.
-    let mut mats = gltf_material::import_materials(&document, &images, stem)?;
+    let mut mats = gltf_material::import_materials(&document, &images, stem, block_compress)?;
 
     let primitives = gltf_import::primitives_from(&document, &buffers)?;
     let mut mesh = Mesh::from_primitives(primitives);
@@ -489,10 +494,11 @@ fn cook_one(
     block_compress: bool,
 ) -> Result<CookOutput, PipelineError> {
     match cook_kind_for(input) {
-        // Only standalone textures take the flag today. A glTF's own images cook through
-        // gltf_material, which picks each map's colour space from its usage; extending block
-        // compression there is a follow-on and wants the same per-usage judgement.
-        Some(SourceKind::GltfMesh) => cook_gltf(input, out_dir),
+        // `color_space` is NOT forwarded to a glTF: gltf_material picks each map's colour space from
+        // how a material uses it (base colour sRGB, normals linear), and one CLI-wide flag would
+        // get half of every file wrong. `block_compress` is only an encoding, so it is safe to
+        // forward -- BC7 has an sRGB and a UNORM variant and keeps that per-usage choice intact.
+        Some(SourceKind::GltfMesh) => cook_gltf(input, out_dir, block_compress),
         Some(SourceKind::StlMesh) => cook_stl(input, out_dir),
         Some(SourceKind::Texture) => cook_texture(input, out_dir, color_space, block_compress),
         None => Err(PipelineError::Unsupported(format!(
