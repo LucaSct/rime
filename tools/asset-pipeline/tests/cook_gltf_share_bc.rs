@@ -28,22 +28,31 @@ fn temp_dir(name: &str) -> PathBuf {
     dir
 }
 
-/// Write `material_quad.gltf` as `<dir>/<stem>.gltf`. Its image URIs are made absolute so the PNGs
-/// need not sit beside the copy -- they would otherwise be cooked as standalone textures too and
-/// muddy what the test counts. `image` swaps in a different PNG for image 0 when given.
+/// Write `material_quad.gltf` as `<dir>/<stem>.gltf`, its images copied to a sibling directory
+/// and referenced by relative URI (why, below). `image0` swaps in a different PNG for image 0.
 fn write_gltf_copy(dir: &Path, stem: &str, image0: Option<&str>) {
     let text = std::fs::read_to_string(fixtures().join("material_quad.gltf")).unwrap();
-    // Forward slashes: a glTF URI is a JSON string, and a Windows path's backslashes are JSON
-    // escapes ("invalid escape" on windows-latest). glTF URIs use `/`, which Windows accepts too.
-    let abs = |png: &str| fixtures().join(png).to_string_lossy().replace('\\', "/");
+    // Reference the images by RELATIVE URI, copied into a sibling `<dir>-images` directory. An
+    // absolute path is not portable as a glTF URI: on Windows `C:/...` parses as a URI with
+    // scheme `c:` and the gltf crate rejects it (`UnsupportedScheme`), and backslashes are JSON
+    // escapes. A relative URI resolves against the glTF's own directory on every OS. The images
+    // sit OUTSIDE `dir` because `dir` is cooked as a directory, and a PNG inside it would be
+    // cooked as a standalone texture too, changing the counts these tests assert.
+    let images_name = format!("{}-images", dir.file_name().unwrap().to_string_lossy());
+    let images = dir.parent().unwrap().join(&images_name);
+    std::fs::create_dir_all(&images).unwrap();
+    let base = image0.unwrap_or("checker.png");
+    for png in [base, "normal.png"] {
+        std::fs::copy(fixtures().join(png), images.join(png)).unwrap();
+    }
     let text = text
         .replace(
             "\"uri\": \"checker.png\"",
-            &format!("\"uri\": \"{}\"", abs(image0.unwrap_or("checker.png"))),
+            &format!("\"uri\": \"../{images_name}/{base}\""),
         )
         .replace(
             "\"uri\": \"normal.png\"",
-            &format!("\"uri\": \"{}\"", abs("normal.png")),
+            &format!("\"uri\": \"../{images_name}/normal.png\""),
         );
     std::fs::write(dir.join(format!("{stem}.gltf")), text).unwrap();
 }
