@@ -2277,12 +2277,15 @@ app::ActionState push_tape(std::uint64_t tick) {
 // The contention proof's observer (`--input-tape-stand`): all-neutral. Seat 0 starts at
 // (-1.8, 0), 3.08 m from the crate at (0, -2.5), inside the 5.117 m join radius, so it is a member
 // from the first tick and everything it shows of the remote seat is prediction.
-app::ActionState stand_tape(std::uint64_t) { return {}; }
+app::ActionState stand_tape(std::uint64_t) {
+    return {};
+}
 
 // The contention proof's remote (`--input-tape-reversal`, seat 1, starting at (-0.6, 0)).
 // Walking is 4 m/s = 1/15 m per tick; -z is toward the crate, whose near face is at z = -2.0, so
 // the capsule (radius 0.35) touches once z <= -1.65: after 1.65 * 15 = 24.75 -> 25 walking ticks,
-// i.e. client tick 10 + 25 = 35. The player's x offset (0.6) is inside the crate's 0.5 + 0.35 reach.
+// i.e. client tick 10 + 25 = 35. The player's x offset (0.6) is inside the crate's 0.5 + 0.35
+// reach.
 //
 //    1-10   stand            the observer is already a member; the remote joins within 5.117 m
 //   11-76   walk -z, push    contact from tick 35 to R = 76: 42 ticks >= 40, ~2.8 m of push, which
@@ -2290,7 +2293,8 @@ app::ActionState stand_tape(std::uint64_t) { return {}; }
 //                            leave radius, so nobody leaves the group mid-proof)
 //   77-136  walk +z          the REVERSAL: R + 1 .. R + 60. The remote retreats 4 m; the observer's
 //                            proxy, seeded with the last executed command, keeps pushing -z until
-//                            the next checkpoint says otherwise -- that is the correction under test
+//                            the next checkpoint says otherwise -- that is the correction under
+//                            test
 //  137-    stand
 app::ActionState reversal_tape(std::uint64_t tick) {
     app::ActionState actions{};

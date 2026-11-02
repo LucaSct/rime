@@ -339,12 +339,14 @@ RunReport run_network_client(const LaunchOptions& options,
     // ADR-0109 §8 accepts that and measures it (`proxy_max_presented_step_m`) rather than coupling
     // the offsets.
     replication::CorrectionSmoother proxy_smoother;
+
     struct ProxyShown {
         replication::NetId net{};
         core::Vec3 shown{}; // the translation presented on the latest step-path evaluation
         bool in_set = false;
         bool returning = false; // left the proxy set: easing back to the mirror
     };
+
     std::vector<ProxyShown> proxy_shown;
     std::uint64_t proxy_entries = 0, proxy_returns = 0;
     double proxy_max_presented_step = 0.0;
@@ -478,6 +480,24 @@ RunReport run_network_client(const LaunchOptions& options,
         smoother.on_correction(
             interaction_id, shown_before.translation, simulated_after->translation);
         smoother.on_correction(interaction_id, shown_before.rotation, simulated_after->rotation);
+        // Every applied checkpoint also corrects the PROXIES (their replay restarts from the
+        // server's pose for that seat), and a proxy that is shown from the simulation must glide
+        // over that jump exactly as the crate does -- entry and return alone would leave every
+        // later checkpoint as a visible pop. `proxy-raw` skips ALL of the proxy smoother's
+        // corrections -- entry, checkpoint and return -- because the proof's scenario has the
+        // remote standing at entry and never returns (the group outlives the push), so entry/return
+        // alone cannot make the control jump.
+        if (interaction_hooks->proxy_poses)
+            for (const auto& pose : interaction_hooks->proxy_poses()) {
+                const auto tracked = std::find_if(proxy_shown.begin(),
+                                                  proxy_shown.end(),
+                                                  [&](const auto& e) { return e.net == pose.net; });
+                if (options.interaction_debug_break != InteractionDebugBreak::ProxyRaw &&
+                    tracked != proxy_shown.end() && tracked->in_set && !tracked->returning)
+                    proxy_smoother.on_correction({pose.net.index, pose.net.generation},
+                                                 tracked->shown,
+                                                 pose.simulated.translation);
+            }
         if (const auto axis = interaction_hooks->remote_axis_y()) {
             // -1 is walking toward the crate in the proof's tape. The first +ve axis after having
             // pushed is the reversal; later checkpoints do not move it.
@@ -535,8 +555,8 @@ RunReport run_network_client(const LaunchOptions& options,
             return replication::PredictedEntityId{net.index, net.generation};
         };
         const auto step_of = [&](core::Vec3 from, core::Vec3 to) {
-            proxy_max_presented_step = std::max(proxy_max_presented_step,
-                                                static_cast<double>(core::length(to - from)));
+            proxy_max_presented_step =
+                std::max(proxy_max_presented_step, static_cast<double>(core::length(to - from)));
         };
         for (auto& entry : proxy_shown)
             entry.in_set = false;
@@ -1314,23 +1334,23 @@ RunReport run_network_client(const LaunchOptions& options,
                             crate_responded ? crate_response_ticks
                                             : (crate_push_tick ? report.ticks - *crate_push_tick
                                                                : report.ticks));
-            spawn_metrics += fmt::format(
-                ",\"proxy_entries\":{},\"proxy_returns\":{},\"proxy_snaps\":{},"
-                "\"proxy_max_presented_step_m\":{:.6f},\"proxy_reversal_tick\":{},"
-                "\"crate_push_checkpoints\":{},\"crate_push_corr_sum_mm\":{:.3f},"
-                "\"crate_push_corr_max_mm\":{:.3f},\"crate_rev_checkpoints\":{},"
-                "\"crate_rev_corr_sum_mm\":{:.3f},\"crate_rev_corr_max_mm\":{:.3f}",
-                proxy_entries,
-                proxy_returns,
-                proxy_smoother.counters().snaps,
-                proxy_max_presented_step,
-                proxy_reversal_tick.value_or(0),
-                push_checkpoints,
-                push_corr_sum,
-                push_corr_max,
-                rev_checkpoints,
-                rev_corr_sum,
-                rev_corr_max);
+            spawn_metrics +=
+                fmt::format(",\"proxy_entries\":{},\"proxy_returns\":{},\"proxy_snaps\":{},"
+                            "\"proxy_max_presented_step_m\":{:.6f},\"proxy_reversal_tick\":{},"
+                            "\"crate_push_checkpoints\":{},\"crate_push_corr_sum_mm\":{:.3f},"
+                            "\"crate_push_corr_max_mm\":{:.3f},\"crate_rev_checkpoints\":{},"
+                            "\"crate_rev_corr_sum_mm\":{:.3f},\"crate_rev_corr_max_mm\":{:.3f}",
+                            proxy_entries,
+                            proxy_returns,
+                            proxy_smoother.counters().snaps,
+                            proxy_max_presented_step,
+                            proxy_reversal_tick.value_or(0),
+                            push_checkpoints,
+                            push_corr_sum,
+                            push_corr_max,
+                            rev_checkpoints,
+                            rev_corr_sum,
+                            rev_corr_max);
             if (options.interaction_trace) {
                 spawn_metrics += ",\"crate_trace\":[";
                 for (std::size_t i = 0; i < crate_trace.size(); ++i)
