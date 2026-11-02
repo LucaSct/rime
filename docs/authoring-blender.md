@@ -273,13 +273,9 @@ In the editor host (`editor-gui` and headless smoke `ed2.png`):
   ```
 
 #### 5. Runtime note: registering material sets (`set_material_sets`)
-In `samples/99-the-block/main.cpp:2462-2464`, `run_play` settles the asset server but omits
-the call to `visuals->renderer.set_material_sets(bridge->material_sets());`. As specified in
-`engine/render/include/rime/render/scene_renderer.hpp:583-584`, the renderer defaults to null
-material sets (falling back to entity-level `MaterialRef`). Consequently, props render with correct
-geometry and transforms but draw untextured white (`game-as-is.png`). Adding that single line
-supplies the `MaterialSetRegistry` and restores full PBR texturing in the standalone game
-(`game-one-line.png`).
+When M16.9 was first measured, `run_play` in `samples/99-the-block/main.cpp` settled the asset
+server without calling `visuals->renderer.set_material_sets(bridge->material_sets());`, so imported
+props drew untextured white until that call landed (now at `samples/99-the-block/main.cpp:2577`).
 
 ## 8. The first thing to make
 

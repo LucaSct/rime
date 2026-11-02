@@ -1,0 +1,1416 @@
+# Rime scene v1 (.rscene) — reflection-serialized world. Human-diffable; hand-edit or regenerate.
+# Generated deterministically by samples/venice/make_scene.py.
+rime_scene 1
+
+# Camera on the quay at (-12, 1.7, 3), looking along +x (-7 deg pitch).
+entity 0 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -12 y 1.7 z 3 }
+      rotation { x -0.043168 y -0.705788 z -0.043168 w 0.705788 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::Camera 0x42cdb0b7ddc97dbc {
+    fov_y 0.94
+    z_near 0.1
+    z_far 1000
+    active true
+  }
+}
+
+# Late-afternoon warm sun from +x+y and procedural Sky.
+entity 1 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 0 }
+      rotation { x -0.103871 y 0.864277 z 0.199534 w 0.449914 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::DirectionalLight 0x0279ad2e8762ff9a {
+    color_r 1
+    color_g 0.86
+    color_b 0.68
+    intensity 3.6
+  }
+}
+
+entity 2 {
+  rime::render::Sky 0x9fe7bd14c159bdab {
+    zenith_r 0.14
+    zenith_g 0.28
+    zenith_b 0.62
+    horizon_r 0.78
+    horizon_g 0.72
+    horizon_b 0.68
+    intensity 0.06
+    sun_angular_radius 0.012
+    cloud_coverage 0.35
+    cloud_density 1
+    cloud_altitude 1400
+    cloud_scale 0.00035
+    cloud_sharpness 0.28
+    wind_x 0
+    wind_z 0
+    clouds true
+  }
+}
+
+entity 3 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -12 y 1.7 z 3 }
+      rotation { x 0 y -0.707107 z 0 w 0.707107 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::block_play::PlayerSpawn 0x5bb141d781156549 {
+    enabled true
+  }
+}
+
+# Fondamenta (quay): x -16..16, z 0..8 (centre z=4) at y=0, masegni paving.
+entity 4 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y 0 z 4 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MaterialAsset 0x6031d5a8e12eb6b5 {
+    asset 11192144905057064139
+  }
+  rime::ground::GroundSurface 0xd6ea82acd7add462 {
+    half_x 16
+    half_z 4
+    cells_x 8
+    cells_z 2
+    tile_metres 8
+    thickness 1
+  }
+}
+
+# STUB: Rio canal water plane (x -16..16, z -6..0, y = -0.6). There is no water simulation;
+# uses built-in plane MeshRef (slot 1 in editor-host, 10x10 m) and MaterialRef (slot 0).
+entity 5 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0 y -0.6 z -3 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 3.2 y 1 z 0.6 }
+    }
+  }
+  rime::render::MeshRef 0xa2a14d16cfd75985 {
+    mesh 1
+  }
+  rime::render::MaterialRef 0xc6b4f8ca9fd52bed {
+    material 0
+  }
+}
+
+# Quay canal face: 8 intonaco wall slabs along z = 0 facing -z, 0.75 m tall, top at y = 0.
+entity 6 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -14 y -0.75 z -0.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 0.25 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 7 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10 y -0.75 z -0.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 0.25 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 8 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y -0.75 z -0.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 0.25 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 9 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y -0.75 z -0.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 0.25 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 10 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y -0.75 z -0.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 0.25 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 11 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y -0.75 z -0.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 0.25 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 12 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y -0.75 z -0.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 0.25 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 13 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 14 y -0.75 z -0.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 0.25 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+# Facade along z = 8 facing -z: 8 bays x 4 m, ground storey 0..3.6 m and upper storey 3.6..6.6 m.
+entity 14 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -15.397351 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.301324 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 15 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -12.602649 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.301324 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 16 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -14 y 3.561396 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.397351 y 0.012868 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 17 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -14.007642 y 0 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 11908588012623095374
+  }
+}
+
+entity 18 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -15.32834 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 19 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -12.67166 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 20 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -14 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.328341 y 0.164594 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 21 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -14 y 6.206692 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.328341 y 0.131103 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 22 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -14.02141 y 4.3 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 16283187708220477304
+  }
+}
+
+entity 23 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -11.40773 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.296135 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 24 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -8.59227 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.296135 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 25 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.40773 y 0.294733 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 26 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10 y 2.690132 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.40773 y 0.303289 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 27 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10.013155 y 0.9 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 17473331599890982305
+  }
+}
+
+entity 28 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -11.32834 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 29 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -8.67166 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 30 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.328341 y 0.164594 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 31 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10 y 6.206692 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.328341 y 0.131103 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 32 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -10.02141 y 4.3 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 16283187708220477304
+  }
+}
+
+entity 33 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.40773 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.296135 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 34 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.59227 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.296135 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 35 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.40773 y 0.294733 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 36 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 2.690132 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.40773 y 0.303289 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 37 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6.013154 y 0.9 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 17473331599890982305
+  }
+}
+
+entity 38 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -7.32834 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 39 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -4.67166 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 40 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.32834 y 0.164594 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 41 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 6.206692 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.32834 y 0.131103 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 42 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6.02141 y 4.3 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 16283187708220477304
+  }
+}
+
+entity 43 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -3.397351 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.301324 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 44 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -0.602649 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.301324 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 45 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 3.561396 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.397351 y 0.012868 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 46 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2.007642 y 0 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 11908588012623095374
+  }
+}
+
+entity 47 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -3.32834 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 48 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -0.671659 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 49 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.32834 y 0.164594 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 50 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2 y 6.206692 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.32834 y 0.131103 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 51 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -2.02141 y 4.3 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 16283187708220477304
+  }
+}
+
+entity 52 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0.59227 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.296135 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 53 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3.40773 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.296135 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 54 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.40773 y 0.294733 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 55 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y 2.690132 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.40773 y 0.303289 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 56 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 1.986846 y 0.9 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 17473331599890982305
+  }
+}
+
+entity 57 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 0.671659 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 58 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 3.32834 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 59 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.32834 y 0.164594 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 60 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 2 y 6.206692 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.32834 y 0.131103 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 61 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 1.97859 y 4.3 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 16283187708220477304
+  }
+}
+
+entity 62 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 4.602649 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.301324 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 63 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 7.397351 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.301324 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 64 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y 3.561396 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.397351 y 0.012868 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 65 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 5.992358 y 0 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 11908588012623095374
+  }
+}
+
+entity 66 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 4.67166 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 67 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 7.32834 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 68 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.32834 y 0.164594 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 69 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 6 y 6.206692 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.32834 y 0.131103 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 70 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 5.97859 y 4.3 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 16283187708220477304
+  }
+}
+
+entity 71 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 8.59227 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.296135 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 72 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 11.40773 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.296135 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 73 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.40773 y 0.294733 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 74 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 2.690132 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.40773 y 0.303289 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 75 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 9.986845 y 0.9 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 17473331599890982305
+  }
+}
+
+entity 76 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 8.67166 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 77 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 11.32834 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 78 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.328341 y 0.164594 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 79 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 10 y 6.206692 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.328341 y 0.131103 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 80 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 9.97859 y 4.3 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 16283187708220477304
+  }
+}
+
+entity 81 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 12.59227 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.296135 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 82 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 15.40773 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.296135 y 1.2 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 83 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 14 y 0 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.40773 y 0.294733 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 84 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 14 y 2.690132 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.40773 y 0.303289 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 85 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 13.986845 y 0.9 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 17473331599890982305
+  }
+}
+
+entity 86 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 12.67166 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 87 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 15.32834 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.33583 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 88 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 14 y 3.6 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.328341 y 0.164594 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 89 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 14 y 6.206692 z 8.125 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 0.328341 y 0.131103 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 15135026655047278371
+  }
+}
+
+entity 90 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 13.97859 y 4.3 z 8 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 16283187708220477304
+  }
+}
+
+# Rose resting on the stone sill ledge of the second barred window.
+entity 91 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y 0.8842 z 7.99 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 8232525556295849469
+  }
+}
+
+# Moored boats: workboat at x=-6 along +x (z=-2.5), hull_only at x=8 yawed 180 deg (z=-4.0).
+entity 92 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x -6 y -0.6 z -2.5 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 18400348582721594771
+  }
+}
+
+entity 93 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 8 y -0.6 z -4 }
+      rotation { x 0 y 1 z 0 w 0 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 8700646217125305506
+  }
+}
+
+# Lido sand patch (x 16..24, z -6..2 at y = -0.05) with driftwood, 4 grass clumps, and 3 shells.
+entity 94 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 18 y -0.05 z -4 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 5774788524910042621
+  }
+}
+
+entity 95 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 18 y -0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 5774788524910042621
+  }
+}
+
+entity 96 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 22 y -0.05 z -4 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 5774788524910042621
+  }
+}
+
+entity 97 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 22 y -0.05 z 0 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 5774788524910042621
+  }
+}
+
+entity 98 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 18.5 y -0.05 z -1.5 }
+      rotation { x 0 y 0.21644 z 0 w 0.976296 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 3381313623841415278
+  }
+}
+
+entity 99 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 18.2 y -0.05 z -1.2 }
+      rotation { x 0 y 0 z 0 w 1 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 3928822919297015247
+  }
+}
+
+entity 100 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 18.8 y -0.05 z -1.22 }
+      rotation { x 0 y 0.422618 z 0 w 0.906308 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 3928822919297015247
+  }
+}
+
+entity 101 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 18.18 y -0.05 z -1.78 }
+      rotation { x 0 y 0.819152 z 0 w 0.573576 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 3928822919297015247
+  }
+}
+
+entity 102 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 18.82 y -0.05 z -1.75 }
+      rotation { x 0 y 0.984808 z 0 w -0.173648 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 3928822919297015247
+  }
+}
+
+entity 103 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 18.42 y -0.05 z -1.28 }
+      rotation { x 0 y 0.130526 z 0 w 0.991445 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 3003503951490831969
+  }
+}
+
+entity 104 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 18.56 y -0.05 z -1.25 }
+      rotation { x 0 y 0.92388 z 0 w 0.382683 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 13905218416731059206
+  }
+}
+
+entity 105 {
+  rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
+    value {
+      translation { x 18.49 y -0.05 z -1.32 }
+      rotation { x 0 y 0.766044 z 0 w -0.642788 }
+      scale { x 1 y 1 z 1 }
+    }
+  }
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 5304325203885746061
+  }
+}
