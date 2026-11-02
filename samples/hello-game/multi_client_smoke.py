@@ -8,7 +8,12 @@ import sys
 
 EXE = sys.argv[1]
 LISTEN = sys.argv[2] if len(sys.argv) > 2 else "127.0.0.1:0"
-TICKS = 200
+# 150, not 200: the push tape walks +z for ticks 11-90 and back -z from tick 101, so it crosses
+# z = 0 again at client tick ~180. At 200 server ticks the late-joining push seat executed
+# ~175-187 commands, which straddles that crossing, and hosted macOS measured z = 1.6e-7 (exactly
+# 80 ticks out, 80 back) against the `abs(z) > 0.3` check. At 150 it executes ~125-137, ending
+# 2.9-3.7 m out, far from the crossing on any runner. The throw tape throws on tick 12.
+TICKS = 150
 
 
 def event_lines(output):
@@ -105,7 +110,10 @@ def churn():
     """A bounded client run uses the same graceful goodbye as closing its window."""
     server = subprocess.Popen(
         [EXE, "dedicated", "--listen", LISTEN, "--max-clients", "2",
-         "--ticks", "320", "--linger-ms", "1000", "--input-slack", "3"],
+         # 600 (10 s), not 320: the first client's graceful goodbye must reach the server before
+         # its tick budget ends, and hosted macOS starts processes slowly enough that at 320 the
+         # server closed first (`reason: server_closed`). Nothing below depends on the length.
+         "--ticks", "600", "--linger-ms", "1000", "--input-slack", "3"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1,
     )
     clients = []
@@ -127,7 +135,7 @@ def churn():
         assert (joined["seat"], joined["gen"]) == (0, 1), joined
         outcomes = []
         for process in (other, replacement):
-            out, err = process.communicate(timeout=12)
+            out, err = process.communicate(timeout=20)
             assert process.returncode == 0, (process.returncode, out, err)
             outcomes.append(finished(out))
         server_out, server_err = server.communicate(timeout=10)
