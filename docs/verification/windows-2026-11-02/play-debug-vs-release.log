@@ -1,0 +1,25 @@
+the_block --play, Debug vs Release, 2026-11-02.
+Same scene, same bounded frame count, 1280x720, RTX 3060 (driver 591.86).
+Release cooked content produced first via:
+  ctest --test-dir build/release -R '^block_demo_cook'     (10/10 passed)
+
+  === RELEASE (build/release, RelWithDebInfo) ===
+  99-the-block: 600 frames, 581 ticks
+  wall=10.29s  -> 58.3 fps          ticks/frame = 0.97
+
+  === DEBUG (build/dev, Debug) ===
+  99-the-block: 600 frames, 4792 ticks
+  wall=272.43s -> 2.2 fps           ticks/frame = 7.99
+
+26x. max_ticks_per_frame is 8 (engine/app/include/rime/app/fixed_timestep.hpp:23);
+Debug saturates it on essentially every frame, Release never engages it.
+
+A user-reported 25-minute --play session on the Debug build read:
+  99-the-block: 4096 frames, 32760 ticks (ESC)
+and 32760 = 4095 x 8 exactly -- every frame after the first ran the maximum.
+The first frame runs zero ticks because run() takes its clock baseline before
+the loop (engine/app/src/application.cpp:460).
+
+Triage rule: --play --frames N prints "N frames, M ticks".
+  M/N == 8.0  -> the clamp is saturated
+  M/N ~= 1    -> the loop is healthy

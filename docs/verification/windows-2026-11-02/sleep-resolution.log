@@ -1,0 +1,21 @@
+Windows timer-resolution measurement, 2026-11-02, idle box.
+Compiled with the same MSVC the engine uses (14.44.35207):
+  cl /nologo /std:c++20 /EHsc /O2 sleepres.cpp
+
+Source: 100 iterations of std::this_thread::sleep_for(1ms), three trials.
+
+100x sleep_for(1ms) = 1594093 us  -> 15.94 ms per iteration
+100x sleep_for(1ms) = 1602503 us  -> 16.03 ms per iteration
+100x sleep_for(1ms) = 1611770 us  -> 16.12 ms per iteration
+
+A 1 ms request costs ~16 ms: one tick of the default ~15.6 ms Windows timer
+period. The engine never calls timeBeginPeriod (zero hits repo-wide), so no
+process in the tree raises it.
+
+This single fact is the root cause of BOTH:
+  * hello_game_net_proof's "applied 85/240" / "52/240" failure -- a send loop
+    that polls with sleep_for(1ms) against a 16.667 ms accumulating deadline
+    (samples/hello-game/net_proof.cpp:568-580);
+  * the job system's idle backoff parking ~15.9 ms after a 27 us spin budget
+    (engine/core/src/jobs/job_system.cpp:325-336), which serializes the server
+    and client simulation halves and defeats the ADR-0077 overlap on Windows.
