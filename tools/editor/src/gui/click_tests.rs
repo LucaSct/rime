@@ -975,6 +975,50 @@ impl Rig {
         self.settle();
     }
 
+    /// Right-click a widget by label, opening its context menu.
+    ///
+    /// Addressed through the accessibility tree like every other click here, then delivered as a
+    /// raw secondary press at the node's own rect — a context menu is a pointer gesture, and
+    /// AccessKit describes no "open the menu" action to invoke instead. The separate move-then-press
+    /// is the same pacing the viewport tests need: egui hit-tests a press against the PREVIOUS
+    /// frame's widgets, so a move and a press inside one frame land on nothing.
+    fn right_click(&mut self, label: &str) {
+        // The node's own box, from the accessibility tree egui just produced — so this is still
+        // "the widget that SAYS this", never a hard-coded coordinate. `Node` derefs to
+        // `accesskit_consumer::Node`, which is where `bounding_box` comes from.
+        let b = self
+            .harness
+            .get_by_label(label)
+            .bounding_box()
+            .expect("an on-screen widget has a bounding box");
+        let pos = egui::pos2(((b.x0 + b.x1) / 2.0) as f32, ((b.y0 + b.y1) / 2.0) as f32);
+        self.harness
+            .input_mut()
+            .events
+            .push(egui::Event::PointerMoved(pos));
+        self.settle();
+        for pressed in [true, false] {
+            self.harness
+                .input_mut()
+                .events
+                .push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+        }
+        self.settle();
+    }
+
+    /// Every clickable label currently on screen — for a failure message that says what WAS there.
+    fn labels(&self) -> Vec<String> {
+        self.harness
+            .get_all_by_role(Role::Button)
+            .filter_map(|n| n.label())
+            .collect()
+    }
+
     fn viewport_click(&mut self, px: (f32, f32)) {
         self.pointer_move(px);
         self.pointer_button(px, egui::PointerButton::Primary, true);
@@ -1660,6 +1704,7 @@ fn spawn_creates_an_entity_and_clears_the_selection() {
     let mut rig = Rig::new();
     rig.click(ROW_LIGHT);
     rig.click("+ spawn");
+    rig.click("Empty entity");
     assert_eq!(
         rig.host.commands(),
         [EditorMessage::Spawn, EditorMessage::RequestSnapshot]
@@ -1677,6 +1722,7 @@ fn spawn_is_undoable_and_redo_brings_back_the_same_entity() {
     // step that names the entity still finds it.
     let mut rig = Rig::new();
     rig.click("+ spawn");
+    rig.click("Empty entity");
     assert_eq!(rig.host.ids(), [CAMERA, LIGHT, CRATE, 4]);
     assert!(rig.menu_item_enabled("Edit", UNDO));
     rig.chord(CTRL, egui::Key::Z);
@@ -2005,7 +2051,8 @@ fn despawn_then_undo_then_undo_the_edit_before_it_then_redo_across_slot_reuse() 
     rig.type_into_number_field(0, "5");
     let light_handle = rig.host.handle(LIGHT).unwrap();
     rig.click("✖ despawn");
-    rig.click("+ spawn"); // reuses the light's slot
+    rig.click("+ spawn");
+    rig.click("Empty entity"); // reuses the light's slot
     let squatter = rig.host.entity(4).unwrap();
     assert_eq!(
         squatter.index, light_handle.0,
@@ -2483,6 +2530,7 @@ fn undo_and_redo_are_refused_while_playing_and_play_edits_leave_no_history() {
     // An edit made during play reaches the engine (it is live) but not the history: Stop throws
     // it away, so there would be nothing for its undo to undo.
     rig.click("+ spawn");
+    rig.click("Empty entity");
     assert_eq!(rig.host.ids(), [CAMERA, LIGHT, CRATE, 4]);
     rig.click("⏹");
     assert_eq!(
@@ -3543,4 +3591,147 @@ fn explicit_camera_edit_can_restore_a_pose_that_is_still_pending() {
     });
     assert_eq!(rig.app().fly.pos, [0.0, 0.0, EYE_Z]);
     assert!(rig.app().fly.pending.is_empty());
+}
+
+// ── Context menus: clone, copy, paste, and the archetype spawn ──────────────────────────────
+
+#[test]
+fn right_click_clone_spawns_the_sources_whole_component_set() {
+    let mut rig = Rig::new();
+    rig.right_click(ROW_LIGHT);
+    rig.click("Clone");
+    // The clone carries the SOURCE's bytes, not a fresh default: the light's intensity 2.0 and its
+    // transform arrive with it. That is the whole claim — a clone of a configured thing is
+    // configured, which is what makes it useful for "spawn an object with all its features".
+    let spawn = SpawnEntity::decode(rig.host.last(EditorMessage::SpawnEntity).unwrap()).unwrap();
+    assert_eq!(
+        spawn.components,
+        [
+            (H_LOCAL, trs_at(0.0, 0.0, 0.0)),
+            (H_LIGHT, light_blob(2.0, false)),
+        ]
+    );
+    assert_eq!(spawn.editor_id, 0, "a clone asks for a fresh id");
+    assert!(!spawn.exact, "a clone is not an exact restore");
+    assert_eq!(rig.host.ids(), [CAMERA, LIGHT, CRATE, 4]);
+    // Undoable through the machinery that already served the asset browser's "place".
+    assert!(rig.menu_item_enabled("Edit", UNDO));
+}
+
+#[test]
+fn copy_then_paste_makes_a_new_entity_from_the_clipboard() {
+    let mut rig = Rig::new();
+    rig.right_click(ROW_CRATE);
+    rig.click("Copy");
+    // Copy is editor-local: nothing crossed the wire.
+    assert!(
+        rig.host.commands().is_empty(),
+        "copying is not a world edit"
+    );
+    // Paste from a DIFFERENT row, to prove the clipboard is the source and the row is not.
+    rig.right_click(ROW_CAMERA);
+    rig.click("Paste as new entity");
+    let spawn = SpawnEntity::decode(rig.host.last(EditorMessage::SpawnEntity).unwrap()).unwrap();
+    assert_eq!(
+        spawn.components,
+        [
+            (H_LOCAL, trs_at(3.0, 0.0, 0.0)),
+            (H_MESH_ASSET, 0xAAu64.to_le_bytes().to_vec()),
+        ],
+        "the paste reproduced the CRATE, not the camera it was invoked on"
+    );
+}
+
+#[test]
+fn paste_is_disabled_until_something_is_copied() {
+    let mut rig = Rig::new();
+    rig.right_click(ROW_CRATE);
+    assert!(
+        !rig.enabled("Paste as new entity"),
+        "an empty clipboard offers nothing to paste"
+    );
+    rig.click("Copy");
+    rig.right_click(ROW_CRATE);
+    assert!(rig.enabled("Paste as new entity"));
+}
+
+#[test]
+fn a_component_pastes_only_onto_its_own_type() {
+    let mut rig = Rig::new();
+    // Copy the light's PointLight component alone, from the inspector's per-component menu.
+    rig.click(ROW_LIGHT);
+    rig.right_click("rime::render::PointLight");
+    rig.click("Copy component");
+    assert!(rig.host.commands().is_empty());
+
+    // On the crate, whose components are LocalTransform + MeshAsset, there is no PointLight to
+    // paste onto — and the clipboard's bytes must not be reinterpreted into a different type.
+    rig.click(ROW_CRATE);
+    rig.right_click("rime::render::MeshAsset");
+    assert!(
+        !rig.enabled("Paste component"),
+        "a PointLight's bytes are not a MeshAsset's"
+    );
+    rig.key(egui::Key::Escape);
+
+    // Back on a PointLight, it pastes — as a SetComponent on that entity.
+    rig.click(ROW_LIGHT);
+    rig.right_click("rime::render::PointLight");
+    assert!(rig.enabled("Paste component"));
+    rig.click("Paste component");
+    assert_eq!(rig.host.commands(), [EditorMessage::SetComponent]);
+    let pasted = rig
+        .host
+        .entity(LIGHT)
+        .unwrap()
+        .components
+        .iter()
+        .find(|c| c.type_hash == H_LIGHT)
+        .unwrap();
+    assert_eq!(pasted.data, light_blob(2.0, false));
+}
+
+#[test]
+fn an_archetype_spawn_asks_the_engine_for_each_component() {
+    let mut rig = Rig::new();
+    rig.click("+ spawn");
+    assert!(rig.has("Empty entity"), "spawn menu did not open");
+    assert!(
+        rig.has("rime::render::PointLight"),
+        "every registered component should be spawnable; visible: {:?}",
+        rig.labels()
+    );
+    rig.click("rime::render::PointLight");
+
+    // A spawn FIRST — the new entity's id exists only in its result — then one AddComponent for
+    // the archetype's type. Crucially the editor sends no BYTES for it: the engine defaults the
+    // component, because only the engine's reflection knows what a default RigidBody is.
+    assert_eq!(
+        rig.host.commands(),
+        [
+            EditorMessage::Spawn,
+            EditorMessage::RequestSnapshot,
+            EditorMessage::AddComponent,
+            EditorMessage::RequestSnapshot
+        ]
+    );
+    let added = ComponentRef::decode(rig.host.last(EditorMessage::AddComponent).unwrap()).unwrap();
+    assert_eq!(added.editor_id, 4, "added to the entity the spawn created");
+    assert_eq!(added.type_hash, H_LIGHT);
+    // And it is selected, so the inspector is already showing what was just made.
+    assert_eq!(rig.app().selected, Some(4));
+}
+
+#[test]
+fn an_archetype_is_offered_only_when_the_host_registers_every_member() {
+    // The fake schema has no rime::physics::Collider, so the "Dynamic rigid body" archetype — which
+    // needs transform + body + collider — must not appear. A host that registers less offers less,
+    // rather than offering a spawn that would half-fail.
+    let mut rig = Rig::new();
+    rig.click("+ spawn");
+    assert!(rig.has("Empty entity"));
+    assert!(
+        !rig.has("Dynamic rigid body (transform + body + collider)"),
+        "an archetype whose components this host lacks is not offered"
+    );
 }
