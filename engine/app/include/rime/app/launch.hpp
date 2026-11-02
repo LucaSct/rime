@@ -74,7 +74,20 @@ enum class SpawnDebugBreak : std::uint8_t { None, NoLedger, NoAdopt, AuthorityPr
 // the proof can show its gate going red. PresentMirror shows the mirrored (round-trip-old) object
 // while predicting; NoRebuild reuses the prediction physics world across restores; StaleRestore
 // restores the object from the PREVIOUS checkpoint's bytes.
-enum class InteractionDebugBreak : std::uint8_t { None, PresentMirror, NoRebuild, StaleRestore };
+//
+// m20.9c adds three for contended-object prediction (ADR-0109 §8-§9): `NoProxies` replays with the
+// remote players ABSENT from the prediction world, `StaleProxies` seeds proxies from the PREVIOUS
+// checkpoint's records, and `ProxyRaw` skips the smoothed proxy entry/return so the presentation
+// jumps straight between mirror and simulation (the continuity gate's sensitivity control).
+enum class InteractionDebugBreak : std::uint8_t {
+    None,
+    PresentMirror,
+    NoRebuild,
+    StaleRestore,
+    NoProxies,
+    StaleProxies,
+    ProxyRaw
+};
 
 [[nodiscard]] std::string_view to_string(LaunchMode mode) noexcept;
 
@@ -117,6 +130,10 @@ struct LaunchOptions {
     // m20.6b: the game's interaction tape (walks the player into its pushable object).
     bool input_tape_push = false;
     bool input_tape_collision = false;
+    // m20.9c: the contention proof's two tapes -- an all-neutral observer and a remote that walks
+    // into the crate, pushes, then reverses.
+    bool input_tape_stand = false;
+    bool input_tape_reversal = false;
     // Keep the separated-seat proof's input distinct from the contact diagnostic.
     bool input_tape_isolation = false;
     SpawnFault spawn_fault = SpawnFault::None;

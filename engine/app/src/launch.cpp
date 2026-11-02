@@ -161,6 +161,8 @@ std::string launch_usage(std::string_view program) {
         "  --input-tape-throw  same tape, with one Throw on tick 12\n"
         "  --input-tape-push  connected interaction tape: walk into the crate, push, retreat\n"
         "  --input-tape-collision  connected two-seat collision diagnostic\n"
+        "  --input-tape-stand  connected observer tape: all-neutral (contention proof)\n"
+        "  --input-tape-reversal  connected remote tape: push the crate, then reverse\n"
         "  --input-tape-isolation  connected separated-seat isolation diagnostic\n"
         "  --spawn-fault CASE  dedicated Throw diagnostic (refuse, lose-one, lose-all, duplicate, "
         "late-alive, late-ended)\n"
@@ -170,7 +172,7 @@ std::string launch_usage(std::string_view program) {
         "T,\n"
         "                     or on the tick that retires client command N (cmd:N, N >= 1)\n"
         "  --interaction-debug-break CASE  connected control (present-mirror, no-rebuild, "
-        "stale-restore)\n"
+        "stale-restore, no-proxies, stale-proxies, proxy-raw)\n"
         "  --interaction-trace  connected: list every crate checkpoint correction\n"
         "  --spawn-fault-ticks N  window of duplicate / late-alive / late-ended, in server ticks\n"
         "  --input-slack N    dedicated: commands buffered before one executes (1..8, default 1)\n"
@@ -240,6 +242,12 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         } else if (arg == "--input-tape-collision") {
             result.options.input_tape = true;
             result.options.input_tape_collision = true;
+        } else if (arg == "--input-tape-stand") {
+            result.options.input_tape = true;
+            result.options.input_tape_stand = true;
+        } else if (arg == "--input-tape-reversal") {
+            result.options.input_tape = true;
+            result.options.input_tape_reversal = true;
         } else if (arg == "--input-tape-isolation") {
             // This proof needs movement without the collision tape's intentional contacts.
             result.options.input_tape = true;
@@ -314,6 +322,12 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
                 result.options.interaction_debug_break = InteractionDebugBreak::NoRebuild;
             else if (value == "stale-restore")
                 result.options.interaction_debug_break = InteractionDebugBreak::StaleRestore;
+            else if (value == "no-proxies")
+                result.options.interaction_debug_break = InteractionDebugBreak::NoProxies;
+            else if (value == "stale-proxies")
+                result.options.interaction_debug_break = InteractionDebugBreak::StaleProxies;
+            else if (value == "proxy-raw")
+                result.options.interaction_debug_break = InteractionDebugBreak::ProxyRaw;
             else
                 return fail("--interaction-debug-break needs a known case");
         } else if (arg == "--interaction-trace") {

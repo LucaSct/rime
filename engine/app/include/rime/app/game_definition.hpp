@@ -24,6 +24,7 @@
 #include "rime/replication/contention_context.hpp"
 #include "rime/replication/input_v2.hpp"
 #include "rime/replication/interaction.hpp"
+#include "rime/replication/net_id.hpp"
 #include "rime/replication/prediction.hpp"
 #include "rime/replication/spawn_prediction.hpp"
 
@@ -570,6 +571,19 @@ struct GameDefinition {
                 bool stale_restore = false;
                 PlayerSlot owner{};
                 bool owner_known = false;
+                // m20.9c controls (ADR-0109 §9): replay with no remote bodies at all, or seed
+                // them from the previous checkpoint's records.
+                bool no_proxies = false;
+                bool stale_proxies = false;
+            };
+
+            // One remote player's SIMULATED pose in the prediction world (m20.9c, ADR-0109 §8).
+            // `net` is the generational NetId that names the proxy's mirror entity; only the
+            // translation is meaningful (the proxy is a kinematic capsule with no orientation of
+            // its own, so presentation keeps the mirror's rotation).
+            struct ProxyPose {
+                replication::NetId net{};
+                core::Transform simulated{};
             };
 
             struct ClientHooks {
@@ -587,6 +601,13 @@ struct GameDefinition {
                 std::function<std::uint64_t(replication::ContentionRefusal)> context_refusals;
                 // In-process replay oracle: the simulation's complete private context bytes.
                 std::function<std::vector<std::byte>()> context_snapshot;
+                // The proxies' simulated poses after the latest step/replay, ascending seat;
+                // empty while the object is not a member or nobody else is in the group.
+                std::function<std::vector<ProxyPose>()> proxy_poses;
+                // The move_y axis the latest APPLIED checkpoint recorded for the first remote
+                // seat, read from the decoded record whatever the proxy controls do with it. A
+                // proof uses it to date the remote's reversal in SERVER ticks.
+                std::function<std::optional<float>()> remote_axis_y;
             };
 
             ClientHooks (*client_hooks)(ecs::World& prediction,
@@ -608,6 +629,9 @@ struct GameDefinition {
                                                       PlayerSlot,
                                                       std::uint32_t,
                                                       std::span<const ExecutedSeat>) = nullptr;
+            // m20.9c: the contention proof's tapes (`--input-tape-stand`, `--input-tape-reversal`).
+            ActionState (*diagnostic_stand_input)(std::uint64_t) = nullptr;
+            ActionState (*diagnostic_reversal_input)(std::uint64_t) = nullptr;
         };
 
         std::optional<InteractionProfile> interaction;

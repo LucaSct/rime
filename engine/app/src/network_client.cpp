@@ -260,6 +260,12 @@ RunReport run_network_client(const LaunchOptions& options,
          (!definition.remote_play->active_interaction() ||
           !definition.remote_play->active_interaction()->diagnostic_push_input)) ||
         (options.input_tape_collision && !definition.remote_play->diagnostic_collision_input) ||
+        (options.input_tape_stand &&
+         (!definition.remote_play->active_interaction() ||
+          !definition.remote_play->active_interaction()->diagnostic_stand_input)) ||
+        (options.input_tape_reversal &&
+         (!definition.remote_play->active_interaction() ||
+          !definition.remote_play->active_interaction()->diagnostic_reversal_input)) ||
         (options.input_tape_isolation && !definition.remote_play->diagnostic_isolation_input))
         return fail(report, "game or autopilot unavailable");
 
@@ -316,6 +322,40 @@ RunReport run_network_client(const LaunchOptions& options,
     // ADR-0106 §3 expects to be non-zero: the rebuilt world has no warm-start cache.
     double crate_max_sim_correction = 0.0;
     std::uint64_t crate_member_checkpoints = 0, crate_corrections_over_1cm = 0;
+
+    // m20.9c, ADR-0109 §8: PROXY PRESENTATION. A remote player's proxy is a kinematic capsule in
+    // the prediction world, so its simulated pose leads the mirror's round-trip-old one. The crate
+    // is shown from the simulation; if the proxy it touches were still shown from the mirror, the
+    // two would disagree by the lead and the contact would visibly tear -- so a proxy's mirror
+    // entity is presented from the simulation while the crate is a member.
+    //
+    // A SEPARATE smoother, not the crate's: its keys are the proxies' NetIds, and the crate's
+    // smoother is keyed by `interaction_id`, so an index/generation collision between a player and
+    // the crate can never cross-wire two offsets. Same parameters, so the same glide.
+    //
+    // Smoothing each body independently does NOT preserve contact exactly: the crate's offset
+    // decays from ITS correction and the proxy's from its own, so for a few ticks after a
+    // checkpoint they are eased by different amounts and a visible gap or overlap can appear.
+    // ADR-0109 §8 accepts that and measures it (`proxy_max_presented_step_m`) rather than coupling
+    // the offsets.
+    replication::CorrectionSmoother proxy_smoother;
+    struct ProxyShown {
+        replication::NetId net{};
+        core::Vec3 shown{}; // the translation presented on the latest step-path evaluation
+        bool in_set = false;
+        bool returning = false; // left the proxy set: easing back to the mirror
+    };
+    std::vector<ProxyShown> proxy_shown;
+    std::uint64_t proxy_entries = 0, proxy_returns = 0;
+    double proxy_max_presented_step = 0.0;
+    // Crate corrections split by the REMOTE's reversal, dated in server ticks from the executed
+    // command each applied checkpoint recorded (never from client ticks, which differ by the
+    // seat's join time and the input buffer). PUSH = member checkpoints before the reversal was
+    // seen, REVERSAL = the checkpoint that shows it and the 60 server ticks after.
+    bool remote_was_pushing = false;
+    std::optional<std::uint64_t> proxy_reversal_tick;
+    double push_corr_sum = 0.0, push_corr_max = 0.0, rev_corr_sum = 0.0, rev_corr_max = 0.0;
+    std::uint64_t push_checkpoints = 0, rev_checkpoints = 0;
 
     // `--interaction-trace`: one (server tick, simulated crate correction, the predicted PLAYER's
     // correction at the same checkpoint, both in metres, plus the server input stalls that fell
@@ -438,9 +478,26 @@ RunReport run_network_client(const LaunchOptions& options,
         smoother.on_correction(
             interaction_id, shown_before.translation, simulated_after->translation);
         smoother.on_correction(interaction_id, shown_before.rotation, simulated_after->rotation);
+        if (const auto axis = interaction_hooks->remote_axis_y()) {
+            // -1 is walking toward the crate in the proof's tape. The first +ve axis after having
+            // pushed is the reversal; later checkpoints do not move it.
+            if (*axis < -0.5f)
+                remote_was_pushing = true;
+            else if (*axis > 0.5f && remote_was_pushing && !proxy_reversal_tick)
+                proxy_reversal_tick = checkpoint_server_tick;
+        }
         if (was_member && simulated_before) {
             const double jump = static_cast<double>(
                 core::length(simulated_before->translation - simulated_after->translation));
+            if (!proxy_reversal_tick) {
+                push_corr_sum += jump * 1000.0;
+                push_corr_max = std::max(push_corr_max, jump * 1000.0);
+                ++push_checkpoints;
+            } else if (checkpoint_server_tick <= *proxy_reversal_tick + 60) {
+                rev_corr_sum += jump * 1000.0;
+                rev_corr_max = std::max(rev_corr_max, jump * 1000.0);
+                ++rev_checkpoints;
+            }
             crate_max_sim_correction = std::max(crate_max_sim_correction, jump);
             ++crate_member_checkpoints;
             if (jump > 0.01)
@@ -448,6 +505,98 @@ RunReport run_network_client(const LaunchOptions& options,
             if (options.interaction_trace)
                 crate_trace.push_back(
                     {checkpoint_server_tick, jump, player_jump, checkpoint_stalls});
+        }
+    };
+
+    // The ONE function that decides what a proxy's mirror entity shows (ADR-0109 §8). It runs on
+    // the STEP path every tick -- under --no-gpu too, which never renders, so the counters exist
+    // for the process proof -- and leaves the result in `proxy_shown`; on_render only writes that
+    // result onto the entities (nothing changes between a step and the frame that follows it, so a
+    // second evaluation there would only double-count an entry).
+    //
+    //   entry       a NetId appears in the proxy set: ease from where the MIRROR showed it
+    //   steady      present simulated + the smoother's decaying offset
+    //   return      a NetId leaves the set but its mirror entity lives: ease from the last shown
+    //               pose back to the mirror, then hand the entity back (offset < 1 mm)
+    //   destroyed   the mirror entity is gone: forget at once
+    // `proxy-raw` skips the entry/return on_correction, so the presentation jumps instead.
+    const auto update_proxy_presentation = [&] {
+        const bool active = !options.no_prediction && interaction_hooks &&
+                            interaction_hooks->proxy_poses &&
+                            options.interaction_debug_break != InteractionDebugBreak::PresentMirror;
+        if (!active)
+            return;
+        const bool raw = options.interaction_debug_break == InteractionDebugBreak::ProxyRaw;
+        const auto mirror_translation = [&](ecs::Entity entity) {
+            const auto* wt = mirror_world.get<ecs::WorldTransform>(entity);
+            return wt ? wt->value.translation : core::Vec3{};
+        };
+        const auto key_of = [](replication::NetId net) {
+            return replication::PredictedEntityId{net.index, net.generation};
+        };
+        const auto step_of = [&](core::Vec3 from, core::Vec3 to) {
+            proxy_max_presented_step = std::max(proxy_max_presented_step,
+                                                static_cast<double>(core::length(to - from)));
+        };
+        for (auto& entry : proxy_shown)
+            entry.in_set = false;
+        for (const auto& pose : interaction_hooks->proxy_poses()) {
+            const ecs::Entity entity = mirror.map().resolve(pose.net);
+            if (entity == ecs::kNullEntity)
+                continue; // no mirror entity: left !in_set, so the sweep below forgets it
+            const auto key = key_of(pose.net);
+            const auto simulated = pose.simulated.translation;
+            auto found = std::find_if(proxy_shown.begin(), proxy_shown.end(), [&](const auto& e) {
+                return e.net == pose.net;
+            });
+            if (found == proxy_shown.end()) {
+                // ENTRY: what is on screen now is the mirror's pose.
+                proxy_shown.push_back({pose.net, mirror_translation(entity), true, false});
+                found = proxy_shown.end() - 1;
+                ++proxy_entries;
+                if (!raw)
+                    proxy_smoother.on_correction(key, found->shown, simulated);
+            } else if (found->returning) {
+                // RE-ENTRY while easing back: ease from the pose already shown.
+                found->returning = false;
+                ++proxy_entries;
+                if (!raw)
+                    proxy_smoother.on_correction(key, found->shown, simulated);
+            }
+            found->in_set = true;
+            const auto presented = proxy_smoother.presented(key, simulated);
+            step_of(found->shown, presented);
+            found->shown = presented;
+        }
+        for (std::size_t i = 0; i < proxy_shown.size();) {
+            auto& entry = proxy_shown[i];
+            if (entry.in_set) {
+                ++i;
+                continue;
+            }
+            const auto key = key_of(entry.net);
+            const ecs::Entity entity = mirror.map().resolve(entry.net);
+            if (entity == ecs::kNullEntity) {
+                proxy_smoother.forget(key); // DESTROYED
+                proxy_shown.erase(proxy_shown.begin() + static_cast<std::ptrdiff_t>(i));
+                continue;
+            }
+            const auto target = mirror_translation(entity);
+            if (!entry.returning) {
+                entry.returning = true;
+                ++proxy_returns;
+                if (!raw)
+                    proxy_smoother.on_correction(key, entry.shown, target);
+            }
+            const auto presented = raw ? target : proxy_smoother.presented(key, target);
+            step_of(entry.shown, presented);
+            entry.shown = presented;
+            if (raw || proxy_smoother.offset_length(key) < 1e-3f) {
+                proxy_smoother.forget(key); // the mirror presents it unmodified again
+                proxy_shown.erase(proxy_shown.begin() + static_cast<std::ptrdiff_t>(i));
+                continue;
+            }
+            ++i;
         }
     };
 
@@ -789,7 +938,10 @@ RunReport run_network_client(const LaunchOptions& options,
                             {options.interaction_debug_break != InteractionDebugBreak::NoRebuild,
                              options.interaction_debug_break == InteractionDebugBreak::StaleRestore,
                              seat.value_or(PlayerSlot{}),
-                             seat.has_value()});
+                             seat.has_value(),
+                             options.interaction_debug_break == InteractionDebugBreak::NoProxies,
+                             options.interaction_debug_break ==
+                                 InteractionDebugBreak::StaleProxies});
                         spawn_hooks = interaction_hooks->hooks;
                     }
                     if (options.spawn_debug_break == SpawnDebugBreak::NoAdopt) {
@@ -858,6 +1010,16 @@ RunReport run_network_client(const LaunchOptions& options,
                 if (interaction_hooks && interaction_hooks->object_pose())
                     mirror_world.add_component(mirror_object,
                                                ecs::RenderTransform{presented_object()});
+                // Proxies: the step path's presented translation on the mirror's own rotation.
+                for (const auto& entry : proxy_shown) {
+                    const ecs::Entity entity = mirror.map().resolve(entry.net);
+                    const auto* wt = mirror_world.get<ecs::WorldTransform>(entity);
+                    if (!wt)
+                        continue;
+                    core::Transform shown = wt->value;
+                    shown.translation = entry.shown;
+                    mirror_world.add_component(entity, ecs::RenderTransform{shown});
+                }
             }
             PresentFrameContext frame{mirror_world, ctx.frame_dt, ctx.alpha};
             game->present_frame(frame);
@@ -915,6 +1077,10 @@ RunReport run_network_client(const LaunchOptions& options,
                                                                          seat ? seat->index : 0);
         else if (options.input_tape_push)
             actions = interaction->diagnostic_push_input(report.ticks + 1);
+        else if (options.input_tape_stand)
+            actions = interaction->diagnostic_stand_input(report.ticks + 1);
+        else if (options.input_tape_reversal)
+            actions = interaction->diagnostic_reversal_input(report.ticks + 1);
         else if (options.input_tape_throw)
             actions =
                 definition.remote_play->spawn_prediction->diagnostic_throw_input(report.ticks + 1);
@@ -950,6 +1116,8 @@ RunReport run_network_client(const LaunchOptions& options,
             update_presentation();
             if (interaction_hooks) {
                 smoother.advance(definition.remote_play->fixed_dt);
+                proxy_smoother.advance(definition.remote_play->fixed_dt);
+                update_proxy_presentation();
                 if (object_member())
                     ++crate_member_ticks;
                 if (!crate_push_tick && interaction_hooks->touching()) {
@@ -1146,6 +1314,23 @@ RunReport run_network_client(const LaunchOptions& options,
                             crate_responded ? crate_response_ticks
                                             : (crate_push_tick ? report.ticks - *crate_push_tick
                                                                : report.ticks));
+            spawn_metrics += fmt::format(
+                ",\"proxy_entries\":{},\"proxy_returns\":{},\"proxy_snaps\":{},"
+                "\"proxy_max_presented_step_m\":{:.6f},\"proxy_reversal_tick\":{},"
+                "\"crate_push_checkpoints\":{},\"crate_push_corr_sum_mm\":{:.3f},"
+                "\"crate_push_corr_max_mm\":{:.3f},\"crate_rev_checkpoints\":{},"
+                "\"crate_rev_corr_sum_mm\":{:.3f},\"crate_rev_corr_max_mm\":{:.3f}",
+                proxy_entries,
+                proxy_returns,
+                proxy_smoother.counters().snaps,
+                proxy_max_presented_step,
+                proxy_reversal_tick.value_or(0),
+                push_checkpoints,
+                push_corr_sum,
+                push_corr_max,
+                rev_checkpoints,
+                rev_corr_sum,
+                rev_corr_max);
             if (options.interaction_trace) {
                 spawn_metrics += ",\"crate_trace\":[";
                 for (std::size_t i = 0; i < crate_trace.size(); ++i)
