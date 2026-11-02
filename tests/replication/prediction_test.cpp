@@ -110,13 +110,16 @@ struct Game {
 
 TEST_CASE("owner checkpoint round-trips little-endian fields and InputResult") {
     auto value = checkpoint(0x0102030405060708ull, 12, 4.0f, 0b101);
+    value.input_stalls = 0x01020304u;
     value.entities.push_back({kOther, {std::byte{0xAB}}});
     const auto bytes = wire(value);
-    CHECK(std::to_integer<std::uint8_t>(bytes[0]) == 0xE4);
+    CHECK(std::to_integer<std::uint8_t>(bytes[0]) == kOwnerCheckpointTag);
     CHECK(std::to_integer<std::uint8_t>(bytes[1]) == 0x08);
     CHECK(std::to_integer<std::uint8_t>(bytes[8]) == 0x01);
     CHECK(std::to_integer<std::uint8_t>(bytes[13]) == 2);
     CHECK(std::to_integer<std::uint8_t>(bytes[16]) == kInputResultTag);
+    CHECK(std::to_integer<std::uint8_t>(bytes[46]) == 0x04);
+    CHECK(std::to_integer<std::uint8_t>(bytes[49]) == 0x01);
     OwnerCheckpoint out{};
     REQUIRE(decode_owner_checkpoint(bytes, out) == CheckpointRefusal::None);
     CHECK(out.server_tick == value.server_tick);
@@ -124,6 +127,7 @@ TEST_CASE("owner checkpoint round-trips little-endian fields and InputResult") {
     CHECK(out.result.server_tick == value.server_tick);
     CHECK(out.result.retired_through == 12);
     CHECK(out.result.applied_mask[0] == 0b101);
+    CHECK(out.input_stalls == value.input_stalls);
     REQUIRE(out.entities.size() == 2);
     CHECK(out.entities[0].id == kPlayer);
     CHECK(position(out.entities[0].state) == 4.0f);
@@ -133,7 +137,7 @@ TEST_CASE("owner checkpoint round-trips little-endian fields and InputResult") {
 
 TEST_CASE("every checkpoint refusal leaves decode output untouched") {
     const auto good = wire(checkpoint(10, 1, 2.0f));
-    refused(std::span{good}.first(45), CheckpointRefusal::Truncated);
+    refused(std::span{good}.first(49), CheckpointRefusal::Truncated);
     refused(std::span{good}.first(good.size() - 1), CheckpointRefusal::Truncated);
     auto bad = good;
     bad.push_back(std::byte{0});
@@ -141,12 +145,14 @@ TEST_CASE("every checkpoint refusal leaves decode output untouched") {
     bad = good;
     bad[0] = std::byte{0xE3};
     refused(bad, CheckpointRefusal::BadTag);
+    bad[0] = std::byte{0xE4};
+    refused(bad, CheckpointRefusal::BadTag);
     bad = good;
     bad[13] = std::byte{17};
     refused(bad, CheckpointRefusal::TooManyEntities);
     bad = good;
-    bad[54] = std::byte{1};
-    bad[55] = std::byte{2}; // 513 bytes
+    bad[58] = std::byte{1};
+    bad[59] = std::byte{2}; // 513 bytes
     refused(bad, CheckpointRefusal::EntityStateTooLarge);
     bad = good;
     bad[14] = std::byte{1};
@@ -168,7 +174,7 @@ TEST_CASE("every checkpoint refusal leaves decode output untouched") {
     CHECK(encode_owner_checkpoint(duplicate, output).refusal == CheckpointRefusal::DuplicateEntity);
     // A second entry with the same ID is invalid on the wire as well.
     bad[13] = std::byte{2};
-    bad.insert(bad.end() - 1, good.begin() + 46, good.begin() + 60);
+    bad.insert(bad.end() - 1, good.begin() + 50, good.begin() + 64);
     refused(bad, CheckpointRefusal::DuplicateEntity);
 
     auto oversized = checkpoint(10, 1, 2.0f);
