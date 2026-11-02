@@ -126,6 +126,14 @@ if(UNIX)
     set_tests_properties(hello_game_multi_client_smoke PROPERTIES
         TIMEOUT 60 RUN_SERIAL TRUE LABELS "hello_game")
 endif()
+# m20.9c: two seats predict ONE crate (ADR-0109 §9): a scripted remote push-and-reverse, and three
+# sensitivity controls (no-proxies, stale-proxies, proxy-raw). Measured ~24 s; TIMEOUT is 3x.
+if(UNIX)
+    add_test(NAME hello_game_contention_proof COMMAND python3
+        ${CMAKE_CURRENT_SOURCE_DIR}/contention_proof.py $<TARGET_FILE:hello_game>)
+    set_tests_properties(hello_game_contention_proof PROPERTIES
+        TIMEOUT 75 RUN_SERIAL TRUE LABELS "hello_game")
+endif()
 # m20.8c: three independent UDP processes, a swapped-routing sensitivity run, a measured
 # no-blackout envelope and churn. Its runtime is measured by the direct proof gate; keep CTest
 # serial so host scheduling noise cannot masquerade as another seat's correction.
