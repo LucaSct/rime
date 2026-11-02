@@ -283,6 +283,8 @@ private:
     float player_crate_overlap_before_step_ = 0.0f;
     float maximum_player_crate_overlap_ = 0.0f;
     float minimum_player_distance_ = 1000.0f;
+    // The process proof needs the closest authoritative approach, not a final mirror pose.
+    float minimum_player_crate_distance_ = 1000.0f;
     bool quit_ = false;
     std::uint64_t presentation_calls_ = 0;
 };

@@ -161,6 +161,7 @@ std::string launch_usage(std::string_view program) {
         "  --input-tape-throw  same tape, with one Throw on tick 12\n"
         "  --input-tape-push  connected interaction tape: walk into the crate, push, retreat\n"
         "  --input-tape-collision  connected two-seat collision diagnostic\n"
+        "  --input-tape-isolation  connected separated-seat isolation diagnostic\n"
         "  --spawn-fault CASE  dedicated Throw diagnostic (refuse, lose-one, lose-all, duplicate, "
         "late-alive, late-ended)\n"
         "  --spawn-debug-break CASE  connected sensitivity control (no-ledger, no-adopt, "
@@ -239,6 +240,10 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         } else if (arg == "--input-tape-collision") {
             result.options.input_tape = true;
             result.options.input_tape_collision = true;
+        } else if (arg == "--input-tape-isolation") {
+            // This proof needs movement without the collision tape's intentional contacts.
+            result.options.input_tape = true;
+            result.options.input_tape_isolation = true;
         } else if (arg == "--spawn-fault") {
             if (!has_value || result.options.spawn_fault != SpawnFault::None)
                 return fail("--spawn-fault needs one case");
