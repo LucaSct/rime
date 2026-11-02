@@ -1714,9 +1714,9 @@ physics::BodyDesc body_desc(const physics::RigidBody& rb,
 }
 
 // The client's PREDICTION PHYSICS WORLD (ADR-0106 §3, ADR-0109 §5): a separate PhysicsWorld --
-// floor, all kinematic players in seat order, crate; no sensors, so prediction cannot collect a
-// pickup -- because the authoritative world can only be stepped whole. Three rules make a replay
-// a pure function of
+// floor, the local player plus KINEMATIC PROXIES FOR REMOTE PLAYERS in ascending seat order, then
+// the crate; no sensors, so prediction cannot collect a pickup -- because the authoritative world
+// can only be stepped whole. Three rules make COUPLED ROLLBACK REPLAY a pure function of
 // (checkpoint, commands):
 //
 //   1. REBUILT ON EVERY RESTORE. Restoring the crate makes a FRESH world and creates its bodies in
@@ -1769,10 +1769,12 @@ struct InteractionPhysics {
         std::unique_ptr<physics::PhysicsWorld> world;
         physics::BodyId player_body{};
         physics::BodyId crate_body{};
+        physics::BodyState crate_state{};
         std::vector<std::byte> crate_bytes;
         std::vector<Mover> movers;
         std::uint32_t context_revision = 0;
         bool coupled_context = false;
+        bool reuse_existing_world = false;
     };
 
     std::optional<Prepared> prepared;
@@ -1837,10 +1839,6 @@ struct InteractionPhysics {
             read(*player_bytes, 0), read(*player_bytes, 4), read(*player_bytes, 8)};
         player_state.linear_velocity = {
             read(*player_bytes, 12), read(*player_bytes, 16), read(*player_bytes, 20)};
-        // Build a fresh replacement world from the checkpoint before the live world or roster
-        // changes. The no-rebuild diagnostic intentionally keeps its old contact cache.
-        if (!rebuild_on_restore)
-            return true;
         auto chosen = stale_restore && !previous_bytes.empty()
                           ? std::span<const std::byte>{previous_bytes}
                           : crate_bytes;
@@ -1848,14 +1846,12 @@ struct InteractionPhysics {
         if (!crate)
             return false;
         Prepared stage{};
-        stage.world = std::make_unique<physics::PhysicsWorld>();
-        stage.world->set_sleeping_enabled(false);
-        physics::BodyState floor{};
-        floor.position = {0.0f, -kFloorHalfY, 0.0f};
-        (void)stage.world->create_body(body_desc(kFloorRigidBody, floor_collider(), floor));
+        stage.crate_state = *crate;
         stage.movers.push_back({owner.index, owner.generation, {}, {}, {}, {}, true});
         stage.movers.back().state.position = player_state.position;
         stage.movers.back().state.velocity = player_state.linear_velocity;
+        // KINEMATIC PROXIES FOR REMOTE PLAYERS: each remote seat enters the prediction world at
+        // its checkpointed pose, velocity and executed continuous command, sorted by seat index.
         for (const auto& proxy : proxies) {
             Mover mover{};
             mover.seat = proxy.seat;
@@ -1871,17 +1867,29 @@ struct InteractionPhysics {
         std::sort(stage.movers.begin(), stage.movers.end(), [](const Mover& a, const Mover& b) {
             return a.seat < b.seat;
         });
-        for (Mover& mover : stage.movers) {
-            physics::BodyState body{};
-            body.position = mover.state.position;
-            body.linear_velocity = mover.state.velocity;
-            mover.body =
-                stage.world->create_body(body_desc(kPlayerRigidBody, player_collider(), body));
-            if (mover.owner)
-                stage.player_body = mover.body;
+        // Build a fresh replacement world from the checkpoint before the live world or roster
+        // changes. The no-rebuild diagnostic intentionally keeps its existing world and warm-start
+        // contact cache while still staging the checkpoint's players, proxies and crate state.
+        if (rebuild_on_restore || !physics) {
+            stage.world = std::make_unique<physics::PhysicsWorld>();
+            stage.world->set_sleeping_enabled(false);
+            physics::BodyState floor{};
+            floor.position = {0.0f, -kFloorHalfY, 0.0f};
+            (void)stage.world->create_body(body_desc(kFloorRigidBody, floor_collider(), floor));
+            for (Mover& mover : stage.movers) {
+                physics::BodyState body{};
+                body.position = mover.state.position;
+                body.linear_velocity = mover.state.velocity;
+                mover.body =
+                    stage.world->create_body(body_desc(kPlayerRigidBody, player_collider(), body));
+                if (mover.owner)
+                    stage.player_body = mover.body;
+            }
+            stage.crate_body =
+                stage.world->create_body(body_desc(kCrateRigidBody, crate_collider(), *crate));
+        } else {
+            stage.reuse_existing_world = true;
         }
-        stage.crate_body =
-            stage.world->create_body(body_desc(kCrateRigidBody, crate_collider(), *crate));
         stage.context_revision = revision;
         stage.coupled_context = raw.size() != replication::kContentionCrateBytes;
         // Keep the 52-byte physics state for the stale-seed diagnostic even when the envelope is
@@ -1894,10 +1902,40 @@ struct InteractionPhysics {
     void commit() {
         if (!prepared)
             return;
-        physics = std::move(prepared->world);
-        player_body = prepared->player_body;
-        crate_body = prepared->crate_body;
-        movers = std::move(prepared->movers);
+        if (!prepared->reuse_existing_world) {
+            physics = std::move(prepared->world);
+            player_body = prepared->player_body;
+            crate_body = prepared->crate_body;
+            movers = std::move(prepared->movers);
+        } else {
+            for (const Mover& old_mover : movers) {
+                const bool kept =
+                    std::any_of(prepared->movers.begin(),
+                                prepared->movers.end(),
+                                [&](const Mover& next) { return next.seat == old_mover.seat; });
+                if (!kept)
+                    physics->destroy_body(old_mover.body);
+            }
+            for (Mover& next : prepared->movers) {
+                const auto existing =
+                    std::find_if(movers.begin(), movers.end(), [&](const Mover& old_mover) {
+                        return old_mover.seat == next.seat;
+                    });
+                if (existing != movers.end()) {
+                    next.body = existing->body;
+                } else {
+                    physics::BodyState body{};
+                    body.position = next.state.position;
+                    body.linear_velocity = next.state.velocity;
+                    next.body =
+                        physics->create_body(body_desc(kPlayerRigidBody, player_collider(), body));
+                }
+                if (next.owner)
+                    player_body = next.body;
+            }
+            (void)physics->set_body_state(crate_body, prepared->crate_state);
+            movers = std::move(prepared->movers);
+        }
         proxy_trajectory.clear();
         context_revision = prepared->context_revision;
         coupled_context = prepared->coupled_context;
@@ -1977,6 +2015,9 @@ struct InteractionPhysics {
                              dt,
                              CratePose{crate.position, crate.orientation},
                              others);
+            for (Mover& mover : movers)
+                if (mover.owner)
+                    mover.state = *owner_state;
             touching = false;
             return;
         }

@@ -508,7 +508,90 @@ TEST_CASE("contention: proxy checkpoint uses the executed stand-in and five seat
     CHECK(h.server->counters().interaction_contention_unsupported > 0);
     h.step();
     REQUIRE_FALSE(a.spawn_checkpoints.empty());
+    const auto mirrored_epoch = a.spawn_checkpoints.back().base.membership_epoch;
     CHECK(a.spawn_checkpoints.back().base.entities.size() == 1);
+
+    // Dropping back from five seated players to four re-enables contention through normal join
+    // evaluation, advancing seat 0's roster epoch once and restoring three remote proxies.
+    fifth.driver->session(*fifth.id)->disconnect();
+    h.step_until([&] { return !h.seen.left.empty(); }, "fifth player left");
+    h.step();
+    h.step();
+    const auto& recovered = a.spawn_checkpoints.back().base;
+    REQUIRE(recovered.entities.size() == 2);
+    CHECK(recovered.membership_epoch == mirrored_epoch + 1);
+    replication::ContentionContext recovered_ctx{};
+    REQUIRE(replication::decode_contention_context(recovered.entities[1].state, recovered_ctx) ==
+            replication::ContentionRefusal::None);
+    CHECK(recovered_ctx.proxies.size() == 3);
+}
+
+TEST_CASE("contention: complete checkpoint parts fit before oldest-first spawn outcomes") {
+    Harness h(
+        {.max_players = 4, .max_clients = 4}, false, /*start_now=*/false, /*contention=*/true);
+    h.profile.spawn_prediction->capture_spawned = [](const ecs::World&, ecs::Entity) {
+        return std::vector<std::byte>(300, std::byte{0x5A});
+    };
+    h.profile.prediction_hooks = [](ecs::World& world, ecs::Entity entity) {
+        auto hooks = pawn_hooks(world, entity);
+        hooks.capture_group = [] { return std::vector<std::byte>(500, std::byte{0xA5}); };
+        return hooks;
+    };
+    h.start();
+    Client& a = h.join_seat(7921);
+    (void)h.join_seat(7922);
+    (void)h.join_seat(7923);
+    (void)h.join_seat(7924);
+    h.step();
+    a.spawn_checkpoints.clear();
+
+    const std::uint32_t inc = a.driver->session(*a.id)->incarnation();
+    core::Transform tf{};
+    const ecs::Entity live_projectile =
+        h.world.spawn_with(ecs::LocalTransform{tf}, ecs::WorldTransform{tf});
+    std::vector<app::SpawnReport> reports;
+    reports.push_back({app::SpawnReport::Kind::Launched, {inc, 1, 0}, live_projectile, 0, {0, 0}});
+    for (std::uint32_t seq = 2; seq <= 5; ++seq)
+        reports.push_back({app::SpawnReport::Kind::Refused, {inc, seq, 0}, {}, 1, {0, 0}});
+    h.network.advance_time(h.now);
+    a.pump(h.now);
+    a.spawn_checkpoints.clear();
+    h.server->after_tick(h.tick++, reports);
+    h.now += 16;
+    h.network.advance_time(h.now);
+    a.pump(h.now);
+
+    CHECK(h.server->counters().checkpoint_encode_refused == 0);
+    CHECK(h.server->counters().spawn_extension_refused == 0);
+    CHECK(h.server->counters().spawn_outcomes_deferred > 0);
+    REQUIRE_FALSE(a.spawn_checkpoints.empty());
+    const auto& first_cp = a.spawn_checkpoints.back();
+    // Atomic parts all arrived together: owner, v2 crate with 3 proxies, live spawn + binding.
+    REQUIRE(first_cp.base.entities.size() == 3);
+    CHECK(first_cp.base.group_state.size() == 500);
+    REQUIRE(first_cp.spawns.has_value());
+    REQUIRE(first_cp.spawns->bindings.size() == 1);
+    // Only an oldest-first prefix of the 5 outcomes fits inside the 1200-byte message budget.
+    const auto& first_outcomes = first_cp.spawns->outcomes;
+    REQUIRE(!first_outcomes.empty());
+    CHECK(first_outcomes.size() < 5);
+    for (std::size_t i = 0; i < first_outcomes.size(); ++i)
+        CHECK(first_outcomes[i].key.sequence == i + 1);
+
+    // Reliable acknowledgement retires the delivered prefix so the deferred tail fits next.
+    const std::uint32_t delivered_through = first_outcomes.back().key.sequence;
+    std::array<std::byte, replication::kSpawnOutcomeAckBytes> ack_bytes{};
+    const auto ack_size =
+        replication::encode_spawn_outcome_ack({first_outcomes.back().key}, ack_bytes);
+    REQUIRE(a.driver->session(*a.id)->send_reliable(std::span(ack_bytes).first(ack_size), h.now));
+    a.spawn_checkpoints.clear();
+    h.step();
+    h.step();
+    REQUIRE_FALSE(a.spawn_checkpoints.empty());
+    const auto& next_outcomes = a.spawn_checkpoints.back().spawns->outcomes;
+    REQUIRE_FALSE(next_outcomes.empty());
+    CHECK(next_outcomes.front().key.sequence == delivered_through + 1);
+    CHECK(next_outcomes.back().key.sequence == 5);
 }
 
 TEST_CASE("seats: each seat's commands reach only its own PlayerInput, result and checkpoint") {

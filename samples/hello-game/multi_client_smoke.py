@@ -66,14 +66,15 @@ def run(tapes):
         assert server.returncode == 0, (server.returncode, server_out, server_err)
         authority = finished(server_out)
         assert authority["clients_refused"] >= 1, authority
-        assert authority["interaction_joins"] == 0, authority  # shared crate stays mirrored
+        assert authority["interaction_joins"] >= 2, authority  # m20.9b: <=4 seats predict the crate
+        assert authority["interaction_contention_unsupported"] == 0, authority
         assert authority["spawn_accepted"] == 1, authority  # the x tape launches one throw
         assert authority["seats"][0]["applied"] > 0 and authority["seats"][1]["applied"] > 0, authority
         for index, outcome in enumerate(outputs):
             assert outcome["digest"] == authority["digest"], (authority, outcome)
             assert outcome["response_ticks"] == 0, outcome
             assert outcome["seat"] == index, outcome
-            assert outcome["crate_joins_seen"] == 0, outcome
+            assert outcome["crate_member_ticks"] > 0, outcome
             assert {p["seat"] for p in outcome["players"]} == {0, 1}, outcome
             assert outcome["presentation_launch"] == (tapes[index] == "--input-tape-throw"), outcome
         # Both mirrors agree on both bodies. Digest equality alone would also pass if the server

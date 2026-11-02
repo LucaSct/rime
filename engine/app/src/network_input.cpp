@@ -626,6 +626,16 @@ struct NetworkInputServer::Impl {
         (void)table.release(session_key(e.id));
     }
 
+    void fold_policy_counts(const InteractionMembershipPolicy& policy) noexcept {
+        const auto& c = policy.counters();
+        policy_totals.joins += c.joins;
+        policy_totals.leaves += c.leaves;
+        policy_totals.joined_in_contact += c.joined_in_contact;
+        policy_totals.leave_deferred_moving += c.leave_deferred_moving;
+        policy_totals.leave_deferred_touching += c.leave_deferred_touching;
+        policy_totals.leave_deferred_quiet += c.leave_deferred_quiet;
+    }
+
     void release_owner(Seat& seat) {
         seat.owner = {};
         seat.owner_net_id = {};
@@ -635,13 +645,7 @@ struct NetworkInputServer::Impl {
         seat.context_revision = 0;
         if (seat.policy) {
             // Keep the departed occupant's policy counts in the run's totals.
-            const auto& c = seat.policy->counters();
-            policy_totals.joins += c.joins;
-            policy_totals.leaves += c.leaves;
-            policy_totals.joined_in_contact += c.joined_in_contact;
-            policy_totals.leave_deferred_moving += c.leave_deferred_moving;
-            policy_totals.leave_deferred_touching += c.leave_deferred_touching;
-            policy_totals.leave_deferred_quiet += c.leave_deferred_quiet;
+            fold_policy_counts(*seat.policy);
             seat.policy.reset();
         }
     }
@@ -818,7 +822,6 @@ struct NetworkInputServer::Impl {
     // m20.7 (ADR-0107): `dedicated --input-buffer adaptive`. Config, per schedule.
     bool adaptive_input = false;
     bool multi_seat = false;
-    bool contention_supported = true;
     std::optional<std::uint32_t> fault_sequence;
     // `duplicate` holds the client's ack for its window, so the verdict rides every checkpoint in
     // it -- a repeated confirmation the client must recognise -- and applies it afterwards.
@@ -1069,16 +1072,24 @@ struct NetworkInputServer::Impl {
         const auto seated = std::count_if(
             seats.begin(), seats.end(), [](const Seat& seat) { return seat.admitted; });
         const bool supported = !multi_seat || seated <= 4;
-        if (supported != contention_supported) {
-            contention_supported = supported;
-            for (Seat& seat : seats) {
-                if (!seat.admitted)
-                    continue;
-                ++seat.membership_epoch;
-                ++totals.interaction_epoch_advances;
-            }
-        }
         if (!supported) {
+            // Contention context v2 carries at most three kinematic proxies for remote players
+            // (ADR-0109 §3). Above four seated players the shared object falls back to the
+            // world-stream mirror: evict any active member cleanly so its roster epoch advances
+            // once now, and re-enters through normal join hysteresis if the crowd drops back.
+            for (Seat& seat : seats) {
+                if (!seat.admitted || !seat.policy)
+                    continue;
+                const bool was_member = seat.policy->member();
+                fold_policy_counts(*seat.policy);
+                if (was_member) {
+                    ++policy_totals.leaves;
+                    ++seat.membership_epoch;
+                    ++totals.interaction_epoch_advances;
+                }
+                seat.policy.emplace(interaction->params);
+                seat.context_identities.clear();
+            }
             ++totals.interaction_contention_unsupported;
             interaction_tick = server_tick;
             return;

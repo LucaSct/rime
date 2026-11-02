@@ -752,6 +752,8 @@ RunReport run_network_client(const LaunchOptions& options,
                         if (!net_id || !interaction->client_hooks)
                             return fail(report, "interaction object unavailable");
                         interaction_id = {net_id->index, net_id->generation};
+                        // Multi-seat replies name this client's (seat, generation), which v2
+                        // contention checkpoints must match before staging remote proxy bodies.
                         interaction_hooks = interaction->client_hooks(
                             prediction_world,
                             predicted_player,
@@ -760,7 +762,7 @@ RunReport run_network_client(const LaunchOptions& options,
                             {options.interaction_debug_break != InteractionDebugBreak::NoRebuild,
                              options.interaction_debug_break == InteractionDebugBreak::StaleRestore,
                              seat.value_or(PlayerSlot{}),
-                             true});
+                             seat.has_value()});
                         spawn_hooks = interaction_hooks->hooks;
                     }
                     if (options.spawn_debug_break == SpawnDebugBreak::NoAdopt) {

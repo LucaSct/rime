@@ -110,14 +110,16 @@ struct Client {
     ecs::Entity player{};
     InteractionProfile::ClientHooks hooks;
 
-    Client(const app::GameDefinition& definition, InteractionProfile::ClientOptions options) {
+    Client(const app::GameDefinition& definition,
+           InteractionProfile::ClientOptions options,
+           replication::PredictedEntityId crate_id = kCrateId) {
         definition.remote_play->register_replicated(world);
         player = world.spawn_with(ecs::WorldTransform{}, hello_game::PlayerState{});
         auto inner = definition.remote_play->spawn_prediction->client_hooks(
             world, player, 1, [](const replication::SpawnKey&, std::span<const std::byte>) {
                 return std::optional<replication::PredictedEntityId>{};
             });
-        hooks = profile().client_hooks(world, player, kCrateId, std::move(inner), options);
+        hooks = profile().client_hooks(world, player, crate_id, std::move(inner), options);
     }
 
     void restore(const std::vector<std::byte>& group,
@@ -410,12 +412,187 @@ TEST_CASE("interaction accepts a valid v2 crate context and restores its v1 body
 }
 
 TEST_CASE("contention: fresh predictor matches every replay tick through stand-in and seat reuse") {
-    Server server;
+    // Real two-seat authority: HelloGame + NetworkInputServer + world-stream mirror. Seat 0 is the
+    // live predictor under test (checkpoints held kDelay ticks so every correction replays); seat 1
+    // pushes the crate beside it, drops packets so the server executes synthesized and neutralized
+    // stand-ins, then disconnects and is reused at generation 1 with a fresh NetId.
+    constexpr int kDelay = 3;
+    app::Application application{server_config()};
     const auto def = hello_game::definition_with_interaction();
+    auto& server_world = application.world();
+    def.register_components(server_world);
+    hello_game::build_arena(server_world);
+    scene::derive_world_transforms(server_world, application.jobs());
+    app::SetupContext setup{server_world, application.jobs(), kDt, {}};
+    setup.seats = 2;
+    hello_game::HelloGame game;
+    REQUIRE(game.setup(setup));
+    const ecs::Entity server_crate = profile().object(server_world);
+    REQUIRE(server_world.is_alive(server_crate));
+
+    net::ScriptedNetwork network(0xC097u, {0.0f, 0.0f, 0, 0});
+    const net::Endpoint server_endpoint{0x7F000001u, 7880};
+    net::Link& server_link = network.add_node(server_endpoint);
+    std::string error;
+    const app::SeatConfig seat_cfg{.max_players = 2, .max_clients = 2};
+    auto pump = app::NetworkInputServer::on_link(server_link,
+                                                 def.tick_hz,
+                                                 *def.network_input,
+                                                 server_world,
+                                                 &*def.remote_play,
+                                                 error,
+                                                 seat_cfg);
+    REQUIRE_MESSAGE(pump != nullptr, error);
+    const std::uint64_t schema_id =
+        app::input_schema_identity(*def.network_input, &*def.remote_play, def.max_players);
+
+    struct Peer {
+        net::Link* link = nullptr;
+        std::unique_ptr<net::NetDriver> driver;
+        std::optional<net::SessionId> id;
+        ecs::World mirror_world;
+        std::unique_ptr<replication::ClientReplicator> mirror;
+        std::optional<replication::InputHelloReply> reply;
+        std::vector<net::SessionEvent> events;
+        std::vector<net::Received> inbox;
+        std::uint32_t sequence = 0;
+        bool connected = false;
+
+        Peer(net::ScriptedNetwork& net,
+             const app::GameDefinition& definition,
+             net::Endpoint server_ep,
+             std::uint16_t port,
+             std::uint64_t now) {
+            link = &net.add_node({0x7F000001u, port});
+            net::NetDriver::Config cfg{};
+            cfg.salt_seed = 0xC0970000u + port;
+            driver = std::make_unique<net::NetDriver>(*link, cfg);
+            definition.remote_play->register_replicated(mirror_world);
+            mirror = std::make_unique<replication::ClientReplicator>(mirror_world);
+            id = driver->connect(server_ep, now);
+            REQUIRE(id.has_value());
+        }
+
+        std::vector<replication::SpawnCheckpoint> pump_io(std::uint64_t now) {
+            events.clear();
+            driver->update(now, events);
+            for (const auto& ev : events)
+                connected |= ev.kind == net::SessionEvent::Kind::Connected;
+            inbox.clear();
+            if (id)
+                if (auto* session = driver->session(*id))
+                    session->drain_received(inbox);
+            mirror->apply_messages(inbox);
+            std::vector<replication::SpawnCheckpoint> out;
+            for (const auto& msg : inbox) {
+                replication::InputHelloReply hello_reply{};
+                if (replication::decode_input_hello_reply(msg.bytes, hello_reply)) {
+                    reply = hello_reply;
+                    continue;
+                }
+                replication::SpawnCheckpoint cp{};
+                if (replication::decode_spawn_checkpoint(msg.bytes, cp))
+                    out.push_back(std::move(cp));
+            }
+            mirror->send_ack(*driver, now);
+            return out;
+        }
+
+        replication::InputCommand send_move(float mx, float mz, std::uint64_t now) {
+            replication::InputCommand cmd{};
+            cmd.sequence = ++sequence;
+            cmd.move_x = mx;
+            cmd.move_y = mz;
+            std::array<std::byte,
+                       replication::kInputV2HeaderBytes + replication::kInputV2CommandBytes>
+                bytes{};
+            const auto size = replication::encode_input_v2(std::span(&cmd, 1), bytes);
+            REQUIRE(driver->session(*id)->send_unreliable(
+                std::span(bytes).first(size), now, app::kRemoteInputCommandsStream));
+            return cmd;
+        }
+    };
+
+    std::uint64_t now = 0;
+    std::uint64_t server_tick = 0;
+    std::vector<std::unique_ptr<Peer>> peers;
+    const auto server_step = [&] {
+        std::vector<app::SpawnReport> reports;
+        std::vector<ecs::Entity> despawns;
+        app::TickContext ctx{server_world, kDt, server_tick};
+        ctx.spawns = &reports;
+        ctx.despawns = &despawns;
+        ctx.input = pump->before_tick(server_tick, now);
+        ctx.command = pump->command_provenance();
+        ctx.refuse_spawn = pump->refuse_spawn();
+        pump->begin_seat_tick(game, ctx);
+        server_world.advance_version();
+        game.fixed_tick(ctx);
+        pump->after_tick(server_tick, reports, despawns);
+        ++server_tick;
+    };
+    const auto advance_handshake = [&] {
+        now += 16;
+        network.advance_time(now);
+        for (auto& peer : peers)
+            (void)peer->pump_io(now);
+        network.advance_time(now);
+        server_step();
+    };
+    const auto admit_peer = [&](std::uint16_t port) -> Peer& {
+        peers.push_back(std::make_unique<Peer>(network, def, server_endpoint, port, now));
+        Peer& peer = *peers.back();
+        for (int i = 0; i < 60 && !peer.connected; ++i)
+            advance_handshake();
+        REQUIRE(peer.connected);
+        const replication::InputHello hello{
+            replication::kInputCodecV3, replication::kInputCodecV3, schema_id};
+        std::array<std::byte, replication::kInputHelloBytes> bytes{};
+        const auto size = replication::encode_input_hello(hello, bytes);
+        REQUIRE(peer.driver->session(*peer.id)->send_reliable(std::span(bytes).first(size), now));
+        for (int i = 0; i < 60 && !peer.reply.has_value(); ++i)
+            advance_handshake();
+        REQUIRE(peer.reply.has_value());
+        REQUIRE(peer.reply->refusal == replication::InputHelloRefusal::None);
+        return peer;
+    };
+
+    Peer& seat0 = admit_peer(7881);
+    Peer& seat1_first = admit_peer(7882);
+    REQUIRE(seat0.reply->seat == 0);
+    REQUIRE(seat0.reply->seat_generation == 0);
+    REQUIRE(seat1_first.reply->seat == 1);
+    REQUIRE(seat1_first.reply->seat_generation == 0);
+
+    // Drive one initial tick so seat 0 receives its baseline world stream and seed checkpoint.
+    std::vector<replication::SpawnCheckpoint> seed_cps;
+    while (seed_cps.empty() || seat0.mirror->deltas_applied() == 0) {
+        now += 16;
+        (void)seat0.send_move(0.0f, 0.0f, now);
+        (void)seat1_first.send_move(0.0f, 0.0f, now);
+        network.advance_time(now);
+        (void)seat0.pump_io(now);
+        (void)seat1_first.pump_io(now);
+        network.advance_time(now);
+        server_step();
+        now += 16;
+        network.advance_time(now);
+        for (auto& cp : seat0.pump_io(now))
+            seed_cps.push_back(std::move(cp));
+        (void)seat1_first.pump_io(now);
+    }
+    const auto& seed_cp = seed_cps.back();
+    REQUIRE(seed_cp.base.entities.size() == 2);
+    const auto crate_net_id = seat0.mirror->map().net_id_of(profile().object(seat0.mirror_world));
+    REQUIRE(crate_net_id.has_value());
+    const replication::PredictedEntityId crate_id{crate_net_id->index, crate_net_id->generation};
+    const replication::PredictedEntityId player_id = seed_cp.base.entities[0].id;
+    REQUIRE(seed_cp.base.entities[1].id == crate_id);
+
     InteractionProfile::ClientOptions options{};
-    options.owner = {0, 1};
+    options.owner = {seat0.reply->seat, seat0.reply->seat_generation};
     options.owner_known = true;
-    Client live(def, options);
+    Client live(def, options, crate_id);
     auto live_hooks = live.hooks.hooks.prediction;
     std::vector<std::vector<std::byte>> replay_states;
     const auto live_simulate = live_hooks.simulate;
@@ -427,96 +604,216 @@ TEST_CASE("contention: fresh predictor matches every replay tick through stand-i
             replay_states.push_back(live.hooks.context_snapshot());
     };
     replication::Reconciler reconciler(live_hooks, kDt);
-    reconciler.set_membership(1, {kPlayerId, kCrateId});
+    reconciler.set_membership(seed_cp.base.membership_epoch, {player_id, crate_id});
+    REQUIRE(reconciler.apply_checkpoint(seed_cp.base).applied);
 
-    const auto checkpoint = [&](std::uint32_t tick) {
-        replication::ContentionContext context{};
-        context.owner_seat = 0;
-        context.owner_generation = 1;
-        context.context_revision = tick < 30 ? 1 : 2;
-        const auto crate = server.crate_bytes();
-        std::copy(crate.begin(), crate.end(), context.crate.begin());
-        replication::ContentionProxy proxy{};
-        proxy.seat = 1;
-        proxy.seat_generation = tick < 30 ? 1 : 2;
-        proxy.net_id = {3, static_cast<std::uint32_t>(proxy.seat_generation)};
-        proxy.position = {0.0f,
-                          hello_game::HelloGame::kPlayerRadius +
-                              hello_game::HelloGame::kPlayerHalfHeight,
-                          tick < 30 ? -2.0f : -1.8f};
-        proxy.axes = {0.0f, tick == 20 ? 0.0f : (tick < 30 ? 1.0f : -1.0f)};
-        context.proxies.push_back(proxy);
-        std::array<std::byte, replication::kContentionMaxBytes> buffer{};
-        std::size_t written = 0;
-        REQUIRE(replication::encode_contention_context(context, buffer, written) ==
-                replication::ContentionRefusal::None);
-        replication::OwnerCheckpoint cp{};
-        cp.server_tick = tick;
-        cp.membership_epoch = 1;
-        cp.result.server_tick = tick;
-        cp.result.any_retired = tick > 3;
-        cp.result.retired_through = tick > 3 ? tick - 3 : 0;
-        cp.entities.push_back({kPlayerId, server.hooks.capture(kPlayerId)});
-        cp.entities.push_back(
-            {kCrateId, {buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(written)}});
-        cp.group_state = server.hooks.capture_group();
-        return cp;
-    };
-    REQUIRE(reconciler.apply_checkpoint(checkpoint(0)).applied);
     auto no_rebuild_options = options;
     no_rebuild_options.rebuild_on_restore = false;
-    Client no_rebuild(def, no_rebuild_options);
-    replication::Reconciler no_rebuild_predictor(no_rebuild.hooks.hooks.prediction, kDt);
-    no_rebuild_predictor.set_membership(1, {kPlayerId, kCrateId});
-    REQUIRE(no_rebuild_predictor.apply_checkpoint(checkpoint(0)).applied);
+    Client no_rebuild(def, no_rebuild_options, crate_id);
+    auto no_rebuild_hooks = no_rebuild.hooks.hooks.prediction;
+    std::vector<std::vector<std::byte>> no_rebuild_replay_states;
+    const auto no_rebuild_simulate = no_rebuild_hooks.simulate;
+    no_rebuild_hooks.simulate = [&](std::span<const replication::PredictedEntityId> members,
+                                    const replication::InputCommand& command,
+                                    const replication::PredictionStep& step) {
+        no_rebuild_simulate(members, command, step);
+        if (step.replaying)
+            no_rebuild_replay_states.push_back(no_rebuild.hooks.context_snapshot());
+    };
+    replication::Reconciler no_rebuild_predictor(no_rebuild_hooks, kDt);
+    no_rebuild_predictor.set_membership(seed_cp.base.membership_epoch, {player_id, crate_id});
+    REQUIRE(no_rebuild_predictor.apply_checkpoint(seed_cp.base).applied);
+
+    struct HeldCheckpoint {
+        int release_step = 0;
+        replication::OwnerCheckpoint cp;
+    };
+
+    std::deque<HeldCheckpoint> held;
     std::vector<replication::InputCommand> commands;
-    bool mirror_control_failed = false;
-    bool rebuild_control_failed = false;
-    for (std::uint32_t tick = 1; tick <= 45; ++tick) {
-        const auto command = walk(tick, -1.0f);
-        commands.push_back(command);
-        reconciler.predict(command);
-        no_rebuild_predictor.predict(command);
-        server.step(command);
-        if (tick % 5 != 0)
-            continue;
-        const auto cp = checkpoint(tick);
-        replay_states.clear();
-        const auto result = reconciler.apply_checkpoint(cp);
-        REQUIRE(result.applied);
-        REQUIRE(no_rebuild_predictor.apply_checkpoint(cp).applied);
-        rebuild_control_failed |=
-            no_rebuild.hooks.context_snapshot() != live.hooks.context_snapshot();
-        REQUIRE(result.replayed == 3);
-        Client fresh(def, options);
-        replication::Reconciler oracle(fresh.hooks.hooks.prediction, kDt);
-        oracle.set_membership(1, {kPlayerId, kCrateId});
-        REQUIRE(oracle.apply_checkpoint(cp).applied);
-        for (std::size_t i = commands.size() - 3, replay_tick = 0; i < commands.size(); ++i) {
-            oracle.predict(commands[i]);
-            CHECK(replay_states[replay_tick++] == fresh.hooks.context_snapshot());
+    const std::uint32_t initial_epoch = seed_cp.base.membership_epoch;
+    std::optional<replication::PredictedEntityId> first_proxy_net_id;
+    std::uint32_t max_context_revision = 0;
+    bool saw_synthesized_stand_in = false;
+    bool saw_neutralized_stand_in = false;
+    bool saw_empty_proxy_on_leave = false;
+    bool saw_reused_seat = false;
+    std::size_t mirror_differed_ticks = 0;
+    std::size_t rebuild_differed_ticks = 0;
+    std::size_t total_replay_ticks_checked = 0;
+
+    Peer* active_seat1 = &seat1_first;
+    std::unique_ptr<Peer> replacement_connecting;
+
+    // Seat 0 (-1.8, 0) and Seat 1 (-0.6, 0) converge onto the left and right halves of the crate
+    // at (0, 0.5, -2.5), keeping > 0.70 m lateral separation so both capsules contact the crate.
+    for (int step = 1; step <= 95; ++step) {
+        now += 16;
+        const auto cmd0 = seat0.send_move(0.494f, -0.870f, now);
+        commands.push_back(cmd0);
+        reconciler.predict(cmd0);
+        no_rebuild_predictor.predict(cmd0);
+
+        if (step == 44 && active_seat1 != nullptr) {
+            active_seat1->driver->session(*active_seat1->id)->disconnect();
+            active_seat1 = nullptr;
+        } else if (step == 48) {
+            replacement_connecting =
+                std::make_unique<Peer>(network, def, server_endpoint, 7883, now);
         }
-        // A proxy initialized from an older mirror pose must fail this byte oracle.
-        auto mirror_seed = cp;
-        replication::ContentionContext stale{};
-        REQUIRE(replication::decode_contention_context(mirror_seed.entities[1].state, stale) ==
-                replication::ContentionRefusal::None);
-        stale.proxies[0].position[2] -= 0.25f;
-        std::array<std::byte, replication::kContentionMaxBytes> buffer{};
-        std::size_t written = 0;
-        REQUIRE(replication::encode_contention_context(stale, buffer, written) ==
-                replication::ContentionRefusal::None);
-        mirror_seed.entities[1].state.assign(buffer.begin(),
-                                             buffer.begin() + static_cast<std::ptrdiff_t>(written));
-        Client stale_client(def, options);
-        replication::Reconciler stale_predictor(stale_client.hooks.hooks.prediction, kDt);
-        stale_predictor.set_membership(1, {kPlayerId, kCrateId});
-        REQUIRE(stale_predictor.apply_checkpoint(mirror_seed).applied);
-        stale_predictor.predict(commands[commands.size() - 3]);
-        mirror_control_failed |= stale_client.hooks.context_snapshot() != replay_states.front();
+        if (replacement_connecting && replacement_connecting->connected &&
+            !replacement_connecting->reply.has_value()) {
+            // Send hello once connected; harmless if re-sent before admission.
+            if (step == 50) {
+                const replication::InputHello hello{
+                    replication::kInputCodecV3, replication::kInputCodecV3, schema_id};
+                std::array<std::byte, replication::kInputHelloBytes> bytes{};
+                const auto size = replication::encode_input_hello(hello, bytes);
+                REQUIRE(replacement_connecting->driver->session(*replacement_connecting->id)
+                            ->send_reliable(std::span(bytes).first(size), now));
+            }
+        }
+        // Steps 32..39: seat 1 sends nothing, forcing 6 synthesized repeat stand-ins followed by
+        // 2 neutralized stand-ins while both bodies are actively pushing the crate.
+        const bool silent_stand_in = (step >= 32 && step <= 39);
+        if (active_seat1 != nullptr && !silent_stand_in)
+            (void)active_seat1->send_move(0.365f, -0.931f, now);
+
+        network.advance_time(now);
+        for (auto& peer : peers)
+            for (auto& cp : peer->pump_io(now))
+                if (peer.get() == &seat0)
+                    held.push_back({step + kDelay, std::move(cp.base)});
+        if (replacement_connecting) {
+            (void)replacement_connecting->pump_io(now);
+            if (replacement_connecting->reply.has_value()) {
+                REQUIRE(replacement_connecting->reply->refusal ==
+                        replication::InputHelloRefusal::None);
+                REQUIRE(replacement_connecting->reply->seat == 1);
+                REQUIRE(replacement_connecting->reply->seat_generation == 1);
+                peers.push_back(std::move(replacement_connecting));
+                active_seat1 = peers.back().get();
+            }
+        }
+        network.advance_time(now);
+        server_step();
+
+        while (!held.empty() && held.front().release_step <= step) {
+            const auto cp = std::move(held.front().cp);
+            held.pop_front();
+            REQUIRE(cp.entities.size() == 2);
+            CHECK(cp.membership_epoch == initial_epoch);
+
+            replication::ContentionContext decoded{};
+            REQUIRE(replication::decode_contention_context(cp.entities[1].state, decoded) ==
+                    replication::ContentionRefusal::None);
+            max_context_revision = std::max(max_context_revision, decoded.context_revision);
+            if (decoded.proxies.empty()) {
+                saw_empty_proxy_on_leave = true;
+            } else {
+                const auto& proxy = decoded.proxies[0];
+                CHECK(proxy.seat == 1);
+                if (!first_proxy_net_id)
+                    first_proxy_net_id = proxy.net_id;
+                if (proxy.seat_generation == 0 && cp.server_tick >= 34) {
+                    if (std::abs(proxy.axes[1] - (-0.931f)) < 1e-4f)
+                        saw_synthesized_stand_in = true;
+                    if (proxy.axes[0] == 0.0f && proxy.axes[1] == 0.0f)
+                        saw_neutralized_stand_in = true;
+                }
+                if (proxy.seat_generation == 1) {
+                    CHECK(proxy.net_id != *first_proxy_net_id);
+                    saw_reused_seat = true;
+                }
+            }
+
+            replay_states.clear();
+            no_rebuild_replay_states.clear();
+            const auto result = reconciler.apply_checkpoint(cp);
+            REQUIRE(result.applied);
+            const auto no_rebuild_result = no_rebuild_predictor.apply_checkpoint(cp);
+            REQUIRE(no_rebuild_result.applied);
+            REQUIRE(result.replayed == replay_states.size());
+            REQUIRE(no_rebuild_result.replayed == result.replayed);
+            if (result.replayed == 0)
+                continue;
+
+            // Fresh-predictor oracle: construct a brand-new predictor from ONLY this checkpoint
+            // and the unretired command suffix; every replay tick must be byte-identical.
+            Client fresh(def, options, crate_id);
+            replication::Reconciler oracle(fresh.hooks.hooks.prediction, kDt);
+            oracle.set_membership(cp.membership_epoch, {player_id, crate_id});
+            REQUIRE(oracle.apply_checkpoint(cp).applied);
+            const std::size_t suffix_start = commands.size() - result.replayed;
+            for (std::size_t i = suffix_start, replay_tick = 0; i < commands.size();
+                 ++i, ++replay_tick) {
+                oracle.predict(commands[i]);
+                const auto expected = fresh.hooks.context_snapshot();
+                CHECK(replay_states[replay_tick] == expected);
+                if (no_rebuild_replay_states[replay_tick] != expected)
+                    ++rebuild_differed_ticks;
+                ++total_replay_ticks_checked;
+            }
+
+            // Sensitivity control (a): seed the proxy from seat 0's world-stream mirror instead of
+            // the checkpoint's proxy record. Because the mirror leads the held checkpoint (and
+            // carries no executed command), the coupled replay diverges from the byte oracle.
+            if (!decoded.proxies.empty()) {
+                const auto& proxy = decoded.proxies[0];
+                const ecs::Entity mirror_peer = def.remote_play->seat_player(
+                    seat0.mirror_world, {proxy.seat, proxy.seat_generation});
+                if (const auto* mirror_state =
+                        seat0.mirror_world.get<hello_game::PlayerState>(mirror_peer)) {
+                    auto tainted_ctx = decoded;
+                    tainted_ctx.proxies[0].position = {mirror_state->position.x,
+                                                       mirror_state->position.y,
+                                                       mirror_state->position.z};
+                    tainted_ctx.proxies[0].velocity = {mirror_state->velocity.x,
+                                                       mirror_state->velocity.y,
+                                                       mirror_state->velocity.z};
+                    std::array<std::byte, replication::kContentionMaxBytes> buffer{};
+                    std::size_t written = 0;
+                    REQUIRE(replication::encode_contention_context(tainted_ctx, buffer, written) ==
+                            replication::ContentionRefusal::None);
+                    auto mirror_cp = cp;
+                    mirror_cp.entities[1].state.assign(
+                        buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(written));
+                    Client mirror_seeded(def, options, crate_id);
+                    replication::Reconciler mirror_oracle(mirror_seeded.hooks.hooks.prediction,
+                                                          kDt);
+                    mirror_oracle.set_membership(mirror_cp.membership_epoch, {player_id, crate_id});
+                    REQUIRE(mirror_oracle.apply_checkpoint(mirror_cp).applied);
+                    for (std::size_t i = suffix_start, replay_tick = 0; i < commands.size();
+                         ++i, ++replay_tick) {
+                        mirror_oracle.predict(commands[i]);
+                        if (mirror_seeded.hooks.context_snapshot() != replay_states[replay_tick])
+                            ++mirror_differed_ticks;
+                    }
+                }
+            }
+        }
     }
-    CHECK(mirror_control_failed);
-    CHECK(rebuild_control_failed);
+
+    const auto* final_crate = server_world.get<hello_game::CrateBody>(server_crate);
+    REQUIRE(final_crate != nullptr);
+    CHECK(final_crate->position.z < -2.8f); // genuinely pushed under two-seat contention
+    CHECK(pump->counters().synthesized > 0);
+    CHECK(pump->counters().neutralized > 0);
+    CHECK(saw_synthesized_stand_in);
+    CHECK(saw_neutralized_stand_in);
+    CHECK(saw_empty_proxy_on_leave);
+    CHECK(saw_reused_seat);
+    CHECK(max_context_revision >= 3);
+    CHECK(total_replay_ticks_checked >= 150);
+    CHECK(mirror_differed_ticks > 0);
+    CHECK(rebuild_differed_ticks > 0);
+    std::printf("contention oracle: replay_ticks=%zu crate_z=%.4f max_rev=%u "
+                "mirror_differed=%zu no_rebuild_differed=%zu\n",
+                total_replay_ticks_checked,
+                static_cast<double>(final_crate->position.z),
+                max_context_revision,
+                mirror_differed_ticks,
+                rebuild_differed_ticks);
 }
 
 TEST_CASE("a malformed final context record refuses the entire checkpoint before any mutation") {
