@@ -313,19 +313,14 @@ def build_scene(meshes: dict[str, int], materials: dict[str, int]) -> str:
     )
 
     # 3. Rio (canal): water stub plane at y = -0.6 covering z -6..0, x -16..16, plus quay canal face along z = 0.
-    # Editor host registers a 10x10 m built-in plane at MeshRef slot 1; MaterialRef serializes only a runtime
-    # MaterialTable index (`material 0`), not inline PBR colour/roughness/metallic fields.
+    # A `MaterialRef` is only an index into the host's runtime material table (slot 0 is white), so the
+    # water's colour and roughness come from a cooked glTF instead: `canal_water.gltf` (make_water.py), a
+    # 1 x 1 m quad whose material carries only factors. Scaled here to the 32 x 6 m rio.
     sb.add_comment(
         "STUB: Rio canal water plane (x -16..16, z -6..0, y = -0.6). There is no water simulation;\n"
-        "uses built-in plane MeshRef (slot 1 in editor-host, 10x10 m) and MaterialRef (slot 0)."
+        "a dark, smooth (roughness 0.05) factor-only material from samples/venice/canal_water.gltf."
     )
-    sb.add_entity(
-        [
-            sb.transform_block(0.0, -0.6, -3.0, (0.0, 0.0, 0.0, 1.0), (3.2, 1.0, 0.6)),
-            f"{TYPE_MESH_REF} {{\n  mesh 1\n}}",
-            f"{TYPE_MATERIAL_REF} {{\n  material 0\n}}",
-        ]
-    )
+    sb.add_mesh_asset(req_mesh("canal_water"), tx=0.0, ty=-0.6, tz=-3.0, scale=(32.0, 1.0, 6.0))
 
     rot_neg_z = quat_from_yaw_deg(180.0)
     sb.add_comment("Quay canal face: 8 intonaco wall slabs along z = 0 facing -z, 0.75 m tall, top at y = 0.")

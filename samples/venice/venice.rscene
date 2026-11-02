@@ -93,20 +93,17 @@ entity 4 {
 }
 
 # STUB: Rio canal water plane (x -16..16, z -6..0, y = -0.6). There is no water simulation;
-# uses built-in plane MeshRef (slot 1 in editor-host, 10x10 m) and MaterialRef (slot 0).
+# a dark, smooth (roughness 0.05) factor-only material from samples/venice/canal_water.gltf.
 entity 5 {
   rime::ecs::LocalTransform 0xe7d60f5a66770fe9 {
     value {
       translation { x 0 y -0.6 z -3 }
       rotation { x 0 y 0 z 0 w 1 }
-      scale { x 3.2 y 1 z 0.6 }
+      scale { x 32 y 1 z 6 }
     }
   }
-  rime::render::MeshRef 0xa2a14d16cfd75985 {
-    mesh 1
-  }
-  rime::render::MaterialRef 0xc6b4f8ca9fd52bed {
-    material 0
+  rime::render::MeshAsset 0x892fe7631c8aa199 {
+    asset 12156446221125314949
   }
 }
 

@@ -197,7 +197,26 @@ def main() -> None:
 
     rime_cli = find_rime_cli(repo_root)
     args.out.mkdir(parents=True, exist_ok=True)
-    cmd = [str(rime_cli), "cook", str(args.src), "--out", str(args.out), "--bc"]
+
+    # One cook invocation over ONE staging directory: the 14 private GLBs (symlinked, never
+    # copied) plus the committed, code-generated canal water glTF. It has to be a single
+    # invocation because the cook cache reflects the input set of the call that wrote it -- a
+    # second `rime cook` into the same --out would drop the first call's sources from the
+    # manifest.
+    stage = args.out.parent / (args.out.name + "-src")
+    if stage.exists():
+        shutil.rmtree(stage)
+    stage.mkdir(parents=True)
+    for filename in sorted(PINNED_GLB_SHA256):
+        (stage / filename).symlink_to((args.src / filename).resolve())
+    water = repo_root / "samples" / "venice" / "canal_water.gltf"
+    if not water.is_file():
+        raise SourceVerificationError(
+            f"{water} is missing; regenerate it with python3 samples/venice/make_water.py"
+        )
+    (stage / water.name).symlink_to(water)
+
+    cmd = [str(rime_cli), "cook", str(stage), "--out", str(args.out), "--bc"]
     print(f"--> Running cook:\n    {' '.join(cmd)}")
     proc = subprocess.run(cmd, check=False)
     if proc.returncode != 0:
