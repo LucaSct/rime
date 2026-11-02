@@ -2292,9 +2292,10 @@ app::ActionState stand_tape(std::uint64_t) {
 //                            leaves the crate at z ~ -5.3, 5.5 m from the observer (< 6.117 m
 //                            leave radius, so nobody leaves the group mid-proof)
 //   77-136  walk +z          the REVERSAL: R + 1 .. R + 60. The remote retreats 4 m; the observer's
-//                            proxy, seeded with the last executed command, keeps pushing -z until
-//                            the next checkpoint says otherwise -- that is the correction under
-//                            test
+//                            proxy, seeded with the last executed command, keeps walking -z until
+//                            the next checkpoint says otherwise. Measured: by R the pushed crate
+//                            has slid clear of the capsule, so that guess error lands on the PROXY
+//                            only and the crate's reversal-window correction is 0 in every leg
 //  137-    stand
 app::ActionState reversal_tape(std::uint64_t tick) {
     app::ActionState actions{};

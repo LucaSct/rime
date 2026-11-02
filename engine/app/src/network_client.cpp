@@ -498,7 +498,8 @@ RunReport run_network_client(const LaunchOptions& options,
                                                  tracked->shown,
                                                  pose.simulated.translation);
             }
-        if (const auto axis = interaction_hooks->remote_axis_y()) {
+        if (const auto axis = interaction_hooks->remote_axis_y ? interaction_hooks->remote_axis_y()
+                                                               : std::optional<float>{}) {
             // -1 is walking toward the crate in the proof's tape. The first +ve axis after having
             // pushed is the reversal; later checkpoints do not move it.
             if (*axis < -0.5f)

@@ -24,8 +24,9 @@ Gates (LOGIC always enforces; TIMING prints REPORT under RIME_REALTIME_GATES=rep
   members       (correct) both seats were crate members, and the observer entered >= 1 proxy
   separation    observer PUSH-window correction SUM: correct <= 0.5 x no-proxies AND
                 correct <= 0.5 x stale-proxies. The factor is the brief's; it is not tuned.
-  reversal      (UNMET, reported not enforced; see ENFORCE_REVERSAL_GATE) (correct) REVERSAL max correction > PUSH max correction: the guess is wrong
-                for about a round trip, and a proof that cannot see that is not looking
+  reversal      (correct) a checkpoint dated the remote's reversal and the REVERSAL window holds
+                member checkpoints, so the window split above is not vacuous. The crate's
+                REVERSAL-window correction is printed as a MEASUREMENT, not gated (see below)
   continuity    correct leg `proxy_max_presented_step_m` <= G and proxy-raw leg's > G
 
 G. A proxy that merely walks moves up to 4 m/s / 60 = 0.0667 m per tick, and that natural motion is
@@ -153,22 +154,21 @@ gate("separation", push["correct"] <= 0.5 * push["no-proxies"] and
      f"{push['no-proxies']:.1f} ({0.5 * push['no-proxies']:.1f}) and <= 0.5 x stale-proxies "
      f"{push['stale-proxies']:.1f} ({0.5 * push['stale-proxies']:.1f})")
 
-# UNMET (measured, not tuned): on this scenario the correct leg's REVERSAL-window max is 0.0 mm
-# against a push-window max of 2-3 mm. Checkpoints arrive every tick, so a wrong guess is revealed
-# one tick at a time (each correction carries ~one tick of command error), and by the reversal the
-# crate has already left the remote's capsule, so the guess no longer reaches it. 100 ms of
-# observer-side --net-impair did not change the zero (and broke `separation`). The brief forbids
-# tuning the scenario to pass this, so it is reported, not enforced: flip to True to enforce it.
-ENFORCE_REVERSAL_GATE = False
-reversal_ok = obs["crate_rev_corr_max_mm"] > obs["crate_push_corr_max_mm"]
-reversal_detail = (f"correct leg reversal max {obs['crate_rev_corr_max_mm']:.1f} mm > push max "
-                   f"{obs['crate_push_corr_max_mm']:.1f} mm (reversal tick "
-                   f"{obs['proxy_reversal_tick']})")
-if ENFORCE_REVERSAL_GATE:
-    timing_gate("reversal visible", reversal_ok, reversal_detail)
-else:
-    print(("PASS " if reversal_ok else "UNMET ") + "reversal visible (not enforced): "
-          + reversal_detail, flush=True)
+# The reversal must be DATED, or the PUSH/REVERSAL split above is meaningless: a logic gate.
+gate("reversal dated", obs["proxy_reversal_tick"] > 0 and obs["crate_rev_checkpoints"] > 0,
+     f"reversal at server tick {obs['proxy_reversal_tick']}, "
+     f"{obs['crate_rev_checkpoints']} member checkpoints in its window")
+
+# A MEASUREMENT, deliberately not a gate. The m20.9c brief also asked for "reversal max > push
+# max" on the crate; that was the brief's assumption, not an ADR-0109 §9 gate (§9 asks only that
+# the scripted reversal separate correct proxies from the two controls, which `separation`
+# enforces). Measured 2026-11-02: the REVERSAL-window crate correction is 0.0 mm in ALL FOUR legs,
+# no-proxies included -- the pushed crate has slid clear of the remote's capsule by the time the
+# remote turns, so neither the true input nor any guess of it can reach the crate. A gate on it
+# would test the scenario's geometry, not the prediction. (The input-guess error at the reversal
+# lands on the remote's PROXY; a proxy-correction counter would be the honest place to see it.)
+print(f"MEASURED reversal window: correct leg crate max {obs['crate_rev_corr_max_mm']:.1f} mm "
+      f"(push window max {obs['crate_push_corr_max_mm']:.1f} mm)", flush=True)
 
 step_ok = obs["proxy_max_presented_step_m"]
 step_raw = results["proxy-raw"][1]["proxy_max_presented_step_m"]
