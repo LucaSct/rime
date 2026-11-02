@@ -26,10 +26,11 @@ extra buffering. Every leg runs a real hitch (`play --debug-hitch 240:200`, 200 
   absorbed       (adaptive legs) `stalls >= 1` and the server's `max_margin >= hitch_ticks - 2`: the
                  hitch really reached the server as a gap in time and the buffer really grew by
                  about the hitch, so "no loss" is not a hitch that never happened.
-  drained        (adaptive legs) the client's pacer drained: `pacer_drains >= 1`,
-                 `pacer_drained_buffer_ticks >= hitch_ticks - 3 - jitter_ticks`, and the server's
-                 `final_margin <= drain_above + 2`. Catches a buffer that only grows (permanent input
-                 delay). `jitter_ticks` (0 loopback, ceil(20 ms / 16.7 ms) = 2 impaired): the pacer
+  drained        (adaptive legs) the client's pacer drained: `pacer_drains >= 1` and
+                 `pacer_drained_buffer_ticks >= hitch_ticks - 3 - jitter_ticks`. Catches a buffer
+                 that only grows (permanent input delay).
+  settled        (adaptive legs, TIMING) the server's `final_margin <= drain_above + 2`. Printed as
+                 REPORT, not enforced, when RIME_REALTIME_GATES=report (CI's hosted VMs). `jitter_ticks` (0 loopback, ceil(20 ms / 16.7 ms) = 2 impaired): the pacer
                  drains to the window's MINIMUM margin, and arrival jitter puts that minimum up to
                  jitter_ticks below the steady margin -- headroom the pacer keeps on purpose.
   control        (fixed leg, MUST fail the lossless claim) the same hitch with `--input-buffer fixed`
@@ -47,6 +48,7 @@ throw_prediction.py): ONE_WAY = ceil(108 * 60 / 1000) = 7 ticks, ROUND_TRIP = 14
 
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -176,6 +178,22 @@ def gate(name, ok, detail):
         sys.exit(1)
 
 
+# Owner decision 2026-11-02: a gate that measures WALL-CLOCK settling is enforced only on a runner
+# whose timing we trust. GitHub's hosted macOS/Windows VMs are shared and bursty, and on them the
+# server's end-of-run margin settled at 4-9 ticks against a bound of 3 while every logic gate
+# (accounting, absorption, the pacer's own drain) passed in the same run. `RIME_REALTIME_GATES=report`
+# (set by CI on hosted jobs only) prints the measurement as REPORT instead of failing, so the
+# number stays visible; the self-hosted runner and local runs leave it unset and enforce it.
+REPORT_ONLY_TIMING = os.environ.get("RIME_REALTIME_GATES") == "report"
+
+
+def timing_gate(name, ok, detail):
+    if REPORT_ONLY_TIMING and not ok:
+        print("REPORT " + name + " (not enforced on this runner): " + detail, flush=True)
+        return
+    gate(name, ok, detail)
+
+
 def digest_gate(label, s, c):
     gate(f"{label} digest", s["digest"] == c["digest"] and int(c["digest"], 16) != 0,
          f"server {s['digest']} == client {c['digest']}, nonzero")
@@ -207,16 +225,18 @@ def adaptive_gates(label, s, c, impaired):
          f"stalls {s['stalls']} >= 1, max_margin {s['max_margin']} >= hitch_ticks "
          f"{HITCH_TICKS} - 2 = {HITCH_TICKS - 2}")
     drain_floor = HITCH_TICKS - 3 - JITTER_TICKS[impaired]
+    # Two halves on purpose. "drained" is LOGIC: the pacer saw the grown buffer and dilated it
+    # back down by about the hitch. "settled" is TIMING: where the server's margin happened to
+    # sit when the session ended, which a descheduled VM moves -- hence timing_gate.
     gate(f"{label} drained",
-         c["pacer_drains"] >= 1 and c["pacer_drained_buffer_ticks"] >= drain_floor and
-         s["final_margin"] <= DRAIN_ABOVE + 2,
+         c["pacer_drains"] >= 1 and c["pacer_drained_buffer_ticks"] >= drain_floor,
          f"pacer_drains {c['pacer_drains']} >= 1, drained_buffer_ticks "
          f"{c['pacer_drained_buffer_ticks']} >= {HITCH_TICKS} - 3 - jitter "
-         f"{JITTER_TICKS[impaired]} = {drain_floor}, "
-         f"dilated_ticks {c['pacer_dilated_ticks']}, server final_margin {s['final_margin']} <= "
-         f"drain_above {DRAIN_ABOVE} + 2 = {DRAIN_ABOVE + 2} (windows {c['pacer_windows']}, "
-         f"with stall {c['pacer_windows_with_stall']}, client last_margin {c['last_margin']})")
-
+         f"{JITTER_TICKS[impaired]} = {drain_floor}, dilated_ticks {c['pacer_dilated_ticks']} "
+         f"(windows {c['pacer_windows']}, with stall {c['pacer_windows_with_stall']})")
+    timing_gate(f"{label} settled", s["final_margin"] <= DRAIN_ABOVE + 2,
+                f"server final_margin {s['final_margin']} <= drain_above {DRAIN_ABOVE} + 2 = "
+                f"{DRAIN_ABOVE + 2} (client last_margin {c['last_margin']})")
 
 start = time.monotonic()
 print(f"one-way {ONE_WAY} ticks ({DELAY_MS} ms), round trip {ROUND_TRIP}; hitch {HITCH_MS} ms at "
