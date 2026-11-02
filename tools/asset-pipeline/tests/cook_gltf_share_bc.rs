@@ -33,7 +33,9 @@ fn temp_dir(name: &str) -> PathBuf {
 /// muddy what the test counts. `image` swaps in a different PNG for image 0 when given.
 fn write_gltf_copy(dir: &Path, stem: &str, image0: Option<&str>) {
     let text = std::fs::read_to_string(fixtures().join("material_quad.gltf")).unwrap();
-    let abs = |png: &str| fixtures().join(png).to_string_lossy().into_owned();
+    // Forward slashes: a glTF URI is a JSON string, and a Windows path's backslashes are JSON
+    // escapes ("invalid escape" on windows-latest). glTF URIs use `/`, which Windows accepts too.
+    let abs = |png: &str| fixtures().join(png).to_string_lossy().replace('\\', "/");
     let text = text
         .replace(
             "\"uri\": \"checker.png\"",
