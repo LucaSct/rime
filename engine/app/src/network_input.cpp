@@ -287,14 +287,16 @@ struct NetworkInputServer::Impl {
         ecs::Entity owner{};
         NetId owner_net_id{};
         PredictionHooks hooks;
+        InputCommand executed_command{};
+        std::vector<std::pair<PlayerSlot, PredictedEntityId>> context_identities;
+        std::uint32_t context_revision = 0;
         // ── Per INDEX: survives occupants ─────────────────────────────────────────────────────
         // Monotonic per index, deliberately: a newcomer's client starts a fresh ledger and does
         // not care, and m20.7's one seat never reset its epoch across reconnects, so keeping it
         // is what keeps a one-seat reconnect's checkpoint bytes unchanged.
         std::uint32_t membership_epoch = 0;
-        // The interaction membership leaf for THIS seat's player (membership is "is this player
-        // near the object"). One-seat: built once and kept, as m20.6b did. Multi-seat: never
-        // built (m20.8b2, bind_owner) -- the object is mirrored until contention has a rule.
+        // The interaction membership leaf for THIS occupant's player. A multi-seat release
+        // resets it so a reused seat cannot inherit the departed player's contact history.
         std::optional<InteractionMembershipPolicy> policy;
         RunReport::NetworkInputCounters::SeatCounters counts{};
     };
@@ -628,6 +630,9 @@ struct NetworkInputServer::Impl {
         seat.owner = {};
         seat.owner_net_id = {};
         seat.hooks = {};
+        seat.executed_command = {};
+        seat.context_identities.clear();
+        seat.context_revision = 0;
         if (seat.policy) {
             // Keep the departed occupant's policy counts in the run's totals.
             const auto& c = seat.policy->counters();
@@ -813,6 +818,7 @@ struct NetworkInputServer::Impl {
     // m20.7 (ADR-0107): `dedicated --input-buffer adaptive`. Config, per schedule.
     bool adaptive_input = false;
     bool multi_seat = false;
+    bool contention_supported = true;
     std::optional<std::uint32_t> fault_sequence;
     // `duplicate` holds the client's ack for its window, so the verdict rides every checkpoint in
     // it -- a repeated confirmation the client must recognise -- and applies it afterwards.
@@ -898,6 +904,9 @@ struct NetworkInputServer::Impl {
         PlayerInput input{};
         input.slot = seat.slot;
         const ScheduledInput selected = seat.schedule->step();
+        // EXECUTED-COMMAND CAPTURE: schedule::step chooses the stand-in too. A packet cache
+        // would give remote predictors an input this authoritative tick never executed.
+        seat.executed_command = selected.command;
         applied = selected.applied;
         // `kick@cmd:N` (one-seat diagnostic): the sequence THIS step retired. The step's own
         // command carries sequence 0 when a retirement was synthesized with a neutral stand-in,
@@ -975,12 +984,8 @@ struct NetworkInputServer::Impl {
         seat.owner = owner;
         seat.owner_net_id = net_id;
         seat.hooks = std::move(hooks);
-        // m20.8b2: NO interaction policy on a multi-seat server. Membership is "is this player
-        // near the object", and two seats near one crate would be two clients each predicting
-        // it and each corrected by the other's pushes -- contention, which ADR-0106's one-owner
-        // group has no rule for (a later brick's). Until then the object is MIRRORED for every
-        // seat: no seat's roster ever names it, so each client draws the server's crate, and the
-        // client's decorated hooks simply never see it join.
+        if (interaction && interaction->capture_context)
+            seat.policy.emplace(interaction->params);
         return true;
     }
 
@@ -1061,6 +1066,23 @@ struct NetworkInputServer::Impl {
     void update_interaction(std::uint64_t server_tick) {
         if (!interaction || (interaction_tick && *interaction_tick == server_tick))
             return;
+        const auto seated = std::count_if(
+            seats.begin(), seats.end(), [](const Seat& seat) { return seat.admitted; });
+        const bool supported = !multi_seat || seated <= 4;
+        if (supported != contention_supported) {
+            contention_supported = supported;
+            for (Seat& seat : seats) {
+                if (!seat.admitted)
+                    continue;
+                ++seat.membership_epoch;
+                ++totals.interaction_epoch_advances;
+            }
+        }
+        if (!supported) {
+            ++totals.interaction_contention_unsupported;
+            interaction_tick = server_tick;
+            return;
+        }
         bool any = false;
         for (Seat& seat : seats) {
             if (!seat.policy)
@@ -1198,10 +1220,34 @@ struct NetworkInputServer::Impl {
             return;
         }
         checkpoint.entities.push_back(PredictedEntityState{id, std::move(state)});
-        if (seat.policy && seat.policy->member()) {
+        const auto seated = std::count_if(
+            seats.begin(), seats.end(), [](const Seat& candidate) { return candidate.admitted; });
+        if (seat.policy && seat.policy->member() && (!multi_seat || seated <= 4)) {
             // The member's FULL state, velocity included: the client seeds its prediction physics
             // from these bytes on the join tick and on every correction, never from the mirror.
-            auto object_state = interaction->capture(world, object);
+            std::vector<GameDefinition::RemotePlayProfile::InteractionProfile::ExecutedSeat>
+                executed;
+            if (multi_seat) {
+                std::vector<std::pair<PlayerSlot, PredictedEntityId>> identities;
+                for (const Seat& other : seats) {
+                    if (!other.admitted || &other == &seat)
+                        continue;
+                    const PredictedEntityId other_id{other.owner_net_id.index,
+                                                     other.owner_net_id.generation};
+                    identities.emplace_back(other.slot, other_id);
+                    executed.push_back({other.slot, other.owner, other_id, other.executed_command});
+                }
+                // Context changes are private to the crate payload. Its roster epoch moves
+                // only when a predicted entity joins or leaves.
+                if (identities != seat.context_identities) {
+                    seat.context_identities = std::move(identities);
+                    ++seat.context_revision;
+                }
+            }
+            auto object_state = multi_seat
+                                    ? interaction->capture_context(
+                                          world, object, seat.slot, seat.context_revision, executed)
+                                    : interaction->capture(world, object);
             if (object_state.empty()) {
                 ++totals.interaction_capture_refused;
                 ++totals.checkpoint_capture_refused;
@@ -1210,13 +1256,13 @@ struct NetworkInputServer::Impl {
             checkpoint.entities.push_back(PredictedEntityState{object_id, std::move(object_state)});
         }
         SpawnCheckpointExtension extension{};
+        bool hide_spawn = false;
         if (spawn_profile) {
             // A delayed answer is redacted as a coherent older roster. Publishing the new entity
             // without its binding would make two visible identities for one key on the client.
-            const bool hide_spawn =
-                fault_launch_tick &&
-                (fault == SpawnFault::LateAlive || fault == SpawnFault::LateEnded) &&
-                server_tick < *fault_launch_tick + fault_ticks;
+            hide_spawn = fault_launch_tick &&
+                         (fault == SpawnFault::LateAlive || fault == SpawnFault::LateEnded) &&
+                         server_tick < *fault_launch_tick + fault_ticks;
             if (hide_spawn) {
                 // The redacted roster still carries the interaction object's CURRENT membership,
                 // so its epoch moves on by every interaction change since the fault began. Known
@@ -1244,20 +1290,30 @@ struct NetworkInputServer::Impl {
                 checkpoint.entities.push_back({live.id, spawned_state});
                 extension.bindings.push_back({live.key, live.id});
             }
-            if (!hide_spawn) {
-                const auto count =
-                    std::min(seat.pending_outcomes.size(), kSpawnExtensionMaxOutcomes);
-                extension.outcomes.assign(seat.pending_outcomes.begin(),
-                                          seat.pending_outcomes.begin() +
-                                              static_cast<std::ptrdiff_t>(count));
-                totals.spawn_outcomes_deferred += seat.pending_outcomes.size() - count;
-            }
         }
         checkpoint.group_state = seat.hooks.capture_group();
         std::array<std::byte, kCheckpointMaxMessageBytes> checkpoint_bytes{};
         std::size_t encoded_size = 0;
         if (spawn_profile) {
-            const auto encoded = encode_spawn_checkpoint(checkpoint, extension, checkpoint_bytes);
+            // BUDGET COMPLETE PARTS FIRST: owner, crate, spawns and bindings are atomic.
+            // Add durable verdicts oldest-first only while the whole message still fits.
+            auto encoded = encode_spawn_checkpoint(checkpoint, extension, checkpoint_bytes);
+            if (encoded && !hide_spawn) {
+                for (const auto& outcome : seat.pending_outcomes) {
+                    if (extension.outcomes.size() == kSpawnExtensionMaxOutcomes)
+                        break;
+                    extension.outcomes.push_back(outcome);
+                    const auto candidate =
+                        encode_spawn_checkpoint(checkpoint, extension, checkpoint_bytes);
+                    if (!candidate) {
+                        extension.outcomes.pop_back();
+                        break;
+                    }
+                    encoded = candidate;
+                }
+                totals.spawn_outcomes_deferred +=
+                    seat.pending_outcomes.size() - extension.outcomes.size();
+            }
             if (!encoded)
                 ++totals.spawn_extension_refused;
             else

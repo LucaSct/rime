@@ -31,6 +31,7 @@
 #include "rime/ecs/world.hpp"
 #include "rime/net/link.hpp"
 #include "rime/net/net_driver.hpp"
+#include "rime/replication/contention_context.hpp"
 #include "rime/replication/input_v2.hpp"
 #include "rime/replication/prediction.hpp"
 
@@ -175,6 +176,64 @@ app::GameDefinition::RemotePlayProfile remote_profile() {
     return profile;
 }
 
+// A minimal interaction object lets the production seat pump expose its executed-command
+// capture independently of hello-game's physics. The codec makes the observation a real
+// checkpoint payload, including synthesized commands chosen by InputSchedule::step.
+ecs::Entity contention_object(ecs::World& world) {
+    ecs::Entity object{};
+    world.query<ecs::WorldTransform>().for_each(
+        [&](ecs::Entity entity, const ecs::WorldTransform&) {
+            if (!world.get<SeatPawn>(entity))
+                object = entity;
+        });
+    return object;
+}
+
+replication::InteractionSample contention_sample(const ecs::World&, ecs::Entity, ecs::Entity) {
+    return {.distance = 0.0f, .speed = 0.0f, .touching = true};
+}
+
+std::vector<std::byte> contention_capture(
+    const ecs::World& world,
+    ecs::Entity,
+    app::PlayerSlot owner,
+    std::uint32_t revision,
+    std::span<const app::GameDefinition::RemotePlayProfile::InteractionProfile::ExecutedSeat>
+        executed) {
+    replication::ContentionContext context{};
+    context.owner_seat = owner.index;
+    context.owner_generation = owner.generation;
+    context.context_revision = revision;
+    context.crate[26] = std::byte{0x80}; // quaternion w = 1.0f, little-endian
+    context.crate[27] = std::byte{0x3f};
+    for (const auto& seat : executed) {
+        const auto* pawn = world.get<SeatPawn>(seat.entity);
+        if (!pawn)
+            return {};
+        replication::ContentionProxy proxy{};
+        proxy.seat = seat.slot.index;
+        proxy.seat_generation = seat.slot.generation;
+        proxy.net_id = seat.net_id;
+        proxy.position = {pawn->x, 0.0f, 0.0f};
+        proxy.axes = {seat.command.move_x, seat.command.move_y};
+        proxy.held = seat.command.held;
+        context.proxies.push_back(proxy);
+    }
+    std::array<std::byte, replication::kContentionMaxBytes> bytes{};
+    std::size_t written = 0;
+    if (replication::encode_contention_context(context, bytes, written) !=
+        replication::ContentionRefusal::None)
+        return {};
+    return {bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(written)};
+}
+
+std::vector<std::byte> contention_capture_v1(const ecs::World&, ecs::Entity) {
+    std::vector<std::byte> bytes(replication::kContentionCrateBytes);
+    bytes[26] = std::byte{0x80};
+    bytes[27] = std::byte{0x3f};
+    return bytes;
+}
+
 // One scripted client: its own driver on its own endpoint of the shared network.
 struct Client {
     net::Endpoint endpoint{};
@@ -274,9 +333,26 @@ struct Harness {
     std::uint64_t tick = 0;
     app::SeatConfig seats;
 
-    explicit Harness(app::SeatConfig config, bool adaptive = false, bool start_now = true)
+    explicit Harness(app::SeatConfig config,
+                     bool adaptive = false,
+                     bool start_now = true,
+                     bool contention = false)
         : seats(config) {
+        if (contention) {
+            profile.spawn_prediction =
+                app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile{};
+            profile.spawn_prediction->capture_spawned = [](const ecs::World&, ecs::Entity) {
+                return std::vector<std::byte>{};
+            };
+            profile.interaction = app::GameDefinition::RemotePlayProfile::InteractionProfile{};
+            profile.interaction->object = contention_object;
+            profile.interaction->sample = contention_sample;
+            profile.interaction->capture = contention_capture_v1;
+            profile.interaction->capture_context = contention_capture;
+        }
         profile.register_replicated(world);
+        if (contention)
+            (void)world.spawn_with(ecs::WorldTransform{});
         if (start_now)
             start(adaptive);
     }
@@ -386,6 +462,53 @@ TEST_CASE("seats: two sessions are seated 0 and 1, and the hello reply names eac
     REQUIRE(h.seen.ticks.back().size() == 2);
     CHECK(h.seen.ticks.back()[0].slot == app::PlayerSlot{0, 0});
     CHECK(h.seen.ticks.back()[1].slot == app::PlayerSlot{1, 0});
+}
+
+TEST_CASE("contention: proxy checkpoint uses the executed stand-in and five seats mirror") {
+    Harness h({.max_players = 5, .max_clients = 5}, false, true, true);
+    Client& a = h.join_seat(7911);
+    Client& b = h.join_seat(7912);
+    for (int i = 0; i < 8; ++i) {
+        REQUIRE(a.send_axis(0.2f, h.now));
+        REQUIRE(b.send_axis(0.75f, h.now));
+        h.step();
+    }
+    // Seat 1 sends no packet: its schedule executes its prior held axes as a synthesized
+    // stand-in. The other seat's next checkpoint must carry THAT command.
+    REQUIRE(a.send_axis(0.2f, h.now));
+    h.step();
+    const auto stand_in = h.last_input({1, 0});
+    REQUIRE(stand_in.has_value());
+    REQUIRE(stand_in->command.has_value());
+    CHECK_FALSE(stand_in->command->applied);
+    CHECK(stand_in->actions.axis(0) == 0.75f);
+    h.step(); // deliver the checkpoint emitted by the preceding server step
+    INFO("encoded=" << h.server->counters().checkpoint_encoded
+                    << " capture_refused=" << h.server->counters().interaction_capture_refused
+                    << " encode_refused=" << h.server->counters().checkpoint_encode_refused
+                    << " extension_refused=" << h.server->counters().spawn_extension_refused);
+    REQUIRE_FALSE(a.spawn_checkpoints.empty());
+    const auto& cp = a.spawn_checkpoints.back().base;
+    REQUIRE(cp.entities.size() == 2);
+    replication::ContentionContext decoded{};
+    REQUIRE(replication::decode_contention_context(cp.entities[1].state, decoded) ==
+            replication::ContentionRefusal::None);
+    REQUIRE(decoded.proxies.size() == 1);
+    CHECK(decoded.proxies[0].seat == 1);
+    CHECK(decoded.proxies[0].axes[0] == 0.75f);
+    CHECK(decoded.proxies[0].held == 0);
+
+    (void)h.join_seat(7913);
+    (void)h.join_seat(7914);
+    for (int i = 0; i < 70; ++i)
+        h.step(); // SeatTable's four-joins-per-second window is part of admission.
+    Client& fifth = h.join_seat(7915);
+    REQUIRE(fifth.reply->refusal == replication::InputHelloRefusal::None);
+    h.step();
+    CHECK(h.server->counters().interaction_contention_unsupported > 0);
+    h.step();
+    REQUIRE_FALSE(a.spawn_checkpoints.empty());
+    CHECK(a.spawn_checkpoints.back().base.entities.size() == 1);
 }
 
 TEST_CASE("seats: each seat's commands reach only its own PlayerInput, result and checkpoint") {

@@ -1086,6 +1086,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                                 "\"interaction_leave_deferred_touching\":{},"
                                 "\"interaction_epoch_advances\":{},\"interaction_member_ticks\":{},"
                                 "\"interaction_capture_refused\":{},"
+                                "\"interaction_contention_unsupported\":{},"
                                 "\"interaction_leave_deferred_quiet\":{},"
                                 "\"interaction_joined_sliding\":{},\"interaction_kicks\":{},"
                                 "\"interaction_kicks_by_command\":{},\"interaction_kick1_tick\":{},"
@@ -1101,6 +1102,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                                 report.network_input.interaction_epoch_advances,
                                 report.network_input.interaction_member_ticks,
                                 report.network_input.interaction_capture_refused,
+                                report.network_input.interaction_contention_unsupported,
                                 report.network_input.interaction_leave_deferred_quiet,
                                 report.network_input.interaction_joined_sliding,
                                 report.network_input.interaction_kicks,

@@ -409,6 +409,116 @@ TEST_CASE("interaction accepts a valid v2 crate context and restores its v1 body
     CHECK(rig.reconciler->checkpoints_refused_invalid() == 0);
 }
 
+TEST_CASE("contention: fresh predictor matches every replay tick through stand-in and seat reuse") {
+    Server server;
+    const auto def = hello_game::definition_with_interaction();
+    InteractionProfile::ClientOptions options{};
+    options.owner = {0, 1};
+    options.owner_known = true;
+    Client live(def, options);
+    auto live_hooks = live.hooks.hooks.prediction;
+    std::vector<std::vector<std::byte>> replay_states;
+    const auto live_simulate = live_hooks.simulate;
+    live_hooks.simulate = [&](std::span<const replication::PredictedEntityId> members,
+                              const replication::InputCommand& command,
+                              const replication::PredictionStep& step) {
+        live_simulate(members, command, step);
+        if (step.replaying)
+            replay_states.push_back(live.hooks.context_snapshot());
+    };
+    replication::Reconciler reconciler(live_hooks, kDt);
+    reconciler.set_membership(1, {kPlayerId, kCrateId});
+
+    const auto checkpoint = [&](std::uint32_t tick) {
+        replication::ContentionContext context{};
+        context.owner_seat = 0;
+        context.owner_generation = 1;
+        context.context_revision = tick < 30 ? 1 : 2;
+        const auto crate = server.crate_bytes();
+        std::copy(crate.begin(), crate.end(), context.crate.begin());
+        replication::ContentionProxy proxy{};
+        proxy.seat = 1;
+        proxy.seat_generation = tick < 30 ? 1 : 2;
+        proxy.net_id = {3, static_cast<std::uint32_t>(proxy.seat_generation)};
+        proxy.position = {0.0f,
+                          hello_game::HelloGame::kPlayerRadius +
+                              hello_game::HelloGame::kPlayerHalfHeight,
+                          tick < 30 ? -2.0f : -1.8f};
+        proxy.axes = {0.0f, tick == 20 ? 0.0f : (tick < 30 ? 1.0f : -1.0f)};
+        context.proxies.push_back(proxy);
+        std::array<std::byte, replication::kContentionMaxBytes> buffer{};
+        std::size_t written = 0;
+        REQUIRE(replication::encode_contention_context(context, buffer, written) ==
+                replication::ContentionRefusal::None);
+        replication::OwnerCheckpoint cp{};
+        cp.server_tick = tick;
+        cp.membership_epoch = 1;
+        cp.result.server_tick = tick;
+        cp.result.any_retired = tick > 3;
+        cp.result.retired_through = tick > 3 ? tick - 3 : 0;
+        cp.entities.push_back({kPlayerId, server.hooks.capture(kPlayerId)});
+        cp.entities.push_back(
+            {kCrateId, {buffer.begin(), buffer.begin() + static_cast<std::ptrdiff_t>(written)}});
+        cp.group_state = server.hooks.capture_group();
+        return cp;
+    };
+    REQUIRE(reconciler.apply_checkpoint(checkpoint(0)).applied);
+    auto no_rebuild_options = options;
+    no_rebuild_options.rebuild_on_restore = false;
+    Client no_rebuild(def, no_rebuild_options);
+    replication::Reconciler no_rebuild_predictor(no_rebuild.hooks.hooks.prediction, kDt);
+    no_rebuild_predictor.set_membership(1, {kPlayerId, kCrateId});
+    REQUIRE(no_rebuild_predictor.apply_checkpoint(checkpoint(0)).applied);
+    std::vector<replication::InputCommand> commands;
+    bool mirror_control_failed = false;
+    bool rebuild_control_failed = false;
+    for (std::uint32_t tick = 1; tick <= 45; ++tick) {
+        const auto command = walk(tick, -1.0f);
+        commands.push_back(command);
+        reconciler.predict(command);
+        no_rebuild_predictor.predict(command);
+        server.step(command);
+        if (tick % 5 != 0)
+            continue;
+        const auto cp = checkpoint(tick);
+        replay_states.clear();
+        const auto result = reconciler.apply_checkpoint(cp);
+        REQUIRE(result.applied);
+        REQUIRE(no_rebuild_predictor.apply_checkpoint(cp).applied);
+        rebuild_control_failed |=
+            no_rebuild.hooks.context_snapshot() != live.hooks.context_snapshot();
+        REQUIRE(result.replayed == 3);
+        Client fresh(def, options);
+        replication::Reconciler oracle(fresh.hooks.hooks.prediction, kDt);
+        oracle.set_membership(1, {kPlayerId, kCrateId});
+        REQUIRE(oracle.apply_checkpoint(cp).applied);
+        for (std::size_t i = commands.size() - 3, replay_tick = 0; i < commands.size(); ++i) {
+            oracle.predict(commands[i]);
+            CHECK(replay_states[replay_tick++] == fresh.hooks.context_snapshot());
+        }
+        // A proxy initialized from an older mirror pose must fail this byte oracle.
+        auto mirror_seed = cp;
+        replication::ContentionContext stale{};
+        REQUIRE(replication::decode_contention_context(mirror_seed.entities[1].state, stale) ==
+                replication::ContentionRefusal::None);
+        stale.proxies[0].position[2] -= 0.25f;
+        std::array<std::byte, replication::kContentionMaxBytes> buffer{};
+        std::size_t written = 0;
+        REQUIRE(replication::encode_contention_context(stale, buffer, written) ==
+                replication::ContentionRefusal::None);
+        mirror_seed.entities[1].state.assign(buffer.begin(),
+                                             buffer.begin() + static_cast<std::ptrdiff_t>(written));
+        Client stale_client(def, options);
+        replication::Reconciler stale_predictor(stale_client.hooks.hooks.prediction, kDt);
+        stale_predictor.set_membership(1, {kPlayerId, kCrateId});
+        REQUIRE(stale_predictor.apply_checkpoint(mirror_seed).applied);
+        stale_predictor.predict(commands[commands.size() - 3]);
+        mirror_control_failed |= stale_client.hooks.context_snapshot() != replay_states.front();
+    }
+    CHECK(mirror_control_failed);
+    CHECK(rebuild_control_failed);
+}
+
 TEST_CASE("a malformed final context record refuses the entire checkpoint before any mutation") {
     const auto corrupt_last_proxy = [](std::vector<std::byte>& crate_state) {
         REQUIRE(crate_state.size() == replication::kContentionCrateBytes);

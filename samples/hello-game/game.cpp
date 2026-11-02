@@ -249,8 +249,8 @@ struct CratePose {
     core::Quat rotation;
 };
 
-// The prediction world owns only this player's body. Its mirror supplies the latest known other
-// seats and crate; replay must use that same snapshot until a newer world update arrives.
+// Outside an interaction group, the mirror supplies the latest known other seats and crate.
+// A member instead uses checkpointed kinematic proxies in InteractionPhysics.
 struct PredictionMirror {
     ecs::World* world = nullptr;
     ecs::Entity own_player{};
@@ -260,6 +260,10 @@ struct PredictionCratePose {
     CratePose pose{};
     bool valid = false;
 };
+
+// The interaction decorator owns movement while its crate is a member. The spawn hook still
+// advances throws and cooldowns, but must not integrate the owner a second time.
+struct PredictionCoupledMove {};
 
 // Local x/z coordinates make the same circle-vs-oriented-square rule work as the crate yaws.
 // Return the outward normal and overlap depth, including a deterministic nearest-face choice
@@ -1430,8 +1434,9 @@ replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
                         crate = CratePose{shared.crate_position, shared.crate_rotation};
                     });
         }
-        integrate_player(
-            *state, intent_from(actions), static_cast<float>(step.fixed_dt), crate, others);
+        if (!bound->get<PredictionCoupledMove>(player))
+            integrate_player(
+                *state, intent_from(actions), static_cast<float>(step.fixed_dt), crate, others);
         if (state->throw_cooldown > 0)
             --state->throw_cooldown;
         const core::Vec3 wished{command.move_x, 0.0f, command.move_y};
@@ -1629,10 +1634,46 @@ std::vector<std::byte> capture_crate(const ecs::World& world, ecs::Entity object
     const auto* crate = world.get<CrateBody>(object);
     if (!crate)
         return {};
-    // m20.9a accepts a versioned context on restore, but capture keeps the v1 crate bytes until
-    // m20.9b supplies executed remote commands and can populate the proxy records truthfully.
     return encode_crate(physics::BodyState{
         crate->position, crate->orientation, crate->linear_velocity, crate->angular_velocity});
+}
+
+std::vector<std::byte>
+capture_crate_context(const ecs::World& world,
+                      ecs::Entity object,
+                      app::PlayerSlot owner,
+                      std::uint32_t context_revision,
+                      std::span<const InteractionProfile::ExecutedSeat> executed) {
+    const auto crate_bytes = capture_crate(world, object);
+    if (crate_bytes.empty())
+        return {};
+    replication::ContentionContext context{};
+    context.owner_seat = owner.index;
+    context.owner_generation = owner.generation;
+    context.context_revision = context_revision;
+    std::copy(crate_bytes.begin(), crate_bytes.end(), context.crate.begin());
+    for (const auto& seat : executed) {
+        const auto* player = world.get<PlayerState>(seat.entity);
+        if (!player)
+            return {};
+        replication::ContentionProxy proxy{};
+        proxy.seat = seat.slot.index;
+        proxy.seat_generation = seat.slot.generation;
+        proxy.net_id = seat.net_id;
+        proxy.position = {player->position.x, player->position.y, player->position.z};
+        proxy.velocity = {player->velocity.x, player->velocity.y, player->velocity.z};
+        // EXECUTED-COMMAND CAPTURE records the schedule's chosen stand-in, including neutral
+        // and stall ticks. Press edges are deliberately absent from replayed proxy input.
+        proxy.axes = {seat.command.move_x, seat.command.move_y};
+        proxy.held = seat.command.held;
+        context.proxies.push_back(proxy);
+    }
+    std::array<std::byte, replication::kContentionMaxBytes> bytes{};
+    std::size_t written = 0;
+    if (replication::encode_contention_context(context, bytes, written) !=
+        replication::ContentionRefusal::None)
+        return {};
+    return {bytes.begin(), bytes.begin() + static_cast<std::ptrdiff_t>(written)};
 }
 
 physics::BodyDesc body_desc(const physics::RigidBody& rb,
@@ -1660,9 +1701,10 @@ physics::BodyDesc body_desc(const physics::RigidBody& rb,
     return d;
 }
 
-// The client's PREDICTION PHYSICS WORLD (ADR-0106 §3): a separate, tiny PhysicsWorld -- floor,
-// kinematic player, crate; no sensors, so prediction can never collect a pickup -- because the
-// authoritative world can only be stepped whole. Three rules make a replay a pure function of
+// The client's PREDICTION PHYSICS WORLD (ADR-0106 §3, ADR-0109 §5): a separate PhysicsWorld --
+// floor, all kinematic players in seat order, crate; no sensors, so prediction cannot collect a
+// pickup -- because the authoritative world can only be stepped whole. Three rules make a replay
+// a pure function of
 // (checkpoint, commands):
 //
 //   1. REBUILT ON EVERY RESTORE. Restoring the crate makes a FRESH world and creates its bodies in
@@ -1684,6 +1726,8 @@ struct InteractionPhysics {
     ecs::World* world = nullptr;
     ecs::Entity player{}; // the predicted player, which also holds its PlayerState
     replication::PredictedEntityId object{};
+    app::PlayerSlot owner{};
+    bool owner_known = false;
     bool rebuild_on_restore = true;
     // The `stale-restore` control and the bytes it restores from.
     bool stale_restore = false;
@@ -1691,6 +1735,22 @@ struct InteractionPhysics {
     std::unique_ptr<physics::PhysicsWorld> physics;
     physics::BodyId player_body{};
     physics::BodyId crate_body{};
+
+    struct Mover {
+        std::uint16_t seat = 0;
+        std::uint16_t generation = 0;
+        replication::PredictedEntityId net_id{};
+        PlayerState state{};
+        replication::InputCommand repeated{};
+        physics::BodyId body{};
+        bool owner = false;
+    };
+
+    std::vector<Mover> movers;
+    std::vector<std::vector<core::Vec3>> proxy_trajectory;
+    std::uint32_t context_revision = 0;
+    std::uint32_t seed_age = 0;
+    bool coupled_context = false;
     bool touching = false;
 
     struct Prepared {
@@ -1698,6 +1758,9 @@ struct InteractionPhysics {
         physics::BodyId player_body{};
         physics::BodyId crate_body{};
         std::vector<std::byte> crate_bytes;
+        std::vector<Mover> movers;
+        std::uint32_t context_revision = 0;
+        bool coupled_context = false;
     };
 
     std::optional<Prepared> prepared;
@@ -1724,6 +1787,8 @@ struct InteractionPhysics {
             return true;
         std::array<std::byte, replication::kContentionCrateBytes> decoded_crate{};
         std::span<const std::byte> crate_bytes = raw;
+        std::vector<replication::ContentionProxy> proxies;
+        std::uint32_t revision = 0;
         if (raw.size() == replication::kContentionCrateBytes) {
             const auto reason = replication::validate_contention_crate(raw);
             if (reason != replication::ContentionRefusal::None) {
@@ -1739,6 +1804,11 @@ struct InteractionPhysics {
             }
             decoded_crate = decoded.crate;
             crate_bytes = decoded_crate;
+            if (owner_known &&
+                (decoded.owner_seat != owner.index || decoded.owner_generation != owner.generation))
+                return false;
+            proxies = std::move(decoded.proxies);
+            revision = decoded.context_revision;
         }
         const auto* player_bytes =
             without_crate.entities.empty() ? nullptr : &without_crate.entities.front().state;
@@ -1771,10 +1841,37 @@ struct InteractionPhysics {
         physics::BodyState floor{};
         floor.position = {0.0f, -kFloorHalfY, 0.0f};
         (void)stage.world->create_body(body_desc(kFloorRigidBody, floor_collider(), floor));
-        stage.player_body =
-            stage.world->create_body(body_desc(kPlayerRigidBody, player_collider(), player_state));
+        stage.movers.push_back({owner.index, owner.generation, {}, {}, {}, {}, true});
+        stage.movers.back().state.position = player_state.position;
+        stage.movers.back().state.velocity = player_state.linear_velocity;
+        for (const auto& proxy : proxies) {
+            Mover mover{};
+            mover.seat = proxy.seat;
+            mover.generation = proxy.seat_generation;
+            mover.net_id = proxy.net_id;
+            mover.state.position = {proxy.position[0], proxy.position[1], proxy.position[2]};
+            mover.state.velocity = {proxy.velocity[0], proxy.velocity[1], proxy.velocity[2]};
+            mover.repeated.move_x = proxy.axes[0];
+            mover.repeated.move_y = proxy.axes[1];
+            mover.repeated.held = proxy.held;
+            stage.movers.push_back(mover);
+        }
+        std::sort(stage.movers.begin(), stage.movers.end(), [](const Mover& a, const Mover& b) {
+            return a.seat < b.seat;
+        });
+        for (Mover& mover : stage.movers) {
+            physics::BodyState body{};
+            body.position = mover.state.position;
+            body.linear_velocity = mover.state.velocity;
+            mover.body =
+                stage.world->create_body(body_desc(kPlayerRigidBody, player_collider(), body));
+            if (mover.owner)
+                stage.player_body = mover.body;
+        }
         stage.crate_body =
             stage.world->create_body(body_desc(kCrateRigidBody, crate_collider(), *crate));
+        stage.context_revision = revision;
+        stage.coupled_context = raw.size() != replication::kContentionCrateBytes;
         // Keep the 52-byte physics state for the stale-seed diagnostic even when the envelope is
         // v2; its previous checkpoint must remain decodable by the crate-state reader.
         stage.crate_bytes.assign(crate_bytes.begin(), crate_bytes.end());
@@ -1788,6 +1885,11 @@ struct InteractionPhysics {
         physics = std::move(prepared->world);
         player_body = prepared->player_body;
         crate_body = prepared->crate_body;
+        movers = std::move(prepared->movers);
+        proxy_trajectory.clear();
+        context_revision = prepared->context_revision;
+        coupled_context = prepared->coupled_context;
+        seed_age = 0;
         previous_bytes = std::move(prepared->crate_bytes);
         touching = false;
         prepared.reset();
@@ -1806,8 +1908,14 @@ struct InteractionPhysics {
         }
         player_body =
             physics->create_body(body_desc(kPlayerRigidBody, player_collider(), player_state));
+        movers = {{owner.index, owner.generation, {}, {}, {}, player_body, true}};
+        proxy_trajectory.clear();
+        movers.front().state.position = player_state.position;
+        movers.front().state.velocity = player_state.linear_velocity;
         crate_body = physics->create_body(body_desc(kCrateRigidBody, crate_collider(), crate));
         touching = false;
+        seed_age = 0;
+        coupled_context = false;
     }
 
     void restore(std::span<const std::byte> bytes) {
@@ -1834,15 +1942,69 @@ struct InteractionPhysics {
             (void)physics->set_body_state(crate_body, *crate); // the control: cache survives
     }
 
-    void step(float dt) {
-        const auto* state = world->get<PlayerState>(player);
-        if (!physics || !state)
+    void step(const replication::InputCommand& command, float dt) {
+        auto* owner_state = world->get<PlayerState>(player);
+        if (!physics || !owner_state)
             return;
-        physics::BodyState drive{};
-        drive.position = state->position;
-        drive.linear_velocity = state->velocity;
-        (void)physics->set_body_state(player_body, drive);
+        physics::BodyState crate{};
+        if (!physics->get_body_state(crate_body, crate))
+            return;
+        if (coupled_context && seed_age >= 64) {
+            // A remote command is only a checkpoint-seeded guess. After the bounded horizon,
+            // keep the owner's controller responsive against frozen proxy/crate poses and wait
+            // for a fresh checkpoint before advancing the shared physics again.
+            std::vector<core::Vec3> others;
+            for (const Mover& mover : movers)
+                if (!mover.owner)
+                    others.push_back(mover.state.position);
+            app::ActionState actions{};
+            actions.axes[kAxisMoveX] = command.move_x;
+            actions.axes[kAxisMoveZ] = command.move_y;
+            integrate_player(*owner_state,
+                             intent_from(actions),
+                             dt,
+                             CratePose{crate.position, crate.orientation},
+                             others);
+            touching = false;
+            return;
+        }
+        // COUPLED ROLLBACK REPLAY: every mover sees earlier seats' new poses and later
+        // seats' old poses, exactly as the authoritative fixed_tick does. The crate is
+        // deliberately the pre-step body for every controller in this tick.
+        for (Mover& mover : movers) {
+            if (mover.owner)
+                mover.state = *owner_state;
+            std::vector<core::Vec3> others;
+            for (const Mover& other : movers)
+                if (other.seat != mover.seat)
+                    others.push_back(other.state.position);
+            const auto& input = mover.owner ? command : mover.repeated;
+            app::ActionState actions{};
+            actions.axes[kAxisMoveX] = input.move_x;
+            actions.axes[kAxisMoveZ] = input.move_y;
+            integrate_player(mover.state,
+                             intent_from(actions),
+                             dt,
+                             CratePose{crate.position, crate.orientation},
+                             others);
+            physics::BodyState drive{};
+            drive.position = mover.state.position;
+            drive.linear_velocity = mover.state.velocity;
+            (void)physics->set_body_state(mover.body, drive);
+            if (mover.owner) {
+                owner_state->position = mover.state.position;
+                owner_state->velocity = mover.state.velocity;
+            }
+        }
         physics->step(dt);
+        // Preserve the coupled proxy path for the later presentation brick. Every entry is
+        // one completed physics tick in ascending seat order, excluding the owner.
+        std::vector<core::Vec3> path_entry;
+        for (const Mover& mover : movers)
+            if (!mover.owner)
+                path_entry.push_back(mover.state.position);
+        proxy_trajectory.push_back(std::move(path_entry));
+        ++seed_age;
         touching = false;
         for (const physics::ContactEvent& ev : physics->contact_events())
             if (((ev.a == player_body && ev.b == crate_body) ||
@@ -1862,6 +2024,8 @@ InteractionProfile::ClientHooks interaction_client_hooks(
     state->world = &world;
     state->player = player;
     state->object = object;
+    state->owner = options.owner;
+    state->owner_known = options.owner_known;
     state->rebuild_on_restore = options.rebuild_on_restore;
     state->stale_restore = options.stale_restore;
     InteractionProfile::ClientHooks out{};
@@ -1893,8 +2057,8 @@ InteractionProfile::ClientHooks interaction_client_hooks(
         if (next)
             next();
     };
-    // The crate steps AFTER the player's controller, in the same order the server's fixed_tick
-    // uses (move the player, then step physics), and only while the crate is in the set.
+    // The interaction decorator moves all kinematic players before the spawn hook updates
+    // owner abilities. This is one controller pass and one physics step for the whole group.
     prediction.simulate = [state, next = inner.prediction.simulate](
                               std::span<const replication::PredictedEntityId> members,
                               const replication::InputCommand& command,
@@ -1904,10 +2068,15 @@ InteractionProfile::ClientHooks interaction_client_hooks(
             state->physics && state->physics->get_body_state(state->crate_body, crate);
         state->world->add_component(
             state->player, PredictionCratePose{{crate.position, crate.orientation}, valid});
+        const bool member =
+            std::find(members.begin(), members.end(), state->object) != members.end();
+        if (member) {
+            state->world->add_component(state->player, PredictionCoupledMove{});
+            state->step(command, static_cast<float>(step.fixed_dt));
+        } else {
+            (void)state->world->remove_component<PredictionCoupledMove>(state->player);
+        }
         next(members, command, step);
-        state->touching = false;
-        if (std::find(members.begin(), members.end(), state->object) != members.end())
-            state->step(static_cast<float>(step.fixed_dt));
     };
     // Joining needs no work of its own: PredictionHooks::restore follows `create` at once and
     // rebuilds the world. Leaving drops the world, so a non-member costs nothing.
@@ -1921,6 +2090,7 @@ InteractionProfile::ClientHooks interaction_client_hooks(
             state->prepared.reset();
             state->previous_bytes.clear();
             state->touching = false;
+            (void)state->world->remove_component<PredictionCoupledMove>(state->player);
         } else {
             next(id);
         }
@@ -1930,6 +2100,41 @@ InteractionProfile::ClientHooks interaction_client_hooks(
     };
     out.hooks.is_live = [state, next = inner.is_live](replication::PredictedEntityId id) {
         return !(id == state->object) && next(id);
+    };
+    out.context_snapshot = [state] {
+        physics::BodyState crate{};
+        const auto* owner_state = state->world->get<PlayerState>(state->player);
+        if (!state->physics || !owner_state ||
+            !state->physics->get_body_state(state->crate_body, crate))
+            return std::vector<std::byte>{};
+        auto bytes = encode_crate(crate);
+        for (unsigned shift = 0; shift < 32; shift += 8)
+            bytes.push_back(std::byte{static_cast<std::uint8_t>(state->context_revision >> shift)});
+        for (float value : {owner_state->position.x,
+                            owner_state->position.y,
+                            owner_state->position.z,
+                            owner_state->velocity.x,
+                            owner_state->velocity.y,
+                            owner_state->velocity.z})
+            append_f32(bytes, value);
+        for (const auto& mover : state->movers) {
+            if (mover.owner)
+                continue;
+            for (std::uint32_t value : {static_cast<std::uint32_t>(mover.seat),
+                                        static_cast<std::uint32_t>(mover.generation),
+                                        mover.net_id.index,
+                                        mover.net_id.generation})
+                for (unsigned shift = 0; shift < 32; shift += 8)
+                    bytes.push_back(std::byte{static_cast<std::uint8_t>(value >> shift)});
+            for (float value : {mover.state.position.x,
+                                mover.state.position.y,
+                                mover.state.position.z,
+                                mover.state.velocity.x,
+                                mover.state.velocity.y,
+                                mover.state.velocity.z})
+                append_f32(bytes, value);
+        }
+        return bytes;
     };
     out.object_pose = [state]() -> std::optional<core::Transform> {
         physics::BodyState body{};
@@ -2129,8 +2334,8 @@ app::GameDefinition definition_with_interaction() {
     interaction.player_max_speed = HelloGame::kPlayerSpeed;
     interaction.replay_ticks = 64;
     interaction.fixed_dt = 1.0 / 60.0;
-    // The profile identity advertises a v2-capable restore contract. The emitted crate payload
-    // stays v1 for this brick; contention capture begins in m20.9b.
+    // The legacy hook remains v1. The additive context hook emits v2 only for supported
+    // multi-seat contention, so one-seat wire bytes retain their original shape.
     def.remote_play->interaction = InteractionProfile{2,
                                                       interaction,
                                                       interaction_object,
@@ -2140,6 +2345,7 @@ app::GameDefinition definition_with_interaction() {
                                                       push_tape,
                                                       HelloGame::kCrateKickImpulse,
                                                       kCrateRigidBody.mass};
+    def.remote_play->interaction->capture_context = capture_crate_context;
     return def;
 }
 

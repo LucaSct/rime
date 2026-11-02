@@ -540,6 +540,13 @@ struct GameDefinition {
         // Negotiated through the schema identity like spawn prediction: presence and `version`
         // are folded into `input_schema_identity`.
         struct InteractionProfile {
+            struct ExecutedSeat {
+                PlayerSlot slot{};
+                ecs::Entity entity{};
+                replication::PredictedEntityId net_id{};
+                replication::InputCommand command{};
+            };
+
             std::uint32_t version = 1;
             // Join/leave radii, rest run and speed (the leaf's), in the game's units.
             replication::InteractionParams params{};
@@ -561,6 +568,8 @@ struct GameDefinition {
                 // The `stale-restore` control: restore the object from the previous restore's
                 // bytes, i.e. one checkpoint old, so every replay starts from a stale state.
                 bool stale_restore = false;
+                PlayerSlot owner{};
+                bool owner_known = false;
             };
 
             struct ClientHooks {
@@ -576,6 +585,8 @@ struct GameDefinition {
                 // Named codec refusals are counted at the game boundary, where a malformed
                 // payload can refuse the complete checkpoint before any roster mutation.
                 std::function<std::uint64_t(replication::ContentionRefusal)> context_refusals;
+                // In-process replay oracle: the simulation's complete private context bytes.
+                std::function<std::vector<std::byte>()> context_snapshot;
             };
 
             ClientHooks (*client_hooks)(ecs::World& prediction,
@@ -590,6 +601,13 @@ struct GameDefinition {
             // proof's raw-correction bound (`interaction_raw_bound`) share the number. 0 = none.
             float j_max = 0.0f;
             float object_mass = 0.0f;
+            // Additive m20.9 capture: multi-seat members receive the recipient and this
+            // tick's scheduled commands. Games with only the v1 hook remain mirrored there.
+            std::vector<std::byte> (*capture_context)(const ecs::World&,
+                                                      ecs::Entity,
+                                                      PlayerSlot,
+                                                      std::uint32_t,
+                                                      std::span<const ExecutedSeat>) = nullptr;
         };
 
         std::optional<InteractionProfile> interaction;

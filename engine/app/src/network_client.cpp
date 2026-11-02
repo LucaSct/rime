@@ -757,8 +757,9 @@ RunReport run_network_client(const LaunchOptions& options,
                             interaction_id,
                             *spawn_hooks,
                             {options.interaction_debug_break != InteractionDebugBreak::NoRebuild,
-                             options.interaction_debug_break ==
-                                 InteractionDebugBreak::StaleRestore});
+                             options.interaction_debug_break == InteractionDebugBreak::StaleRestore,
+                             seat.value_or(PlayerSlot{}),
+                             true});
                         spawn_hooks = interaction_hooks->hooks;
                     }
                     if (options.spawn_debug_break == SpawnDebugBreak::NoAdopt) {

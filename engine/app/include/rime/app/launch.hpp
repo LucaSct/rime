@@ -288,6 +288,8 @@ struct RunReport {
         std::uint64_t interaction_leave_deferred_touching = 0;
         std::uint64_t interaction_epoch_advances = 0, interaction_member_ticks = 0;
         std::uint64_t interaction_capture_refused = 0;
+        // Ticks with more than four admitted seats use mirrored contention.
+        std::uint64_t interaction_contention_unsupported = 0;
         // m20.6c: leaves delayed only by the quiet window; joins taken while the object still
         // moved; server-only kicks applied (and whether the object was a member at that tick).
         std::uint64_t interaction_leave_deferred_quiet = 0;
