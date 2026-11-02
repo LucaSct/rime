@@ -37,9 +37,12 @@ use crate::gizmo::{self, DragSession, Snapping};
 #[cfg(test)]
 mod click_tests;
 mod commands;
+// The same widgets as `click_tests`, against the real engine process instead of a fake host.
 mod entity_picker;
 mod game_run;
 mod outliner;
+#[cfg(test)]
+mod pipeline_tests;
 mod player;
 #[cfg(test)]
 use outliner::label as outliner_label;

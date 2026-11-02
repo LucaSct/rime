@@ -1404,6 +1404,7 @@ dependencies = [
  "egui_dock",
  "egui_kittest",
  "rime-protocol",
+ "uds_windows",
 ]
 
 [[package]]

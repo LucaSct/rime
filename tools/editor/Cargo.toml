@@ -34,5 +34,17 @@ eframe = { version = "0.31", optional = true }
 egui_dock = { version = "0.16", optional = true }
 egui_kittest = { version = "0.31", optional = true, features = ["eframe"] }
 
+# The editor's half of the s1.4 local socket, on Windows only.
+#
+# Not a second transport: the engine has served AF_UNIX on Windows since the Win32 socket backend
+# landed (Windows 10 1803+; see engine/platform/include/rime/platform/socket.hpp). The gap was in
+# Rust's standard library, which puts `UnixStream` behind `std::os::unix` and offers no Windows
+# equivalent -- so naming it made this crate fail to COMPILE here, which is why `--features gui`
+# was unbuildable on Windows and `--smoke` shipped a "Unix-only for now" stub. This crate supplies
+# the same AF_UNIX sockets with std's `UnixStream` shape; `src/local_socket.rs` picks between them
+# and nothing else in the editor changes. The wire is byte-identical on all three platforms.
+[target.'cfg(windows)'.dependencies]
+uds_windows = "1"
+
 [lints.clippy]
 all = "deny"
