@@ -316,14 +316,24 @@ RunReport run_network_client(const LaunchOptions& options,
     // ADR-0106 §3 expects to be non-zero: the rebuilt world has no warm-start cache.
     double crate_max_sim_correction = 0.0;
     std::uint64_t crate_member_checkpoints = 0, crate_corrections_over_1cm = 0;
+
     // `--interaction-trace`: one (server tick, simulated crate correction, the predicted PLAYER's
-    // correction at the same checkpoint, both in metres) triple per member->member checkpoint. The
-    // player's is what lets a proof tell a crate that disagrees because its pusher did (a lost or
-    // late command: the server's player stood still while the prediction walked) from a crate that
-    // disagrees while the player agrees -- hidden physics state. So a proof can tell the
+    // correction at the same checkpoint, both in metres, plus the server input stalls that fell
+    // inside this checkpoint's applied window) tuple per member->member checkpoint. The player's
+    // correction and the window's stall count are what let a proof tell a crate that disagrees
+    // because the server ran a stand-in (a lost/late command or an adaptive-buffer stall, where the
+    // server stepped the crate without the player's command) from a crate that disagrees while the
+    // player agrees and no stall intervened -- hidden physics state. So a proof can tell the
     // undisturbed residual (before a kick) from the disturbance and its convergence (after) instead
     // of reading one maximum over the run.
-    std::vector<std::array<double, 3>> crate_trace;
+    struct CrateTraceSample {
+        std::uint64_t server_tick = 0;
+        double jump = 0.0;
+        double player_jump = 0.0;
+        std::uint32_t input_stalls = 0;
+    };
+
+    std::vector<CrateTraceSample> crate_trace;
     // Push response: the first predicted step in which the player touched the object, and the
     // presented object's position just before that step.
     std::optional<std::uint64_t> crate_push_tick;
@@ -349,6 +359,19 @@ RunReport run_network_client(const LaunchOptions& options,
     bool multi_seat = false;
     std::string failure_reason;
     std::uint64_t checkpoints = 0, replayed = 0, max_replay = 0;
+    // Cumulative `OwnerCheckpoint::input_stalls` as of the previous applied checkpoint. Updated on
+    // every applied checkpoint -- non-member and join checkpoints included -- so a stall before a
+    // join never leaks into the first member->member window, while a lost checkpoint merges its
+    // stall count into the next applied checkpoint's window.
+    std::optional<std::uint32_t> last_checkpoint_input_stalls;
+    const auto note_checkpoint_stalls = [&](std::uint32_t total) {
+        const std::uint32_t delta =
+            last_checkpoint_input_stalls && total >= *last_checkpoint_input_stalls
+                ? total - *last_checkpoint_input_stalls
+                : 0u;
+        last_checkpoint_input_stalls = total;
+        return delta;
+    };
     std::uint64_t response_ticks = 0, snaps_over_bound = 0;
     double max_snap = 0.0;
     std::optional<std::uint64_t> first_input_tick;
@@ -398,7 +421,8 @@ RunReport run_network_client(const LaunchOptions& options,
                                             const std::optional<core::Transform>& simulated_before,
                                             const core::Transform& shown_before,
                                             std::uint64_t checkpoint_server_tick,
-                                            double player_jump) {
+                                            double player_jump,
+                                            std::uint32_t checkpoint_stalls) {
         const bool member = object_member();
         if (member && !was_member)
             ++crate_joins_seen;
@@ -423,7 +447,7 @@ RunReport run_network_client(const LaunchOptions& options,
                 ++crate_corrections_over_1cm;
             if (options.interaction_trace)
                 crate_trace.push_back(
-                    {static_cast<double>(checkpoint_server_tick), jump, player_jump});
+                    {checkpoint_server_tick, jump, player_jump, checkpoint_stalls});
         }
     };
 
@@ -537,13 +561,15 @@ RunReport run_network_client(const LaunchOptions& options,
                 const auto result = spawn_reconciler->apply_checkpoint(base, *checkpoint.spawns);
                 if (!result.base.applied)
                     continue;
+                const std::uint32_t checkpoint_stalls = note_checkpoint_stalls(base.input_stalls);
                 if (interaction_hooks)
                     note_object_checkpoint(
                         object_was_member,
                         object_simulated_before,
                         object_shown_before,
                         base.server_tick,
-                        static_cast<double>(core::length(presented_position() - before)));
+                        static_cast<double>(core::length(presented_position() - before)),
+                        checkpoint_stalls);
                 for (const auto& old : spawn_bindings)
                     if (std::none_of(checkpoint.spawns->bindings.begin(),
                                      checkpoint.spawns->bindings.end(),
@@ -594,6 +620,7 @@ RunReport run_network_client(const LaunchOptions& options,
             const auto before = presented_position();
             const auto result = reconciler->apply_checkpoint(base);
             if (result.applied) {
+                (void)note_checkpoint_stalls(base.input_stalls);
                 record_snap(before);
                 ++checkpoints;
                 replayed += result.replayed;
@@ -1122,11 +1149,12 @@ RunReport run_network_client(const LaunchOptions& options,
             if (options.interaction_trace) {
                 spawn_metrics += ",\"crate_trace\":[";
                 for (std::size_t i = 0; i < crate_trace.size(); ++i)
-                    spawn_metrics += fmt::format("{}[{},{:.6f},{:.6f}]",
+                    spawn_metrics += fmt::format("{}[{},{:.6f},{:.6f},{}]",
                                                  i == 0 ? "" : ",",
-                                                 static_cast<std::uint64_t>(crate_trace[i][0]),
-                                                 crate_trace[i][1],
-                                                 crate_trace[i][2]);
+                                                 crate_trace[i].server_tick,
+                                                 crate_trace[i].jump,
+                                                 crate_trace[i].player_jump,
+                                                 crate_trace[i].input_stalls);
                 spawn_metrics += "]";
             }
         }

@@ -696,6 +696,10 @@ TEST_CASE("seats: one seat's stall does not move the other seat's schedule") {
     const auto resumed = h.last_input({1, 0});
     REQUIRE(resumed.has_value());
     CHECK(resumed->actions.axis(0) == -1.0f);
+    REQUIRE(!a.checkpoints.empty());
+    REQUIRE(!b.checkpoints.empty());
+    CHECK(a.checkpoints.back().input_stalls == 0);
+    CHECK(b.checkpoints.back().input_stalls == after.seats[1].stalls);
 }
 
 TEST_CASE("seats: leave and rejoin reuses index 0 with generation + 1; the old slot is dead") {

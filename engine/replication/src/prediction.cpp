@@ -9,7 +9,7 @@
 namespace rime::replication {
 namespace {
 
-constexpr std::size_t kOwnerCheckpointHeaderBytes = 1 + 8 + 4 + 1 + 2 + kInputResultBytes;
+constexpr std::size_t kOwnerCheckpointHeaderBytes = 1 + 8 + 4 + 1 + 2 + kInputResultBytes + 4;
 
 struct Writer {
     std::span<std::byte> bytes;
@@ -126,6 +126,7 @@ CheckpointEncode encode_owner_checkpoint(const OwnerCheckpoint& checkpoint,
     if (encode_input_result(checkpoint.result, result_bytes) != result_bytes.size())
         return {0, CheckpointRefusal::InvalidInputResult};
     writer.blob(result_bytes);
+    writer.u32(checkpoint.input_stalls);
     for (const auto& entity : checkpoint.entities) {
         writer.u32(entity.id.index);
         writer.u32(entity.id.generation);
@@ -159,6 +160,7 @@ CheckpointRefusal decode_owner_checkpoint_prefix(std::span<const std::byte> in,
         return CheckpointRefusal::InvalidInputResult;
     if (decoded.result.server_tick != decoded.server_tick)
         return CheckpointRefusal::TickMismatch;
+    decoded.input_stalls = reader.u32();
     decoded.entities.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         if (!reader.has(10))

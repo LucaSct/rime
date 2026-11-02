@@ -19,7 +19,7 @@
 // retransmission path and may be newer than the state being restored here.
 namespace rime::replication {
 
-inline constexpr std::uint8_t kOwnerCheckpointTag = 0xE4;
+inline constexpr std::uint8_t kOwnerCheckpointTag = 0xE8;
 inline constexpr std::size_t kCheckpointMaxEntities = 16;
 inline constexpr std::size_t kCheckpointMaxStateBytes = 512;
 inline constexpr std::size_t kCheckpointMaxGroupBytes = 512;
@@ -40,6 +40,9 @@ struct OwnerCheckpoint {
     std::uint64_t server_tick = 0;
     std::uint32_t membership_epoch = 0;
     InputResult result{};
+    // Cumulative stand-in ticks for this seat. A checkpoint carries its own count so a lost or
+    // reordered pacing report cannot make a stall look like an undisturbed physics correction.
+    std::uint32_t input_stalls = 0;
     std::vector<PredictedEntityState> entities;
     std::vector<std::byte> group_state;
 };

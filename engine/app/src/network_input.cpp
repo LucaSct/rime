@@ -1223,6 +1223,7 @@ struct NetworkInputServer::Impl {
         checkpoint.server_tick = server_tick;
         checkpoint.membership_epoch = seat.membership_epoch;
         checkpoint.result = result;
+        checkpoint.input_stalls = static_cast<std::uint32_t>(seat.schedule->stalls() & 0xFFFFFFFFu);
         // The client resolves this replicated NetId through its map to find its own mirror.
         const PredictedEntityId id{seat.owner_net_id.index, seat.owner_net_id.generation};
         auto state = seat.hooks.capture(id);
