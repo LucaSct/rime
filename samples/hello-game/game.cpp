@@ -1744,6 +1744,14 @@ struct InteractionPhysics {
     // The `stale-restore` control and the bytes it restores from.
     bool stale_restore = false;
     std::vector<std::byte> previous_bytes;
+    // m20.9c controls (ADR-0109 §9). `no_proxies` replays without any remote body; `stale_proxies`
+    // seeds them from the PREVIOUS applied checkpoint's records, i.e. one checkpoint old.
+    bool no_proxies = false;
+    bool stale_proxies = false;
+    std::vector<replication::ContentionProxy> previous_proxies;
+    // The first remote seat's executed move_y at the latest APPLIED checkpoint, from the decoded
+    // record itself (untouched by the controls above), so a proof can date the remote's reversal.
+    std::optional<float> remote_axis;
     std::unique_ptr<physics::PhysicsWorld> physics;
     physics::BodyId player_body{};
     physics::BodyId crate_body{};
@@ -1775,6 +1783,8 @@ struct InteractionPhysics {
         std::uint32_t context_revision = 0;
         bool coupled_context = false;
         bool reuse_existing_world = false;
+        std::vector<replication::ContentionProxy> record_proxies; // as decoded, for `previous`
+        std::optional<float> remote_axis;
     };
 
     std::optional<Prepared> prepared;
@@ -1846,6 +1856,14 @@ struct InteractionPhysics {
         if (!crate)
             return false;
         Prepared stage{};
+        stage.record_proxies = proxies;
+        if (!proxies.empty())
+            stage.remote_axis = proxies.front().axes[1];
+        // The controls change only what gets SEEDED, never what was decoded or validated above.
+        if (no_proxies)
+            proxies.clear();
+        else if (stale_proxies)
+            proxies = previous_proxies;
         stage.crate_state = *crate;
         stage.movers.push_back({owner.index, owner.generation, {}, {}, {}, {}, true});
         stage.movers.back().state.position = player_state.position;
@@ -1937,6 +1955,8 @@ struct InteractionPhysics {
             movers = std::move(prepared->movers);
         }
         proxy_trajectory.clear();
+        previous_proxies = std::move(prepared->record_proxies);
+        remote_axis = prepared->remote_axis;
         context_revision = prepared->context_revision;
         coupled_context = prepared->coupled_context;
         seed_age = 0;
@@ -2081,6 +2101,8 @@ InteractionProfile::ClientHooks interaction_client_hooks(
     state->owner_known = options.owner_known;
     state->rebuild_on_restore = options.rebuild_on_restore;
     state->stale_restore = options.stale_restore;
+    state->no_proxies = options.no_proxies;
+    state->stale_proxies = options.stale_proxies;
     InteractionProfile::ClientHooks out{};
     out.hooks = inner;
     auto& prediction = out.hooks.prediction;
@@ -2199,6 +2221,23 @@ InteractionProfile::ClientHooks interaction_client_hooks(
         return pose;
     };
     out.touching = [state] { return state->touching; };
+    // The proxies' simulated translations after the latest step or replay (ADR-0109 §8). Empty
+    // while the crate is not a member (the world is dropped on leave) or nobody else is in it.
+    out.proxy_poses = [state] {
+        std::vector<InteractionProfile::ProxyPose> poses;
+        if (!state->physics || !state->coupled_context)
+            return poses;
+        for (const auto& mover : state->movers) {
+            if (mover.owner)
+                continue;
+            InteractionProfile::ProxyPose pose{};
+            pose.net = {mover.net_id.index, mover.net_id.generation};
+            pose.simulated.translation = mover.state.position;
+            poses.push_back(pose);
+        }
+        return poses;
+    };
+    out.remote_axis_y = [state] { return state->remote_axis; };
     out.context_refusals = [state](replication::ContentionRefusal reason) {
         return reason < replication::ContentionRefusal::Count
                    ? state->context_refusals[static_cast<std::size_t>(reason)]
@@ -2232,6 +2271,33 @@ app::ActionState push_tape(std::uint64_t tick) {
         actions.axes[kAxisMoveZ] = 1.0f;
     else if ((tick >= 101 && tick <= 245) || (tick >= 426 && tick <= 520))
         actions.axes[kAxisMoveZ] = -1.0f;
+    return actions;
+}
+
+// The contention proof's observer (`--input-tape-stand`): all-neutral. Seat 0 starts at
+// (-1.8, 0), 3.08 m from the crate at (0, -2.5), inside the 5.117 m join radius, so it is a member
+// from the first tick and everything it shows of the remote seat is prediction.
+app::ActionState stand_tape(std::uint64_t) { return {}; }
+
+// The contention proof's remote (`--input-tape-reversal`, seat 1, starting at (-0.6, 0)).
+// Walking is 4 m/s = 1/15 m per tick; -z is toward the crate, whose near face is at z = -2.0, so
+// the capsule (radius 0.35) touches once z <= -1.65: after 1.65 * 15 = 24.75 -> 25 walking ticks,
+// i.e. client tick 10 + 25 = 35. The player's x offset (0.6) is inside the crate's 0.5 + 0.35 reach.
+//
+//    1-10   stand            the observer is already a member; the remote joins within 5.117 m
+//   11-76   walk -z, push    contact from tick 35 to R = 76: 42 ticks >= 40, ~2.8 m of push, which
+//                            leaves the crate at z ~ -5.3, 5.5 m from the observer (< 6.117 m
+//                            leave radius, so nobody leaves the group mid-proof)
+//   77-136  walk +z          the REVERSAL: R + 1 .. R + 60. The remote retreats 4 m; the observer's
+//                            proxy, seeded with the last executed command, keeps pushing -z until
+//                            the next checkpoint says otherwise -- that is the correction under test
+//  137-    stand
+app::ActionState reversal_tape(std::uint64_t tick) {
+    app::ActionState actions{};
+    if (tick >= 11 && tick <= 76)
+        actions.axes[kAxisMoveZ] = -1.0f;
+    else if (tick >= 77 && tick <= 136)
+        actions.axes[kAxisMoveZ] = 1.0f;
     return actions;
 }
 
@@ -2413,6 +2479,8 @@ app::GameDefinition definition_with_interaction() {
                                                       HelloGame::kCrateKickImpulse,
                                                       kCrateRigidBody.mass};
     def.remote_play->interaction->capture_context = capture_crate_context;
+    def.remote_play->interaction->diagnostic_stand_input = stand_tape;
+    def.remote_play->interaction->diagnostic_reversal_input = reversal_tape;
     return def;
 }
 
