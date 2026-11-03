@@ -30,4 +30,13 @@ void set_thread_name(std::string_view name) {
     pthread_setname_np(pthread_self(), buf.data());
 }
 
+namespace detail {
+// Linux timers are already fine-grained (hrtimers), so there is nothing to raise.
+bool timer_resolution_begin() {
+    return true;
+}
+
+void timer_resolution_end() {}
+} // namespace detail
+
 } // namespace rime::platform

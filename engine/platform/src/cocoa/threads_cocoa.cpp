@@ -23,4 +23,15 @@ void set_thread_name(std::string_view name) {
     pthread_setname_np(buf.data());
 }
 
+namespace detail {
+// macOS has no process-wide timer period to raise: a bare-metal Mac sleeps ~1 ms for 1 ms. (A
+// virtualised one may not: GitHub's hosted macOS VM measured 11.5 ms on 2026-11-03. That is the
+// hypervisor's timer, which no call here can change.)
+bool timer_resolution_begin() {
+    return true;
+}
+
+void timer_resolution_end() {}
+} // namespace detail
+
 } // namespace rime::platform

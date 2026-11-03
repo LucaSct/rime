@@ -43,6 +43,7 @@ add_test(NAME hello_game_headless COMMAND hello_game --headless --frames 8)
 # ticks and at the win. Dedicated must never enter the device factory (a counter, not a guess), and
 # on Linux `/proc/self/maps` must show no libvulkan after every GPU-free leg.
 add_test(NAME hello_game_dedicated_proof COMMAND hello_game --dedicated-proof --verbose)
+add_test(NAME hello_game_crate_proof COMMAND hello_game --crate-proof --verbose)
 
 # The shipped-game CLI end to end: a bounded dedicated run, and a stub mode that must refuse with
 # the "not yet" exit code (3) rather than quietly running `play`.
@@ -63,7 +64,19 @@ set_tests_properties(hello_game_cli_content_missing PROPERTIES
 
 # These process-level gates exercise the listener without a GPU or a network client. The Python
 # helper only reads events and, for the conflict case, holds a local UDP port open.
-add_test(NAME hello_game_listen_ready COMMAND python3 -c [=[
+#
+# The interpreter is FOUND at configure time, never named as a bare `python3` resolved at run
+# time. On Windows a bare `python3` that is not on PATH falls through to the Microsoft Store
+# alias stub, which prints "Python was not found" and exits 49 -- indistinguishable, in ctest's
+# report, from the proof itself failing (measured on a clean Win11 box, 2026-11-02; CI only
+# passed because actions/setup-python installs a real `python3`). FindPython3 runs the candidate
+# to read its version, so the stub is rejected there. Same idiom as samples/99-the-block.
+find_package(Python3 QUIET COMPONENTS Interpreter)
+if(NOT Python3_Interpreter_FOUND)
+    message(WARNING "hello-game: no Python 3 interpreter found; the listener and play_connect "
+                    "process proofs are NOT registered (install Python 3 to run them)")
+else()
+add_test(NAME hello_game_listen_ready COMMAND ${Python3_EXECUTABLE} -c [=[
 import json, subprocess, sys
 p = subprocess.run([sys.argv[1], 'dedicated', '--listen', '127.0.0.1:0', '--ticks', '30'],
                    capture_output=True, text=True, timeout=10)
@@ -76,7 +89,7 @@ assert lines[-1]['synthesized'] == 30
 ]=] $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_listen_ready PROPERTIES TIMEOUT 15)
 
-add_test(NAME hello_game_listen_bind_conflict COMMAND python3 -c [=[
+add_test(NAME hello_game_listen_bind_conflict COMMAND ${Python3_EXECUTABLE} -c [=[
 import json, socket, subprocess, sys
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(('127.0.0.1', 0))
@@ -96,26 +109,27 @@ set_tests_properties(hello_game_listen_bind_conflict PROPERTIES TIMEOUT 15)
 # backend end to end. The game rules are compiled into net_proof so its replay uses the same code.
 # python3 is what the other tests here already use on Windows (setup-python provides it).
 # The production executable on both sides, with a real loopback UDP port.
-add_test(NAME hello_game_play_connect COMMAND python3
+add_test(NAME hello_game_play_connect COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/connect_prediction.py $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_play_connect PROPERTIES TIMEOUT 120 LABELS "hello_game")
 # m20.5c2: the Throw's two-process proof -- faults, response, and the sensitivity controls that
 # must fail. 13 sequential legs; RUN_SERIAL because two real-time processes whose press must land
 # inside the server's input buffer are exactly what a parallel suite starves.
-add_test(NAME hello_game_play_throw COMMAND python3
+add_test(NAME hello_game_play_throw COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/throw_prediction.py $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_play_throw PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE LABELS "hello_game")
 # m20.6c: the interaction group's two-process proof -- scripted membership, a server-only kick,
 # and the controls that must fail. RUN_SERIAL for the same reason as the throw proof.
-add_test(NAME hello_game_play_interaction COMMAND python3
+add_test(NAME hello_game_play_interaction COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/interaction_prediction.py $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_play_interaction PROPERTIES TIMEOUT 400 RUN_SERIAL TRUE LABELS "hello_game")
 # m20.7c (ADR-0107): the adaptive input buffer's two-process proof -- a scripted client hitch,
 # loopback and impaired, plus a fixed-buffer control that must lose the hitch's commands.
 # RUN_SERIAL for the same reason as the proofs above. Measured ~43 s; TIMEOUT is 3x that.
-add_test(NAME hello_game_play_adaptive COMMAND python3
+add_test(NAME hello_game_play_adaptive COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/adaptive_input.py $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_play_adaptive PROPERTIES TIMEOUT 130 RUN_SERIAL TRUE LABELS "hello_game")
+endif()
 add_executable(hello_game_net_proof net_proof.cpp game.cpp)
 target_link_libraries(hello_game_net_proof
     PRIVATE rime::app_game rime::app rime::physics rime::scene rime::net rime::replication)

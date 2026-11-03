@@ -1719,6 +1719,36 @@ void PhysicsWorld::step(float dt) {
     std::size_t active_count = 0;
     {
         RIME_PROFILE_ZONE(p.zone(StepZone::Wake));
+        // A MOVING KINEMATIC BODY WAKES WHAT IT TOUCHES. Kinematic bodies are island ANCHORS, not
+        // members (stage 4), so the rule below — "an island is active if any MEMBER is awake" —
+        // cannot see one. Without this, a sleeping crate's island holds only the crate, stays
+        // inactive, is never solved, and a character's kinematic capsule walks straight through it
+        // (hello-game on Windows, 2026-11-02: any crate that had rested kTimeToSleep = 0.5 s).
+        // Waking the touched body here makes its island active by the ordinary rule, this tick.
+        //
+        // Only a MOVING anchor wakes (same thresholds that put bodies to sleep): a parked platform
+        // or a standing player leaning on a crate must not hold it awake forever. A teleported
+        // kinematic body carries the velocity push-in gives it, so it counts as moving.
+        // Deterministic: a pure function of this tick's constraints and velocities.
+        if (p.sleeping_enabled) {
+            const float lin2 = kLinearSleepThreshold * kLinearSleepThreshold;
+            const float ang2 = kAngularSleepThreshold * kAngularSleepThreshold;
+            const auto moving_kinematic = [&](std::uint32_t b) {
+                return p.motion[b] == static_cast<std::uint8_t>(MotionType::Kinematic) &&
+                       (core::dot(p.linear_velocity[b], p.linear_velocity[b]) > lin2 ||
+                        core::dot(p.angular_velocity[b], p.angular_velocity[b]) > ang2);
+            };
+            for (const ContactConstraint& c : constraints) {
+                if (p.asleep[c.body_b] != 0 && moving_kinematic(c.body_a)) {
+                    p.asleep[c.body_b] = 0;
+                    p.clear_rest(c.body_b);
+                }
+                if (p.asleep[c.body_a] != 0 && moving_kinematic(c.body_b)) {
+                    p.asleep[c.body_a] = 0;
+                    p.clear_rest(c.body_a);
+                }
+            }
+        }
         for (std::size_t k = 0; k < isl.island_count; ++k) {
             bool any_awake = false;
             for (std::uint32_t bi = isl.body_offsets[k]; bi < isl.body_offsets[k + 1]; ++bi) {
