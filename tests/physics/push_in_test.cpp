@@ -220,6 +220,69 @@ TEST_CASE("m12.1 push-in: a moving kinematic body PUSHES a dynamic one") {
     }
 }
 
+TEST_CASE("push-in: a moving kinematic body WAKES a sleeping crate and pushes it") {
+    // The test above passes on timing: its pusher reaches the crate after ~20 ticks, before the
+    // crate has rested the 0.5 s (kTimeToSleep) it takes to fall asleep. A player who walks up to a
+    // crate that has been sitting still — the normal case in a game — met a SLEEPING body, and
+    // kinematic bodies are island anchors, not members, so nothing in the crate's island was awake
+    // and the island was never solved: the player walked straight through it (found by a tester on
+    // Windows in hello-game, 2026-11-02). Here the crate is put to sleep first.
+    ecs::World w;
+    physics::register_physics_components(w);
+    physics::PhysicsWorld pw;
+    physics::PhysicsSync sync;
+    pw.set_gravity({0.0f, 0.0f, 0.0f});
+
+    const ecs::Entity pusher =
+        spawn_body(w, {-3.0f, 0.0f, 0.0f}, physics::MotionType::Kinematic, {0.5f, 0.5f, 0.5f});
+    const ecs::Entity crate =
+        spawn_body(w, {0.0f, 0.0f, 0.0f}, physics::MotionType::Dynamic, {0.5f, 0.5f, 0.5f});
+    for (int i = 0; i < 60; ++i) { // a second at rest: well past kTimeToSleep
+        sync.step(w, pw, kDt);
+    }
+    const physics::RigidBodyHandle* handle = w.get<physics::RigidBodyHandle>(crate);
+    REQUIRE(handle != nullptr);
+    REQUIRE(pw.is_asleep(handle->body));
+
+    core::Vec3 at{-3.0f, 0.0f, 0.0f};
+    for (int i = 0; i < 60; ++i) { // 3 m/s for a second: contact after ~20 ticks, then 40 of push
+        at.x += 3.0f * kDt;
+        move_to(w, pusher, at);
+        sync.step(w, pw, kDt);
+    }
+
+    const physics::BodyState crate_state = state_of(w, pw, crate);
+    CHECK(!pw.is_asleep(handle->body));
+    // The pusher's face ended at x = -0.5; a crate that stayed put (x = 0) has it buried 0.5 m
+    // deep.
+    CHECK(crate_state.position.x > 0.3f);
+    CHECK(crate_state.linear_velocity.x > 0.0f);
+}
+
+TEST_CASE("push-in: a STILL kinematic body touching a sleeper does not wake it") {
+    // The other half of the rule: only a MOVING kinematic body wakes what it touches. A parked
+    // platform or a standing player resting against a crate must not keep it awake forever, which
+    // would quietly defeat sleeping for every body a level places against kinematic scenery.
+    ecs::World w;
+    physics::register_physics_components(w);
+    physics::PhysicsWorld pw;
+    physics::PhysicsSync sync;
+    pw.set_gravity({0.0f, 0.0f, 0.0f});
+
+    // Faces exactly touching (kinematic at x = -1, crate at 0, both half 0.5): a contact, no push.
+    spawn_body(w, {-1.0f, 0.0f, 0.0f}, physics::MotionType::Kinematic, {0.5f, 0.5f, 0.5f});
+    const ecs::Entity crate =
+        spawn_body(w, {0.0f, 0.0f, 0.0f}, physics::MotionType::Dynamic, {0.5f, 0.5f, 0.5f});
+    for (int i = 0; i < 120; ++i) {
+        sync.step(w, pw, kDt);
+    }
+    // Non-vacuity: the two really are in contact, or "it stayed asleep" would prove nothing.
+    CHECK(pw.stats().manifolds >= 1);
+    const physics::RigidBodyHandle* handle = w.get<physics::RigidBodyHandle>(crate);
+    REQUIRE(handle != nullptr);
+    CHECK(pw.is_asleep(handle->body));
+}
+
 TEST_CASE("m12.1 push-in: an unmoved body is not re-pushed, and write-back leaves it alone") {
     ecs::World w;
     physics::register_physics_components(w);
