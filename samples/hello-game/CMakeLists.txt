@@ -43,6 +43,7 @@ add_test(NAME hello_game_headless COMMAND hello_game --headless --frames 8)
 # ticks and at the win. Dedicated must never enter the device factory (a counter, not a guess), and
 # on Linux `/proc/self/maps` must show no libvulkan after every GPU-free leg.
 add_test(NAME hello_game_dedicated_proof COMMAND hello_game --dedicated-proof --verbose)
+add_test(NAME hello_game_crate_proof COMMAND hello_game --crate-proof --verbose)
 
 # The shipped-game CLI end to end: a bounded dedicated run, and a stub mode that must refuse with
 # the "not yet" exit code (3) rather than quietly running `play`.

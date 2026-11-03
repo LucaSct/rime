@@ -32,7 +32,9 @@
 
 #include <fmt/core.h>
 
+#include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -46,6 +48,7 @@
 #include "rime/app/application.hpp"
 #include "rime/app/content_root.hpp"
 #include "rime/app/launch.hpp"
+#include "rime/ecs/query.hpp"
 #include "rime/rhi/device.hpp"
 #include "rime/scene/derive_transforms.hpp"
 #include "rime/scene/scene_format.hpp"
@@ -227,6 +230,188 @@ RunResult reference_run(std::uint64_t ticks, unsigned workers) {
         (void)application.step(fd);
     }
     return result_of(game, application.world());
+}
+
+// ── The crate proof ──────────────────────────────────────────────────────────────────────────
+//
+// Demonstrates that a kinematic player pushing into a dynamic crate does not pop through it,
+// even when approaching at glancing angles or along diagonals. Kinematic bodies are driven
+// directly by the game and not backed out by the physics solver; instead, post-step
+// depenetration detects residual overlaps and restores a legal separation.
+//
+// The proof executes two passes across multiple approach scenarios:
+//   1. With depenetration enabled (the fix): verifies that the player distance to the crate box
+//      never drops below the penetration threshold (kPlayerRadius - 0.05m), and that walking
+//      straight at the crate pushes it forward.
+//   2. With depenetration disabled (sensitivity control): verifies that at least one scenario
+//      detects penetration inside the crate, proving CI is testing a scenario that reproduces
+//      the bug.
+struct ScenarioSpec {
+    std::string label;
+    int n_ticks = 0;
+    bool diagonal = false;
+};
+
+struct ScenarioOutcome {
+    std::string label;
+    float min_distance = 1e9f;
+    float crate_end_x = 0.0f;
+    float crate_end_z = 0.0f;
+    float crate_start_z = 0.0f;
+    bool went_inside = false;
+};
+
+ScenarioOutcome run_crate_scenario(const ScenarioSpec& spec, bool depenetrate) {
+    app::AppConfig config{};
+    app::Application application(config);
+    const app::GameDefinition def = hello_game::definition();
+    app::ContentSearch search{};
+    search.dev_content_dir = def.dev_content_dir;
+    search.dev_binary_dir = def.dev_binary_dir;
+    search.required = hello_game::kEntryScene;
+    const app::ContentRoot root = app::resolve_content_root(search);
+    if (!root.ok) {
+        fmt::print(stderr, "hello-game: {}\n", app::describe_content_failure(root));
+        return {};
+    }
+    hello_game::register_components(application.world());
+    if (!scene::load_scene_file(application.world(), root.dir / hello_game::kEntryScene).ok) {
+        return {};
+    }
+    scene::derive_world_transforms(application.world(), application.jobs());
+    HelloGame game;
+    game.set_depenetration(depenetrate);
+    app::SetupContext setup{
+        application.world(), application.jobs(), application.fixed_dt(), root.dir};
+    if (!game.setup(setup)) {
+        return {};
+    }
+
+    app::ActionState action{};
+    std::uint64_t tick = 0;
+    application.on_fixed_tick([&](ecs::World& world, double dt) {
+        if (spec.diagonal) {
+            action.axes[hello_game::kAxisMoveX] = 1.0f;
+            action.axes[hello_game::kAxisMoveZ] = -1.0f;
+        } else if (static_cast<int>(tick) < spec.n_ticks) {
+            action.axes[hello_game::kAxisMoveX] = 1.0f;
+            action.axes[hello_game::kAxisMoveZ] = 0.0f;
+        } else {
+            action.axes[hello_game::kAxisMoveX] = 0.0f;
+            action.axes[hello_game::kAxisMoveZ] = -1.0f;
+        }
+        app::TickContext ctx{world, dt, tick++, action};
+        game.fixed_tick(ctx);
+    });
+
+    ScenarioOutcome outcome{};
+    outcome.label = spec.label;
+    application.world().query<hello_game::ReplicatedGameState>().for_each(
+        [&](ecs::Entity, const hello_game::ReplicatedGameState& s) {
+            outcome.crate_start_z = s.crate_position.z;
+        });
+
+    constexpr float kCrateHalf = 0.5f;
+    constexpr float kPlayerRadius = HelloGame::kPlayerRadius;
+    const float min_allowed = kPlayerRadius - 0.05f;
+
+    const double fd = application.fixed_dt();
+    for (int i = 0; i < 150; ++i) {
+        (void)application.step(fd);
+        application.world().query<hello_game::ReplicatedGameState>().for_each(
+            [&](ecs::Entity, const hello_game::ReplicatedGameState& s) {
+                outcome.crate_end_x = s.crate_position.x;
+                outcome.crate_end_z = s.crate_position.z;
+                const core::Vec3 d = s.player_position - s.crate_position;
+                const core::Vec3 local = core::rotate(core::conjugate(s.crate_rotation), d);
+                const core::Vec3 clamped{
+                    std::clamp(local.x, -kCrateHalf, kCrateHalf),
+                    std::clamp(local.y, -kCrateHalf, kCrateHalf),
+                    std::clamp(local.z, -kCrateHalf, kCrateHalf),
+                };
+                const float dist = core::length(local - clamped);
+                if (dist < outcome.min_distance) {
+                    outcome.min_distance = dist;
+                }
+                if (dist < min_allowed) {
+                    outcome.went_inside = true;
+                }
+            });
+    }
+    return outcome;
+}
+
+int run_crate_proof(bool verbose) {
+    const std::vector<ScenarioSpec> specs = {
+        {"0", 0, false},
+        {"6", 6, false},
+        {"9", 9, false},
+        {"11", 11, false},
+        {"12", 12, false},
+        {"13", 13, false},
+        {"diag", -1, true},
+    };
+
+    std::vector<ScenarioOutcome> with_depen;
+    std::vector<ScenarioOutcome> without_depen;
+
+    for (const auto& spec : specs) {
+        with_depen.push_back(run_crate_scenario(spec, true));
+    }
+    for (const auto& spec : specs) {
+        without_depen.push_back(run_crate_scenario(spec, false));
+    }
+
+    if (verbose) {
+        auto clean = [](float v) noexcept { return std::abs(v) < 5e-4f ? 0.0f : v; };
+        fmt::print("hello-game crate proof (with depenetration)\n");
+        for (const auto& r : with_depen) {
+            fmt::print("  N = {:>4} : min dist = {:.3f}, crate end = ({:.3f}, {:.3f})\n",
+                       r.label,
+                       r.min_distance,
+                       clean(r.crate_end_x),
+                       clean(r.crate_end_z));
+        }
+        fmt::print("hello-game crate proof (without depenetration)\n");
+        for (const auto& r : without_depen) {
+            fmt::print("  N = {:>4} : min dist = {:.3f}, crate end = ({:.3f}, {:.3f})\n",
+                       r.label,
+                       r.min_distance,
+                       clean(r.crate_end_x),
+                       clean(r.crate_end_z));
+        }
+    }
+
+    for (const auto& r : with_depen) {
+        if (r.went_inside) {
+            fmt::print(
+                stderr, "hello-game: FAILED — crate proof: never through (scenario {})\n", r.label);
+            return 1;
+        }
+        if (r.label == "0" && r.crate_end_z > r.crate_start_z - 1.0f) {
+            fmt::print(stderr, "hello-game: FAILED — crate proof: pushed\n");
+            return 1;
+        }
+    }
+
+    bool sensitivity_detected = false;
+    for (const auto& r : without_depen) {
+        if (r.went_inside) {
+            sensitivity_detected = true;
+            break;
+        }
+    }
+    if (!sensitivity_detected) {
+        fmt::print(
+            stderr,
+            "hello-game: FAILED — crate proof: sensitivity control (no scenario went inside)\n");
+        return 1;
+    }
+
+    if (verbose) {
+        fmt::print("  PASS\n");
+    }
+    return 0;
 }
 
 // Is the Vulkan loader mapped into THIS process? On Linux `/proc/self/maps` lists every mapped
@@ -526,6 +711,7 @@ int main(int argc, char** argv) {
     bool headless = false;
     bool windowed = false;
     bool dedicated_proof = false;
+    bool crate_proof = false;
     int frames = 240;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg{argv[i]};
@@ -537,6 +723,8 @@ int main(int argc, char** argv) {
             windowed = true;
         } else if (arg == "--dedicated-proof") {
             dedicated_proof = true;
+        } else if (arg == "--crate-proof") {
+            crate_proof = true;
         } else if (arg == "--emit-content" && i + 1 < argc) {
             return emit_content(argv[++i]);
         } else if (arg == "--frames" && i + 1 < argc) {
@@ -544,7 +732,7 @@ int main(int argc, char** argv) {
         } else {
             fmt::print(stderr,
                        "usage: hello_game [--verbose] [--headless [--frames N]] [--windowed] "
-                       "[--dedicated-proof] [--emit-content DIR]\n"
+                       "[--dedicated-proof] [--crate-proof] [--emit-content DIR]\n"
                        "       hello_game play|dedicated|browser|stream|host [options]  "
                        "(see: hello_game play --help)\n");
             return 2;
@@ -552,6 +740,9 @@ int main(int argc, char** argv) {
     }
     if (dedicated_proof) {
         return run_dedicated_proof(verbose);
+    }
+    if (crate_proof) {
+        return run_crate_proof(verbose);
     }
     if (windowed || headless) {
         return run_rendered(windowed, frames);
