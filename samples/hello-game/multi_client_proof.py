@@ -300,10 +300,16 @@ def main():
 
     normal, baseline, base_runtime = isolation_leg(False)
     dark, impaired, dark_runtime = isolation_leg(True)
-    # Each healthy client's own no-blackout maximum is its measured envelope. A small scheduling
+    # Each healthy client's own no-blackout maximum is its measured envelope. A scheduling
     # allowance covers real-clock jitter; the blackout must not impose seconds of corrections.
+    # The allowance is RELATIVE plus a floor, because the correction COUNT scales with the run:
+    # two no-blackout runs of the same tape differ by ~20 on counts near 450 (measured 2026-11-02:
+    # starbase 444 -> 467, hosted macOS 513 -> 526, every max_snap 0.0), so a fixed +12 failed on
+    # scheduling noise alone. 10 % of ~450 is ~45 corrections, under one second at 60 Hz, still
+    # far below the seconds of corrections a blackout leaking into healthy seats would impose, and
+    # the max_snap bound is unchanged. Owner decision 2026-11-03.
     envelopes = [(baseline[i]["corrections"], baseline[i]["max_snap"]) for i in (0, 2)]
-    healthy = all(impaired[i]["corrections"] <= baseline[i]["corrections"] + 12 and
+    healthy = all(impaired[i]["corrections"] <= baseline[i]["corrections"] * 1.10 + 12 and
                   impaired[i]["max_snap"] <= baseline[i]["max_snap"] + 0.15 for i in (0, 2))
     print_gate("isolation.no_blackout_control", normal["seats"][1]["resyncs"] == 0,
                resyncs=normal["seats"][1]["resyncs"])
