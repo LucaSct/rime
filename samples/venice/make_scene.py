@@ -323,104 +323,124 @@ def build_scene(meshes: dict[str, int], materials: dict[str, int]) -> str:
     sb.add_mesh_asset(req_mesh("canal_water"), tx=0.0, ty=-0.6, tz=-3.0, scale=(32.0, 1.0, 6.0))
 
     rot_neg_z = quat_from_yaw_deg(180.0)
+
+    def add_quay_face(sb: SceneBuilder, z_edge: float, facing_sign: int) -> None:
+        # Slab centre is pushed 0.125 m outside the paving so its top cap at y = 0 never overlaps the
+        # GroundSurface top (coplanar overlap would z-fight). facing_sign = -1 faces -z, +1 faces +z.
+        rot = quat_from_yaw_deg(180.0 if facing_sign < 0 else 0.0)
+        for bay_idx in range(8):
+            cx = -14.0 + 4.0 * bay_idx
+            sb.add_mesh_asset(
+                m_wall,
+                tx=cx,
+                ty=-0.75,
+                tz=z_edge + facing_sign * WALL_HALF_THICK,
+                rot=rot,
+                scale=(1.0, 0.25, 1.0),
+            )
+
+    # Storey boundaries shared by every facade: ground 3.6 m (tall doors), later storeys 3.0 m.
+    storey_y = [0.0, 3.6, 6.6, 9.6]
+    ground_pattern = ["door", "barred", "barred", "door", "barred", "door", "barred", "barred"]
+    barred_sill_y = 0.9
+
+    def add_facade(
+        sb: SceneBuilder,
+        z_wall: float,
+        facing_sign: int,
+        storeys_per_bay: list[int],
+        opening_shift: int,
+    ) -> float:
+        """Add a facade whose front face is the plane z = z_wall, facing `facing_sign` (-1: -z, +1: +z).
+
+        The wall body lies behind the front face (away from the canal) so the opening recesses, which
+        extend toward the wall interior, are never covered by a slab. Returns the x of the second
+        barred window (where the north row puts its rose).
+        """
+        rot = quat_from_yaw_deg(180.0 if facing_sign < 0 else 0.0)
+        wall_z = z_wall - facing_sign * WALL_HALF_THICK
+
+        def add_wall_rect(x0: float, x1: float, y0: float, y1: float) -> None:
+            w = x1 - x0
+            h = y1 - y0
+            if w <= 1e-5 or h <= 1e-5:
+                return
+            sb.add_mesh_asset(
+                m_wall,
+                tx=0.5 * (x0 + x1),
+                ty=y0,
+                tz=wall_z,
+                rot=rot,
+                scale=(w / WALL_SLAB_W, h / WALL_SLAB_H, 1.0),
+            )
+
+        def opening_tx(bay_cx: float, x_mid: float) -> float:
+            # A yaw-180 mesh mirrors local x (x_world = tx - x_local); a yaw-0 mesh does not.
+            return bay_cx - facing_sign * x_mid
+
+        barred_count = 0
+        second_barred_cx = 0.0
+        for bay_idx in range(8):
+            kind = ground_pattern[(bay_idx - opening_shift) % 8]
+            bay_x0 = -16.0 + 4.0 * bay_idx
+            bay_x1 = bay_x0 + 4.0
+            bay_cx = 0.5 * (bay_x0 + bay_x1)
+            ground_y0, ground_y1 = storey_y[0], storey_y[1]
+
+            if kind == "door":
+                w = DOOR_BBOX["x_max"] - DOOR_BBOX["x_min"]
+                x_mid = 0.5 * (DOOR_BBOX["x_min"] + DOOR_BBOX["x_max"])
+                pier_w = 0.5 * (4.0 - w)
+                open_x0 = bay_x0 + pier_w
+                open_x1 = bay_x1 - pier_w
+                add_wall_rect(bay_x0, open_x0, ground_y0, ground_y1)
+                add_wall_rect(open_x1, bay_x1, ground_y0, ground_y1)
+                add_wall_rect(open_x0, open_x1, DOOR_BBOX["y_max"], ground_y1)
+                sb.add_mesh_asset(m_door, tx=opening_tx(bay_cx, x_mid), ty=0.0, tz=z_wall, rot=rot)
+            else:
+                barred_count += 1
+                if barred_count == 2:
+                    second_barred_cx = bay_cx
+                w = BARRED_BBOX["x_max"] - BARRED_BBOX["x_min"]
+                x_mid = 0.5 * (BARRED_BBOX["x_min"] + BARRED_BBOX["x_max"])
+                pier_w = 0.5 * (4.0 - w)
+                open_x0 = bay_x0 + pier_w
+                open_x1 = bay_x1 - pier_w
+                add_wall_rect(bay_x0, open_x0, ground_y0, ground_y1)
+                add_wall_rect(open_x1, bay_x1, ground_y0, ground_y1)
+                add_wall_rect(open_x0, open_x1, ground_y0, barred_sill_y + BARRED_BBOX["y_sill_ledge"])
+                add_wall_rect(open_x0, open_x1, barred_sill_y + BARRED_BBOX["y_max"], ground_y1)
+                sb.add_mesh_asset(
+                    m_barred, tx=opening_tx(bay_cx, x_mid), ty=barred_sill_y, tz=z_wall, rot=rot
+                )
+
+            # Every storey above the ground floor gets one shutter window, sill 0.7 m above the floor.
+            uw = SHUTTER_BBOX["x_max"] - SHUTTER_BBOX["x_min"]
+            ux_mid = 0.5 * (SHUTTER_BBOX["x_min"] + SHUTTER_BBOX["x_max"])
+            upier_w = 0.5 * (4.0 - uw)
+            uopen_x0 = bay_x0 + upier_w
+            uopen_x1 = bay_x1 - upier_w
+            for s in range(1, storeys_per_bay[bay_idx]):
+                y0, y1 = storey_y[s], storey_y[s + 1]
+                sill_y = y0 + 0.7
+                add_wall_rect(bay_x0, uopen_x0, y0, y1)
+                add_wall_rect(uopen_x1, bay_x1, y0, y1)
+                add_wall_rect(uopen_x0, uopen_x1, y0, sill_y + SHUTTER_BBOX["y_min"])
+                add_wall_rect(uopen_x0, uopen_x1, sill_y + SHUTTER_BBOX["y_max"], y1)
+                sb.add_mesh_asset(
+                    m_shutter, tx=opening_tx(bay_cx, ux_mid), ty=sill_y, tz=z_wall, rot=rot
+                )
+        return second_barred_cx
+
     sb.add_comment("Quay canal face: 8 intonaco wall slabs along z = 0 facing -z, 0.75 m tall, top at y = 0.")
-    for bay_idx in range(8):
-        cx = -14.0 + 4.0 * bay_idx
-        # Place front (-z) face at z = -0.25..0 (centre z = -0.125) or front face at z = 0 (centre z = +0.125);
-        # centre z = -0.125 keeps the slab top cap at y = 0 clear of coplanar overlap with GroundSurface (z 0..8).
-        sb.add_mesh_asset(
-            m_wall,
-            tx=cx,
-            ty=-0.75,
-            tz=-WALL_HALF_THICK,
-            rot=rot_neg_z,
-            scale=(1.0, 0.25, 1.0),
-        )
+    add_quay_face(sb, 0.0, -1)
 
     # 4. Facade along z = 8, facing -z, x -16..16 = 8 bays of 4 m, two storeys (0..3.6 m, 3.6..6.6 m).
     # Wall front face sits at z = 8.0 (wall slab centres at z = 8.125); opening z = 0 planes sit at z = 8.0
     # so recesses extend into the wall's [8.0, 8.25] thickness without any wall slab covering them.
-    facade_front_z = 8.0
-    facade_wall_z = facade_front_z + WALL_HALF_THICK
-    ground_pattern = ["door", "barred", "barred", "door", "barred", "door", "barred", "barred"]
-    ground_y0, ground_y1 = 0.0, 3.6
-    upper_y0, upper_y1 = 3.6, 6.6
-    barred_sill_y = 0.9
-    shutter_sill_y = 4.3
-
-    def add_wall_rect(x0: float, x1: float, y0: float, y1: float) -> None:
-        w = x1 - x0
-        h = y1 - y0
-        if w <= 1e-5 or h <= 1e-5:
-            return
-        sb.add_mesh_asset(
-            m_wall,
-            tx=0.5 * (x0 + x1),
-            ty=y0,
-            tz=facade_wall_z,
-            rot=rot_neg_z,
-            scale=(w / WALL_SLAB_W, h / WALL_SLAB_H, 1.0),
-        )
-
     sb.add_comment("Facade along z = 8 facing -z: 8 bays x 4 m, ground storey 0..3.6 m and upper storey 3.6..6.6 m.")
-    barred_count = 0
-    second_barred_cx: float | None = None
-
-    for bay_idx, kind in enumerate(ground_pattern):
-        bay_x0 = -16.0 + 4.0 * bay_idx
-        bay_x1 = bay_x0 + 4.0
-        bay_cx = 0.5 * (bay_x0 + bay_x1)
-
-        # Ground storey bay
-        if kind == "door":
-            w = DOOR_BBOX["x_max"] - DOOR_BBOX["x_min"]
-            x_mid = 0.5 * (DOOR_BBOX["x_min"] + DOOR_BBOX["x_max"])
-            pier_w = 0.5 * (4.0 - w)
-            open_x0 = bay_x0 + pier_w
-            open_x1 = bay_x1 - pier_w
-            add_wall_rect(bay_x0, open_x0, ground_y0, ground_y1)
-            add_wall_rect(open_x1, bay_x1, ground_y0, ground_y1)
-            add_wall_rect(open_x0, open_x1, DOOR_BBOX["y_max"], ground_y1)
-            # Under 180 deg Y rotation, x_world = tx - x_local; tx = bay_cx + x_mid centres [x_min, x_max] on bay_cx.
-            sb.add_mesh_asset(m_door, tx=bay_cx + x_mid, ty=0.0, tz=facade_front_z, rot=rot_neg_z)
-        else:
-            barred_count += 1
-            if barred_count == 2:
-                second_barred_cx = bay_cx
-            w = BARRED_BBOX["x_max"] - BARRED_BBOX["x_min"]
-            x_mid = 0.5 * (BARRED_BBOX["x_min"] + BARRED_BBOX["x_max"])
-            pier_w = 0.5 * (4.0 - w)
-            open_x0 = bay_x0 + pier_w
-            open_x1 = bay_x1 - pier_w
-            add_wall_rect(bay_x0, open_x0, ground_y0, ground_y1)
-            add_wall_rect(open_x1, bay_x1, ground_y0, ground_y1)
-            add_wall_rect(open_x0, open_x1, ground_y0, barred_sill_y + BARRED_BBOX["y_sill_ledge"])
-            add_wall_rect(open_x0, open_x1, barred_sill_y + BARRED_BBOX["y_max"], ground_y1)
-            sb.add_mesh_asset(
-                m_barred,
-                tx=bay_cx + x_mid,
-                ty=barred_sill_y,
-                tz=facade_front_z,
-                rot=rot_neg_z,
-            )
-
-        # Upper storey bay: shutter window in every bay, sill at y = 4.3
-        uw = SHUTTER_BBOX["x_max"] - SHUTTER_BBOX["x_min"]
-        ux_mid = 0.5 * (SHUTTER_BBOX["x_min"] + SHUTTER_BBOX["x_max"])
-        upier_w = 0.5 * (4.0 - uw)
-        uopen_x0 = bay_x0 + upier_w
-        uopen_x1 = bay_x1 - upier_w
-        add_wall_rect(bay_x0, uopen_x0, upper_y0, upper_y1)
-        add_wall_rect(uopen_x1, bay_x1, upper_y0, upper_y1)
-        add_wall_rect(uopen_x0, uopen_x1, upper_y0, shutter_sill_y + SHUTTER_BBOX["y_min"])
-        add_wall_rect(uopen_x0, uopen_x1, shutter_sill_y + SHUTTER_BBOX["y_max"], upper_y1)
-        sb.add_mesh_asset(
-            m_shutter,
-            tx=bay_cx + ux_mid,
-            ty=shutter_sill_y,
-            tz=facade_front_z,
-            rot=rot_neg_z,
-        )
+    second_barred_cx = add_facade(sb, 8.0, -1, [2] * 8, 0)
+    facade_front_z = 8.0
 
     # 5. Rose on the sill of the second barred window (Bay 2, x = -6).
     assert second_barred_cx is not None
