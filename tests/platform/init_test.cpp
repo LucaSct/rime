@@ -48,6 +48,11 @@ TEST_CASE("TimerResolutionScope makes a 1 ms sleep about 1 ms, with no window an
     MESSAGE("median sleep_for(1ms): " << std::chrono::duration<double, std::milli>(median).count()
                                       << " ms");
     // 8 ms is half the default Windows period: the result is bimodal (~1-2 ms raised, ~16 ms
-    // not), so this is a mode test, not a fine timing threshold.
+    // not), so this is a mode test, not a fine timing threshold. It is enforced ONLY on Windows,
+    // the one platform where the scope does anything: elsewhere it would measure the runner, not
+    // our code. (GitHub's hosted macOS VM measured a median of 11.5 ms for a 1 ms sleep on
+    // 2026-11-03 although bare-metal macOS sleeps ~1 ms; the number is still printed above.)
+#if defined(_WIN32)
     CHECK(median < std::chrono::milliseconds(8));
+#endif
 }
