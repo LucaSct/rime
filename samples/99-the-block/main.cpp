@@ -7737,6 +7737,12 @@ int run_play(const std::filesystem::path& cooked, std::string_view scene_path, u
                 static_cast<unsigned long long>(demo.app.frame_index()),
                 static_cast<unsigned long long>(demo.app.tick_count()),
                 quit ? " (ESC)" : "");
+    if (demo.app.clamped_frame_count() != 0) {
+        std::printf("99-the-block: %llu of %llu frames hit the catch-up clamp (simulation slower "
+                    "than real time)\n",
+                    static_cast<unsigned long long>(demo.app.clamped_frame_count()),
+                    static_cast<unsigned long long>(demo.app.frame_index()));
+    }
     demo.app.finish_gpu(); // first-person resources retire before Visuals and their registries
     if (!g_ppm.empty() && demo.visuals && demo.visuals->last_ldr.is_valid()) {
         const auto pixels = read_rgba8(*demo.app.device(),

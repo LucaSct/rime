@@ -328,6 +328,11 @@ public:
 
     [[nodiscard]] std::uint64_t tick_count() const noexcept { return tick_count_; }
 
+    // A frame that hits the catch-up clamp drops simulated time (the sim runs slower than wall
+    // clock). A count near frame_index() means the machine cannot keep the tick rate, e.g. an
+    // unoptimised Debug build.
+    [[nodiscard]] std::uint64_t clamped_frame_count() const noexcept { return clamped_frames_; }
+
 private:
     void run_stage(SimStage stage); // run every step registered at one phase, in order
     void run_ticks(int ticks);      // run `ticks` simulation steps
@@ -393,6 +398,7 @@ private:
 
     std::uint64_t frame_index_ = 0;
     std::uint64_t tick_count_ = 0;
+    std::uint64_t clamped_frames_ = 0;
     bool quit_ = false;
 };
 

@@ -59,6 +59,23 @@ struct InputFlag {
     int key_downs = 0;
 };
 
+TEST_CASE("app: catch-up clamp counts clamped frames") {
+    Application app(AppConfig{});
+
+    for (int i = 0; i < 5; ++i) {
+        app.step(app.fixed_dt());
+    }
+    CHECK(app.clamped_frame_count() == 0);
+
+    const auto step = app.step(1.0);
+    CHECK(step.clamped == true);
+    CHECK(step.ticks == 8);
+    CHECK(app.clamped_frame_count() == 1);
+
+    app.step(app.fixed_dt());
+    CHECK(app.clamped_frame_count() == 1);
+}
+
 TEST_CASE("app: the fixed tick drives a sim system once per tick (M5.7)") {
     Application app(AppConfig{}); // headless, GPU-free, 60 Hz
     ecs::World& w = app.world();
