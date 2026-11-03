@@ -16,6 +16,7 @@
 #include "rime/ecs/schedule.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/platform/event.hpp"
+#include "rime/platform/init.hpp"       // TimerResolutionScope
 #include "rime/render/render_graph.hpp" // RGTexture (FrameContext::present) — no backend headers
 #include "rime/rhi/types.hpp"           // Extent2D only — no Vulkan, no backend
 
@@ -339,6 +340,10 @@ private:
     bool pump_window(); // drain the OS queue into the input snapshot; false = close requested
 
     AppConfig config_;
+    // Declared BEFORE jobs_ on purpose: members construct in declaration order and destroy in
+    // reverse, so the fine OS timer is in place before any job worker first sleeps and stays until
+    // the last one has stopped. Without it an idle worker's 100 us nap parks ~16 ms on Windows.
+    platform::TimerResolutionScope timer_resolution_;
     core::JobSystem jobs_;
     ecs::World world_;
     ecs::Schedule schedule_;
