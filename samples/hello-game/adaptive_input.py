@@ -215,12 +215,21 @@ def adaptive_gates(label, s, c, impaired):
              f"{s['gaps_retired']} == 0")
     unaccounted = c["commands_sent"] - (s["accepted"] + s["gaps_retired"])
     spec_form = c["commands_sent"] - (s["applied"] + s["gaps_retired"] + s["final_margin"])
-    gate(f"{label} accounting", 0 <= unaccounted <= TAIL[impaired],
-         f"commands_sent {c['commands_sent']} - (accepted {s['accepted']} + gaps_retired "
-         f"{s['gaps_retired']}) = {unaccounted}, in [0, {TAIL[impaired]}] (the client's tail after "
-         f"the session closed); executed {s['applied']}, still buffered at the end "
-         f"{s['accepted'] - s['applied']}; spec form sent - (applied + gaps + final_margin "
-         f"{s['final_margin']}) = {spec_form}")
+    accounting = (f"commands_sent {c['commands_sent']} - (accepted {s['accepted']} + gaps_retired "
+                  f"{s['gaps_retired']}) = {unaccounted}, in [0, {TAIL[impaired]}] (the client's "
+                  f"tail after the session closed); executed {s['applied']}, still buffered at the "
+                  f"end {s['accepted'] - s['applied']}; spec form sent - (applied + gaps + "
+                  f"final_margin {s['final_margin']}) = {spec_form}")
+    # The two ends of this interval are different kinds of claim, so they are gated differently.
+    # The LOWER end is logic: the server can never account for more commands than the client sent,
+    # so a negative residual is a bookkeeping bug on any machine. The UPPER end (TAIL) is a
+    # wall-clock budget: it counts what the client sent between the server closing and the client
+    # noticing, so it grows with how slowly the two processes are scheduled at shutdown. Measured
+    # 2026-11-02 on a hosted macOS VM: 27 against TAIL 21, with every other logic gate passing in the
+    # same run. Owner decision 2026-11-03: the upper end is a timing gate (REPORT under
+    # RIME_REALTIME_GATES=report, enforced on self-hosted and local runs), the lower end is not.
+    gate(f"{label} accounting", 0 <= unaccounted, accounting)
+    timing_gate(f"{label} accounting tail", unaccounted <= TAIL[impaired], accounting)
     gate(f"{label} hitch absorbed", s["stalls"] >= 1 and s["max_margin"] >= HITCH_TICKS - 2,
          f"stalls {s['stalls']} >= 1, max_margin {s['max_margin']} >= hitch_ticks "
          f"{HITCH_TICKS} - 2 = {HITCH_TICKS - 2}")
