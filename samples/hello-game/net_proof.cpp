@@ -569,7 +569,9 @@ int positive(const std::filesystem::path& binary) {
     while (child.status == -1 && sequence <= 260) {
         child.pump();
         client.pump();
-        if (std::chrono::steady_clock::now() >= next && welcomed) {
+        // The poll's granularity is the OS timer's, not 1 ms, so an iteration can arrive many
+        // deadlines late; the loop must not assume one deadline per iteration, and catches up.
+        while (std::chrono::steady_clock::now() >= next && welcomed && sequence <= 260) {
             client.window.push(command(sequence++));
             std::array<std::byte, 4 + 16 * 28> bytes{};
             const auto n = replication::encode_input_v2(client.window.packet(), bytes);

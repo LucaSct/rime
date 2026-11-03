@@ -6,6 +6,9 @@
 // true here and false on a spawned thread.
 #include <doctest/doctest.h>
 
+#include <algorithm>
+#include <array>
+#include <chrono>
 #include <thread>
 
 #include "rime/platform/init.hpp"
@@ -27,4 +30,26 @@ TEST_CASE("init/shutdown lifetime and the main-thread guard") {
 
     shutdown();
     CHECK_FALSE(is_initialized());
+}
+
+TEST_CASE("init raises the OS timer resolution so a 1 ms sleep is about 1 ms") {
+    using namespace rime::platform;
+    using clock = std::chrono::steady_clock;
+
+    set_headless(true);
+    REQUIRE(init());
+    std::array<clock::duration, 21> samples{};
+    for (auto& s : samples) {
+        const auto t0 = clock::now();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        s = clock::now() - t0;
+    }
+    std::sort(samples.begin(), samples.end());
+    const auto median = samples[samples.size() / 2];
+    MESSAGE("median sleep_for(1ms): " << std::chrono::duration<double, std::milli>(median).count()
+                                      << " ms");
+    // 8 ms is half the default Windows period: the result is bimodal (~1-2 ms raised, ~16 ms
+    // not), so this is a mode test, not a fine timing threshold.
+    CHECK(median < std::chrono::milliseconds(8));
+    shutdown();
 }
