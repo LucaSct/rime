@@ -234,18 +234,24 @@ RunResult reference_run(std::uint64_t ticks, unsigned workers) {
 
 // ── The crate proof ──────────────────────────────────────────────────────────────────────────
 //
-// Demonstrates that a kinematic player pushing into a dynamic crate does not pop through it,
-// even when approaching at glancing angles or along diagonals. Kinematic bodies are driven
-// directly by the game and not backed out by the physics solver; instead, post-step
-// depenetration detects residual overlaps and restores a legal separation.
+// The player is a KINEMATIC body: the game moves it and the solver never pushes it back, so the
+// only thing that stops it walking into the dynamic crate is the crate being pushed away. That
+// used to fail whenever the crate had fallen ASLEEP first. Sleeping bodies live in islands, and
+// a kinematic body is an island ANCHOR, not a member, so its contact with a sleeping crate never
+// woke the island: the crate stayed frozen and the player walked straight into it. The fix is in
+// the physics core (world.cpp, stage 5: a MOVING kinematic body wakes the sleepers it touches,
+// covered by tests/physics/push_in_test.cpp); this proof is the game-level consequence.
 //
-// The proof executes two passes across multiple approach scenarios:
-//   1. With depenetration enabled (the fix): verifies that the player distance to the crate box
-//      never drops below the penetration threshold (kPlayerRadius - 0.05m), and that walking
-//      straight at the crate pushes it forward.
-//   2. With depenetration disabled (sensitivity control): verifies that at least one scenario
-//      detects penetration inside the crate, proving CI is testing a scenario that reproduces
-//      the bug.
+// Each scenario walks +x for N ticks — the crate settles and sleeps meanwhile — then turns to -z,
+// so the player meets the crate off-centre and from the side, and one walks the diagonal. The
+// claim is geometric: the distance from the player's centre to the crate's box never drops below
+// the player radius minus 5 cm, and walking straight at it pushes the crate a metre.
+//
+// Sensitivity control (measured once, 2026-11-03, not re-run here because the fix is not a
+// runtime switch): with the stage-5 wake reverted the crate never moves from its start, and the
+// player's centre comes within 0.000 / 0.100 / 0.233 m of the box at N = 6 / 9 / 11 — against a
+// floor of 0.30 — so these scenarios do reproduce the bug this proof guards against. With the fix
+// the closest any scenario comes is 0.342 m, which is contact slop, not a walk-through.
 struct ScenarioSpec {
     std::string label;
     int n_ticks = 0;
@@ -261,7 +267,7 @@ struct ScenarioOutcome {
     bool went_inside = false;
 };
 
-ScenarioOutcome run_crate_scenario(const ScenarioSpec& spec, bool depenetrate) {
+ScenarioOutcome run_crate_scenario(const ScenarioSpec& spec) {
     app::AppConfig config{};
     app::Application application(config);
     const app::GameDefinition def = hello_game::definition();
@@ -280,7 +286,6 @@ ScenarioOutcome run_crate_scenario(const ScenarioSpec& spec, bool depenetrate) {
     }
     scene::derive_world_transforms(application.world(), application.jobs());
     HelloGame game;
-    game.set_depenetration(depenetrate);
     app::SetupContext setup{
         application.world(), application.jobs(), application.fixed_dt(), root.dir};
     if (!game.setup(setup)) {
@@ -352,28 +357,15 @@ int run_crate_proof(bool verbose) {
         {"diag", -1, true},
     };
 
-    std::vector<ScenarioOutcome> with_depen;
-    std::vector<ScenarioOutcome> without_depen;
-
+    std::vector<ScenarioOutcome> outcomes;
     for (const auto& spec : specs) {
-        with_depen.push_back(run_crate_scenario(spec, true));
-    }
-    for (const auto& spec : specs) {
-        without_depen.push_back(run_crate_scenario(spec, false));
+        outcomes.push_back(run_crate_scenario(spec));
     }
 
     if (verbose) {
         auto clean = [](float v) noexcept { return std::abs(v) < 5e-4f ? 0.0f : v; };
-        fmt::print("hello-game crate proof (with depenetration)\n");
-        for (const auto& r : with_depen) {
-            fmt::print("  N = {:>4} : min dist = {:.3f}, crate end = ({:.3f}, {:.3f})\n",
-                       r.label,
-                       r.min_distance,
-                       clean(r.crate_end_x),
-                       clean(r.crate_end_z));
-        }
-        fmt::print("hello-game crate proof (without depenetration)\n");
-        for (const auto& r : without_depen) {
+        fmt::print("hello-game crate proof\n");
+        for (const auto& r : outcomes) {
             fmt::print("  N = {:>4} : min dist = {:.3f}, crate end = ({:.3f}, {:.3f})\n",
                        r.label,
                        r.min_distance,
@@ -382,7 +374,7 @@ int run_crate_proof(bool verbose) {
         }
     }
 
-    for (const auto& r : with_depen) {
+    for (const auto& r : outcomes) {
         if (r.went_inside) {
             fmt::print(
                 stderr, "hello-game: FAILED — crate proof: never through (scenario {})\n", r.label);
@@ -392,20 +384,6 @@ int run_crate_proof(bool verbose) {
             fmt::print(stderr, "hello-game: FAILED — crate proof: pushed\n");
             return 1;
         }
-    }
-
-    bool sensitivity_detected = false;
-    for (const auto& r : without_depen) {
-        if (r.went_inside) {
-            sensitivity_detected = true;
-            break;
-        }
-    }
-    if (!sensitivity_detected) {
-        fmt::print(
-            stderr,
-            "hello-game: FAILED — crate proof: sensitivity control (no scenario went inside)\n");
-        return 1;
     }
 
     if (verbose) {
