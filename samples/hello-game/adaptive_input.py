@@ -26,9 +26,9 @@ extra buffering. Every leg runs a real hitch (`play --debug-hitch 240:200`, 200 
   absorbed       (adaptive legs) `stalls >= 1` and the server's `max_margin >= hitch_ticks - 2`: the
                  hitch really reached the server as a gap in time and the buffer really grew by
                  about the hitch, so "no loss" is not a hitch that never happened.
-  drained        (adaptive legs) the client's pacer drained: `pacer_drains >= 1` and
+  drained        (adaptive legs, TIMING since 2026-11-03) the client's pacer drained: `pacer_drains >= 1` and
                  `pacer_drained_buffer_ticks >= hitch_ticks - 3 - jitter_ticks`. Catches a buffer
-                 that only grows (permanent input delay).
+                 that only grows (permanent input delay). REPORT under RIME_REALTIME_GATES=report.
   settled        (adaptive legs, TIMING) the server's `final_margin <= drain_above + 2`. Printed as
                  REPORT, not enforced, when RIME_REALTIME_GATES=report (CI's hosted VMs). `jitter_ticks` (0 loopback, ceil(20 ms / 16.7 ms) = 2 impaired): the pacer
                  drains to the window's MINIMUM margin, and arrival jitter puts that minimum up to
@@ -234,10 +234,15 @@ def adaptive_gates(label, s, c, impaired):
          f"stalls {s['stalls']} >= 1, max_margin {s['max_margin']} >= hitch_ticks "
          f"{HITCH_TICKS} - 2 = {HITCH_TICKS - 2}")
     drain_floor = HITCH_TICKS - 3 - JITTER_TICKS[impaired]
-    # Two halves on purpose. "drained" is LOGIC: the pacer saw the grown buffer and dilated it
-    # back down by about the hitch. "settled" is TIMING: where the server's margin happened to
-    # sit when the session ended, which a descheduled VM moves -- hence timing_gate.
-    gate(f"{label} drained",
+    # Two halves on purpose. "drained" asks whether the pacer saw the grown buffer and dilated it
+    # back down by about the hitch; "settled" asks where the server's margin happened to sit when
+    # the session ended, which a descheduled VM moves. Both are timing gates now. "drained" was
+    # counted as logic until 2026-11-03, when GitHub's hosted macOS VM measured a median of 11.5 ms
+    # for a 1 ms sleep (tests/platform/init_test.cpp prints it): the pacer's windows are wall-clock
+    # windows, so on that clock it drained 7-8 ticks against a floor of 9, or never drained at all,
+    # while self-hosted and local runs drained fully. Owner decision 2026-11-03: REPORT under
+    # RIME_REALTIME_GATES=report, enforced unchanged on self-hosted and local runs.
+    timing_gate(f"{label} drained",
          c["pacer_drains"] >= 1 and c["pacer_drained_buffer_ticks"] >= drain_floor,
          f"pacer_drains {c['pacer_drains']} >= 1, drained_buffer_ticks "
          f"{c['pacer_drained_buffer_ticks']} >= {HITCH_TICKS} - 3 - jitter "
