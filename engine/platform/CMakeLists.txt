@@ -54,7 +54,8 @@ elseif(WIN32)
         src/win32/paths_win32.cpp
         src/win32/socket_win32.cpp)
     # Winsock: the TCP sockets backend links the Windows sockets library.
-    target_link_libraries(rime_platform PRIVATE ws2_32)
+    # winmm: timeBeginPeriod / timeEndPeriod (the timer-resolution request in threads_win32.cpp).
+    target_link_libraries(rime_platform PRIVATE ws2_32 winmm)
 elseif(UNIX)
     # Linux chooses its windowing system at runtime (Wayland or X11), so both backends are compiled
     # in and window_linux.cpp dispatches between them. keymap_linux is shared (evdev -> Key).
