@@ -58,4 +58,12 @@ bool is_initialized() noexcept {
     return g_initialized;
 }
 
+TimerResolutionScope::TimerResolutionScope() : raised_(detail::timer_resolution_begin()) {}
+
+TimerResolutionScope::~TimerResolutionScope() {
+    if (raised_) {
+        detail::timer_resolution_end();
+    }
+}
+
 } // namespace rime::platform

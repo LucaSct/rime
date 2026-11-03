@@ -101,10 +101,17 @@ assert off["response_ticks"] >= 6, off
 print("response on/off:", on["response_ticks"], off["response_ticks"], flush=True)
 
 snaps = []
+corrections = []
 for seed in (7, 8, 9):
     result = run_leg("--net-impair", f"delay_ms=50,loss=0.05,jitter_ms=20,seed={seed}",
                      "--snap-bound", str(BOUND))
-    assert result["corrections"] > 0 and result["replayed"] > 0, result
+    # Whether a lost or late command actually MISPREDICTS depends on when it arrives by the wall
+    # clock, so one seed may correct nothing: hosted Windows measured seed 8 at 0 corrections
+    # (replayed 2413, stale 82) on 2026-11-03, while seed 7 corrected 28 times. The claim below is
+    # the snap bound, checked per seed; corrections only prove that claim is not vacuous, which the
+    # three seeds TOGETHER must do (asserted after the loop, on every runner).
+    assert result["replayed"] > 0, result
+    corrections.append(result["corrections"])
     assert 0 < result["max_replay"] <= 64, result
     assert result["stale_checkpoints"] > 0, result
     assert result["snaps_over_bound"] == 0 and result["max_snap"] <= BOUND, result
@@ -112,6 +119,7 @@ for seed in (7, 8, 9):
     print("seed", seed, "corrections/replayed/stale:", result["corrections"],
           result["replayed"], result["stale_checkpoints"], "max_snap:", result["max_snap"],
           flush=True)
+assert sum(corrections) > 0, ("no seed exercised a correction", corrections)
 print("snap bound:", BOUND, "metres = 4 m/s * 64 ticks / 60 Hz", flush=True)
 
 reseed = run_leg("--net-impair", "delay_ms=0,seed=11,blackout_ms=3000@tick=100")
