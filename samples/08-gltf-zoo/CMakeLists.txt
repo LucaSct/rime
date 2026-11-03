@@ -26,7 +26,9 @@ add_test(NAME gltf_zoo_cook
     COMMAND cargo run --quiet --manifest-path tools/Cargo.toml --bin rime --
             cook samples/08-gltf-zoo/assets --out "${ZOO_COOKED_DIR}"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(gltf_zoo_cook PROPERTIES FIXTURES_SETUP zoo_cook)
+# scripts/build.sh and scripts/build.ps1 run tests with this label when tests are
+# skipped so sample content is cooked and the sample can still run.
+set_tests_properties(gltf_zoo_cook PROPERTIES FIXTURES_SETUP zoo_cook LABELS cook)
 
 # M6's "done when," in CI: load the cooked models and self-check the shaded image (base-color texture
 # and normal map each demonstrably reach the shader; a rigged model is CPU-posed). Green on lavapipe;

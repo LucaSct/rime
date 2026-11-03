@@ -174,7 +174,7 @@ foreach(cook IN LISTS BLOCK_DEMO_COOKS)
                 --damage-threshold ${c_dthr} --damage-scale ${c_dscale}
                 --out "${BLOCK_DEMO_COOKED}" --name ${c_name}
         WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-    set_tests_properties(block_demo_cook_${c_name} PROPERTIES FIXTURES_SETUP block_demo_cook)
+    set_tests_properties(block_demo_cook_${c_name} PROPERTIES FIXTURES_SETUP block_demo_cook LABELS cook)
 endforeach()
 
 # THE STREET'S MATERIAL (m17.8b). Generated rather than imported: this repository holds no texture
@@ -186,7 +186,7 @@ add_test(NAME block_demo_cook_ground
     COMMAND cargo run --quiet --manifest-path tools/Cargo.toml --bin rime --
             ground --out "${BLOCK_DEMO_COOKED}" --name street --bc
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(block_demo_cook_ground PROPERTIES FIXTURES_SETUP block_demo_cook)
+set_tests_properties(block_demo_cook_ground PROPERTIES FIXTURES_SETUP block_demo_cook LABELS cook)
 
 # M13's "done when", in CI. The sim half runs anywhere (it is GPU-free); the render assertions are
 # self-guarded on a device, and a host without one is an honest skip rather than a red build —
@@ -298,7 +298,7 @@ if(BLOCK_HAVE_VIEWMODEL_ART)
 
     add_test(NAME block_demo_cook_viewmodel
         COMMAND ${CMAKE_COMMAND} --build "${CMAKE_BINARY_DIR}" --target the_block_viewmodel_cook)
-    set_tests_properties(block_demo_cook_viewmodel PROPERTIES FIXTURES_SETUP viewmodel_cook)
+    set_tests_properties(block_demo_cook_viewmodel PROPERTIES FIXTURES_SETUP viewmodel_cook LABELS cook)
 endif()
 
 # Authoring -> strict runtime parity, independent of the chaotic collapse/performance sample gates.

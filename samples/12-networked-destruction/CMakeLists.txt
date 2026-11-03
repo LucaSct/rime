@@ -26,7 +26,7 @@ add_test(NAME networked_destruction_cook
     COMMAND cargo run --quiet --manifest-path tools/Cargo.toml --bin rime --
             fracture --size 4 3 0.3 --parts 60 --seed 11 --out "${NETWALL_COOKED_DIR}" --name wall
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(networked_destruction_cook PROPERTIES FIXTURES_SETUP netwall_cook)
+set_tests_properties(networked_destruction_cook PROPERTIES FIXTURES_SETUP netwall_cook LABELS cook)
 
 # M11's "done when", in CI: the deterministic scripted-network run. Exact counters, exact packet
 # economy, and a negative control that must MISMATCH — see README.md for what this can and cannot

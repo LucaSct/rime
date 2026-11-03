@@ -28,7 +28,7 @@ add_test(NAME networked_player_cook
     COMMAND cargo run --quiet --manifest-path tools/Cargo.toml --bin rime --
             fracture --size 3 3 0.3 --parts 40 --seed 12 --out "${PLAYER_COOKED_DIR}" --name wall
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(networked_player_cook PROPERTIES FIXTURES_SETUP player_cook)
+set_tests_properties(networked_player_cook PROPERTIES FIXTURES_SETUP player_cook LABELS cook)
 
 # M12's "done when", in CI. Self-gating: the binary returns non-zero if any clause fails, so the
 # clauses live in the program rather than in a CMake assertion nobody reads.
