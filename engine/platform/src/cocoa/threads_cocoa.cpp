@@ -25,7 +25,9 @@ void set_thread_name(std::string_view name) {
 
 namespace detail {
 // macOS timers are already fine-grained, so there is nothing to raise.
-void timer_resolution_begin() {}
+bool timer_resolution_begin() {
+    return true;
+}
 
 void timer_resolution_end() {}
 } // namespace detail

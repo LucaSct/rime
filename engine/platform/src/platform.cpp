@@ -32,8 +32,6 @@ bool init() {
     // Start from a clean run-loop state: no stale events, not quitting.
     detail::clear_events();
     detail::reset_quit();
-    // Raise the OS timer resolution even when headless: the dedicated server and tests sleep too.
-    detail::timer_resolution_begin();
     // Bring up the OS windowing system (NSApplication / DPI awareness / the X11|Wayland
     // connection) unless we are headless (unit tests, display-less CI).
     if (!headless()) {
@@ -46,7 +44,6 @@ void shutdown() {
     if (!headless()) {
         detail::native_shutdown();
     }
-    detail::timer_resolution_end();
     detail::clear_events();
     detail::reset_quit();
     g_initialized = false;
@@ -59,6 +56,14 @@ bool on_main_thread() noexcept {
 
 bool is_initialized() noexcept {
     return g_initialized;
+}
+
+TimerResolutionScope::TimerResolutionScope() : raised_(detail::timer_resolution_begin()) {}
+
+TimerResolutionScope::~TimerResolutionScope() {
+    if (raised_) {
+        detail::timer_resolution_end();
+    }
 }
 
 } // namespace rime::platform

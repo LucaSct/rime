@@ -32,12 +32,11 @@ TEST_CASE("init/shutdown lifetime and the main-thread guard") {
     CHECK_FALSE(is_initialized());
 }
 
-TEST_CASE("init raises the OS timer resolution so a 1 ms sleep is about 1 ms") {
+TEST_CASE("TimerResolutionScope makes a 1 ms sleep about 1 ms, with no window and no init()") {
     using namespace rime::platform;
     using clock = std::chrono::steady_clock;
 
-    set_headless(true);
-    REQUIRE(init());
+    const TimerResolutionScope fine_timer;
     std::array<clock::duration, 21> samples{};
     for (auto& s : samples) {
         const auto t0 = clock::now();
@@ -51,5 +50,4 @@ TEST_CASE("init raises the OS timer resolution so a 1 ms sleep is about 1 ms") {
     // 8 ms is half the default Windows period: the result is bimodal (~1-2 ms raised, ~16 ms
     // not), so this is a mode test, not a fine timing threshold.
     CHECK(median < std::chrono::milliseconds(8));
-    shutdown();
 }

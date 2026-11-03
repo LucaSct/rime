@@ -29,4 +29,23 @@ void shutdown();
 // True between a successful init() and shutdown().
 [[nodiscard]] bool is_initialized() noexcept;
 
+// Raises the OS timer resolution for as long as the object lives (RAII), so that a short
+// sleep_for() sleeps about as long as asked. On Windows the default timer period is 15.625 ms and
+// every sleep rounds UP to it (sleep_for(1ms) measured ~16 ms); the request lowers it to 1 ms.
+// Linux and macOS timers are already fine-grained, so there it does nothing. It is deliberately
+// NOT part of init(): init() belongs to windowing and only a windowed app calls it, while the
+// processes that sleep most (a dedicated server, a headless client) have no window at all. Hold
+// one for the life of anything that sleeps or runs a JobSystem; rime::app::Application does.
+// Nesting is safe: Windows counts the requests and the period stays raised until the last ends.
+class TimerResolutionScope {
+public:
+    TimerResolutionScope();
+    ~TimerResolutionScope();
+    TimerResolutionScope(const TimerResolutionScope&) = delete;
+    TimerResolutionScope& operator=(const TimerResolutionScope&) = delete;
+
+private:
+    bool raised_; // the OS accepted the request, so the destructor owes it one release
+};
+
 } // namespace rime::platform

@@ -332,7 +332,8 @@ void JobSystem::worker_main(int queue_index) {
                 std::this_thread::yield();
             } else {
                 // On Windows this sleep rounds up to the OS timer period (~15.6 ms by default),
-                // which platform::init() raises to 1 ms (core cannot include platform; see there).
+                // which platform::TimerResolutionScope lowers to 1 ms for any process holding one,
+                // as app::Application does (core cannot include platform; see init.hpp).
                 std::this_thread::sleep_for(std::chrono::microseconds(100));
             }
         }

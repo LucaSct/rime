@@ -44,8 +44,6 @@ namespace {
 #define PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION 0x4
 #endif
 
-bool g_timer_period_raised = false; // true only if timeBeginPeriod(1) succeeded.
-
 } // namespace
 
 // Windows wakes sleeping threads on a periodic timer interrupt whose default period is 15.625 ms
@@ -59,21 +57,19 @@ bool g_timer_period_raised = false; // true only if timeBeginPeriod(1) succeeded
 // dedicated server or a minimised game. Setting PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION
 // with StateMask 0 opts this process out of that throttling. Both calls are best-effort: failure
 // just leaves the coarse default timer, which is slower but not an error.
-void timer_resolution_begin() {
-    g_timer_period_raised = (timeBeginPeriod(1) == TIMERR_NOERROR);
+bool timer_resolution_begin() {
+    const bool raised = (timeBeginPeriod(1) == TIMERR_NOERROR);
 
     PROCESS_POWER_THROTTLING_STATE state{};
     state.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
     state.ControlMask = PROCESS_POWER_THROTTLING_IGNORE_TIMER_RESOLUTION;
     state.StateMask = 0;
     SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &state, sizeof(state));
+    return raised;
 }
 
 void timer_resolution_end() {
-    if (g_timer_period_raised) {
-        timeEndPeriod(1);
-        g_timer_period_raised = false;
-    }
+    timeEndPeriod(1); // Windows counts begin/end pairs; the scope calls this only after a success.
 }
 
 } // namespace detail

@@ -25,9 +25,9 @@ void clear_events(); // drop any pending events (on init/shutdown)
 [[nodiscard]] std::unique_ptr<Window> null_create_window(const WindowDesc& desc);
 
 // --- OS timer resolution (win32/threads_win32.cpp, linux/threads_posix.cpp,
-// cocoa/threads_cocoa.cpp) --- Raised for the process lifetime by init(), restored by shutdown();
-// runs even when headless().
-void timer_resolution_begin();
+// cocoa/threads_cocoa.cpp) --- Driven only by TimerResolutionScope (init.hpp). begin() reports
+// whether the OS accepted the request; end() is called exactly once for each begin() that did.
+[[nodiscard]] bool timer_resolution_begin();
 void timer_resolution_end();
 
 // --- native OS backend (cocoa/win32/linux; exactly one compiled per OS) ---
