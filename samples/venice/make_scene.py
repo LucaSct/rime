@@ -180,7 +180,7 @@ class SceneBuilder:
         return "\n".join(self.lines).rstrip() + "\n"
 
 
-def build_scene(meshes: dict[str, int], materials: dict[str, int]) -> str:
+def build_scene(meshes: dict[str, int], materials: dict[str, int], camera: str = "north") -> str:
     def req_mesh(stem: str) -> int:
         key = f"{stem}.rmesh"
         if key not in meshes:
@@ -211,11 +211,19 @@ def build_scene(meshes: dict[str, int], materials: dict[str, int]) -> str:
 
     # 1. Camera + PlayerSpawn on the quay at (-12, 1.7, 3) looking along +x with slight downward pitch.
     # Identity camera looks along -Z; yaw -90 deg rotates (0, 0, -1) -> (+1, 0, 0) (+X).
-    cam_rot = quat_yaw_pitch_deg(-90.0, -7.0)
-    sb.add_comment("Camera on the quay at (-12, 1.7, 3), looking along +x (-7 deg pitch).")
+    # The "opposite" review viewpoint stands on the south fondamenta and looks back along -x (yaw +90),
+    # so one generator yields both banks' views without hand-editing the committed scene.
+    if camera == "opposite":
+        cam_pos, cam_yaw = (12.0, 1.7, -10.0), 90.0
+        cam_text = "Review camera on the opposite quay at (12, 1.7, -10), looking along -x (-7 deg pitch)."
+    else:
+        cam_pos, cam_yaw = (-12.0, 1.7, 3.0), -90.0
+        cam_text = "Camera on the north quay at (-12, 1.7, 3), looking along +x (-7 deg pitch)."
+    cam_rot = quat_yaw_pitch_deg(cam_yaw, -7.0)
+    sb.add_comment(cam_text)
     sb.add_entity(
         [
-            sb.transform_block(-12.0, 1.7, 3.0, cam_rot),
+            sb.transform_block(*cam_pos, cam_rot),
             "\n".join(
                 [
                     f"{TYPE_CAMERA} {{",
@@ -277,10 +285,10 @@ def build_scene(meshes: dict[str, int], materials: dict[str, int]) -> str:
         ]
     )
 
-    spawn_rot = quat_from_yaw_deg(-90.0)
+    spawn_rot = quat_from_yaw_deg(cam_yaw)
     sb.add_entity(
         [
-            sb.transform_block(-12.0, 1.7, 3.0, spawn_rot),
+            sb.transform_block(*cam_pos, spawn_rot),
             "\n".join(
                 [
                     f"{TYPE_PLAYER_SPAWN} {{",
@@ -312,15 +320,20 @@ def build_scene(meshes: dict[str, int], materials: dict[str, int]) -> str:
         ]
     )
 
-    # 3. Rio (canal): water stub plane at y = -0.6 covering z -6..0, x -16..16, plus quay canal face along z = 0.
-    # A `MaterialRef` is only an index into the host's runtime material table (slot 0 is white), so the
-    # water's colour and roughness come from a cooked glTF instead: `canal_water.gltf` (make_water.py), a
-    # 1 x 1 m quad whose material carries only factors. Scaled here to the 32 x 6 m rio.
+    # 3. Lagoon: ONE huge water plane under everything. Anything the camera can see past the quays
+    # (the open ends of the rio, the far side of the buildings) is then water to the horizon instead of
+    # the sky's black void, and no tiling or seams need managing. A `MaterialRef` is only an index into
+    # the host's runtime material table (slot 0 is white), so the water's colour and roughness come
+    # from a cooked glTF instead: `canal_water.gltf` (make_water.py), a 1 x 1 m quad with factors only.
+    # Its size is set by the camera's far plane (z_far 1000 m), not by the map: the sky draws black
+    # BELOW the horizon, so wherever the plane ends a dark band shows between its edge and the sky.
+    # From eye height (2.3 m above the water) an edge 200 m away sits 0.66 deg below the horizon,
+    # ~6 px at 540 px; at 980 m it is 0.13 deg, ~1 px. Any farther and the far plane clips it.
     sb.add_comment(
-        "STUB: Rio canal water plane (x -16..16, z -6..0, y = -0.6). There is no water simulation;\n"
-        "a dark, smooth (roughness 0.05) factor-only material from samples/venice/canal_water.gltf."
+        "STUB: lagoon water, one 1960 x 1960 m plane at y = -0.6 under the whole scene. There is no water\n"
+        "simulation; a dark, smooth (roughness 0.05) factor-only material from samples/venice/canal_water.gltf."
     )
-    sb.add_mesh_asset(req_mesh("canal_water"), tx=0.0, ty=-0.6, tz=-3.0, scale=(32.0, 1.0, 6.0))
+    sb.add_mesh_asset(req_mesh("canal_water"), tx=0.0, ty=-0.6, tz=0.0, scale=(1960.0, 1.0, 1960.0))
 
     rot_neg_z = quat_from_yaw_deg(180.0)
 
@@ -453,6 +466,79 @@ def build_scene(meshes: dict[str, int], materials: dict[str, int]) -> str:
         rot=rot_neg_z,
     )
 
+    def add_end_walls(sb: SceneBuilder, z_wall: float, facing_sign: int, storeys_per_bay: list[int]) -> None:
+        # The facade is a single slab, paper-thin seen end-on. A return wall at each end, perpendicular
+        # to the facade and running 8 m back (away from the canal), gives the block a believable depth.
+        # Its height follows the end bay's storeys, and the outer face sits on x = +-16 facing outward.
+        back = -facing_sign
+        for x_end, bay_idx, yaw in ((-16.0, 0, -90.0), (16.0, 7, 90.0)):
+            rot = quat_from_yaw_deg(yaw)
+            tx = x_end - WALL_HALF_THICK if x_end > 0 else x_end + WALL_HALF_THICK
+            for s in range(storeys_per_bay[bay_idx]):
+                y0, y1 = storey_y[s], storey_y[s + 1]
+                for k in range(2):
+                    sb.add_mesh_asset(
+                        m_wall,
+                        tx=tx,
+                        ty=y0,
+                        tz=z_wall + back * (2.0 + WALL_SLAB_W * k),
+                        rot=rot,
+                        scale=(1.0, (y1 - y0) / WALL_SLAB_H, 1.0),
+                    )
+
+    def add_quay_ends(sb: SceneBuilder, z_near: float, z_far: float) -> None:
+        # Without end faces the paving is a floating sheet when seen from the lagoon. Same 0.75 m,
+        # top-at-y=0 slabs as the canal faces, pushed 0.125 m outside the paving to avoid z-fighting.
+        for x_end, yaw in ((-16.0, -90.0), (16.0, 90.0)):
+            tx = x_end + (WALL_HALF_THICK if x_end > 0 else -WALL_HALF_THICK)
+            for k in range(2):
+                z = min(z_near, z_far) + 2.0 + WALL_SLAB_W * k
+                sb.add_mesh_asset(
+                    m_wall,
+                    tx=tx,
+                    ty=-0.75,
+                    tz=z,
+                    rot=quat_from_yaw_deg(yaw),
+                    scale=(1.0, 0.25, 1.0),
+                )
+
+    sb.add_comment("North facade end walls: x = -16 and x = +16, 8 m back (z 8..16), full end-bay height.")
+    add_end_walls(sb, 8.0, -1, [2] * 8)
+
+    # 5b. Opposite bank: fondamenta z -14..-6 so the rio reads as a canal between two rows of houses.
+    sb.add_comment("South fondamenta (quay): x -16..16, z -14..-6 (centre z=-10) at y=0, masegni paving.")
+    sb.add_entity(
+        [
+            sb.transform_block(0.0, 0.0, -10.0),
+            f"{TYPE_MATERIAL_ASSET} {{\n  asset {mat_masegni}\n}}",
+            "\n".join(
+                [
+                    f"{TYPE_GROUND_SURFACE} {{",
+                    "  half_x 16",
+                    "  half_z 4",
+                    "  cells_x 8",
+                    "  cells_z 2",
+                    "  tile_metres 8",
+                    "  thickness 1",
+                    "}",
+                ]
+            ),
+        ]
+    )
+    sb.add_comment("South quay canal face: 8 intonaco slabs along z = -6 facing +z, 0.75 m tall, top at y = 0.")
+    add_quay_face(sb, -6.0, 1)
+    # Bays 0-3 get a third storey so the skyline steps down; shifting the openings by one bay stops the
+    # two banks mirroring each other. No rose here: it stays a single hero detail on the north row.
+    south_storeys = [3, 3, 3, 3, 2, 2, 2, 2]
+    sb.add_comment("South facade along z = -14 facing +z: bays 0-3 three storeys, bays 4-7 two; openings shifted one bay.")
+    add_facade(sb, -14.0, 1, south_storeys, 1)
+    sb.add_comment("South facade end walls: x = -16 and x = +16, 8 m back (z -14..-22).")
+    add_end_walls(sb, -14.0, 1, south_storeys)
+
+    sb.add_comment("Quay end faces at x = -16 and x = +16 for both fondamentas (0.75 m, top at y = 0).")
+    add_quay_ends(sb, 0.0, 8.0)
+    add_quay_ends(sb, -14.0, -6.0)
+
     # 6. Boats moored in the canal (y = 0 at water plane y = -0.6; 0.24 m draft is an assumption).
     sb.add_comment("Moored boats: workboat at x=-6 along +x (z=-2.5), hull_only at x=8 yawed 180 deg (z=-4.0).")
     sb.add_mesh_asset(m_workboat, tx=-6.0, ty=-0.6, tz=-2.5)
@@ -508,10 +594,17 @@ def main() -> None:
         default=default_out,
         help=f"Output .rscene path (default: {default_out})",
     )
+    parser.add_argument(
+        "--camera",
+        choices=("north", "opposite"),
+        default="north",
+        help="Viewpoint for camera + PlayerSpawn: north quay (default, committed scene) or the "
+        "opposite fondamenta at (12, 1.7, -10) for review.",
+    )
     args = parser.parse_args()
 
     meshes, materials = load_manifest(args.manifest)
-    content = build_scene(meshes, materials)
+    content = build_scene(meshes, materials, args.camera)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(content, encoding="utf-8")
     print(f"Wrote {args.out} ({content.count('entity ')} entities).")

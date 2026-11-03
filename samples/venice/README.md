@@ -1,9 +1,13 @@
 # Venice Map (`samples/venice`)
 
-A first Venetian canal-and-quay scene assembled from Luca's 14 photo-sourced assets: an 8-bay,
-two-storey intonaco and Istrian-stone façade facing a masegni fondamenta (`z = 0..8`), a canal
-(`z = -6..0`) with two moored boats, a rose on the second barred-window sill, and a small Lido sand
-patch (`x = 16..24`) with driftwood, marram grass, and shells.
+A Venetian rio between two banks, assembled from Luca's 14 photo-sourced assets: a north row (an
+8-bay, two-storey intonaco and Istrian-stone façade on a masegni fondamenta, `z = 0..8`) and a south
+row (`z = -14..-6`, bays 0-3 three storeys, bays 4-7 two, openings shifted one bay), both with return
+walls 8 m deep and quay end faces at `x = ±16`. The rio (`z = -6..0`) holds two moored boats and floats
+on one 1960 × 1960 m lagoon water plane that runs to the horizon; a rose sits on the second barred-window
+sill of the north row, and a small Lido sand patch (`x = 16..24`) has driftwood, marram grass, and
+shells. `python3 samples/venice/make_scene.py --camera opposite --out PATH` writes a review copy
+viewed from the south fondamenta.
 
 ## Private Sources (Not in Git)
 
@@ -79,9 +83,8 @@ xvfb-run -a ./build/dev/bin/the_block --play \
 
 ## Stubs, Limitations, and Assumed Dimensions
 
-- **Water is a stub:** There is no water simulation or buoyancy. The Rio (`z = -6..0` at
-  `y = -0.6`) uses a flat built-in plane (`MeshRef { mesh 1 }` in `editor-host`, scaled to
-  `32 × 6 m`) and `MaterialRef { material 0 }`. Because `MaterialRef` serializes only a runtime
+- **Water is a stub:** There is no water simulation or buoyancy. The lagoon (one plane at
+  `y = -0.6`, scaled `1960 × 1960 m`, just inside the camera's 1000 m far plane) uses the cooked `canal_water` quad mesh and its factor-only material. Because `MaterialRef` serializes only a runtime
   table index in `.rscene` (not inline PBR base colour, roughness, or metallic fields), the water
   cannot carry an authored `(0.04, 0.07, 0.06)` green-teal PBR material in `.rscene`.
 - **No collision on structures or props:** Only the Fondamenta `GroundSurface` (`x = -16..16`,
