@@ -283,6 +283,13 @@ def predicted_gates(label, s, c, k1, impaired):
          f"{s['interaction_raw_bound']:.4f}")
     residual, n, (excluded, worst), (stalled, stall_worst), unexplained = residual_before(c, k1)
     ok = not unexplained
+    if residual > RESIDUAL:
+        outliers = [point for point in c["crate_trace"]
+                    if point[0] < k1 and point[2] <= PLAYER_AGREES and
+                    (len(point) == 3 or point[3] == 0) and point[1] > RESIDUAL]
+        print(f"DETAIL {label} agreed pre-kick outliers {len(outliers)} "
+              f"(server tick, crate metres, player metres[, server stalls]): "
+              f"{sorted(outliers, key=lambda point: point[1], reverse=True)[:20]}", flush=True)
     gate(f"{label} undisturbed residual", residual <= RESIDUAL and ok,
          f"{n} checkpoints before the first kick with the player agreeing and no server stall, "
          f"max correction {residual * 1000:.3f} mm <= {RESIDUAL * 1000:.0f} mm; {excluded} more "
@@ -297,6 +304,13 @@ def predicted_gates(label, s, c, k1, impaired):
          f"{n} agreed checkpoints before kick #1 >= 100", timing=True)
     floor = VISIBLE_IMPAIRED if impaired else VISIBLE_LOOPBACK
     shape = kick_shape(c, k1, floor)
+    if shape is not None and not shape[3]:
+        trace = [point for point in c["crate_trace"] if point[0] >= k1]
+        spike = next(i for i, point in enumerate(trace) if point[1] > floor)
+        outliers = [point for point in trace[spike + 1:] if not explained(*point[1:])]
+        print(f"DETAIL {label} post-kick outliers {len(outliers)} "
+              f"(server tick, crate metres, player metres[, server stalls]): "
+              f"{sorted(outliers, key=lambda point: point[1], reverse=True)[:20]}", flush=True)
     gate(f"{label} kick visibility window",
          shape is not None and shape[1] <= 5 and len(shape[2]) == 2,
          "no correction above the floor" if shape is None else
