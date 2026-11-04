@@ -29,6 +29,11 @@ jobs:
   build:
     name: build & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # Hosted VMs are shared and bursty: wall-clock settling gates in the real-time process proofs
+    # report their number here instead of failing (owner decision 2026-11-02). Logic gates still
+    # fail; the self-hosted jobs, which leave this unset, enforce the timing gates too.
+    env:
+      RIME_REALTIME_GATES: report
     # Skip hosted CI while a pull request is a DRAFT: iterating on a draft used to re-run the
     # whole 8-job matrix on every `synchronize`, which is the single easiest way to burn hosted
     # minutes. ci-self-hosted.yml still builds and ASan-tests each push on our own runners, so a
