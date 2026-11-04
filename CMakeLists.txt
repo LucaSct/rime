@@ -16,6 +16,23 @@ project(Rime
     DESCRIPTION "Rime — an open-source AAA-grade game engine"
     LANGUAGES CXX)
 
+# CMake's default MSVC Debug flags include /Ob0, which disables all inlining, including
+# __forceinline. This silently threw away the win measured in force_inline.hpp (such as
+# core::rotate's -19.6% physics solve) by emitting calls for every RIME_FORCE_INLINE site.
+# Switching to /Ob1 honours explicit inline/__forceinline requests while avoiding the
+# discretionary inlining of /Ob2, keeping Debug builds steppable and debuggable. Note that
+# /Ob1 also expands every member function DEFINED IN ITS CLASS (implicitly inline), so a
+# header's small helpers now inline in Debug too, and MSVC's optimizer warnings that only fire
+# after inlining (C4723 on a guarded division, first seen in fixed_timestep.hpp) can appear
+# here and not in a GCC/Clang build. Replacing
+# the flag directly rather than appending /Ob1 prevents cl.exe warning D9025 ("overriding
+# '/Ob0' with '/Ob1'") on every translation unit. Note that the effect on MSVC Debug timing
+# is not yet measured (inferred).
+if(MSVC)
+    string(REPLACE "/Ob0" "/Ob1" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+    string(REPLACE "/Ob0" "/Ob1" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+endif()
+
 # ── Language policy ───────────────────────────────────────────────────────────
 # C++20 today; we adopt C++23 features as they stabilize across our compilers.
 set(CMAKE_CXX_STANDARD 20)

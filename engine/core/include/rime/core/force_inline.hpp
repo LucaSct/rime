@@ -34,6 +34,11 @@
 // the macro is the only place that word belongs. Equally, REMOVING it from the macro would make
 // every user a non-inline function defined in a header — an ODR violation the linker finds, not
 // the compiler — which is why all three branches carry it.
+//
+// MSVC DEBUG BUILDS REQUIRE /Ob1 for this macro to mean anything. CMake's default MSVC Debug
+// flags include /Ob0, which disables all inlining (including __forceinline) and emits an out-of-
+// line call. The top-level CMakeLists.txt replaces /Ob0 with /Ob1 so explicit inline requests
+// are honoured in Debug while preserving steppability without discretionary inlining.
 #if defined(_MSC_VER)
 #define RIME_FORCE_INLINE __forceinline // implies inline; spelling it again is C4141
 #elif defined(__GNUC__) || defined(__clang__)
