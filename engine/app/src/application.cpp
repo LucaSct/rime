@@ -408,6 +408,9 @@ void Application::run_one_frame(double frame_dt) {
     pending_input_.clear();
 
     const FixedTimestep::Step step = timestep_.advance(frame_dt);
+    if (step.clamped) {
+        ++clamped_frames_;
+    }
     run_ticks(step.ticks);
     render_frame(step.alpha, frame_dt);
     ++frame_index_;
@@ -429,6 +432,9 @@ FixedTimestep::Step Application::step(double frame_dt) {
     pending_input_.clear();
 
     const FixedTimestep::Step s = timestep_.advance(frame_dt);
+    if (s.clamped) {
+        ++clamped_frames_;
+    }
     run_ticks(s.ticks);
     render_frame(s.alpha, frame_dt);
     ++frame_index_;

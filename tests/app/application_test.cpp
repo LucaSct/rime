@@ -59,6 +59,26 @@ struct InputFlag {
     int key_downs = 0;
 };
 
+TEST_CASE("app: catch-up clamp counts clamped frames") {
+    // A frame owing more ticks than the clamp allows runs the clamp's worth and DROPS the rest
+    // (ADR-0023 §2). The count is what makes that visible: a Debug build that clamps on every
+    // frame runs its simulation slower than real time and, without it, says nothing.
+    Application app(AppConfig{});
+
+    for (int i = 0; i < 5; ++i) {
+        app.step(app.fixed_dt());
+    }
+    CHECK(app.clamped_frame_count() == 0);
+
+    const auto step = app.step(1.0);
+    CHECK(step.clamped == true);
+    CHECK(step.ticks == AppConfig{}.max_ticks_per_frame); // 1 s owes 60; the clamp runs fewer
+    CHECK(app.clamped_frame_count() == 1);
+
+    app.step(app.fixed_dt());
+    CHECK(app.clamped_frame_count() == 1);
+}
+
 TEST_CASE("app: the fixed tick drives a sim system once per tick (M5.7)") {
     Application app(AppConfig{}); // headless, GPU-free, 60 Hz
     ecs::World& w = app.world();
