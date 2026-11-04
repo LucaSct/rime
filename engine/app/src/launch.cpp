@@ -114,7 +114,15 @@ std::string launch_usage(std::string_view program) {
         "  --profile-version-override N  connected schema refusal diagnostic\n"
         "  --fixed-dt-override S  advertise a different connected timestep\n"
         "  --client-port N  connected local UDP port diagnostic\n"
-        "  --input-tape  connected fixed input for process diagnostics\n"
+        "  --input-tape  connected fixed input for process diagnostics (no Throw)\n"
+        "  --input-tape-throw  same tape, with one Throw on tick 12\n"
+        "  --spawn-fault CASE  dedicated Throw diagnostic (refuse, lose-one, lose-all, duplicate, "
+        "late-alive, late-ended)\n"
+        "  --spawn-debug-break CASE  connected sensitivity control (no-ledger, no-adopt, "
+        "authority-presentation)\n"
+        "  --spawn-fault-ticks N  window of duplicate / late-alive / late-ended, in server ticks\n"
+        "  --input-slack N    dedicated: commands buffered before one executes (1..8, default 1)\n"
+        "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
         "  --listen ADDR:PORT  dedicated: bind IPv4 address and port (0 = OS chosen)\n"
@@ -163,6 +171,54 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             result.options.no_prediction = true;
         } else if (arg == "--input-tape") {
             result.options.input_tape = true;
+        } else if (arg == "--input-tape-throw") {
+            result.options.input_tape = true;
+            result.options.input_tape_throw = true;
+        } else if (arg == "--spawn-fault") {
+            if (!has_value || result.options.spawn_fault != SpawnFault::None)
+                return fail("--spawn-fault needs one case");
+            const auto value = args[++i];
+            if (value == "refuse")
+                result.options.spawn_fault = SpawnFault::Refuse;
+            else if (value == "lose-one")
+                result.options.spawn_fault = SpawnFault::LoseOne;
+            else if (value == "lose-all")
+                result.options.spawn_fault = SpawnFault::LoseAll;
+            else if (value == "duplicate")
+                result.options.spawn_fault = SpawnFault::Duplicate;
+            else if (value == "late-alive")
+                result.options.spawn_fault = SpawnFault::LateAlive;
+            else if (value == "late-ended")
+                result.options.spawn_fault = SpawnFault::LateEnded;
+            else
+                return fail("--spawn-fault needs a known case");
+        } else if (arg == "--spawn-debug-break") {
+            if (!has_value || result.options.spawn_debug_break != SpawnDebugBreak::None)
+                return fail("--spawn-debug-break needs one case");
+            const auto value = args[++i];
+            if (value == "no-ledger")
+                result.options.spawn_debug_break = SpawnDebugBreak::NoLedger;
+            else if (value == "no-adopt")
+                result.options.spawn_debug_break = SpawnDebugBreak::NoAdopt;
+            else if (value == "authority-presentation")
+                result.options.spawn_debug_break = SpawnDebugBreak::AuthorityPresentation;
+            else
+                return fail("--spawn-debug-break needs a known case");
+        } else if (arg == "--input-slack") {
+            if (!has_value || result.options.input_slack != 0 ||
+                !parse_uint(args[++i], result.options.input_slack) ||
+                result.options.input_slack == 0 || result.options.input_slack > 8)
+                return fail("--input-slack needs an integer 1..8 once");
+        } else if (arg == "--spawn-fault-ticks") {
+            if (!has_value || result.options.spawn_fault_ticks != 0 ||
+                !parse_uint(args[++i], result.options.spawn_fault_ticks) ||
+                result.options.spawn_fault_ticks == 0)
+                return fail("--spawn-fault-ticks needs a positive integer once");
+        } else if (arg == "--spawn-unresolved-bound") {
+            if (!has_value || result.options.spawn_unresolved_bound != 0 ||
+                !parse_uint(args[++i], result.options.spawn_unresolved_bound) ||
+                result.options.spawn_unresolved_bound == 0)
+                return fail("--spawn-unresolved-bound needs a positive integer once");
         } else if (arg == "--snap-bound") {
             if (!has_value || result.options.has_snap_bound)
                 return fail("--snap-bound needs a non-negative finite number once");
@@ -340,6 +396,20 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         (result.options.mode != LaunchMode::Dedicated || result.options.offline)) {
         return fail("--input-trace requires listening dedicated mode");
     }
+    if (result.options.spawn_fault != SpawnFault::None &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline))
+        return fail("--spawn-fault requires listening dedicated mode");
+    {
+        const auto fault = result.options.spawn_fault;
+        const bool timed = fault == SpawnFault::Duplicate || fault == SpawnFault::LateAlive ||
+                           fault == SpawnFault::LateEnded;
+        if (timed != (result.options.spawn_fault_ticks != 0))
+            return fail("--spawn-fault-ticks goes with duplicate, late-alive or late-ended only");
+    }
+    if ((result.options.spawn_debug_break != SpawnDebugBreak::None ||
+         result.options.spawn_unresolved_bound != 0) &&
+        result.options.connect_host.empty())
+        return fail("spawn client diagnostics require --connect");
     if (!result.options.connect_host.empty() && result.options.mode != LaunchMode::Play)
         return fail("--connect requires play mode");
     if (!result.options.connect_host.empty() &&
@@ -528,7 +598,10 @@ RunReport run_game_mode(const LaunchOptions& options,
                                      *definition.network_input,
                                      app.world(),
                                      definition.remote_play ? &*definition.remote_play : nullptr,
-                                     report.bind_error);
+                                     report.bind_error,
+                                     options.spawn_fault,
+                                     options.spawn_fault_ticks,
+                                     options.input_slack == 0 ? 1u : options.input_slack);
         if (!network) {
             report.bind_failed = report.bind_error.starts_with('E');
             return refuse(report,
@@ -590,6 +663,7 @@ RunReport run_game_mode(const LaunchOptions& options,
     // ── 6. The tick — the same body in every mode ──────────────────────────────────────────────
     bool game_finished = false;
     std::uint64_t game_ticks = 0;
+    std::vector<SpawnReport> spawn_reports;
     app.on_fixed_tick([&](ecs::World& world, double dt) {
         if (game_finished) {
             // A real-clock frame can owe several ticks and the game can finish on the first; the
@@ -604,6 +678,13 @@ RunReport run_game_mode(const LaunchOptions& options,
                                        : ActionState{};
         if (network) {
             tick.input = network->before_tick(game_ticks);
+            tick.command = network->command_provenance();
+            tick.refuse_spawn = network->refuse_spawn();
+            // The report list lives through publication, so a keyed launch and its first
+            // checkpoint describe the same tick rather than disagreeing for one frame.
+            tick.spawns = definition.remote_play && definition.remote_play->spawn_prediction
+                              ? &spawn_reports
+                              : nullptr;
             if (input_trace) {
                 // One line per committed tick: tick, applied(1)/synthesized(0), four axes,
                 // held and pressed. max_digits10 preserves the exact float for replay.
@@ -618,7 +699,8 @@ RunReport run_game_mode(const LaunchOptions& options,
         }
         game->fixed_tick(tick);
         if (network) {
-            network->after_tick(game_ticks);
+            network->after_tick(game_ticks, spawn_reports);
+            spawn_reports.clear();
         }
         ++game_ticks;
         if (game->finished()) {
@@ -701,6 +783,53 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (network) {
         report.network_input = network->counters();
         if (options.ticks > 0) {
+            // Keep the m20.4 event byte-identical for games without the profile. An opted-in
+            // server names every refusal and skip beside the existing input counters.
+            std::string spawn_counters =
+                definition.remote_play && definition.remote_play->spawn_prediction
+                    ? fmt::format(",\"spawn_accepted\":{},\"spawn_rejected\":{},"
+                                  "\"spawn_accepted_ended\":{},\"spawn_epoch_advances\":{},"
+                                  "\"spawn_outcomes_deferred\":{},\"spawn_outcomes_dropped\":{},"
+                                  "\"spawn_foreign_key\":{},\"spawn_out_of_order\":{},"
+                                  "\"spawn_end_unknown\":{},\"spawn_roster_refused\":{},"
+                                  "\"spawn_without_client\":{},\"spawn_extension_refused\":{},"
+                                  "\"spawn_acks_applied\":{},\"spawn_ack_malformed\":{},"
+                                  "\"spawn_ack_wrong_channel\":{},"
+                                  "\"spawn_ack_wrong_incarnation\":{},\"spawn_ack_ahead\":{},"
+                                  "\"spawn_ack_stale\":{}",
+                                  report.network_input.spawn_accepted,
+                                  report.network_input.spawn_rejected,
+                                  report.network_input.spawn_accepted_ended,
+                                  report.network_input.spawn_epoch_advances,
+                                  report.network_input.spawn_outcomes_deferred,
+                                  report.network_input.spawn_outcomes_dropped,
+                                  report.network_input.spawn_foreign_key,
+                                  report.network_input.spawn_out_of_order,
+                                  report.network_input.spawn_end_unknown,
+                                  report.network_input.spawn_roster_refused,
+                                  report.network_input.spawn_without_client,
+                                  report.network_input.spawn_extension_refused,
+                                  report.network_input.spawn_acks_applied,
+                                  report.network_input.spawn_ack_malformed,
+                                  report.network_input.spawn_ack_wrong_channel,
+                                  report.network_input.spawn_ack_wrong_incarnation,
+                                  report.network_input.spawn_ack_ahead,
+                                  report.network_input.spawn_ack_stale)
+                    : std::string{};
+            if (definition.remote_play && definition.remote_play->spawn_prediction)
+                spawn_counters += fmt::format(
+                    ",\"spawn_fault_refuse\":{},\"spawn_fault_lose_one\":{},"
+                    "\"spawn_fault_lose_all\":{},\"spawn_fault_duplicate\":{},"
+                    "\"spawn_fault_late_alive\":{},\"spawn_fault_late_ended\":{},"
+                    "\"launch_recovered_by_redundancy\":{},\"spawn_last_flight_ticks\":{}",
+                    report.network_input.spawn_fault_refuse,
+                    report.network_input.spawn_fault_lose_one,
+                    report.network_input.spawn_fault_lose_all,
+                    report.network_input.spawn_fault_duplicate,
+                    report.network_input.spawn_fault_late_alive,
+                    report.network_input.spawn_fault_late_ended,
+                    report.network_input.launch_recovered_by_redundancy,
+                    report.network_input.spawn_last_flight_ticks);
             fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
                        "\"applied\":{},\"synthesized\":{},\"neutralized\":{},"
                        "\"late\":{},\"duplicate\":{},\"future\":{},"
@@ -718,7 +847,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"checkpoint_encoded\":{},\"checkpoint_encode_refused\":{},"
                        "\"checkpoint_send_refused\":{},\"input_result_send_refused\":{},"
                        "\"replication_registration_refused\":{},\"publish_missing_session\":{},"
-                       "\"checkpoint_capture_refused\":{}}}\n",
+                       "\"checkpoint_capture_refused\":{}{}}}\n",
                        report.ticks,
                        report.state_digest,
                        report.network_input.applied,
@@ -758,7 +887,8 @@ RunReport run_game_mode(const LaunchOptions& options,
                        report.network_input.input_result_send_refused,
                        report.network_input.replication_registration_refused,
                        report.network_input.publish_missing_session,
-                       report.network_input.checkpoint_capture_refused);
+                       report.network_input.checkpoint_capture_refused,
+                       spawn_counters);
             std::fflush(stdout);
         }
     }

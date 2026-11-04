@@ -20,6 +20,7 @@
 #include "rime/net/net_driver.hpp"
 #include "rime/replication/client_replicator.hpp"
 #include "rime/replication/prediction.hpp"
+#include "rime/replication/spawn_prediction.hpp"
 #include "rime/scene/derive_transforms.hpp"
 
 using namespace rime;
@@ -30,6 +31,42 @@ struct DelayedBatch {
     int release_tick = 0;
     std::vector<net::Received> messages;
 };
+
+// Retain m20.4's exact digest recipe as a measurement of the deliberate Throw-state change.
+// This hashes the same authoritative fields before charges, cooldown, target score and facing
+// were appended; it never asks a second executable to run a different simulation.
+std::uint64_t legacy_hello_digest(ecs::World& world) {
+    std::uint64_t hash = 0xcbf29ce484222325ull;
+    const auto bytes = [&](const void* data, std::size_t size) {
+        const auto* first = static_cast<const unsigned char*>(data);
+        for (std::size_t i = 0; i < size; ++i)
+            hash = (hash ^ first[i]) * 0x100000001b3ull;
+    };
+    const auto u64 = [&](std::uint64_t value) { bytes(&value, sizeof value); };
+    const auto f32 = [&](float value) { u64(std::bit_cast<std::uint32_t>(value)); };
+    const auto vec3 = [&](core::Vec3 value) {
+        f32(value.x);
+        f32(value.y);
+        f32(value.z);
+    };
+    world.query<hello_game::ReplicatedGameState>().for_each(
+        [&](ecs::Entity, const hello_game::ReplicatedGameState& state) {
+            u64(state.ticks);
+            u64(state.score);
+            u64(state.collected0);
+            u64(state.collected1);
+            u64(state.collected2);
+            u64(state.collected3);
+            u64(state.collected4);
+            vec3(state.player_position);
+            vec3(state.crate_position);
+            f32(state.crate_rotation.x);
+            f32(state.crate_rotation.y);
+            f32(state.crate_rotation.z);
+            f32(state.crate_rotation.w);
+        });
+    return hash;
+}
 
 } // namespace
 
@@ -95,6 +132,9 @@ TEST_CASE("hello-game publishes a convergent mirror and a leading predicted play
     auto definition = hello_game::definition();
     REQUIRE(definition.remote_play.has_value());
     REQUIRE(definition.network_input.has_value());
+    // This m20.4 reconciler reads base checkpoints only. Disable the optional extension here so
+    // the existing proof also guards byte-for-byte legacy publication after the opt-in exists.
+    definition.remote_play->spawn_prediction.reset();
     auto& server_world = application.world();
     definition.register_components(server_world);
     definition.remote_play->register_replicated(server_world);
@@ -333,12 +373,14 @@ TEST_CASE("hello-game publishes a convergent mirror and a leading predicted play
     CHECK(definition.remote_play->digest(mirror_world) ==
           definition.remote_play->digest(server_world));
     CHECK(definition.remote_play->digest(server_world) != 0);
+    CHECK(legacy_hello_digest(server_world) != definition.remote_play->digest(server_world));
     std::printf("remote_play checkpoints=%llu corrections=%llu mirror_digest=%016llx "
-                "server_digest=%016llx\n",
+                "server_digest=%016llx legacy_digest=%016llx\n",
                 static_cast<unsigned long long>(checkpoints),
                 static_cast<unsigned long long>(reconciler.corrections()),
                 static_cast<unsigned long long>(definition.remote_play->digest(mirror_world)),
-                static_cast<unsigned long long>(definition.remote_play->digest(server_world)));
+                static_cast<unsigned long long>(definition.remote_play->digest(server_world)),
+                static_cast<unsigned long long>(legacy_hello_digest(server_world)));
     if (auto* session = client.session(*client_id))
         session->disconnect();
     for (int attempt = 0; attempt < 100 && server->counters().clients_left == 0; ++attempt) {
@@ -348,4 +390,522 @@ TEST_CASE("hello-game publishes a convergent mirror and a leading predicted play
     }
     CHECK(server->counters().clients_left == 1);
     CHECK(server->counters().replication_clients_released == 1);
+}
+
+TEST_CASE("Throw spends three charges, sweeps a target, and never fires a stand-in") {
+    const auto exercise = [](core::Vec3 target) {
+        app::AppConfig config{};
+        config.gpu = false;
+        config.worker_threads = 1;
+        app::Application application(config);
+        auto& world = application.world();
+        hello_game::register_components(world);
+        hello_game::build_arena(world);
+        scene::derive_world_transforms(world, application.jobs());
+        hello_game::HelloGame game;
+        game.set_throw_target(target);
+        app::SetupContext setup{world, application.jobs(), 1.0 / 60.0, {}};
+        REQUIRE(game.setup(setup));
+        std::uint32_t sequence = 1;
+        std::uint32_t launches = 0, refusals = 0, ends = 0;
+        const auto step = [&](std::uint64_t tick, bool press, bool applied) {
+            app::ActionState input{};
+            if (press)
+                input.pressed = 1u << hello_game::kButtonThrow;
+            input.held = 1u << hello_game::kButtonThrow;
+            std::vector<app::SpawnReport> reports;
+            app::TickContext context{world, 1.0 / 60.0, tick, input};
+            context.command = app::CommandProvenance{91, sequence++, applied};
+            context.spawns = &reports;
+            world.advance_version();
+            game.fixed_tick(context);
+            for (const auto& report : reports) {
+                launches += report.kind == app::SpawnReport::Kind::Launched;
+                refusals += report.kind == app::SpawnReport::Kind::Refused;
+                ends += report.kind == app::SpawnReport::Kind::Ended;
+                if (report.kind == app::SpawnReport::Kind::Ended)
+                    world.despawn(report.entity); // stand in for the server's replicator
+            }
+            return reports;
+        };
+        const auto first = step(0, true, true);
+        REQUIRE(first.size() == 1);
+        CHECK(first[0].kind == app::SpawnReport::Kind::Launched);
+        const auto live = step(1, true, true);
+        REQUIRE(live.size() == 1);
+        CHECK(live[0].reason == 3);
+        const auto stand_in = step(2, true, false);
+        CHECK(stand_in.empty());
+        for (std::uint64_t tick = 3; tick < 45; ++tick)
+            (void)step(tick, false, true);
+        const auto cooling = step(45, true, true);
+        REQUIRE(cooling.size() == 1);
+        CHECK(cooling[0].reason == 2);
+        for (std::uint64_t tick = 46; tick < 60; ++tick)
+            (void)step(tick, false, true);
+        const auto second = step(60, true, true);
+        REQUIRE(second.size() == 1);
+        CHECK(second[0].kind == app::SpawnReport::Kind::Launched);
+        for (std::uint64_t tick = 61; tick < 120; ++tick)
+            (void)step(tick, false, true);
+        const auto third = step(120, true, true);
+        REQUIRE(third.size() == 1);
+        CHECK(third[0].kind == app::SpawnReport::Kind::Launched);
+        for (std::uint64_t tick = 121; tick < 180; ++tick)
+            (void)step(tick, false, true);
+        const auto empty = step(180, true, true);
+        REQUIRE(empty.size() == 1);
+        CHECK(empty[0].reason == 1);
+        std::uint32_t score = 0, charges = 99;
+        world.query<hello_game::ReplicatedGameState>().for_each(
+            [&](ecs::Entity, const hello_game::ReplicatedGameState& state) {
+                score = state.target_score;
+                charges = state.throw_charges;
+            });
+        CHECK(launches == 3);
+        CHECK(refusals == 3);
+        CHECK(ends == 3);
+        CHECK(charges == 0);
+        return score;
+    };
+    // The target centre sits between two fixed-step endpoints, with a small radius. Moving it
+    // sideways is a control that proves a point came from the segment and not from every launch.
+    CHECK(exercise({0.0f, 0.9f, -2.55f}) == 3);
+    CHECK(exercise({2.0f, 0.9f, -2.55f}) == 0);
+}
+
+TEST_CASE("spawn outcomes stay in checkpoints until an applied ack") {
+    app::AppConfig config{};
+    config.gpu = false;
+    config.worker_threads = 1;
+    app::Application application(config);
+    auto definition = hello_game::definition();
+    REQUIRE(definition.remote_play.has_value());
+    REQUIRE(definition.remote_play->spawn_prediction.has_value());
+    auto& world = application.world();
+    definition.register_components(world);
+    definition.remote_play->register_replicated(world);
+    hello_game::build_arena(world);
+    scene::derive_world_transforms(world, application.jobs());
+    hello_game::HelloGame game;
+    app::SetupContext setup{world, application.jobs(), 1.0 / 60.0, {}};
+    REQUIRE(game.setup(setup));
+    net::ScriptedNetwork network(0xE507u, {0.0f, 0.0f, 0, 0});
+    const net::Endpoint server_endpoint{0x7F000001u, 7823};
+    const net::Endpoint client_endpoint{0x7F000001u, 7824};
+    net::Link& server_link = network.add_node(server_endpoint);
+    net::Link& client_link = network.add_node(client_endpoint);
+    std::string error;
+    auto server = app::NetworkInputServer::on_link(server_link,
+                                                   definition.tick_hz,
+                                                   *definition.network_input,
+                                                   world,
+                                                   &*definition.remote_play,
+                                                   error);
+    REQUIRE_MESSAGE(server != nullptr, error);
+    net::NetDriver client{client_link, net::NetDriver::Config{}};
+    std::uint64_t now = 0;
+    const auto id = client.connect(server_endpoint, now);
+    REQUIRE(id.has_value());
+    std::vector<net::SessionEvent> events;
+    std::vector<net::Received> inbox;
+    const auto client_pump = [&] {
+        events.clear();
+        client.update(now, events);
+        network.advance_time(now);
+        inbox.clear();
+        if (auto* session = client.session(*id))
+            session->drain_received(inbox);
+    };
+    const auto advance = [&] {
+        now += 16;
+        network.advance_time(now);
+    };
+    bool connected = false;
+    for (int attempt = 0; attempt < 300 && !connected; ++attempt) {
+        advance();
+        client_pump();
+        for (const auto& e : events)
+            connected |= e.kind == net::SessionEvent::Kind::Connected;
+        (void)server->before_tick(0, now);
+    }
+    REQUIRE(connected);
+    const replication::InputHello hello{
+        2, 2, app::input_schema_identity(*definition.network_input, &*definition.remote_play)};
+    std::array<std::byte, replication::kInputHelloBytes> hello_bytes{};
+    const auto hello_size = replication::encode_input_hello(hello, hello_bytes);
+    REQUIRE(client.session(*id)->send_reliable(std::span(hello_bytes).first(hello_size), now));
+    bool admitted = false;
+    for (int attempt = 0; attempt < 300 && !admitted; ++attempt) {
+        advance();
+        client_pump();
+        for (const auto& message : inbox) {
+            replication::InputHelloReply reply{};
+            if (replication::decode_input_hello_reply(message.bytes, reply)) {
+                CHECK(reply.refusal == replication::InputHelloRefusal::None);
+                admitted = true;
+            }
+        }
+        (void)server->before_tick(0, now);
+    }
+    REQUIRE(admitted);
+    const auto incarnation = client.session(*id)->incarnation();
+    replication::InputCommand input{};
+    input.sequence = 1;
+    input.held = 1u << hello_game::kButtonThrow;
+    input.pressed = input.held;
+    std::array<std::byte, replication::kInputV2HeaderBytes + replication::kInputV2CommandBytes>
+        input_bytes{};
+    const auto input_size = replication::encode_input_v2(std::span(&input, 1), input_bytes);
+    REQUIRE(client.session(*id)->send_unreliable(
+        std::span(input_bytes).first(input_size), now, app::kRemoteInputCommandsStream));
+    advance();
+    client_pump();
+    const auto selected = server->before_tick(0, now);
+    REQUIRE(server->command_provenance().has_value());
+    CHECK(server->command_provenance()->incarnation == incarnation);
+    CHECK(server->command_provenance()->sequence == 1);
+    CHECK(server->command_provenance()->applied);
+    CHECK(selected.was_pressed(hello_game::kButtonThrow));
+    (void)server->before_tick(0, now);
+    REQUIRE(server->command_provenance().has_value());
+    CHECK_FALSE(server->command_provenance()->applied);
+    CHECK_FALSE(server->before_tick(0, now).was_pressed(hello_game::kButtonThrow));
+    const replication::SpawnKey key1{incarnation, 1, 0};
+    const replication::SpawnKey key2{incarnation, 2, 0};
+    core::Transform transform{};
+    const ecs::Entity projectile =
+        world.spawn_with(ecs::LocalTransform{transform},
+                         ecs::WorldTransform{transform},
+                         hello_game::ThrownProjectile{{0.0f, 1.0f, 0.0f}, {0.0f, 0.0f, -18.0f}, 0});
+    const auto publish = [&](std::uint64_t tick, std::vector<app::SpawnReport> reports) {
+        advance();
+        client_pump();
+        (void)server->before_tick(tick, now);
+        server->after_tick(tick, reports);
+        // after_tick queues the checkpoint; the next transport pump flushes it to the link.
+        advance();
+        (void)server->before_tick(tick + 1, now);
+        client_pump();
+        replication::SpawnCheckpoint checkpoint{};
+        bool found = false;
+        for (const auto& message : inbox) {
+            if (message.bytes.empty() ||
+                message.bytes[0] != std::byte{replication::kOwnerCheckpointTag})
+                continue;
+            CHECK(replication::decode_spawn_checkpoint(message.bytes, checkpoint));
+            found = true;
+        }
+        REQUIRE(found);
+        REQUIRE(checkpoint.spawns.has_value());
+        CHECK(checkpoint.base.server_tick == tick);
+        return checkpoint;
+    };
+    const auto launched = publish(1, {{app::SpawnReport::Kind::Launched, key1, projectile, 0}});
+    CHECK(launched.base.entities.size() == 2);
+    CHECK(launched.base.membership_epoch == 2);
+    REQUIRE(launched.spawns->bindings.size() == 1);
+    CHECK(launched.spawns->bindings[0].key == key1);
+    REQUIRE(launched.spawns->outcomes.size() == 1);
+    CHECK(launched.spawns->outcomes[0].kind == replication::SpawnOutcomeKind::Accepted);
+    const auto rejected = publish(2, {{app::SpawnReport::Kind::Refused, key2, {}, 3}});
+    REQUIRE(rejected.spawns->outcomes.size() == 2);
+    CHECK(rejected.spawns->outcomes[1].kind == replication::SpawnOutcomeKind::Rejected);
+    CHECK(rejected.spawns->outcomes[1].reason == 3);
+    const auto ended = publish(3, {{app::SpawnReport::Kind::Ended, key1, projectile, 0}});
+    CHECK(ended.base.entities.size() == 1);
+    CHECK(ended.base.membership_epoch == 3);
+    CHECK(ended.spawns->bindings.empty());
+    CHECK(ended.spawns->outcomes[0].kind == replication::SpawnOutcomeKind::AcceptedEnded);
+    std::array<std::byte, replication::kCheckpointMaxMessageBytes> encoded{};
+    const auto size = replication::encode_spawn_checkpoint(ended.base, *ended.spawns, encoded);
+    REQUIRE(size);
+    CHECK(size.bytes_written <= 1200);
+    std::array<std::byte, replication::kSpawnOutcomeAckBytes> ack_bytes{};
+    const auto ack_size = replication::encode_spawn_outcome_ack({key2}, ack_bytes);
+    REQUIRE(client.session(*id)->send_reliable(std::span(ack_bytes).first(ack_size), now));
+    const auto acked = publish(4, {});
+    CHECK(acked.spawns->outcomes.empty());
+    CHECK(acked.spawns->acknowledged_through == key2);
+    CHECK(server->counters().spawn_acks_applied == 1);
+    // Bad frontiers cannot strengthen what the peer is known to hold.
+    const replication::SpawnKey ahead{incarnation, 3, 0};
+    (void)replication::encode_spawn_outcome_ack({ahead}, ack_bytes);
+    REQUIRE(client.session(*id)->send_reliable(ack_bytes, now));
+    (void)publish(5, {});
+    CHECK(server->counters().spawn_ack_ahead == 1);
+    const replication::SpawnKey wrong{incarnation + 1, 2, 0};
+    (void)replication::encode_spawn_outcome_ack({wrong}, ack_bytes);
+    REQUIRE(client.session(*id)->send_reliable(ack_bytes, now));
+    (void)publish(6, {});
+    CHECK(server->counters().spawn_ack_wrong_incarnation == 1);
+    (void)replication::encode_spawn_outcome_ack({key2}, ack_bytes);
+    REQUIRE(client.session(*id)->send_reliable(ack_bytes, now));
+    (void)publish(7, {});
+    CHECK(server->counters().spawn_ack_stale == 1);
+    REQUIRE(client.session(*id)->send_reliable(std::span(ack_bytes).first(ack_size - 1), now));
+    (void)publish(8, {});
+    CHECK(server->counters().spawn_ack_malformed == 1);
+    std::vector<app::SpawnReport> burst;
+    for (std::uint32_t sequence = 3; sequence <= 19; ++sequence)
+        burst.push_back({app::SpawnReport::Kind::Refused, {incarnation, sequence, 0}, {}, 2});
+    const auto deferred = publish(9, burst);
+    REQUIRE(deferred.spawns->outcomes.size() == replication::kSpawnExtensionMaxOutcomes);
+    CHECK(deferred.spawns->outcomes.front().key.sequence == 3);
+    CHECK(deferred.spawns->outcomes.back().key.sequence == 18);
+    CHECK(server->counters().spawn_outcomes_deferred > 0);
+    (void)replication::encode_spawn_outcome_ack({{incarnation, 18, 0}}, ack_bytes);
+    REQUIRE(client.session(*id)->send_reliable(ack_bytes, now));
+    const auto remainder = publish(10, {});
+    REQUIRE(remainder.spawns->outcomes.size() == 1);
+    CHECK(remainder.spawns->outcomes[0].key.sequence == 19);
+    CHECK(server->counters().spawn_accepted == 1);
+    CHECK(server->counters().spawn_rejected == 18);
+    CHECK(server->counters().spawn_accepted_ended == 1);
+}
+
+TEST_CASE("spawn negotiation leaves the absent profile identity and checkpoint bytes unchanged") {
+    auto definition = hello_game::definition();
+    REQUIRE(definition.network_input.has_value());
+    REQUIRE(definition.remote_play.has_value());
+    const auto extended =
+        app::input_schema_identity(*definition.network_input, &*definition.remote_play);
+    definition.remote_play->spawn_prediction.reset();
+    const auto legacy =
+        app::input_schema_identity(*definition.network_input, &*definition.remote_play);
+    CHECK(legacy == replication::input_schema_hash(definition.network_input->profile_id,
+                                                   definition.network_input->profile_version,
+                                                   definition.remote_play->fixed_dt));
+    CHECK(extended != legacy);
+    definition.remote_play->spawn_prediction =
+        app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile{2, nullptr};
+    CHECK(app::input_schema_identity(*definition.network_input, &*definition.remote_play) !=
+          extended);
+    replication::OwnerCheckpoint base{};
+    base.server_tick = 8;
+    base.result.server_tick = 8;
+    base.membership_epoch = 1;
+    base.entities.push_back({{1, 1}, {std::byte{1}}});
+    std::array<std::byte, replication::kCheckpointMaxMessageBytes> original{};
+    std::array<std::byte, replication::kCheckpointMaxMessageBytes> again{};
+    const auto old_size = replication::encode_owner_checkpoint(base, original);
+    const auto absent_size = replication::encode_owner_checkpoint(base, again);
+    REQUIRE(old_size);
+    REQUIRE(absent_size);
+    CHECK(old_size.bytes_written == absent_size.bytes_written);
+    CHECK(std::equal(original.begin(), original.begin() + old_size.bytes_written, again.begin()));
+    replication::SpawnCheckpointExtension worst{};
+    for (std::uint32_t sequence = 1; sequence <= 16; ++sequence)
+        worst.outcomes.push_back(
+            {{1, sequence, 0}, replication::SpawnOutcomeKind::Rejected, {}, 1});
+    const auto bounded = replication::encode_spawn_checkpoint(base, worst, again);
+    REQUIRE(bounded);
+    CHECK(bounded.bytes_written <= 1200);
+}
+
+TEST_CASE("predicted Throw adopts or cancels through a pumped server and client") {
+    for (const bool refuse : {false, true}) {
+        for (const bool bypass_ledger : {false, true}) {
+            if (refuse && bypass_ledger)
+                continue;
+            app::AppConfig config{};
+            config.gpu = false;
+            config.worker_threads = 1;
+            app::Application application(config);
+            auto definition = hello_game::definition();
+            REQUIRE(definition.remote_play);
+            REQUIRE(definition.remote_play->spawn_prediction);
+            auto& server_world = application.world();
+            definition.register_components(server_world);
+            hello_game::build_arena(server_world);
+            scene::derive_world_transforms(server_world, application.jobs());
+            hello_game::HelloGame game;
+            app::SetupContext setup{server_world, application.jobs(), 1.0 / 60.0, {}};
+            REQUIRE(game.setup(setup));
+            net::ScriptedNetwork network(0xC051u, {0.0f, 0.0f, 0, 0});
+            const net::Endpoint server_endpoint{0x7F000001u, 7833};
+            const net::Endpoint client_endpoint{0x7F000001u, 7834};
+            net::Link& server_link = network.add_node(server_endpoint);
+            net::Link& client_link = network.add_node(client_endpoint);
+            std::string error;
+            auto server = app::NetworkInputServer::on_link(server_link,
+                                                           definition.tick_hz,
+                                                           *definition.network_input,
+                                                           server_world,
+                                                           &*definition.remote_play,
+                                                           error);
+            REQUIRE_MESSAGE(server != nullptr, error);
+            net::NetDriver client{client_link, net::NetDriver::Config{}};
+            auto id = client.connect(server_endpoint, 0);
+            REQUIRE(id);
+            ecs::World mirror_world;
+            definition.remote_play->register_replicated(mirror_world);
+            replication::ClientReplicator mirror{mirror_world};
+            std::uint64_t now = 0;
+            std::vector<net::SessionEvent> events;
+            std::vector<net::Received> inbox;
+            const auto pump_client = [&] {
+                now += 16;
+                network.advance_time(now);
+                events.clear();
+                client.update(now, events);
+                network.advance_time(now);
+                inbox.clear();
+                if (auto* session = client.session(*id))
+                    session->drain_received(inbox);
+                mirror.apply_messages(inbox);
+            };
+            bool connected = false;
+            for (int i = 0; i < 300 && !connected; ++i) {
+                pump_client();
+                for (const auto& event : events)
+                    connected |= event.kind == net::SessionEvent::Kind::Connected;
+                (void)server->before_tick(0, now);
+            }
+            REQUIRE(connected);
+            const replication::InputHello hello{
+                2,
+                2,
+                app::input_schema_identity(*definition.network_input, &*definition.remote_play)};
+            std::array<std::byte, replication::kInputHelloBytes> hello_bytes{};
+            const auto hello_size = replication::encode_input_hello(hello, hello_bytes);
+            REQUIRE(
+                client.session(*id)->send_reliable(std::span(hello_bytes).first(hello_size), now));
+            bool admitted = false;
+            for (int i = 0; i < 300 && !admitted; ++i) {
+                pump_client();
+                for (const auto& message : inbox) {
+                    replication::InputHelloReply reply{};
+                    if (replication::decode_input_hello_reply(message.bytes, reply)) {
+                        REQUIRE(reply.refusal == replication::InputHelloRefusal::None);
+                        admitted = true;
+                    }
+                }
+                (void)server->before_tick(0, now);
+            }
+            REQUIRE(admitted);
+            const auto receive_checkpoint = [&] {
+                replication::SpawnCheckpoint checkpoint{};
+                bool received = false;
+                for (int i = 0; i < 100 && !received; ++i) {
+                    pump_client();
+                    for (const auto& message : inbox)
+                        if (replication::decode_spawn_checkpoint(message.bytes, checkpoint))
+                            received = true;
+                }
+                REQUIRE(received);
+                REQUIRE(checkpoint.spawns);
+                return checkpoint;
+            };
+            // Publish a real initial roster before the guess; the same server pump later emits
+            // its verdict, so the client never manufactures an authoritative identity.
+            (void)server->before_tick(0, now);
+            server->after_tick(0, {});
+            const auto initial = receive_checkpoint();
+            ecs::World predicted_world;
+            definition.remote_play->register_replicated(predicted_world);
+            const auto mirror_player = definition.remote_play->owned_player(mirror_world);
+            REQUIRE(mirror_player != ecs::kNullEntity);
+            const auto predicted_player = definition.remote_play->seed_prediction(
+                mirror_world, predicted_world, mirror_player);
+            replication::PresentationLedger ledger;
+            std::unique_ptr<replication::SpawnReconciler> predicted;
+            const auto hooks = definition.remote_play->spawn_prediction->client_hooks(
+                predicted_world,
+                predicted_player,
+                client.session(*id)->incarnation(),
+                [&](const replication::SpawnKey& key, std::span<const std::byte> bytes) {
+                    return predicted->spawn_provisional(key, bytes);
+                });
+            predicted =
+                std::make_unique<replication::SpawnReconciler>(hooks.prediction,
+                                                               hooks.spawn,
+                                                               1.0 / 60.0,
+                                                               client.session(*id)->incarnation(),
+                                                               &ledger);
+            std::vector<replication::PredictedEntityId> members;
+            for (const auto& member : initial.base.entities)
+                members.push_back(member.id);
+            predicted->set_membership(initial.base.membership_epoch, std::move(members));
+            REQUIRE(predicted->apply_checkpoint(initial.base, *initial.spawns).base.applied);
+            const auto epoch_before = predicted->epoch();
+            if (refuse) {
+                server_world.query<hello_game::ReplicatedGameState>().for_each(
+                    [&](ecs::Entity entity, hello_game::ReplicatedGameState& state) {
+                        state.throw_charges = 0;
+                        server_world.mark_changed<hello_game::ReplicatedGameState>(entity);
+                    });
+            }
+            replication::InputCommand command{};
+            command.sequence = 1;
+            command.pressed = 1u << hello_game::kButtonThrow;
+            command.held = command.pressed;
+            predicted->predict(command);
+            const replication::SpawnKey key{client.session(*id)->incarnation(), 1, 0};
+            REQUIRE(predicted->provisional_id(key));
+            CHECK(predicted->epoch() == epoch_before); // a guess never advances membership
+            int launch_presentations = 0;
+            const auto present_launch = [&] {
+                if (bypass_ledger ||
+                    ledger.should_play(key, replication::PresentationEventKind::Launch, 0))
+                    ++launch_presentations;
+            };
+            present_launch();
+            std::array<std::byte,
+                       replication::kInputV2HeaderBytes + replication::kInputV2CommandBytes>
+                input_bytes{};
+            const auto input_size =
+                replication::encode_input_v2(std::span(&command, 1), input_bytes);
+            REQUIRE(client.session(*id)->send_unreliable(
+                std::span(input_bytes).first(input_size), now, app::kRemoteInputCommandsStream));
+            pump_client();
+            const auto actions = server->before_tick(1, now);
+            std::vector<app::SpawnReport> reports;
+            app::TickContext context{server_world, 1.0 / 60.0, 1, actions};
+            context.command = server->command_provenance();
+            context.spawns = &reports;
+            server_world.advance_version();
+            game.fixed_tick(context);
+            REQUIRE(reports.size() == 1);
+            CHECK(reports.front().kind ==
+                  (refuse ? app::SpawnReport::Kind::Refused : app::SpawnReport::Kind::Launched));
+            server->after_tick(1, reports);
+            const auto verdict = receive_checkpoint();
+            const auto result = predicted->apply_checkpoint(verdict.base, *verdict.spawns);
+            REQUIRE(result.base.applied);
+            REQUIRE(verdict.spawns->outcomes.size() == 1);
+            if (refuse) {
+                CHECK(result.rejected == 1);
+                CHECK_FALSE(predicted->provisional_id(key));
+                CHECK(ledger.cancelled(key));
+                const auto* state =
+                    predicted_world.get<hello_game::ReplicatedGameState>(predicted_player);
+                REQUIRE(state);
+                CHECK(state->throw_charges == 0);
+                CHECK_FALSE(result.cancelled.empty());
+            } else {
+                CHECK(result.adopted == 1);
+                CHECK(predicted->provisional().empty());
+                std::size_t projectiles = 0;
+                predicted_world.query<hello_game::ThrownProjectile>().for_each(
+                    [&](ecs::Entity, const hello_game::ThrownProjectile&) { ++projectiles; });
+                CHECK(projectiles == 1);
+                present_launch(); // authority asks again under the same SpawnKey
+                CHECK((launch_presentations == 1) == !bypass_ledger);
+                CHECK(ledger.adoptions() == 1);
+            }
+            const auto held = predicted->outcomes_held_through();
+            REQUIRE(held);
+            CHECK(*held == key);
+            std::array<std::byte, replication::kSpawnOutcomeAckBytes> ack_bytes{};
+            const auto ack_size = replication::encode_spawn_outcome_ack({*held}, ack_bytes);
+            REQUIRE(client.session(*id)->send_reliable(std::span(ack_bytes).first(ack_size), now));
+            pump_client();
+            (void)server->before_tick(2, now);
+            server->after_tick(2, {});
+            const auto acknowledged = receive_checkpoint();
+            CHECK(acknowledged.spawns->outcomes.empty());
+            CHECK(server->counters().spawn_acks_applied == 1);
+        }
+    }
 }

@@ -1961,6 +1961,22 @@ acceptance of the captured case, not a claim that all lighting artifacts are gon
 > refusals. Prediction scope is the local player only, behind a predicted-SET contract (m20.5: own
 > weapon + one projectile; m20.6: one bounded interaction group). Damage is never predicted. Not yet:
 > multiple clients, `host`, a process-level stale-incarnation gate, Windows coverage of the proofs.
+>
+> **m20.5 (2026-10-25)** — speculative spawn and one predicted projectile ([ADR-0105](adr/0105-m20.5-speculative-spawn-and-a-predicted-projectile.md)).
+> hello-game's Throw (3 charges, 60-tick cooldown, one live projectile, 45-tick life, server-only swept hit
+> on a fixed target) launches on the client the tick the button goes down, under a `SpawnKey` (incarnation,
+> input sequence, slot) the server echoes with a durable outcome (Accepted → NetId, Rejected → reason,
+> AcceptedEnded) carried in a negotiated owner-checkpoint extension until the client acknowledges APPLYING
+> it. The client's `SpawnReconciler` keeps guesses as an overlay that never moves the epoch, adopts the
+> replica's identity on confirmation, and a `PresentationLedger` outside rewindable state plays each
+> (key, event, ordinal) once. `hello_game_play_throw` (two processes) measured: launch response 0 ticks
+> predicted vs 15 without (and 15 for an authority-presenting control), and through every fault case —
+> server refusal, one lost copy (recovered by redundancy), every copy lost (no launch, no resurrection),
+> duplicated confirmations, verdicts after local expiry with the replica alive and ended — at most one
+> live projectile per key and exactly one Launch; disabling the ledger plays Launch 88 times and disabling
+> adoption shows two live copies, both failing their gates. An Opus review of the leaf, with mutation tests,
+> found two cases where a server-accepted projectile was silenced; fixed before wiring. Not yet: predicted
+> hits/damage (never), more than one projectile type, interaction groups (m20.6), Windows runs of the proofs (#351).
 
 ### Detail
 

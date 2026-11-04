@@ -26,7 +26,8 @@ add_library(rime_replication STATIC
     src/interpolation.cpp
     src/input.cpp
     src/input_v2.cpp
-    src/prediction.cpp)
+    src/prediction.cpp
+    src/spawn_prediction.cpp)
 
 # Namespaced alias so dependents link `rime::replication`, matching our C++ namespace.
 add_library(rime::replication ALIAS rime_replication)

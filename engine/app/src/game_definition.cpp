@@ -7,6 +7,7 @@
 
 #include "rime/app/game_definition.hpp"
 
+#include <string_view>
 #include <utility>
 
 #include "rime/replication/input_v2.hpp"
@@ -84,10 +85,29 @@ ActionState InputMapper::take() noexcept {
 
 std::uint64_t input_schema_identity(const GameDefinition::NetworkInputProfile& input,
                                     const GameDefinition::RemotePlayProfile* remote_play) {
-    return remote_play != nullptr
-               ? replication::input_schema_hash(
-                     input.profile_id, input.profile_version, remote_play->fixed_dt)
-               : replication::input_schema_hash(input.profile_id, input.profile_version);
+    const std::uint64_t base =
+        remote_play != nullptr
+            ? replication::input_schema_hash(
+                  input.profile_id, input.profile_version, remote_play->fixed_dt)
+            : replication::input_schema_hash(input.profile_id, input.profile_version);
+    if (remote_play == nullptr || !remote_play->spawn_prediction)
+        return base; // m20.4's identity, bit for bit: a game that does not opt in is unchanged
+    // Speculative spawn changes what a checkpoint IS (it gains an extension an m20.4 decoder
+    // refuses), so it is part of the input identity. FNV-1a continued from the m20.4 hash over a
+    // fixed marker and the profile version's four little-endian bytes -- the same construction
+    // `input_schema_hash` uses, so the result is one platform-independent function of
+    // (profile, version, dt, spawn version), and bumping the spawn version is a schema refusal.
+    std::uint64_t hash = base;
+    const auto mix = [&hash](std::uint8_t byte) {
+        hash ^= byte;
+        hash *= 0x100000001b3ull;
+    };
+    for (const char c : std::string_view{"rime.spawn_prediction"})
+        mix(static_cast<std::uint8_t>(c));
+    const std::uint32_t version = remote_play->spawn_prediction->version;
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        mix(static_cast<std::uint8_t>(version >> shift));
+    return hash;
 }
 
 } // namespace rime::app
