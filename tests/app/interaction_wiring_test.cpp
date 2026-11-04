@@ -181,7 +181,8 @@ struct Rig {
     replication::PredictedEntityId crate_id{};
 
     explicit Rig(std::uint16_t port,
-                 app::GameDefinition def = hello_game::definition_with_interaction())
+                 app::GameDefinition def = hello_game::definition_with_interaction(),
+                 bool adaptive = false)
         : server(std::move(def)), network(0x1A7Eu + port, {0.0f, 0.0f, 0, 0}),
           server_link(network.add_node({0x7F000001u, port})),
           client_link(network.add_node({0x7F000001u, static_cast<std::uint16_t>(port + 1)})),
@@ -194,7 +195,8 @@ struct Rig {
                                                 *server.definition.network_input,
                                                 server.world(),
                                                 &*server.definition.remote_play,
-                                                error);
+                                                error,
+                                                adaptive);
         REQUIRE_MESSAGE(pump != nullptr, error);
         id = client.connect(server_endpoint, 0);
         REQUIRE(id);
@@ -244,14 +246,20 @@ struct Rig {
         REQUIRE(admitted);
     }
 
-    // One server tick driven by `command`; returns the checkpoints the client received.
+    // One server tick after sending `commands` (empty = silent client tick, provoking an adaptive
+    // stall); returns the checkpoints the client received.
     std::vector<replication::SpawnCheckpoint>
-    server_tick(const replication::InputCommand& command) {
-        std::array<std::byte, replication::kInputV2HeaderBytes + replication::kInputV2CommandBytes>
-            bytes{};
-        const auto size = replication::encode_input_v2(std::span(&command, 1), bytes);
-        REQUIRE(client.session(*id)->send_unreliable(
-            std::span(bytes).first(size), now, app::kRemoteInputCommandsStream));
+    server_step(std::span<const replication::InputCommand> commands) {
+        if (!commands.empty()) {
+            std::array<std::byte,
+                       replication::kInputV2HeaderBytes +
+                           replication::kInputV2MaxCommands * replication::kInputV2CommandBytes>
+                bytes{};
+            const auto size = replication::encode_input_v2(commands, bytes);
+            REQUIRE(size > 0);
+            REQUIRE(client.session(*id)->send_unreliable(
+                std::span(bytes).first(size), now, app::kRemoteInputCommandsStream));
+        }
         pump_client();
         const auto tick = server.tick++;
         const auto actions = pump->before_tick(tick, now);
@@ -271,6 +279,12 @@ struct Rig {
         }
         mirror->send_ack(client, now);
         return out;
+    }
+
+    // One server tick driven by `command`; returns the checkpoints the client received.
+    std::vector<replication::SpawnCheckpoint>
+    server_tick(const replication::InputCommand& command) {
+        return server_step(std::span(&command, 1));
     }
 
     // Seed the client's prediction from one checkpoint, as network_client does.
@@ -718,4 +732,79 @@ TEST_CASE("interaction: measured resting-crate speed against the 0.05 m/s rest b
                 static_cast<double>(late.crate_body().position.z),
                 static_cast<double>(late.game.player_position().z));
     CHECK(idle_sleep_tick > 0);
+}
+
+TEST_CASE("interaction: an adaptive server stall during a push is carried by that checkpoint") {
+    Rig rig(7881, hello_game::definition_with_interaction(), /*adaptive=*/true);
+    rig.connect();
+    auto first = rig.server_tick(walk(++rig.sequence, 0.0f));
+    REQUIRE_FALSE(first.empty());
+    rig.seed(first.back());
+
+    for (int i = 0; i < 38; ++i) {
+        const auto command = walk(++rig.sequence, -1.0f);
+        rig.reconciler->predict(command);
+        for (const auto& checkpoint : rig.server_tick(command)) {
+            REQUIRE(
+                rig.reconciler->apply_checkpoint(checkpoint.base, *checkpoint.spawns).base.applied);
+            CHECK(checkpoint.base.input_stalls == 0);
+        }
+    }
+    REQUIRE(rig.server.crate_body().position.z < -2.6f);
+
+    // Predict ahead across the end of the push (three more push ticks, five retreat ticks), as an
+    // impaired client leads authority by a one-way trip when the server's input buffer runs dry.
+    std::vector<replication::InputCommand> inflight;
+    for (int i = 0; i < 8; ++i) {
+        inflight.push_back(walk(++rig.sequence, i < 3 ? -1.0f : 1.0f));
+        rig.reconciler->predict(inflight.back());
+    }
+
+    const auto player_pose = [&] {
+        return rig.server.definition.remote_play
+            ->player_pose(rig.predicted_world, rig.predicted_player)
+            .translation;
+    };
+
+    // One silent tick: the adaptive buffer stalls with a neutral stand-in while the crate is still
+    // moving, then publishes a checkpoint naming `input_stalls == 1`.
+    std::uint32_t last_stalls = 0;
+    const auto stalled = rig.server_step({});
+    REQUIRE(stalled.size() == 1);
+    const auto crate_before_stall = rig.hooks->object_pose();
+    const auto player_before_stall = player_pose();
+    REQUIRE(crate_before_stall.has_value());
+    REQUIRE(rig.reconciler->apply_checkpoint(stalled[0].base, *stalled[0].spawns).base.applied);
+    const std::uint32_t stall_delta = stalled[0].base.input_stalls - last_stalls;
+    last_stalls = stalled[0].base.input_stalls;
+    const auto crate_after_stall = rig.hooks->object_pose();
+    REQUIRE(crate_after_stall.has_value());
+    const float stall_crate_jump =
+        core::length(crate_before_stall->translation - crate_after_stall->translation);
+    const float stall_player_jump = core::length(player_before_stall - player_pose());
+    CHECK(stall_delta == 1);
+    CHECK(stall_player_jump <= 0.001f);
+    CHECK(stall_crate_jump > 0.01f);
+
+    // The delayed packet arrives: the next checkpoint's window has `stall_delta == 0` and agrees
+    // back within the strict 1 cm undisturbed bound.
+    const auto resumed = rig.server_step(inflight);
+    REQUIRE(resumed.size() == 1);
+    const auto crate_before_resume = rig.hooks->object_pose();
+    REQUIRE(crate_before_resume.has_value());
+    REQUIRE(rig.reconciler->apply_checkpoint(resumed[0].base, *resumed[0].spawns).base.applied);
+    const std::uint32_t resume_stall_delta = resumed[0].base.input_stalls - last_stalls;
+    const auto crate_after_resume = rig.hooks->object_pose();
+    REQUIRE(crate_after_resume.has_value());
+    const float resume_crate_jump =
+        core::length(crate_before_resume->translation - crate_after_resume->translation);
+    CHECK(resume_stall_delta == 0);
+    CHECK(resume_crate_jump <= 0.01f);
+    std::printf("interaction stall: stall_delta=%u crate_jump=%.3f mm player_jump=%.3f mm; "
+                "next_delta=%u next_crate_jump=%.3f mm\n",
+                stall_delta,
+                static_cast<double>(stall_crate_jump) * 1000.0,
+                static_cast<double>(stall_player_jump) * 1000.0,
+                resume_stall_delta,
+                static_cast<double>(resume_crate_jump) * 1000.0);
 }

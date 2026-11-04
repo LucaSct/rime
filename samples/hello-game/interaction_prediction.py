@@ -10,11 +10,14 @@ leg reads the client's per-checkpoint correction TRACE (`--interaction-trace`: o
 correction per checkpoint, tagged with the server tick it restored) and gates the shape of it:
 
   residual       every correction BEFORE the first kick, at a checkpoint where the predicted PLAYER
-                 agreed with the server (<= 1 mm), is <= 1 cm. With nothing disturbing the crate the
+                 agreed with the server (<= 1 mm) and no server input stall fell inside the
+                 checkpoint's window, is <= 1 cm. With nothing disturbing the crate the
                  prediction must agree with the server to far less than anything visible. Catches
                  hidden physics state. Checkpoints where the player itself was corrected (5 % loss
-                 loses a command) are an input disagreement the physics amplifies; they are counted,
-                 printed and bounded by the input bound, never dropped. The `no-rebuild` and `stale-restore` controls MUST fail it.
+                 loses a command) or whose window contains an adaptive server stall (ADR-0107: a
+                 neutral stand-in steps the crate for one tick before the late command applies) are
+                 server-side stand-ins the physics amplifies; they are counted, printed separately
+                 and bounded by the input bound, never dropped. The `no-rebuild` and `stale-restore` controls MUST fail it.
   disturbance    the first kick produces a correction the gate can SEE: > 10 cm under 108 ms delay
                  (2 m/s of kick velocity x the ~10 ticks the prediction runs ahead), > half of one
                  tick of kick velocity on loopback (where the prediction runs ~1 tick ahead). A gate
@@ -190,53 +193,66 @@ def gate(name, ok, detail, timing=False):
         sys.exit(1)
 
 
-def explained(jump, player_jump):
-    """Is a crate correction accounted for? Where the PLAYER agreed (<= 1 mm), only the plain 1 cm
-    bound. Where the player itself was corrected, the crate is bounded by ADR-0106 §4's raw bound
-    WITHOUT the kick term: V_PUSH_MAX * REPLAY_TICKS * dt = 4.27 m.
+def explained(jump, player_jump, stalls=0):
+    """Is a crate correction accounted for? Where the PLAYER agreed (<= 1 mm) and no adaptive
+    server stall fell in the checkpoint window, only the plain 1 cm bound. Where the player itself
+    was corrected, or the server stalled with a neutral stand-in inside the window, the crate is
+    bounded by ADR-0106 §4's raw bound WITHOUT the kick term: V_PUSH_MAX * REPLAY_TICKS * dt = 4.27 m.
 
     Why so loose: a lost or late command makes the server's player stand in place for a tick or two
-    while the prediction walked (2 ticks x 4 m/s = 133 mm, observed on the player). The crate, being
-    pushed, is then released early on the server and coasts, so the two crates differ by the player's
-    offset PLUS the velocity difference integrated over the whole replay window (observed: crate
-    255 mm and 379 mm against players of 67 mm and 133 mm). That is an INPUT disagreement amplified
-    by physics, not hidden physics state; hidden state shows where the player AGREED, which is where
+    while the prediction walked (2 ticks x 4 m/s = 133 mm, observed on the player). Under ADR-0107's
+    adaptive buffer, a late command instead STALLS the server one tick with a neutral stand-in and
+    applies the command in order afterwards, so the player's own path agrees (0 mm) while the crate
+    coasted one tick without the push (~50-88 mm observed). The crate, being pushed, is released
+    early on the server and coasts, so the two crates differ by the stand-in's offset PLUS the
+    velocity difference integrated over the whole replay window (observed: crate 255 mm and 379 mm
+    against players of 67 mm and 133 mm). Both are server-side stand-ins amplified by physics, not
+    hidden physics state; hidden state shows where the player AGREED with no stall, which is where
     the 1 cm bound stays strict, and those checkpoints are the overwhelming majority (215 of 230).
-    The disagreeing ones are COUNTED and printed with their values, never dropped."""
-    if player_jump <= PLAYER_AGREES:
+    The stand-in ones are COUNTED and printed with their values, never dropped."""
+    if player_jump <= PLAYER_AGREES and stalls == 0:
         return jump <= RESIDUAL
     return jump <= V_PUSH_MAX * REPLAY_TICKS * DT
 
 
 def residual_before(c, k1):
     """(largest correction among checkpoints that restored a server tick before kick #1 while the
-    player agreed, how many such checkpoints, how many were excluded as input disagreements, and
-    whether every excluded one was explained by the player's own correction)."""
-    agreed, excluded, unexplained, worst = [], 0, [], 0.0
-    for tick, jump, player in c["crate_trace"]:
+    player agreed with no server stall, how many such checkpoints, (excluded input disagreements,
+    worst), (stall-affected checkpoints, stall_worst), and any checkpoint beyond the input bound)."""
+    agreed, excluded, worst, stalled, stall_worst, unexplained = [], 0, 0.0, 0, 0.0, []
+    for tick, jump, player, stalls in c["crate_trace"]:
         if tick >= k1:
             continue
-        if player <= PLAYER_AGREES:
+        if stalls > 0:
+            stalled += 1
+            stall_worst = max(stall_worst, jump)
+            if not explained(jump, player, stalls):
+                unexplained.append((tick, round(jump * 1000, 1), round(player * 1000, 1), stalls))
+        elif player <= PLAYER_AGREES:
             agreed.append(jump)
         else:
             excluded += 1
             worst = max(worst, jump)
-            if not explained(jump, player):
-                unexplained.append((tick, round(jump * 1000, 1), round(player * 1000, 1)))
-    return (max(agreed) if agreed else 0.0), len(agreed), (excluded, worst), unexplained
+            if not explained(jump, player, stalls):
+                unexplained.append((tick, round(jump * 1000, 1), round(player * 1000, 1), stalls))
+    return ((max(agreed) if agreed else 0.0), len(agreed), (excluded, worst),
+            (stalled, stall_worst), unexplained)
 
 
 def kick_shape(c, k1, floor):
     """(spike, spike tick offset from kick #1, next two corrections, whether everything after the
     spike is back under bound). The spike is the first correction at/after kick #1 above `floor`."""
-    trace = [(tick, jump, player) for tick, jump, player in c["crate_trace"] if tick >= k1]
-    spike = next(((i, tick, jump) for i, (tick, jump, _) in enumerate(trace) if jump > floor), None)
+    trace = [(tick, jump, player, stalls) for tick, jump, player, stalls in c["crate_trace"]
+             if tick >= k1]
+    spike = next(((i, tick, jump) for i, (tick, jump, _, _) in enumerate(trace) if jump > floor),
+                 None)
     if spike is None:
         return None
     i, tick, jump = spike
     after = trace[i + 1:]
-    later_ok = all(explained(j, p) for _, j, p in after)
-    return jump, tick - k1, [j for _, j, _ in after[:2]], later_ok, [p for _, _, p in after[:2]]
+    later_ok = all(explained(j, p, st) for _, j, p, st in after)
+    return (jump, tick - k1, [j for _, j, _, _ in after[:2]], later_ok,
+            [(p, st) for _, _, p, st in after[:2]])
 
 
 def membership_ok(s, c):
@@ -265,7 +281,7 @@ def predicted_gates(label, s, c, k1, impaired):
          f"server j_max {s['interaction_j_max']} = {J_MAX}; raw bound ({V_PUSH_MAX} + {J_MAX}/"
          f"{CRATE_MASS}) * {REPLAY_TICKS} * 1/60 = {RAW_BOUND:.4f}, code says "
          f"{s['interaction_raw_bound']:.4f}")
-    residual, n, (excluded, worst), unexplained = residual_before(c, k1)
+    residual, n, (excluded, worst), (stalled, stall_worst), unexplained = residual_before(c, k1)
     ok = not unexplained
     if residual > RESIDUAL:
         outliers = [point for point in c["crate_trace"]
@@ -275,13 +291,15 @@ def predicted_gates(label, s, c, k1, impaired):
               f"(server tick, crate metres, player metres[, server stalls]): "
               f"{sorted(outliers, key=lambda point: point[1], reverse=True)[:20]}", flush=True)
     gate(f"{label} undisturbed residual", residual <= RESIDUAL and ok,
-         f"{n} checkpoints before the first kick with the player agreeing, max correction "
-         f"{residual * 1000:.3f} mm <= {RESIDUAL * 1000:.0f} mm; {excluded} more where the player "
-         f"itself was corrected (lost or late input), each within the "
-         f"{V_PUSH_MAX * REPLAY_TICKS * DT:.2f} m input bound (max {worst * 1000:.0f} mm)"
-         if ok else f"{len(unexplained)} of {excluded} input-disagreement checkpoints beyond "
-         f"the input bound (server tick, crate mm, player mm): {unexplained}; agreed-set max "
-         f"{residual * 1000:.3f} mm over {n}")
+         f"{n} checkpoints before the first kick with the player agreeing and no server stall, "
+         f"max correction {residual * 1000:.3f} mm <= {RESIDUAL * 1000:.0f} mm; {excluded} more "
+         f"where the player itself was corrected (lost or late input), each within the "
+         f"{V_PUSH_MAX * REPLAY_TICKS * DT:.2f} m input bound (max {worst * 1000:.0f} mm); "
+         f"stall-affected checkpoints: {stalled}, max {stall_worst * 1000:.3f} mm"
+         if ok else f"{len(unexplained)} of {excluded + stalled} stand-in checkpoints beyond "
+         f"the input bound (server tick, crate mm, player mm, stalls): {unexplained}; agreed-set "
+         f"max {residual * 1000:.3f} mm over {n}; "
+         f"stall-affected checkpoints: {stalled}, max {stall_worst * 1000:.3f} mm")
     gate(f"{label} undisturbed residual window", n >= 100,
          f"{n} agreed checkpoints before kick #1 >= 100", timing=True)
     floor = VISIBLE_IMPAIRED if impaired else VISIBLE_LOOPBACK
@@ -298,11 +316,11 @@ def predicted_gates(label, s, c, k1, impaired):
          "no correction above the floor" if shape is None else
          f"spike {shape[0] * 1000:.1f} mm > {floor * 1000:.1f} mm at kick+{shape[1]} ticks, next "
          f"two {[round(a * 1000, 2) for a in shape[2]]} mm, and every later correction back under "
-         f"{RESIDUAL * 1000:.0f} mm (or, where the player itself was corrected, within the input bound)",
-         timing=True)
+         f"{RESIDUAL * 1000:.0f} mm (or, where the player was corrected or the server stalled, "
+         f"within the input bound)", timing=True)
     gate(f"{label} kick correction bounds",
          shape is None or (shape[3] and
-                           all(explained(a, p) for a, p in zip(shape[2], shape[4]))),
+                           all(explained(a, p, st) for a, (p, st) in zip(shape[2], shape[4]))),
          "no observed spike" if shape is None else
          "observed post-kick corrections stay within their residual or input bounds")
     gate(f"{label} raw jump", c["crate_max_raw_jump"] <= RAW_BOUND,
@@ -364,7 +382,7 @@ gate("present-mirror control fails the response gate",
      f"{mirror['crate_response_ticks']} >= {ROUND_TRIP}: prediction runs, the mirror is shown")
 s, norebuild, k1, _ = run_leg(
     client_extra=[*impair, "--interaction-debug-break", "no-rebuild"], impaired=True)
-worst, n, _, _ = residual_before(norebuild, k1)
+worst, n, _, _, _ = residual_before(norebuild, k1)
 # The no-rebuild control is gated on its RATIO to the clean run, not on the absolute 1 cm bound. Measured
 # 12.5-15.3 mm against that 10 mm bound -- only 1.25-1.5x -- so another machine's last bits could put it
 # under the bound, and a control that passes its gate by luck is a CI red that proves nothing. Measured
@@ -380,7 +398,7 @@ gate("no-rebuild control: the residual measurement sees the leak",
      f"{worst / RESIDUAL:.2f}x): the warm-start cache of a discarded timeline leaks into the replay")
 s, stale, k1, _ = run_leg(
     client_extra=[*impair, "--interaction-debug-break", "stale-restore"], impaired=True)
-worst, n, _, _ = residual_before(stale, k1)
+worst, n, _, _, _ = residual_before(stale, k1)
 gate("stale-restore control fails the residual gate", worst > RESIDUAL and membership_ok(s, stale),
      f"max pre-kick correction {worst * 1000:.2f} mm > {RESIDUAL * 1000:.0f} mm "
      f"({worst / baseline_residual:.1f}x the clean run's)")

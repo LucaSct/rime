@@ -798,7 +798,8 @@ NetworkInputServer::on_link(net::Link& link,
                             const GameDefinition::NetworkInputProfile& profile,
                             ecs::World& world,
                             const GameDefinition::RemotePlayProfile* remote_play,
-                            std::string& error) {
+                            std::string& error,
+                            bool adaptive_input) {
     if (remote_play &&
         (!remote_play->owned_player || !remote_play->prediction_hooks ||
          !world.is_alive(remote_play->owned_player(world)) ||
@@ -807,7 +808,15 @@ NetworkInputServer::on_link(net::Link& link,
         error = "remote play profile has no live owned player";
         return nullptr;
     }
-    auto impl = std::make_unique<Impl>(ListenerLink{link}, tick_hz, profile, world, remote_play);
+    auto impl = std::make_unique<Impl>(ListenerLink{link},
+                                       tick_hz,
+                                       profile,
+                                       world,
+                                       remote_play,
+                                       SpawnFault::None,
+                                       0,
+                                       1,
+                                       adaptive_input);
     if (remote_play &&
         (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
          !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {
@@ -943,6 +952,7 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick,
     checkpoint.server_tick = server_tick;
     checkpoint.membership_epoch = impl_->membership_epoch;
     checkpoint.result = result;
+    checkpoint.input_stalls = static_cast<std::uint32_t>(impl_->schedule->stalls() & 0xFFFFFFFFu);
     // The client resolves this replicated NetId through its map to find its own mirror.
     const PredictedEntityId id{impl_->owner_net_id.index, impl_->owner_net_id.generation};
     auto state = impl_->hooks.capture(id);

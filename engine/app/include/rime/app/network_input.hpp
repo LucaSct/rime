@@ -53,7 +53,8 @@ public:
             const GameDefinition::NetworkInputProfile& profile,
             ecs::World& world,
             const GameDefinition::RemotePlayProfile* remote_play,
-            std::string& error);
+            std::string& error,
+            bool adaptive_input = false);
     ~NetworkInputServer();
 
     [[nodiscard]] std::uint16_t local_port() const noexcept;
