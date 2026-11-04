@@ -215,6 +215,7 @@ TEST_CASE("launch: dedicated listen grammar and conflicts") {
     CHECK(defaults.options.listen_host == "0.0.0.0");
     CHECK(defaults.options.port == kDefaultListenPort);
     CHECK_FALSE(defaults.options.offline);
+    CHECK_FALSE(defaults.options.endless);
     CHECK_FALSE(defaults.options.explicit_listen);
 
     const auto listen = parse({"dedicated", "--listen", "127.0.0.1:0"});
@@ -231,6 +232,11 @@ TEST_CASE("launch: dedicated listen grammar and conflicts") {
     CHECK(port.options.listen_host == shorthand.options.listen_host);
     CHECK(port.options.port == shorthand.options.port);
     CHECK(parse({"dedicated", "--offline"}).options.offline);
+    const auto endless = parse({"dedicated", "--listen", "127.0.0.1:0", "--endless"});
+    REQUIRE(endless.status == ParseStatus::Ok);
+    CHECK(endless.options.endless);
+    CHECK(parse({"dedicated", "--offline", "--endless"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--endless"}).status == ParseStatus::Error);
 
     CHECK(parse({"dedicated", "--listen", "127.0.0.1:1", "--port", "2"}).status ==
           ParseStatus::Error);
@@ -247,6 +253,125 @@ TEST_CASE("launch: dedicated listen grammar and conflicts") {
     CHECK(parse({"play", "--offline"}).status == ParseStatus::Error);
     // play still parses --port, even though only dedicated uses it in this brick.
     CHECK(parse({"play", "--port", "9000"}).status == ParseStatus::Ok);
+}
+
+TEST_CASE("launch: interaction diagnostics parse, are off by default, and are refused in the wrong "
+          "mode") {
+    // m20.6c: kicks are a listening-dedicated server fault, the break and trace are connected play.
+    const auto plain = parse({"dedicated", "--listen", "127.0.0.1:0", "--ticks", "5"});
+    REQUIRE(plain.status == ParseStatus::Ok);
+    CHECK(plain.options.interaction_kicks.empty());
+    CHECK(plain.options.interaction_debug_break == InteractionDebugBreak::None);
+    CHECK_FALSE(plain.options.interaction_trace);
+
+    const auto kicks = parse({"dedicated",
+                              "--listen",
+                              "127.0.0.1:0",
+                              "--ticks",
+                              "5",
+                              "--interaction-fault",
+                              "kick@300,kick@489"});
+    REQUIRE(kicks.status == ParseStatus::Ok);
+    REQUIRE(kicks.options.interaction_kicks.size() == 2);
+    CHECK(kicks.options.interaction_kicks[0] == 300);
+    CHECK(kicks.options.interaction_kicks[1] == 489);
+    // m20.7: kick@cmd:N fires on command retirement, not a server tick; the forms mix freely.
+    const auto by_command = parse({"dedicated",
+                                   "--listen",
+                                   "127.0.0.1:0",
+                                   "--interaction-fault",
+                                   "kick@cmd:306,kick@cmd:485"});
+    REQUIRE(by_command.status == ParseStatus::Ok);
+    CHECK(by_command.options.interaction_kicks.empty());
+    REQUIRE(by_command.options.interaction_kick_commands.size() == 2);
+    CHECK(by_command.options.interaction_kick_commands[0] == 306);
+    CHECK(by_command.options.interaction_kick_commands[1] == 485);
+    const auto mixed =
+        parse({"dedicated", "--listen", "127.0.0.1:0", "--interaction-fault", "kick@7,kick@cmd:9"});
+    REQUIRE(mixed.status == ParseStatus::Ok);
+    CHECK(mixed.options.interaction_kicks == std::vector<std::uint64_t>{7});
+    CHECK(mixed.options.interaction_kick_commands == std::vector<std::uint32_t>{9});
+    for (const char* bad : {"kick@cmd:",
+                            "kick@cmd:x",
+                            "kick@cmd:0",
+                            "kick@cmd:4294967296",
+                            "kick@cmd:1,",
+                            "kick@cmd:1,,kick@2"})
+        CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--interaction-fault", bad}).status ==
+              ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--interaction-fault", "kick@cmd:3"}).status ==
+          ParseStatus::Error);
+    for (const char* bad : {"kick@", "kick@x", "kick@1,", "kick@1,,kick@2", "boom@3", ""})
+        CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--interaction-fault", bad}).status ==
+              ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--interaction-fault", "kick@3"}).status ==
+          ParseStatus::Error);
+
+    const auto broken = parse({"play",
+                               "--connect",
+                               "127.0.0.1",
+                               "--interaction-debug-break",
+                               "stale-restore",
+                               "--interaction-trace"});
+    REQUIRE(broken.status == ParseStatus::Ok);
+    CHECK(broken.options.interaction_debug_break == InteractionDebugBreak::StaleRestore);
+    CHECK(broken.options.interaction_trace);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--interaction-debug-break", "bogus"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"play", "--interaction-debug-break", "no-rebuild"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--interaction-trace"}).status == ParseStatus::Error);
+}
+
+TEST_CASE("launch: m20.7 --input-buffer and --debug-hitch parse, default off, and refuse misuse") {
+    const auto none = parse({"dedicated", "--listen", "127.0.0.1:0"});
+    REQUIRE(none.status == ParseStatus::Ok);
+    CHECK(none.options.input_buffer_adaptive); // the default since ADR-0107 was accepted
+    CHECK(none.options.debug_hitch_tick == 0);
+
+    const auto adaptive =
+        parse({"dedicated", "--listen", "127.0.0.1:0", "--input-buffer", "adaptive"});
+    REQUIRE(adaptive.status == ParseStatus::Ok);
+    CHECK(adaptive.options.input_buffer_adaptive);
+    const auto fixed = parse({"dedicated", "--listen", "127.0.0.1:0", "--input-buffer", "fixed"});
+    REQUIRE(fixed.status == ParseStatus::Ok);
+    CHECK_FALSE(fixed.options.input_buffer_adaptive);
+
+    // Wrong mode word, missing value, repeated, and the wrong mode of play / offline dedicated.
+    CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--input-buffer", "bogus"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--input-buffer"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"dedicated",
+                 "--listen",
+                 "127.0.0.1:0",
+                 "--input-buffer",
+                 "fixed",
+                 "--input-buffer",
+                 "adaptive"})
+              .status == ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--input-buffer", "adaptive"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"dedicated", "--offline", "--input-buffer", "adaptive"}).status ==
+          ParseStatus::Error);
+
+    const auto hitch = parse({"play", "--connect", "127.0.0.1", "--debug-hitch", "240:200"});
+    REQUIRE(hitch.status == ParseStatus::Ok);
+    CHECK(hitch.options.debug_hitch_tick == 240);
+    CHECK(hitch.options.debug_hitch_ms == 200);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--debug-hitch", "1:2000"}).status ==
+          ParseStatus::Ok);
+    for (const char* bad :
+         {"", "240", "240:", ":200", "0:200", "240:0", "240:2001", "x:200", "240:y"})
+        CHECK(parse({"play", "--connect", "127.0.0.1", "--debug-hitch", bad}).status ==
+              ParseStatus::Error);
+    CHECK(parse({"play", "--connect", "127.0.0.1", "--debug-hitch"}).status == ParseStatus::Error);
+    CHECK(
+        parse(
+            {"play", "--connect", "127.0.0.1", "--debug-hitch", "240:200", "--debug-hitch", "9:9"})
+            .status == ParseStatus::Error);
+    CHECK(parse({"play", "--debug-hitch", "240:200"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--listen", "127.0.0.1:0", "--debug-hitch", "240:200"}).status ==
+          ParseStatus::Error);
 }
 
 TEST_CASE("launch: connected play and linger grammar") {
@@ -287,6 +412,62 @@ TEST_CASE("launch: connected play and linger grammar") {
     CHECK(parse({"dedicated", "--offline", "--ticks", "1", "--linger-ms", "1"}).status ==
           ParseStatus::Error);
     CHECK(parse({"dedicated", "--linger-ms", "1"}).status == ParseStatus::Error);
+}
+
+TEST_CASE("launch: m20.8b --max-clients parses 1..128, once, and only for listening dedicated") {
+    const auto unset = parse({"dedicated", "--listen", "127.0.0.1:0"});
+    REQUIRE(unset.status == ParseStatus::Ok);
+    CHECK(unset.options.max_clients == 0); // resolved by the runner against the game
+    const auto four = parse({"dedicated", "--listen", "127.0.0.1:0", "--max-clients", "4"});
+    REQUIRE(four.status == ParseStatus::Ok);
+    CHECK(four.options.max_clients == 4);
+    CHECK(parse({"dedicated", "--max-clients", "128"}).status == ParseStatus::Ok);
+    CHECK(parse({"dedicated", "--max-clients", "0"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--max-clients", "129"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--max-clients", "x"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--max-clients"}).status == ParseStatus::Error);
+    CHECK(parse({"dedicated", "--max-clients", "2", "--max-clients", "3"}).status ==
+          ParseStatus::Error);
+    CHECK(parse({"dedicated", "--offline", "--max-clients", "2"}).status == ParseStatus::Error);
+    CHECK(parse({"play", "--max-clients", "2"}).status == ParseStatus::Error);
+}
+
+TEST_CASE("launch: m20.8b the operator may lower the game's seat count, never raise it") {
+    // Refused before any socket is bound: the game's own ceiling is the only one that matters.
+    const auto listening = [](std::uint16_t max_clients) {
+        LaunchOptions o = bounded(LaunchMode::Dedicated, 5);
+        o.offline = false;
+        o.listen_host = "127.0.0.1";
+        o.port = 0;
+        o.max_clients = max_clients;
+        return o;
+    };
+    const auto with_input = [](Observed& seen, std::uint16_t max_players) {
+        GameDefinition def = probe_definition(seen);
+        def.network_input = GameDefinition::NetworkInputProfile{
+            "probe", 1, [](const replication::InputCommand&) { return ActionState{}; }};
+        def.max_players = max_players;
+        return def;
+    };
+    CountingFactory factory;
+    Observed one_seen, four_seen;
+    // A one-player game (every game before m20.8) cannot be raised to 2 seats.
+    const RunReport one = run_game_mode(listening(2), with_input(one_seen, 1), factory.hooks());
+    CHECK(one.status == RunStatus::Failed);
+    CHECK(one.usage_error);
+    CHECK(one.message.find("never raise") != std::string::npos);
+    CHECK(one_seen.setups == 0);
+    const RunReport four = run_game_mode(listening(5), with_input(four_seen, 4), factory.hooks());
+    CHECK(four.status == RunStatus::Failed);
+    CHECK(four.usage_error);
+    // The one-seat diagnostics are refused on a multi-seat game: each names ONE client.
+    Observed traced_seen;
+    LaunchOptions traced = listening(2);
+    traced.input_trace = "unused-trace.txt";
+    const RunReport trace = run_game_mode(traced, with_input(traced_seen, 4), factory.hooks());
+    CHECK(trace.status == RunStatus::Failed);
+    CHECK(trace.message.find("one-seat diagnostics") != std::string::npos);
+    CHECK(factory.calls == 0);
 }
 
 TEST_CASE("launch: input trace needs a listening dedicated run") {

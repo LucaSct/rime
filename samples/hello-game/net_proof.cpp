@@ -441,12 +441,16 @@ struct Client {
     bool hello(std::uint16_t min = 2, std::uint16_t max = 2, bool wrong_schema = false) {
         if (!wait_connected())
             return false;
-        const auto def = hello_game::definition();
+        // The executable's definition, so the offered identity is the one its server folds --
+        // all of it: m20.8b2's hello-game declares 16 seats, and the "rime.seats" marker is part
+        // of its identity even on the one-seat server this proof runs.
+        const auto def = hello_game::definition_with_interaction();
         const auto& profile = *def.network_input;
         replication::InputHello offer{
             static_cast<std::uint8_t>(min),
             static_cast<std::uint8_t>(max),
-            app::input_schema_identity(profile, def.remote_play ? &*def.remote_play : nullptr) ^
+            app::input_schema_identity(
+                profile, def.remote_play ? &*def.remote_play : nullptr, def.max_players) ^
                 static_cast<std::uint64_t>(wrong_schema)};
         std::array<std::byte, replication::kInputHelloBytes> bytes{};
         const auto n = replication::encode_input_hello(offer, bytes);
@@ -740,8 +744,13 @@ int negative(const std::filesystem::path& binary) {
         const std::string key = name == "hello_version"  ? "hello_version"
                                 : name == "hello_schema" ? "hello_schema"
                                 : name == "full"         ? "clients_refused"
-                                : name == "silence"      ? "neutralized"
-                                                         : std::string(name);
+                                // Silence under the default ADAPTIVE buffer (ADR-0107) stalls:
+                                // each stalled tick runs a NEUTRAL stand-in by construction, so
+                                // "a silent client's held keys stop" is the stall count here. The
+                                // fixed buffer's neutral-after-six-ticks path is the leaf test
+                                // "schedule neutralizes after six silent ticks".
+                                : name == "silence" ? "stalls"
+                                                    : std::string(name);
         bool good = sent && refusal_reply && exited && finished && number(*finished, key) > 0;
         if (finished) {
             if (name == "silence")
@@ -771,6 +780,23 @@ int negative(const std::filesystem::path& binary) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 4 && std::string_view(argv[1]) == "--codec2-to" &&
+        std::string_view(argv[3]) == "--no-gpu") {
+        std::uint16_t port = 0;
+        try {
+            port = static_cast<std::uint16_t>(std::stoul(argv[2]));
+        } catch (...) {
+            return 2;
+        }
+        Client client(port);
+        // An older codec's refusal must be observable on the wire, not inferred from a
+        // server-side count that could rise for a different connection.
+        const bool refused =
+            client.hello(2, 2) && client.reply.refusal == replication::InputHelloRefusal::Version;
+        fmt::print("{{\"event\":\"codec2_probe\",\"version_refused\":{}}}\n",
+                   refused ? "true" : "false");
+        return refused ? 0 : 1;
+    }
     auto binary = std::filesystem::absolute(argv[0]).parent_path() / "hello_game";
     binary.replace_extension(std::filesystem::path(argv[0]).extension());
     return argc == 2 && std::string_view(argv[1]) == "--negative" ? negative(binary)

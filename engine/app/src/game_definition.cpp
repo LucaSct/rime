@@ -7,6 +7,7 @@
 
 #include "rime/app/game_definition.hpp"
 
+#include <string_view>
 #include <utility>
 
 #include "rime/replication/input_v2.hpp"
@@ -82,12 +83,57 @@ ActionState InputMapper::take() noexcept {
     return s;
 }
 
+namespace {
+
+// FNV-1a continued over a fixed marker, then a version's four little-endian bytes -- the same
+// construction `input_schema_hash` uses, so every fold is one platform-independent function.
+void fold_marker(std::uint64_t& hash, std::string_view marker) {
+    for (const char c : marker) {
+        hash ^= static_cast<std::uint8_t>(c);
+        hash *= 0x100000001b3ull;
+    }
+}
+
+void fold_u32(std::uint64_t& hash, std::uint32_t value) {
+    for (unsigned shift = 0; shift < 32; shift += 8) {
+        hash ^= static_cast<std::uint8_t>(value >> shift);
+        hash *= 0x100000001b3ull;
+    }
+}
+
+} // namespace
+
 std::uint64_t input_schema_identity(const GameDefinition::NetworkInputProfile& input,
-                                    const GameDefinition::RemotePlayProfile* remote_play) {
-    return remote_play != nullptr
-               ? replication::input_schema_hash(
-                     input.profile_id, input.profile_version, remote_play->fixed_dt)
-               : replication::input_schema_hash(input.profile_id, input.profile_version);
+                                    const GameDefinition::RemotePlayProfile* remote_play,
+                                    std::uint16_t max_players) {
+    std::uint64_t hash =
+        remote_play != nullptr
+            ? replication::input_schema_hash(
+                  input.profile_id, input.profile_version, remote_play->fixed_dt)
+            : replication::input_schema_hash(input.profile_id, input.profile_version);
+    // Without a spawn profile the hash stays m20.4's identity, bit for bit: a game that does not
+    // opt in is unchanged.
+    if (remote_play != nullptr && remote_play->spawn_prediction) {
+        // Speculative spawn changes what a checkpoint IS (it gains an extension an m20.4 decoder
+        // refuses), so it is part of the input identity: a fixed marker and the profile version,
+        // so bumping the spawn version is a schema refusal.
+        fold_marker(hash, "rime.spawn_prediction");
+        fold_u32(hash, remote_play->spawn_prediction->version);
+        // An active interaction group (m20.6b) changes what a checkpoint's roster may hold -- a
+        // physics object with 52 state bytes beside the player -- so it negotiates the same way.
+        // Inactive or absent: m20.5's identity, bit for bit.
+        if (const auto* interaction = remote_play->active_interaction()) {
+            fold_marker(hash, "rime.interaction");
+            fold_u32(hash, interaction->version);
+        }
+    }
+    // m20.8b: a multi-seat game changes what the hello reply IS (codec 3 carries a seat). The
+    // codec range already refuses a codec-2 client as `Version`; folding presence here as well
+    // means two builds of one game that disagree about seating refuse as `Schema` even if a
+    // future client offers both codecs. One-player: m20.7's identity, bit for bit.
+    if (max_players > 1)
+        fold_marker(hash, "rime.seats");
+    return hash;
 }
 
 } // namespace rime::app
