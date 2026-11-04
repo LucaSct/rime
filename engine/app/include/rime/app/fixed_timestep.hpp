@@ -26,7 +26,11 @@ struct FixedTimestep {
     // Build from a tick rate in Hz (the ergonomic front door; the loop stores dt, tests read Hz).
     [[nodiscard]] static FixedTimestep from_hz(double hz, int max_ticks = 8) noexcept {
         FixedTimestep ts;
-        ts.fixed_dt = hz > 0.0 ? 1.0 / hz : 1.0 / 60.0;
+        // The guard sits INSIDE the divisor, so no division by a possibly-zero `hz` is ever
+        // written. Same value bit for bit. The older `hz > 0 ? 1.0 / hz : ...` form trips MSVC
+        // warning C4723, potential divide by 0, which /WX makes an error once /Ob1 inlines this
+        // into a caller passing a constant 0: the optimizer warns on the dead branch first.
+        ts.fixed_dt = 1.0 / (hz > 0.0 ? hz : 60.0);
         ts.max_ticks_per_frame = max_ticks;
         return ts;
     }

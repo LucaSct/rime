@@ -20,7 +20,11 @@ project(Rime
 # __forceinline. This silently threw away the win measured in force_inline.hpp (such as
 # core::rotate's -19.6% physics solve) by emitting calls for every RIME_FORCE_INLINE site.
 # Switching to /Ob1 honours explicit inline/__forceinline requests while avoiding the
-# discretionary inlining of /Ob2, keeping Debug builds steppable and debuggable. Replacing
+# discretionary inlining of /Ob2, keeping Debug builds steppable and debuggable. Note that
+# /Ob1 also expands every member function DEFINED IN ITS CLASS (implicitly inline), so a
+# header's small helpers now inline in Debug too, and MSVC's optimizer warnings that only fire
+# after inlining (C4723 on a guarded division, first seen in fixed_timestep.hpp) can appear
+# here and not in a GCC/Clang build. Replacing
 # the flag directly rather than appending /Ob1 prevents cl.exe warning D9025 ("overriding
 # '/Ob0' with '/Ob1'") on every translation unit. Note that the effect on MSVC Debug timing
 # is not yet measured (inferred).
