@@ -41,6 +41,7 @@ namespace hello_game {
 inline constexpr std::uint8_t kAxisMoveX = 0; // −1 left … +1 right
 inline constexpr std::uint8_t kAxisMoveZ = 1; // −1 forward (−z, the camera's look) … +1 back
 inline constexpr std::uint8_t kButtonQuit = 0;
+inline constexpr std::uint8_t kButtonThrow = 1;
 
 // ── What the game is told, per tick ───────────────────────────────────────────────────────────
 //
@@ -65,7 +66,40 @@ struct ReplicatedGameState {
     rime::core::Vec3 player_velocity{};
     rime::core::Vec3 crate_position{};
     rime::core::Quat crate_rotation{};
+    // Resource state belongs to the owner checkpoint's group. The score is authoritative only:
+    // prediction never runs the target test or grants a point.
+    std::uint32_t throw_charges = 3;
+    std::uint32_t throw_cooldown = 0;
+    std::uint32_t target_score = 0;
+    rime::core::Vec3 player_facing{0.0f, 0.0f, -1.0f};
 };
+
+// One entity per accepted flight. WorldTransform lets the normal world stream give it a NetId;
+// the complete motion state is also captured in the owner checkpoint for prediction.
+struct ThrownProjectile {
+    rime::core::Vec3 position{};
+    rime::core::Vec3 velocity{};
+    std::uint32_t age = 0;
+};
+
+// The crate's full rigid-body state, copied out of the physics world after every authoritative
+// step (m20.6b, ADR-0106 §2). The pose alone is already in ReplicatedGameState; this adds what a
+// physics body cannot be restored without -- linear and angular velocity -- plus whether the
+// player touched it this tick, the fact the server's membership policy needs and only the physics
+// contact stream knows. It sits on the crate entity because it is per-object state: the server's
+// owner checkpoint captures it from here when the crate is in the interaction group. It is not in
+// the digest, which is unchanged (the crate pose it already hashes is the same body's).
+struct CrateBody {
+    rime::core::Vec3 position{};
+    rime::core::Quat orientation{};
+    rime::core::Vec3 linear_velocity{};
+    rime::core::Vec3 angular_velocity{};
+    std::uint32_t touching_player = 0;
+};
+
+// The crate's roster state bytes: position, orientation, linear and angular velocity as 13
+// little-endian float bit patterns (52 bytes).
+inline constexpr std::size_t kCrateStateBytes = 52;
 
 [[nodiscard]] std::uint64_t replicated_digest(const rime::ecs::World& world);
 [[nodiscard]] rime::ecs::Entity owned_player(rime::ecs::World& world);
@@ -81,6 +115,11 @@ public:
     static constexpr float kPickupRadius = 0.6f;     // the trigger sphere the player must touch
     static constexpr int kPickupCount = 5;
     static constexpr float kRingRadius = 5.0f; // the markers sit on this circle about the origin
+    // The largest SERVER-ONLY impulse the game applies to the crate (m20.6c, ADR-0106 §4): a
+    // 12 N*s kick on the 6 kg crate is a 2 m/s velocity step. Declared once; the interaction
+    // profile's `j_max` reads it, so the kick the server applies and the raw-correction bound the
+    // proof derives cannot drift apart.
+    static constexpr float kCrateKickImpulse = 12.0f;
 
     // Where marker `index` is. Public because the autopilot steers at it, and steering at a
     // hard-coded coordinate instead would mean moving a marker silently turns the self-check into
@@ -100,6 +139,8 @@ public:
     [[nodiscard]] std::uint64_t state_digest(const rime::ecs::World& world) const override;
     void present_setup(rime::app::PresentSetupContext& ctx) override;
     void present_frame(rime::app::PresentFrameContext& ctx) override;
+    void present_prediction(rime::app::PresentFrameContext& ctx,
+                            rime::ecs::World& prediction_world) override;
 
     // ── What a host may ask about the game ────────────────────────────────────────────────────
     [[nodiscard]] int score() const noexcept;
@@ -122,6 +163,9 @@ public:
     // server that set up meshes nobody will see is a server that needed a device to start.
     [[nodiscard]] std::uint64_t presentation_calls() const noexcept { return presentation_calls_; }
 
+    // A test moves the target off the known flight path as a sensitivity control for the sweep.
+    void set_throw_target(rime::core::Vec3 target) noexcept { throw_target_ = target; }
+
 private:
     struct Pickup {
         rime::ecs::Entity entity{};
@@ -132,7 +176,10 @@ private:
     void move_player(rime::ecs::World& world, float dt);
     [[nodiscard]] ReplicatedGameState* state() const noexcept;
     void bind_bodies(rime::ecs::World& world);
-    void collect(rime::ecs::World& world);
+    void collect(rime::ecs::World& world, std::vector<rime::ecs::Entity>* despawns);
+    void throw_step(rime::app::TickContext& ctx, ReplicatedGameState& state);
+    void record_crate(rime::ecs::World& world);
+    void present_projectile(rime::ecs::World& render_world, rime::ecs::World& source_world);
 
     // The physics world is the GAME's (it was the host's before m20.1): the engine owns the loop
     // and hands the game the tick, and what the game simulates with is its own affair.
@@ -143,8 +190,13 @@ private:
     rime::ecs::Entity player_{};
     rime::ecs::Entity crate_{};
     rime::ecs::Entity camera_{}; // presentation only: spawned by present_setup, absent otherwise
+    rime::ecs::Entity projectile_visual_{}; // one visible identity across guess and adoption
     rime::ecs::Entity state_entity_{};
+    rime::ecs::Entity projectile_{};
+    rime::replication::SpawnKey projectile_key_{};
+    rime::core::Vec3 throw_target_{0.0f, 0.9f, -2.55f};
     rime::physics::BodyId player_body_{};
+    rime::physics::BodyId crate_body_{};
     rime::ecs::World* world_ = nullptr;
     std::vector<Pickup> pickups_;
     bool bound_ = false;
@@ -166,6 +218,10 @@ void register_components(rime::ecs::World& world);
 // The GameDefinition: the only thing `main` hands the engine.
 [[nodiscard]] rime::app::GameDefinition definition();
 
+// `definition()` plus the m20.6 interaction group (ADR-0106): the crate is predicted while the
+// server says it is near. The executable runs this one; see game.cpp for why it is separate.
+[[nodiscard]] rime::app::GameDefinition definition_with_interaction();
+
 } // namespace hello_game
 
 // Beside the declaration because World::spawn_with registers components in whichever TU sees it.
@@ -181,4 +237,20 @@ RIME_REFLECT_FIELD(player_position)
 RIME_REFLECT_FIELD(player_velocity)
 RIME_REFLECT_FIELD(crate_position)
 RIME_REFLECT_FIELD(crate_rotation)
+RIME_REFLECT_FIELD(throw_charges)
+RIME_REFLECT_FIELD(throw_cooldown)
+RIME_REFLECT_FIELD(target_score)
+RIME_REFLECT_FIELD(player_facing)
+RIME_REFLECT_END()
+RIME_REFLECT_BEGIN(hello_game::CrateBody)
+RIME_REFLECT_FIELD(position)
+RIME_REFLECT_FIELD(orientation)
+RIME_REFLECT_FIELD(linear_velocity)
+RIME_REFLECT_FIELD(angular_velocity)
+RIME_REFLECT_FIELD(touching_player)
+RIME_REFLECT_END()
+RIME_REFLECT_BEGIN(hello_game::ThrownProjectile)
+RIME_REFLECT_FIELD(position)
+RIME_REFLECT_FIELD(velocity)
+RIME_REFLECT_FIELD(age)
 RIME_REFLECT_END()

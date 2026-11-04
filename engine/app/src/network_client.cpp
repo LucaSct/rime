@@ -17,7 +17,10 @@
 #include <cmath>
 #include <memory>
 #include <optional>
+#include <random>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "rime/app/application.hpp"
@@ -31,6 +34,8 @@
 #include "rime/render/mesh.hpp"
 #include "rime/render/scene_renderer.hpp"
 #include "rime/replication/client_replicator.hpp"
+#include "rime/replication/input_pacing.hpp"
+#include "rime/replication/interaction.hpp"
 #include "rime/replication/interpolation.hpp"
 #include "rime/rhi/device.hpp"
 
@@ -215,7 +220,11 @@ RunReport run_network_client(const LaunchOptions& options,
         impaired = std::make_unique<ImpairedLink>(*link, options);
         link = impaired.get();
     }
-    net::NetDriver driver{*link, net::NetDriver::Config{}};
+    net::NetDriver::Config driver_config{};
+    // Salt entropy is an app input; net code stays deterministic for explicitly seeded tests.
+    std::random_device entropy;
+    driver_config.salt_seed = (std::uint64_t{entropy()} << 32) | std::uint64_t{entropy()};
+    net::NetDriver driver{*link, driver_config};
     const auto session_id = driver.connect(*endpoint, now_ms());
     if (!session_id)
         return fail(report, "transport session unavailable");
@@ -242,18 +251,112 @@ RunReport run_network_client(const LaunchOptions& options,
     definition.remote_play->register_replicated(prediction_world);
     auto game = definition.create();
     if (!game || (options.autopilot && !game->has_autopilot()) ||
-        (options.input_tape && !definition.remote_play->diagnostic_input_tape))
+        (options.input_tape && !definition.remote_play->diagnostic_input_tape) ||
+        (options.input_tape_throw &&
+         (!definition.remote_play->spawn_prediction ||
+          !definition.remote_play->spawn_prediction->diagnostic_throw_input)) ||
+        (options.input_tape_push &&
+         (!definition.remote_play->active_interaction() ||
+          !definition.remote_play->active_interaction()->diagnostic_push_input)))
         return fail(report, "game or autopilot unavailable");
 
     replication::InputWindow window;
+    // m20.7 (ADR-0107): the client half of the adaptive input buffer. It only ever lengthens the
+    // tick, and only after a pacing report has arrived -- a fixed-buffer server never sends one,
+    // so for those runs nothing below changes the loop's pacing.
+    replication::InputPacer pacer;
     std::unique_ptr<replication::Reconciler> reconciler;
+    // Presentation is deliberately outside the rewindable prediction world: replay must not
+    // forget that a Launch has already been shown under its provisional key.
+    replication::PresentationLedger ledger;
+    std::unique_ptr<replication::SpawnReconciler> spawn_reconciler;
+    std::optional<GameDefinition::RemotePlayProfile::SpawnPredictionProfile::ClientHooks>
+        spawn_hooks;
+    std::vector<replication::SpawnBinding> spawn_bindings;
+    std::vector<replication::ProvisionalEntity> detached_guesses;
+    std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> live_presentations;
+    std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> launched_presentations;
+    std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> ended_keys;
+    std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> suspended_keys;
+    std::optional<replication::SpawnKey> acknowledged_outcomes;
+    std::uint64_t presentation_launch = 0, presentation_end = 0;
+    std::uint64_t presentation_cancelled = 0, presentation_suspended = 0;
+    // Keys whose end was the entity's own life limit rather than the server's: the miss/hit
+    // evidence (a hit ends the server's flight early, so its end arrives as an authoritative one).
+    std::uint64_t lifetime_ends = 0, presentation_resumed = 0;
+    std::uint64_t live_presentations_max = 0, spawn_response_ticks = 0;
+    std::optional<std::uint64_t> spawn_press_tick;
+    bool spawn_responded = false;
+    std::uint64_t spawn_acks_sent = 0, spawn_ack_send_refused = 0;
+    // Checkpoints the spawn path could not use: an m20.4-shaped one (no extension, so no verdicts
+    // to apply) or one whose roster lacks the mirror's player. Counted, because a client that
+    // silently dropped every checkpoint would still "converge" on its own prediction (guardrail 5).
+    std::uint64_t spawn_checkpoints_without_extension = 0, spawn_checkpoints_without_player = 0;
+    // m20.6b, ADR-0106 §3-§4: the interaction object. The game's decorated hooks own its
+    // prediction physics world; the engine owns what is OUTSIDE rewindable state -- the smoother
+    // and every counter -- so no restore or replay can rewrite what the player was shown.
+    //
+    // CORRECTED SIMULATION, SMOOTHED PRESENTATION: a checkpoint always moves the simulated object
+    // to the authoritative answer and replays (the hooks never blend), and the smoother records
+    // the jump as a visual offset that decays, so the object on screen glides over it instead.
+    const auto* interaction = definition.remote_play->active_interaction();
+    std::optional<GameDefinition::RemotePlayProfile::InteractionProfile::ClientHooks>
+        interaction_hooks;
+    replication::PredictedEntityId interaction_id{};
+    ecs::Entity mirror_object = ecs::kNullEntity;
+    replication::CorrectionSmoother smoother;
+    // Membership as the CLIENT saw it (applied rosters), beside the server's own counters.
+    std::uint64_t crate_joins_seen = 0, crate_leaves_seen = 0, crate_member_ticks = 0;
+    // The simulation's own correction: the predicted object before a checkpoint against the same
+    // tick replayed from it, for checkpoints where it was a member on both sides (a join is a
+    // seed, not a correction). With no server-only force this is the UNDISTURBED RESIDUAL that
+    // ADR-0106 §3 expects to be non-zero: the rebuilt world has no warm-start cache.
+    double crate_max_sim_correction = 0.0;
+    std::uint64_t crate_member_checkpoints = 0, crate_corrections_over_1cm = 0;
+
+    // `--interaction-trace`: one (server tick, simulated crate correction, the predicted PLAYER's
+    // correction at the same checkpoint, both in metres, plus the server input stalls that fell
+    // inside this checkpoint's applied window) tuple per member->member checkpoint. The player's
+    // correction and the window's stall count are what let a proof tell a crate that disagrees
+    // because the server ran a stand-in (a lost/late command or an adaptive-buffer stall, where the
+    // server stepped the crate without the player's command) from a crate that disagrees while the
+    // player agrees and no stall intervened -- hidden physics state. So a proof can tell the
+    // undisturbed residual (before a kick) from the disturbance and its convergence (after) instead
+    // of reading one maximum over the run.
+    struct CrateTraceSample {
+        std::uint64_t server_tick = 0;
+        double jump = 0.0;
+        double player_jump = 0.0;
+        std::uint32_t input_stalls = 0;
+    };
+
+    std::vector<CrateTraceSample> crate_trace;
+    // Push response: the first predicted step in which the player touched the object, and the
+    // presented object's position just before that step.
+    std::optional<std::uint64_t> crate_push_tick;
+    core::Vec3 crate_push_pose{};
+    std::uint64_t crate_response_ticks = 0;
+    bool crate_responded = false;
     std::vector<net::SessionEvent> events;
     std::vector<net::Received> messages;
-    std::vector<replication::OwnerCheckpoint> pending;
+    std::vector<replication::SpawnCheckpoint> pending;
     std::uint32_t epoch = 0;
     bool has_epoch = false, accepted = false, disconnected = false, graceful = false;
     std::string failure_reason;
     std::uint64_t checkpoints = 0, replayed = 0, max_replay = 0;
+    // Cumulative `OwnerCheckpoint::input_stalls` as of the previous applied checkpoint. Updated on
+    // every applied checkpoint -- non-member and join checkpoints included -- so a stall before a
+    // join never leaks into the first member->member window, while a lost checkpoint merges its
+    // stall count into the next applied checkpoint's window.
+    std::optional<std::uint32_t> last_checkpoint_input_stalls;
+    const auto note_checkpoint_stalls = [&](std::uint32_t total) {
+        const std::uint32_t delta =
+            last_checkpoint_input_stalls && total >= *last_checkpoint_input_stalls
+                ? total - *last_checkpoint_input_stalls
+                : 0u;
+        last_checkpoint_input_stalls = total;
+        return delta;
+    };
     std::uint64_t response_ticks = 0, snaps_over_bound = 0;
     double max_snap = 0.0;
     std::optional<std::uint64_t> first_input_tick;
@@ -276,23 +379,262 @@ RunReport run_network_client(const LaunchOptions& options,
             ++snaps_over_bound;
     };
 
+    const auto object_member = [&] {
+        if (!spawn_reconciler || !interaction_hooks)
+            return false;
+        const auto roster = spawn_reconciler->roster();
+        return std::find(roster.begin(), roster.end(), interaction_id) != roster.end();
+    };
+    // What the player sees of the object: the predicted simulation plus the smoother's offset
+    // while it is a predicted member, otherwise (or with --no-prediction) the mirror's authority.
+    const auto presented_object = [&] {
+        // `present-mirror` control: keep predicting, but SHOW the round-trip-old mirror.
+        if (!options.no_prediction && interaction_hooks &&
+            options.interaction_debug_break != InteractionDebugBreak::PresentMirror)
+            if (const auto simulated = interaction_hooks->object_pose()) {
+                core::Transform pose = *simulated;
+                pose.translation = smoother.presented(interaction_id, simulated->translation);
+                pose.rotation = smoother.presented(interaction_id, simulated->rotation);
+                return pose;
+            }
+        const auto* wt = mirror_world.get<ecs::WorldTransform>(mirror_object);
+        return wt ? wt->value : core::Transform{};
+    };
+    // After an applied checkpoint: count what the roster did, and hand the smoother the jump from
+    // what was on screen to what the corrected simulation now says.
+    const auto note_object_checkpoint = [&](bool was_member,
+                                            const std::optional<core::Transform>& simulated_before,
+                                            const core::Transform& shown_before,
+                                            std::uint64_t checkpoint_server_tick,
+                                            double player_jump,
+                                            std::uint32_t checkpoint_stalls) {
+        const bool member = object_member();
+        if (member && !was_member)
+            ++crate_joins_seen;
+        if (!member && was_member) {
+            ++crate_leaves_seen;
+            smoother.forget(interaction_id); // the mirror presents it again
+        }
+        if (!member)
+            return;
+        const auto simulated_after = interaction_hooks->object_pose();
+        if (!simulated_after)
+            return;
+        smoother.on_correction(
+            interaction_id, shown_before.translation, simulated_after->translation);
+        smoother.on_correction(interaction_id, shown_before.rotation, simulated_after->rotation);
+        if (was_member && simulated_before) {
+            const double jump = static_cast<double>(
+                core::length(simulated_before->translation - simulated_after->translation));
+            crate_max_sim_correction = std::max(crate_max_sim_correction, jump);
+            ++crate_member_checkpoints;
+            if (jump > 0.01)
+                ++crate_corrections_over_1cm;
+            if (options.interaction_trace)
+                crate_trace.push_back(
+                    {checkpoint_server_tick, jump, player_jump, checkpoint_stalls});
+        }
+    };
+
+    const auto update_presentation = [&] {
+        if (!spawn_reconciler || !spawn_hooks)
+            return;
+        std::unordered_set<replication::SpawnKey, replication::SpawnKeyHash> visible;
+        std::unordered_map<replication::SpawnKey, std::uint64_t, replication::SpawnKeyHash>
+            live_per_key;
+        for (const auto& binding : spawn_bindings)
+            if (spawn_hooks->is_live(binding.id)) {
+                visible.insert(binding.key);
+                ++live_per_key[binding.key];
+            }
+        if (!options.no_prediction &&
+            options.spawn_debug_break != SpawnDebugBreak::AuthorityPresentation) {
+            for (const auto& provisional : spawn_reconciler->provisional())
+                if (spawn_hooks->is_live(provisional.id)) {
+                    visible.insert(provisional.key);
+                    ++live_per_key[provisional.key];
+                }
+            for (const auto& detached : detached_guesses)
+                if (spawn_hooks->is_live(detached.id)) {
+                    visible.insert(detached.key);
+                    ++live_per_key[detached.key];
+                }
+        }
+        // Count identities per key before the set coalesces them for ledger events. A surviving
+        // provisional ghost beside its adopted roster entity must make this diagnostic exceed 1.
+        for (const auto& [key, count] : live_per_key) {
+            (void)key;
+            live_presentations_max = std::max(live_presentations_max, count);
+        }
+        for (const auto& key : visible) {
+            // A suspended key that becomes visible again is the replica of a late verdict -- or
+            // a guess resurrected by replay, which must never happen. Counted either way; the
+            // proof says which legs may show it.
+            if (live_presentations.insert(key).second && suspended_keys.erase(key) != 0)
+                ++presentation_resumed;
+            if ((options.spawn_debug_break == SpawnDebugBreak::NoLedger ||
+                 ledger.should_play(key, replication::PresentationEventKind::Launch, 0))) {
+                ++presentation_launch;
+                launched_presentations.insert(key);
+            }
+            if (spawn_press_tick && !spawn_responded) {
+                spawn_response_ticks = report.ticks + 1 - *spawn_press_tick;
+                spawn_responded = true;
+            }
+        }
+        // An entity that still exists but whose own age reached the game's life limit really
+        // ended -- a still-tracked guess, or the adopted replica, which (predicted ahead of the
+        // server by the round trip) normally reaches its life before the server's binding goes.
+        // Losing the guess during reconciliation or at a diagnostic budget is NOT an end: the
+        // entity is gone, not expired, and its key waits for the verdict.
+        const auto ended_in_place = [&](replication::PredictedEntityId id) {
+            return spawn_hooks->entity_for(id) != ecs::kNullEntity && !spawn_hooks->is_live(id);
+        };
+        for (const auto& provisional : spawn_reconciler->provisional())
+            if (ended_in_place(provisional.id) && ended_keys.insert(provisional.key).second)
+                ++lifetime_ends;
+        for (const auto& binding : spawn_bindings)
+            if (ended_in_place(binding.id) && ended_keys.insert(binding.key).second)
+                ++lifetime_ends;
+        for (auto it = live_presentations.begin(); it != live_presentations.end();) {
+            if (visible.contains(*it)) {
+                ++it;
+                continue;
+            }
+            if (!ledger.cancelled(*it) && ended_keys.contains(*it) &&
+                launched_presentations.contains(*it)) {
+                if (ledger.should_play(*it, replication::PresentationEventKind::End, 0))
+                    ++presentation_end;
+                ledger.release(*it);
+            } else if (!ledger.cancelled(*it)) {
+                ++presentation_suspended;
+                suspended_keys.insert(*it);
+            }
+            it = live_presentations.erase(it);
+        }
+        // AcceptedEnded can arrive after a local removal, when there is no visible transition.
+        for (const auto& key : ended_keys)
+            if (launched_presentations.contains(key) && !visible.contains(key) &&
+                !ledger.cancelled(key) &&
+                ledger.should_play(key, replication::PresentationEventKind::End, 0))
+                ++presentation_end;
+    };
+
+    const auto apply_pending = [&] {
+        for (const auto& checkpoint : pending) {
+            const auto& base = checkpoint.base;
+            if (spawn_reconciler) {
+                if (!checkpoint.spawns) {
+                    ++spawn_checkpoints_without_extension;
+                    continue;
+                }
+                const bool has_player = std::any_of(
+                    base.entities.begin(), base.entities.end(), [&](const auto& member) {
+                        return mirror.map().resolve({member.id.index, member.id.generation}) ==
+                               mirror_player;
+                    });
+                if (!has_player) {
+                    ++spawn_checkpoints_without_player;
+                    continue;
+                }
+                const auto before = presented_position();
+                const bool object_was_member = object_member();
+                const auto object_simulated_before =
+                    interaction_hooks ? interaction_hooks->object_pose() : std::nullopt;
+                const auto object_shown_before =
+                    interaction_hooks ? presented_object() : core::Transform{};
+                const auto result = spawn_reconciler->apply_checkpoint(base, *checkpoint.spawns);
+                if (!result.base.applied)
+                    continue;
+                const std::uint32_t checkpoint_stalls = note_checkpoint_stalls(base.input_stalls);
+                if (interaction_hooks)
+                    note_object_checkpoint(
+                        object_was_member,
+                        object_simulated_before,
+                        object_shown_before,
+                        base.server_tick,
+                        static_cast<double>(core::length(presented_position() - before)),
+                        checkpoint_stalls);
+                for (const auto& old : spawn_bindings)
+                    if (std::none_of(checkpoint.spawns->bindings.begin(),
+                                     checkpoint.spawns->bindings.end(),
+                                     [&](const auto& binding) { return binding.key == old.key; }))
+                        ended_keys.insert(old.key);
+                for (const auto& outcome : checkpoint.spawns->outcomes)
+                    if (outcome.kind == replication::SpawnOutcomeKind::AcceptedEnded)
+                        ended_keys.insert(outcome.key);
+                // Bindings are authoritative for this applied roster only; a stale or refused
+                // checkpoint cannot replace the keys used by presentation.
+                spawn_bindings = checkpoint.spawns->bindings;
+                for (const auto& cancelled : result.cancelled) {
+                    live_presentations.erase(cancelled.key);
+                    ++presentation_cancelled;
+                }
+                record_snap(before);
+                ++checkpoints;
+                replayed += result.base.replayed;
+                max_replay = std::max<std::uint64_t>(max_replay, result.base.replayed);
+                window.apply_result(base.result);
+                // Acknowledge only applied verdicts. The held frontier cannot advance from a
+                // malformed, refused, or stale checkpoint, even if its wire bytes decoded.
+                const auto held = spawn_reconciler->outcomes_held_through();
+                if (held && (!acknowledged_outcomes || *held > *acknowledged_outcomes)) {
+                    std::array<std::byte, replication::kSpawnOutcomeAckBytes> bytes{};
+                    const auto size = replication::encode_spawn_outcome_ack({*held}, bytes);
+                    auto* session = driver.session(*session_id);
+                    if (session && session->send_reliable(std::span(bytes).first(size), now_ms())) {
+                        acknowledged_outcomes = held;
+                        ++spawn_acks_sent;
+                    } else {
+                        ++spawn_ack_send_refused;
+                    }
+                }
+                update_presentation();
+                continue;
+            }
+            if (!reconciler || base.entities.size() != 1)
+                continue;
+            const auto id = base.entities.front().id;
+            if (mirror.map().resolve({id.index, id.generation}) != mirror_player)
+                continue;
+            if (!has_epoch || base.membership_epoch != epoch) {
+                epoch = base.membership_epoch;
+                reconciler->set_membership(epoch, {id});
+                has_epoch = true;
+            }
+            const auto before = presented_position();
+            const auto result = reconciler->apply_checkpoint(base);
+            if (result.applied) {
+                (void)note_checkpoint_stalls(base.input_stalls);
+                record_snap(before);
+                ++checkpoints;
+                replayed += result.replayed;
+                max_replay = std::max<std::uint64_t>(max_replay, result.replayed);
+                window.apply_result(base.result);
+            }
+        }
+        pending.clear();
+    };
+
     const auto pump = [&] {
-        const auto before_mirror = reconciler ? std::optional{presented_position()} : std::nullopt;
+        const auto before_mirror =
+            (reconciler || spawn_reconciler) ? std::optional{presented_position()} : std::nullopt;
         events.clear();
         messages.clear();
         driver.update(now_ms(), events);
         for (auto& event : events) {
             if (event.kind == net::SessionEvent::Kind::Connected) {
+                // The overrides exist to provoke a Schema refusal on purpose; everything else uses
+                // the ONE identity function the server uses, so a game that opts into more (m20.5's
+                // spawn prediction folds itself in) cannot drift between the two ends again.
+                auto input_profile = *definition.network_input;
+                auto remote_profile = *definition.remote_play;
+                if (options.has_profile_version_override)
+                    input_profile.profile_version = options.profile_version_override;
+                if (options.has_fixed_dt_override)
+                    remote_profile.fixed_dt = options.fixed_dt_override;
                 replication::InputHello hello{
-                    2,
-                    2,
-                    replication::input_schema_hash(definition.network_input->profile_id,
-                                                   options.has_profile_version_override
-                                                       ? options.profile_version_override
-                                                       : definition.network_input->profile_version,
-                                                   options.has_fixed_dt_override
-                                                       ? options.fixed_dt_override
-                                                       : definition.remote_play->fixed_dt)};
+                    2, 2, input_schema_identity(input_profile, &remote_profile)};
                 std::array<std::byte, replication::kInputHelloBytes> bytes{};
                 const auto size = replication::encode_input_hello(hello, bytes);
                 if (auto* session = driver.session(*session_id))
@@ -333,75 +675,112 @@ RunReport run_network_client(const LaunchOptions& options,
                 window.apply_result(result);
                 continue;
             }
-            replication::OwnerCheckpoint checkpoint{};
-            if (replication::decode_owner_checkpoint(message.bytes, checkpoint) ==
-                replication::CheckpointRefusal::None)
+            replication::InputPacing pacing{};
+            if (replication::decode_input_pacing(message.bytes, pacing)) {
+                pacer.on_report(pacing);
+                continue;
+            }
+            // Decode the whole extension before any state changes: dropping verdicts but applying
+            // their roster would leave a ghost provisional entity alive.
+            replication::SpawnCheckpoint checkpoint{};
+            if (replication::decode_spawn_checkpoint(message.bytes, checkpoint))
                 pending.push_back(std::move(checkpoint));
         }
-        if (reconciler) {
-            for (const auto& checkpoint : pending) {
-                if (checkpoint.entities.size() != 1)
-                    continue;
-                const auto id = checkpoint.entities.front().id;
-                if (mirror.map().resolve({id.index, id.generation}) != mirror_player)
-                    continue;
-                if (!has_epoch || checkpoint.membership_epoch != epoch) {
-                    epoch = checkpoint.membership_epoch;
-                    reconciler->set_membership(epoch, {id});
-                    has_epoch = true;
-                }
-                const auto before = presented_position();
-                const auto result = reconciler->apply_checkpoint(checkpoint);
-                if (result.applied) {
-                    record_snap(before);
-                    ++checkpoints;
-                    replayed += result.replayed;
-                    max_replay = std::max<std::uint64_t>(max_replay, result.replayed);
-                    window.apply_result(checkpoint.result);
-                }
-            }
-            pending.clear();
-        }
+        if (reconciler || spawn_reconciler)
+            apply_pending();
         if (before_mirror && options.no_prediction && checkpoints > 0)
             record_snap(*before_mirror);
         mirror.send_ack(driver, now_ms());
     };
 
-    while (Clock::now() < connect_deadline && !disconnected && !reconciler) {
+    while (Clock::now() < connect_deadline && !disconnected && !reconciler && !spawn_reconciler) {
         pump();
         if (accepted && mirror.deltas_applied() > 0 && !pending.empty()) {
-            const auto& checkpoint = pending.back();
-            if (checkpoint.entities.size() == 1) {
-                const auto id = checkpoint.entities.front().id;
-                mirror_player = mirror.map().resolve({id.index, id.generation});
-                if (mirror_player != ecs::kNullEntity && game->bind_remote_world(mirror_world)) {
-                    predicted_player = definition.remote_play->seed_prediction(
-                        mirror_world, prediction_world, mirror_player);
+            const auto& checkpoint = pending.back().base;
+            if (!definition.remote_play->spawn_prediction && checkpoint.entities.size() != 1)
+                continue;
+            for (const auto& member : checkpoint.entities) {
+                const auto candidate =
+                    mirror.map().resolve({member.id.index, member.id.generation});
+                if (candidate != ecs::kNullEntity &&
+                    candidate == definition.remote_play->owned_player(mirror_world)) {
+                    mirror_player = candidate;
+                    break;
+                }
+            }
+            if (mirror_player != ecs::kNullEntity && game->bind_remote_world(mirror_world)) {
+                predicted_player = definition.remote_play->seed_prediction(
+                    mirror_world, prediction_world, mirror_player);
+                if (const auto& profile = definition.remote_play->spawn_prediction) {
+                    auto* session = driver.session(*session_id);
+                    if (!session || !profile->client_hooks)
+                        return fail(report, "spawn client hooks unavailable");
+                    spawn_hooks = profile->client_hooks(
+                        prediction_world,
+                        predicted_player,
+                        session->incarnation(),
+                        [&](const replication::SpawnKey& key, std::span<const std::byte> state) {
+                            return spawn_reconciler->spawn_provisional(key, state);
+                        });
+                    if (interaction) {
+                        // The object's roster id is its world-stream NetId, which the mirror
+                        // already holds: the server names it, the client only looks it up.
+                        mirror_object = interaction->object(mirror_world);
+                        const auto net_id = mirror_object != ecs::kNullEntity
+                                                ? mirror.map().net_id_of(mirror_object)
+                                                : std::nullopt;
+                        if (!net_id || !interaction->client_hooks)
+                            return fail(report, "interaction object unavailable");
+                        interaction_id = {net_id->index, net_id->generation};
+                        interaction_hooks = interaction->client_hooks(
+                            prediction_world,
+                            predicted_player,
+                            interaction_id,
+                            *spawn_hooks,
+                            {options.interaction_debug_break != InteractionDebugBreak::NoRebuild,
+                             options.interaction_debug_break ==
+                                 InteractionDebugBreak::StaleRestore});
+                        spawn_hooks = interaction_hooks->hooks;
+                    }
+                    if (options.spawn_debug_break == SpawnDebugBreak::NoAdopt) {
+                        spawn_hooks->spawn.adopt = [&](auto provisional, auto authoritative) {
+                            // Keep the old entity beside a fresh replica so the live-key gate
+                            // proves that it can see the ghost named by ADR-0105 §5.
+                            for (const auto& guess : spawn_reconciler->provisional())
+                                if (guess.id == provisional)
+                                    detached_guesses.push_back(guess);
+                            spawn_hooks->spawn.create(authoritative);
+                        };
+                    }
+                    replication::SpawnBudget spawn_budget{};
+                    if (options.spawn_unresolved_bound)
+                        spawn_budget.max_unresolved_sequences = options.spawn_unresolved_bound;
+                    spawn_reconciler = std::make_unique<replication::SpawnReconciler>(
+                        spawn_hooks->prediction,
+                        spawn_hooks->spawn,
+                        definition.remote_play->fixed_dt,
+                        session->incarnation(),
+                        &ledger,
+                        replication::ReconcilerBudget{},
+                        spawn_budget);
+                    std::vector<replication::PredictedEntityId> members;
+                    for (const auto& member : checkpoint.entities)
+                        members.push_back(member.id);
+                    spawn_reconciler->set_membership(checkpoint.membership_epoch,
+                                                     std::move(members));
+                } else {
                     reconciler = std::make_unique<replication::Reconciler>(
                         definition.remote_play->prediction_hooks(prediction_world,
                                                                  predicted_player),
                         definition.remote_play->fixed_dt);
-                    // Process the first checkpoint through the same path as all later ones.
-                    const auto initial = std::move(pending);
-                    pending.clear();
-                    for (const auto& first : initial) {
-                        if (!has_epoch || first.membership_epoch != epoch) {
-                            reconciler->set_membership(first.membership_epoch,
-                                                       {first.entities.front().id});
-                            epoch = first.membership_epoch;
-                            has_epoch = true;
-                        }
-                        if (reconciler->apply_checkpoint(first).applied) {
-                            ++checkpoints;
-                            window.apply_result(first.result);
-                        }
-                    }
                 }
+                // The initial checkpoint follows the same applied-verdict and ack path.
+                apply_pending();
             }
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    if (!reconciler)
+    if (!reconciler && !spawn_reconciler)
         return fail(report,
                     disconnected ? failure_reason
                                  : "timed out waiting for ownership and initial world");
@@ -426,34 +805,74 @@ RunReport run_network_client(const LaunchOptions& options,
                 if (const auto* source =
                         prediction_world.get<ecs::WorldTransform>(predicted_player))
                     mirror_world.add_component(mirror_player, ecs::RenderTransform{source->value});
+                if (interaction_hooks && interaction_hooks->object_pose())
+                    mirror_world.add_component(mirror_object,
+                                               ecs::RenderTransform{presented_object()});
             }
             PresentFrameContext frame{mirror_world, ctx.frame_dt, ctx.alpha};
             game->present_frame(frame);
+            if (spawn_reconciler && !options.no_prediction)
+                game->present_prediction(frame, prediction_world);
             ctx.present = renderer->render(*ctx.graph, mirror_world, ctx.extent, true).ldr;
         });
     }
 
     InputMapper mapper(definition.input);
+    std::uint64_t frames_skipped = 0;
+    std::uint64_t hitch_ticks = 0;
     auto deadline = Clock::now();
     const auto period = std::chrono::duration_cast<Clock::duration>(
         std::chrono::duration<double>(definition.remote_play->fixed_dt));
-    while (!disconnected &&
+    // The window's close button ends the session: step() and pump_only() record it as a quit
+    // request, and a loop that never asked would leave a window nobody can close.
+    while (!disconnected && !app.quit_requested() &&
            (options.frames == 0 || report.frames < static_cast<std::uint64_t>(options.frames))) {
-        deadline += period;
+        // The pacer lengthens THIS tick's period by 1/16 while it drains the server's surplus.
+        // Integer Clock::duration arithmetic, and only once a report has arrived: an unscaled
+        // tick adds `period` exactly, so a fixed-buffer run's deadlines are what they always were.
+        auto this_period = period;
+        if (pacer.reports() > 0) {
+            const double scale = pacer.tick();
+            if (scale != 1.0)
+                this_period += std::chrono::duration_cast<Clock::duration>(period * (scale - 1.0));
+        }
+        deadline += this_period;
         std::this_thread::sleep_until(deadline);
         if (impaired)
             impaired->client_tick(report.ticks + 1);
         pump();
         if (disconnected)
             break;
+        // `--debug-hitch T:MS` (diagnostic): a frame hitch before this tick samples input. The
+        // loop's deadline is now in the past, so the following iterations run back to back --
+        // the burst of late commands the adaptive server must absorb instead of discarding.
+        if (options.debug_hitch_tick != 0 && report.ticks + 1 == options.debug_hitch_tick) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(options.debug_hitch_ms));
+            // Whole ticks the sleep spans. The epsilon absorbs 0.2 / (1/60) = 11.999... .
+            hitch_ticks =
+                static_cast<std::uint64_t>(std::floor(static_cast<double>(options.debug_hitch_ms) *
+                                                          1e-3 / definition.remote_play->fixed_dt +
+                                                      1e-9));
+        }
         ActionState actions{};
-        if (options.input_tape)
+        if (options.input_tape_push)
+            actions = interaction->diagnostic_push_input(report.ticks + 1);
+        else if (options.input_tape_throw)
+            actions =
+                definition.remote_play->spawn_prediction->diagnostic_throw_input(report.ticks + 1);
+        else if (options.input_tape)
             actions = definition.remote_play->diagnostic_input_tape(report.ticks + 1);
         else if (options.autopilot)
             actions = game->autopilot();
         else if (app.windowed()) {
             mapper.update(app.frame_input());
             actions = mapper.take();
+        }
+        // The player's own quit key ends THIS process, through the same goodbye as closing the
+        // window; it is never sent (see RemotePlayProfile::local_quit).
+        if (definition.remote_play->local_quit && definition.remote_play->local_quit(actions)) {
+            app.request_quit();
+            break;
         }
         auto command = definition.remote_play->to_command(actions);
         const bool non_neutral =
@@ -463,8 +882,33 @@ RunReport run_network_client(const LaunchOptions& options,
             first_input_position = presented_position();
         }
         command.sequence = ++sequence;
+        if (options.input_tape_throw && command.pressed != 0 && !spawn_press_tick)
+            spawn_press_tick = report.ticks + 1;
         window.push(command);
-        reconciler->predict(command);
+        if (spawn_reconciler) {
+            const auto object_before =
+                interaction_hooks ? presented_object().translation : core::Vec3{};
+            spawn_reconciler->predict(command);
+            update_presentation();
+            if (interaction_hooks) {
+                smoother.advance(definition.remote_play->fixed_dt);
+                if (object_member())
+                    ++crate_member_ticks;
+                if (!crate_push_tick && interaction_hooks->touching()) {
+                    crate_push_tick = report.ticks + 1;
+                    crate_push_pose = object_before;
+                }
+                // 1 mm: above the smoother's decaying residual offsets, far below a push step
+                // (4 m/s is 67 mm per tick).
+                if (crate_push_tick && !crate_responded &&
+                    core::length(presented_object().translation - crate_push_pose) > 1e-3f) {
+                    crate_response_ticks = report.ticks + 1 - *crate_push_tick;
+                    crate_responded = true;
+                }
+            }
+        } else {
+            reconciler->predict(command);
+        }
         if (first_input_tick && !responded &&
             core::length(presented_position() - *first_input_position) > 1e-5f) {
             response_ticks = report.ticks + 1 - *first_input_tick;
@@ -480,35 +924,226 @@ RunReport run_network_client(const LaunchOptions& options,
                 std::span(bytes).first(size), now_ms(), kRemoteInputCommandsStream);
         mirror.send_ack(driver, now_ms());
         mirror.settle_transform_history();
-        (void)app.step(definition.remote_play->fixed_dt);
-        ++report.frames;
+        // ONE TICK PER ITERATION, A FRAME ONLY WHEN ON SCHEDULE. The loop is paced by the tick
+        // deadline, and a vsync (FIFO) present blocks until the next vblank on top of that, so a
+        // client that rendered every iteration ran below the tick rate (measured: 41 Hz on an RTX
+        // 3060 in Debug, 28 Hz on lavapipe) and fell behind the server for good -- its commands
+        // arrived late, the server executed stand-ins (596 of 600 ticks), and the player could not
+        // move. When the next deadline has already passed, this iteration skips the present and
+        // only services the window, so ticks keep wall-clock pace and frames are what get dropped.
+        if (Clock::now() < deadline + period) {
+            (void)app.step(definition.remote_play->fixed_dt);
+            ++report.frames;
+        } else {
+            app.pump_only();
+            ++frames_skipped;
+        }
         ++report.ticks;
+    }
+    // A client that leaves on its own -- the window closed, or a --frames bound reached -- says
+    // goodbye. Without it the server holds the one client slot until its idle timeout, and a player
+    // who closes the window and reconnects at once is refused as `full` (measured). The session's
+    // Closing state re-sends the disconnect once per update for a few updates, because one datagram
+    // is a coin flip on a lossy link.
+    const bool left_on_our_own = !disconnected;
+    if (left_on_our_own) {
+        if (auto* session = driver.session(*session_id))
+            session->disconnect();
+        for (int i = 0; i < 6; ++i) {
+            events.clear();
+            driver.update(now_ms(), events);
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
     }
     if (options.frames == 0 && disconnected)
         pump(); // the closing packet may share a poll with the final state
-    if (options.frames == 0 && !graceful)
+    if (options.frames == 0 && !graceful && !(left_on_our_own && app.quit_requested()))
         return fail(report, "server did not disconnect gracefully");
     app.finish_gpu();
     report.state_digest = definition.remote_play->digest(mirror_world);
     report.finished = disconnected;
-    fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
-               "\"response_ticks\":{},\"max_snap\":{:.6f},\"snaps_over_bound\":{},"
-               "\"corrections\":{},\"reseeds\":{},\"replayed\":{},\"max_replay\":{},"
-               "\"stale_checkpoints\":{},\"checkpoints\":{},"
-               "\"malformed_datagrams\":{},\"oversized_datagrams\":{}}}\n",
-               report.ticks,
-               report.state_digest,
-               responded ? response_ticks : report.ticks,
-               max_snap,
-               snaps_over_bound,
-               reconciler->corrections(),
-               reconciler->reseeds(),
-               replayed,
-               max_replay,
-               reconciler->stale_checkpoints(),
-               checkpoints,
-               socket_link.malformed(),
-               socket_link.oversized());
+    const auto& base = spawn_reconciler ? spawn_reconciler->base() : *reconciler;
+    // SpawnReconciler rejects stale extended checkpoints before its inner Reconciler sees them.
+    // Keep the established JSON field tied to the active checkpoint path's refusal counter.
+    const auto stale_checkpoints =
+        spawn_reconciler ? spawn_reconciler->stale_checkpoints() : base.stale_checkpoints();
+    std::string spawn_metrics;
+    if (spawn_reconciler) {
+        const auto& s = *spawn_reconciler;
+        spawn_metrics = fmt::format(
+            ",\"prediction_path\":\"spawn\",\"presentation_launch\":{},"
+            "\"presentation_end\":{},\"presentation_cancelled\":{},"
+            "\"presentation_suspended\":{},\"presentation_resumed\":{},"
+            "\"presentation_lifetime_ends\":{},"
+            "\"spawn_response_ticks\":{},"
+            "\"live_presentations_max\":{},\"spawn_acks_sent\":{},"
+            "\"spawn_ack_send_refused\":{},\"ledger_played\":{},"
+            "\"ledger_duplicates_suppressed\":{},\"ledger_suppressed_cancelled\":{},"
+            "\"ledger_adoptions\":{},\"ledger_duplicate_adoptions\":{},"
+            "\"ledger_adopt_after_cancel\":{},\"ledger_cancels\":{},"
+            "\"ledger_duplicate_cancels\":{},\"ledger_key_overflow\":{},"
+            "\"ledger_event_overflow\":{},\"ledger_tombstones_evicted\":{},"
+            "\"spawn_rejected_launches\":{},\"spawn_rejected_unpredicted\":{},"
+            "\"spawn_local_removals\":{},\"spawn_local_releases\":{},"
+            "\"spawn_authoritative_cancels\":{},\"spawn_unreplayed_guesses\":{},"
+            "\"spawn_frontier_ahead_of_client\":{},\"spawn_epoch_roster_mismatch\":{},"
+            "\"spawn_retired_without_launch\":{},\"spawn_duplicate_outcomes_ignored\":{},"
+            "\"spawn_confirmed_after_expiry_alive\":{},"
+            "\"spawn_confirmed_after_expiry_ended\":{},\"spawn_adopted\":{},"
+            "\"spawn_accepted_ended\":{},\"spawn_unpredicted_outcomes\":{},"
+            "\"spawn_contradictory_outcomes\":{},\"spawn_provisional_expired\":{},"
+            "\"spawn_pending_without_snapshot\":{},\"spawn_not_recreated\":{},"
+            "\"spawn_recreated\":{},\"spawn_respawn_suppressed\":{},"
+            "\"spawn_outside_step\":{},\"spawn_bad_key\":{},\"spawn_duplicate\":{},"
+            "\"spawn_provisional_overflow\":{},\"spawn_snapshots_evicted\":{},"
+            "\"spawn_tombstones_evicted\":{},\"spawn_stale_checkpoints\":{},"
+            "\"spawn_invalid_base\":{}",
+            presentation_launch,
+            presentation_end,
+            presentation_cancelled,
+            presentation_suspended,
+            presentation_resumed,
+            lifetime_ends,
+            spawn_responded ? spawn_response_ticks
+                            : (spawn_press_tick ? report.ticks - *spawn_press_tick : 0),
+            live_presentations_max,
+            spawn_acks_sent,
+            spawn_ack_send_refused,
+            ledger.played(),
+            ledger.duplicates_suppressed(),
+            ledger.suppressed_cancelled(),
+            ledger.adoptions(),
+            ledger.duplicate_adoptions(),
+            ledger.adopt_after_cancel(),
+            ledger.cancels(),
+            ledger.duplicate_cancels(),
+            ledger.key_overflow(),
+            ledger.event_overflow(),
+            ledger.tombstones_evicted(),
+            s.rejected_launches(),
+            s.rejected_unpredicted(),
+            s.local_removals(),
+            s.local_releases(),
+            s.authoritative_cancels(),
+            s.unreplayed_guesses(),
+            s.frontier_ahead_of_client(),
+            s.epoch_roster_mismatch(),
+            s.retired_without_launch(),
+            s.duplicate_outcomes_ignored(),
+            s.confirmed_after_expiry_alive(),
+            s.confirmed_after_expiry_ended(),
+            s.adopted(),
+            s.accepted_ended(),
+            s.unpredicted_outcomes(),
+            s.contradictory_outcomes(),
+            s.provisional_expired(),
+            s.pending_without_snapshot(),
+            s.not_recreated(),
+            s.recreated(),
+            s.respawn_suppressed(),
+            s.spawn_outside_step(),
+            s.spawn_bad_key(),
+            s.spawn_duplicate(),
+            s.provisional_overflow(),
+            s.snapshots_evicted(),
+            s.tombstones_evicted(),
+            s.stale_checkpoints(),
+            s.invalid_base());
+        for (std::size_t i = 0; i < replication::kSpawnExtensionRefusalCount; ++i)
+            spawn_metrics += fmt::format(
+                ",\"spawn_invalid_extension_{}\":{}",
+                i,
+                s.invalid_extension(static_cast<replication::SpawnExtensionRefusal>(i)));
+        spawn_metrics += fmt::format(
+            ",\"spawn_checkpoints_without_extension\":{},\"spawn_checkpoints_without_player\":{}",
+            spawn_checkpoints_without_extension,
+            spawn_checkpoints_without_player);
+        if (interaction_hooks) {
+            const auto& c = smoother.counters();
+            // crate_response_ticks reads the ticks run since the push when the crate never
+            // visibly moved, and the whole run when no push happened (a refusal, not a pass).
+            spawn_metrics +=
+                fmt::format(",\"interaction\":1,\"crate_member\":{},\"crate_joins_seen\":{},"
+                            "\"crate_leaves_seen\":{},\"crate_member_ticks\":{},"
+                            "\"crate_corrections\":{},\"crate_snaps\":{},"
+                            "\"crate_max_raw_jump\":{:.6f},\"crate_max_presented_jump\":{:.6f},"
+                            "\"crate_rotation_snaps\":{},\"crate_max_raw_angle\":{:.6f},"
+                            "\"crate_member_checkpoints\":{},\"crate_max_sim_correction\":{:.6f},"
+                            "\"crate_corrections_over_1cm\":{},\"crate_push_tick\":{},"
+                            "\"crate_response_ticks\":{}",
+                            object_member() ? 1 : 0,
+                            crate_joins_seen,
+                            crate_leaves_seen,
+                            crate_member_ticks,
+                            c.corrections,
+                            c.snaps,
+                            static_cast<double>(c.max_raw_jump),
+                            static_cast<double>(c.max_presented_jump),
+                            c.rotation_snaps,
+                            static_cast<double>(c.max_raw_angle),
+                            crate_member_checkpoints,
+                            crate_max_sim_correction,
+                            crate_corrections_over_1cm,
+                            crate_push_tick.value_or(0),
+                            crate_responded ? crate_response_ticks
+                                            : (crate_push_tick ? report.ticks - *crate_push_tick
+                                                               : report.ticks));
+            if (options.interaction_trace) {
+                spawn_metrics += ",\"crate_trace\":[";
+                for (std::size_t i = 0; i < crate_trace.size(); ++i)
+                    spawn_metrics += fmt::format("{}[{},{:.6f},{:.6f},{}]",
+                                                 i == 0 ? "" : ",",
+                                                 crate_trace[i].server_tick,
+                                                 crate_trace[i].jump,
+                                                 crate_trace[i].player_jump,
+                                                 crate_trace[i].input_stalls);
+                spawn_metrics += "]";
+            }
+        }
+    } else {
+        spawn_metrics = ",\"prediction_path\":\"legacy\"";
+    }
+    fmt::print(
+        "{{\"event\":\"finished\",\"frames_skipped\":{},\"ticks\":{},\"digest\":\"0x{:016x}\","
+        "\"response_ticks\":{},\"max_snap\":{:.6f},\"snaps_over_bound\":{},"
+        "\"corrections\":{},\"reseeds\":{},\"replayed\":{},\"max_replay\":{},"
+        "\"stale_checkpoints\":{},\"checkpoints\":{},"
+        "\"malformed_datagrams\":{},\"oversized_datagrams\":{},"
+        "\"epoch_mismatch\":{},\"incomplete_checkpoints\":{},"
+        "\"history_overflow\":{},\"replay_budget_exceeded\":{}{}"
+        ",\"commands_sent\":{},\"pacing_reports\":{},\"pacing_stale\":{},"
+        "\"pacer_windows\":{},\"pacer_windows_with_stall\":{},\"pacer_drains\":{},"
+        "\"pacer_dilated_ticks\":{},\"pacer_drained_buffer_ticks\":{},\"last_margin\":{},"
+        "\"hitch_ticks\":{} }}\n",
+        frames_skipped,
+        report.ticks,
+        report.state_digest,
+        responded ? response_ticks : report.ticks,
+        max_snap,
+        snaps_over_bound,
+        base.corrections(),
+        base.reseeds(),
+        replayed,
+        max_replay,
+        stale_checkpoints,
+        checkpoints,
+        socket_link.malformed(),
+        socket_link.oversized(),
+        base.epoch_mismatch(),
+        base.incomplete_checkpoints(),
+        base.history_overflow(),
+        base.replay_budget_exceeded(),
+        spawn_metrics,
+        static_cast<std::uint64_t>(sequence),
+        pacer.reports(),
+        pacer.stale_reports(),
+        pacer.windows(),
+        pacer.windows_with_stall(),
+        pacer.drains(),
+        pacer.dilated_ticks(),
+        pacer.drained_ticks_of_buffer(),
+        static_cast<unsigned>(pacer.last_margin()),
+        hitch_ticks);
     std::fflush(stdout);
     return report;
 }

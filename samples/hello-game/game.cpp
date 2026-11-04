@@ -15,7 +15,10 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <limits>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
 
 #include "rime/core/math/quat.hpp"
@@ -53,9 +56,117 @@ constexpr float kCrateHalf = 0.5f;
 constexpr core::Vec3 kPlayerStart{0.0f,
                                   HelloGame::kPlayerRadius + HelloGame::kPlayerHalfHeight,
                                   0.0f};
+constexpr float kThrowSpeed = 18.0f;
+constexpr float kThrowGravity = -9.8f;
+constexpr float kTargetRadius = 0.08f;
+
+using SpawnId = replication::PredictedEntityId;
+using SpawnRequest =
+    std::function<std::optional<SpawnId>(const replication::SpawnKey&, std::span<const std::byte>)>;
+
+// The mapping survives replay while the world may be restored repeatedly. Adoption changes only
+// the id here, keeping the same ECS entity and its presentation identity.
+struct ClientSpawnState {
+    ecs::World* world = nullptr;
+    std::uint32_t incarnation = 0;
+    SpawnRequest request;
+    std::vector<std::pair<SpawnId, ecs::Entity>> entities;
+
+    ecs::Entity entity_for(SpawnId id) const {
+        for (const auto& [known, entity] : entities)
+            if (known == id)
+                return entity;
+        return {};
+    }
+};
+
+std::vector<std::byte> encode_projectile(const ThrownProjectile& projectile) {
+    std::vector<std::byte> bytes;
+    bytes.reserve(28);
+    const auto append = [&](std::uint32_t value) {
+        for (unsigned shift = 0; shift < 32; shift += 8)
+            bytes.push_back(std::byte{static_cast<std::uint8_t>(value >> shift)});
+    };
+    // Match the server's capture_spawned bytes exactly so checkpoint restore is atomic.
+    append(std::bit_cast<std::uint32_t>(projectile.position.x));
+    append(std::bit_cast<std::uint32_t>(projectile.position.y));
+    append(std::bit_cast<std::uint32_t>(projectile.position.z));
+    append(std::bit_cast<std::uint32_t>(projectile.velocity.x));
+    append(std::bit_cast<std::uint32_t>(projectile.velocity.y));
+    append(std::bit_cast<std::uint32_t>(projectile.velocity.z));
+    append(projectile.age);
+    return bytes;
+}
+
+void restore_projectile(ecs::World& world, ecs::Entity entity, std::span<const std::byte> bytes) {
+    if (bytes.size() != 28 || !world.is_alive(entity))
+        return;
+    const auto read = [&](std::size_t offset) {
+        std::uint32_t bits = 0;
+        for (unsigned i = 0; i < 4; ++i)
+            bits |= std::to_integer<std::uint32_t>(bytes[offset + i]) << (8 * i);
+        return bits;
+    };
+    ThrownProjectile projectile{{std::bit_cast<float>(read(0)),
+                                 std::bit_cast<float>(read(4)),
+                                 std::bit_cast<float>(read(8))},
+                                {std::bit_cast<float>(read(12)),
+                                 std::bit_cast<float>(read(16)),
+                                 std::bit_cast<float>(read(20))},
+                                read(24)};
+    if (auto* existing = world.get<ThrownProjectile>(entity))
+        *existing = projectile;
+    else
+        world.add_component(entity, projectile);
+    core::Transform transform{};
+    transform.translation = projectile.position;
+    if (auto* wt = world.get<ecs::WorldTransform>(entity))
+        wt->value = transform;
+    else
+        world.add_component(entity, ecs::WorldTransform{transform});
+    if (auto* local = world.get<ecs::LocalTransform>(entity))
+        local->value = transform;
+    else
+        world.add_component(entity, ecs::LocalTransform{transform});
+}
+
+// A swept segment test catches a fast projectile crossing the small target BETWEEN endpoints;
+// an endpoint-only overlap would miss this fixed launch at 60 Hz.
+bool segment_hits_target(core::Vec3 from, core::Vec3 to, core::Vec3 target) {
+    const core::Vec3 delta = to - from;
+    const float length_squared = core::dot(delta, delta);
+    const float t = length_squared > 0.0f
+                        ? std::clamp(core::dot(target - from, delta) / length_squared, 0.0f, 1.0f)
+                        : 0.0f;
+    const core::Vec3 closest = from + delta * t;
+    const core::Vec3 offset = target - closest;
+    return core::dot(offset, offset) <= kTargetRadius * kTargetRadius;
+}
 
 physics::Collider box_collider(float hx, float hy, float hz) {
     return physics::Collider{.shape_type = kBoxShape, .half_x = hx, .half_y = hy, .half_z = hz};
+}
+
+// The three bodies the crate interaction involves, defined ONCE. The authoritative world builds
+// them as components (setup, build_arena) and the client's prediction physics world builds them as
+// bodies (InteractionPhysics) -- from these same values, so a retuned crate mass or player radius
+// cannot silently give the two worlds different physics.
+constexpr physics::RigidBody kFloorRigidBody{.motion = kStatic};
+constexpr physics::RigidBody kPlayerRigidBody{.motion = kKinematic};
+constexpr physics::RigidBody kCrateRigidBody{.motion = kDynamic, .mass = 6.0f};
+
+physics::Collider floor_collider() {
+    return box_collider(kArenaHalf, kFloorHalfY, kArenaHalf);
+}
+
+physics::Collider player_collider() {
+    return physics::Collider{.shape_type = kCapsuleShape,
+                             .radius = HelloGame::kPlayerRadius,
+                             .half_height = HelloGame::kPlayerHalfHeight};
+}
+
+physics::Collider crate_collider() {
+    return box_collider(kCrateHalf, kCrateHalf, kCrateHalf);
 }
 
 // FNV-1a, 64-bit: the digest's mixing function. Chosen for being one line a reader can verify by
@@ -202,12 +313,8 @@ bool HelloGame::setup(app::SetupContext& ctx) {
     {
         core::Transform tf{};
         tf.translation = kPlayerStart;
-        player_ = world.spawn_with(ecs::LocalTransform{tf},
-                                   WorldTransform{tf},
-                                   physics::RigidBody{.motion = kKinematic},
-                                   physics::Collider{.shape_type = kCapsuleShape,
-                                                     .radius = kPlayerRadius,
-                                                     .half_height = kPlayerHalfHeight});
+        player_ = world.spawn_with(
+            ecs::LocalTransform{tf}, WorldTransform{tf}, kPlayerRigidBody, player_collider());
     }
 
     // The crate: the one DYNAMIC body, and the reason the player is kinematic-with-velocity rather
@@ -215,10 +322,13 @@ bool HelloGame::setup(app::SetupContext& ctx) {
     {
         core::Transform tf{};
         tf.translation = {0.0f, kCrateHalf, -2.5f};
+        // CrateBody starts at the spawn pose and at rest; record_crate overwrites it after every
+        // step with what the solver actually produced.
         crate_ = world.spawn_with(ecs::LocalTransform{tf},
                                   WorldTransform{tf},
-                                  physics::RigidBody{.motion = kDynamic, .mass = 6.0f},
-                                  box_collider(kCrateHalf, kCrateHalf, kCrateHalf));
+                                  kCrateRigidBody,
+                                  crate_collider(),
+                                  CrateBody{tf.translation, tf.rotation, {}, {}, 0});
     }
 
     // The five markers: SENSOR spheres. A sensor joins the broadphase and the exact narrowphase
@@ -266,13 +376,26 @@ void HelloGame::apply_intent(const Intent& intent) {
 void HelloGame::fixed_tick(app::TickContext& ctx) {
     apply_intent(intent_from(ctx.input));
     const float step = static_cast<float>(ctx.dt);
+    // `--interaction-fault kick@T`: a SERVER-ONLY impulse on the crate (m20.6c). Nothing in the
+    // client's input, prediction or checkpoint knows about it until the next checkpoint carries
+    // the changed velocity -- which is the point: it is a disturbance the prediction cannot
+    // foresee. +z is toward the player in the proof's tape (the player walks in from +z). The
+    // body is bound after the first step, and a kick before that is a no-op the server counted.
+    if (ctx.interaction_kick && bound_) {
+        physics::BodyState crate{};
+        if (physics_.get_body_state(crate_body_, crate))
+            physics_.apply_impulse(
+                crate_body_, core::Vec3{0.0f, 0.0f, kCrateKickImpulse}, crate.position);
+    }
     move_player(ctx.world, step);
     sync_.step(ctx.world, physics_, step);
     // Bind the markers' body ids once the bridge has created them. It cannot be done in `setup`:
     // `RigidBodyHandle` is added by `reconcile`, which first runs inside this call.
     bind_bodies(ctx.world);
-    collect(ctx.world);
+    collect(ctx.world, ctx.despawns);
+    record_crate(ctx.world);
     if (auto* replicated = state()) {
+        throw_step(ctx, *replicated);
         ++replicated->ticks;
         if (const auto* wt = ctx.world.get<ecs::WorldTransform>(crate_)) {
             replicated->crate_position = wt->value.translation;
@@ -284,6 +407,85 @@ void HelloGame::fixed_tick(app::TickContext& ctx) {
         }
         ctx.world.mark_changed<ReplicatedGameState>(state_entity_);
     }
+}
+
+void HelloGame::throw_step(app::TickContext& ctx, ReplicatedGameState& replicated) {
+    // A cooldown measures full ticks AFTER a launch. Charges never regenerate: exactly three
+    // launches are possible per run, making the refusal arithmetic observable in the proof.
+    if (replicated.throw_cooldown > 0)
+        --replicated.throw_cooldown;
+    const core::Vec3 wished{ctx.input.axis(kAxisMoveX), 0.0f, ctx.input.axis(kAxisMoveZ)};
+    if (core::length(wished) > 1e-4f)
+        replicated.player_facing = wished * (1.0f / core::length(wished));
+
+    // A synthesized stand-in repeats levels but does not own a new edge. Guard `applied` too:
+    // no guessed server input may consume an ability the client never executed.
+    const bool real_command = !ctx.command || ctx.command->applied;
+    if (ctx.input.was_pressed(kButtonThrow) && real_command) {
+        const auto key =
+            ctx.command ? replication::SpawnKey{ctx.command->incarnation, ctx.command->sequence, 0}
+                        : replication::SpawnKey{};
+        std::uint8_t refusal = 0;
+        if (ctx.refuse_spawn || replicated.throw_charges == 0)
+            refusal = 1;
+        else if (ctx.world.is_alive(projectile_))
+            refusal = 3;
+        else if (replicated.throw_cooldown > 0)
+            refusal = 2;
+        if (refusal != 0) {
+            if (ctx.command && ctx.spawns)
+                ctx.spawns->push_back({app::SpawnReport::Kind::Refused, key, {}, refusal});
+        } else {
+            --replicated.throw_charges;
+            replicated.throw_cooldown = 60;
+            const core::Vec3 start = replicated.player_position + core::Vec3{0.0f, 0.12f, 0.0f};
+            ThrownProjectile projectile{start, replicated.player_facing * kThrowSpeed, 0};
+            core::Transform transform{};
+            transform.translation = start;
+            projectile_ = ctx.world.spawn_with(
+                ecs::LocalTransform{transform}, ecs::WorldTransform{transform}, projectile);
+            projectile_key_ = key;
+            if (ctx.command && ctx.spawns)
+                ctx.spawns->push_back({app::SpawnReport::Kind::Launched, key, projectile_, 0});
+        }
+    }
+    if (!ctx.world.is_alive(projectile_))
+        return;
+    auto* projectile = ctx.world.get<ThrownProjectile>(projectile_);
+    if (!projectile)
+        return;
+    const core::Vec3 before = projectile->position;
+    const float dt = static_cast<float>(ctx.dt);
+    projectile->velocity.y += kThrowGravity * dt;
+    projectile->position = projectile->position + projectile->velocity * dt;
+    ++projectile->age;
+    // Only the authoritative game tick awards a point. The prediction hook advances flight but
+    // never tests the target, so rollback cannot predict a hit or duplicate a score.
+    // fixed_tick only runs where the simulation is authoritative -- the dedicated server, or a
+    // local game -- while a connected client predicts through `prediction_hooks`, which has no hit
+    // test at all. So no provenance check here: local play scores too.
+    const bool hit = segment_hits_target(before, projectile->position, throw_target_);
+    if (hit)
+        ++replicated.target_score;
+    if (hit || projectile->age >= 45) {
+        if (ctx.command && ctx.spawns)
+            ctx.spawns->push_back({app::SpawnReport::Kind::Ended, projectile_key_, projectile_, 0});
+        // The server host retracts a replicated NetId when it consumes Ended. Local play owns no
+        // NetId and can despawn immediately.
+        // A listening server pump despawns it through the replicator (retracting its NetId
+        // first); with nobody listening the game owns the despawn itself.
+        if (!(ctx.command && ctx.spawns))
+            ctx.world.despawn(projectile_);
+        projectile_ = {};
+        return;
+    }
+    if (auto* transform = ctx.world.get<ecs::WorldTransform>(projectile_))
+        transform->value.translation = projectile->position;
+    if (auto* local = ctx.world.get<ecs::LocalTransform>(projectile_)) {
+        local->value.translation = projectile->position;
+        ctx.world.mark_changed<ecs::LocalTransform>(projectile_);
+    }
+    ctx.world.mark_changed<ThrownProjectile>(projectile_);
 }
 
 // Integrate the stored intent into the player's transform, and clamp it to the arena.
@@ -323,6 +525,11 @@ void HelloGame::bind_bodies(ecs::World& world) {
     } else {
         all = false;
     }
+    if (const auto* handle = world.get<physics::RigidBodyHandle>(crate_)) {
+        crate_body_ = handle->body;
+    } else {
+        all = false;
+    }
     bound_ = all;
 }
 
@@ -331,7 +538,7 @@ void HelloGame::bind_bodies(ecs::World& world) {
 // `TriggerEvent`'s `a`/`b` are in canonical index order, so EITHER end may be the sensor and a
 // consumer has to check both — the header says so, and a consumer that checks only `b` works until
 // the day body indices happen to come out the other way round.
-void HelloGame::collect(ecs::World& world) {
+void HelloGame::collect(ecs::World& world, std::vector<ecs::Entity>* despawns) {
     auto* replicated = state();
     if (!replicated)
         return;
@@ -354,8 +561,52 @@ void HelloGame::collect(ecs::World& world) {
             // Despawning takes the RigidBodyHandle with it, which is precisely why the bridge keeps
             // its own entity↔body roster: next tick's `reconcile` destroys the orphaned sensor body
             // from that roster rather than failing to find it in a query.
-            world.despawn(p.entity);
+            // A listening host removes it through the replicator at the end of THIS tick (so its
+            // NetId is retracted now, not a tick late by the orphan backstop). That is equivalent
+            // for the body bridge: nothing between here and the end of fixed_tick reads the
+            // pickup's entity or body, and `reconcile` runs next tick either way.
+            if (despawns)
+                despawns->push_back(p.entity);
+            else
+                world.despawn(p.entity);
         }
+    }
+}
+
+// Copy the crate's solver state into its CrateBody after the step (ADR-0106 §2): the owner
+// checkpoint needs the velocity the physics world keeps privately, and the membership policy needs
+// to know whether the player is touching it -- a contact REGION between the two bodies that is
+// Began or Persisted this tick (an Ended region is the tick they separated). Marked changed only
+// when something changed, so a sleeping crate costs the world stream nothing.
+void HelloGame::record_crate(ecs::World& world) {
+    auto* record = world.get<CrateBody>(crate_);
+    physics::BodyState body{};
+    if (record == nullptr || !physics_.get_body_state(crate_body_, body))
+        return;
+    std::uint32_t touching = 0;
+    for (const physics::ContactEvent& ev : physics_.contact_events()) {
+        const bool pair = (ev.a == player_body_ && ev.b == crate_body_) ||
+                          (ev.a == crate_body_ && ev.b == player_body_);
+        if (pair && ev.phase != physics::ContactPhase::Ended)
+            touching = 1;
+    }
+    const CrateBody next{
+        body.position, body.orientation, body.linear_velocity, body.angular_velocity, touching};
+    // Field by field, not memcmp: Quat is 16-byte aligned, so CrateBody has padding bytes.
+    const auto same = [](core::Vec3 a, core::Vec3 b) {
+        return a.x == b.x && a.y == b.y && a.z == b.z;
+    };
+    const bool unchanged = same(record->position, next.position) &&
+                           same(record->linear_velocity, next.linear_velocity) &&
+                           same(record->angular_velocity, next.angular_velocity) &&
+                           record->orientation.x == next.orientation.x &&
+                           record->orientation.y == next.orientation.y &&
+                           record->orientation.z == next.orientation.z &&
+                           record->orientation.w == next.orientation.w &&
+                           record->touching_player == next.touching_player;
+    if (!unchanged) {
+        *record = next;
+        world.mark_changed<CrateBody>(crate_);
     }
 }
 
@@ -401,6 +652,16 @@ std::uint64_t replicated_digest(const ecs::World& world) {
             h.f32(state.crate_rotation.y);
             h.f32(state.crate_rotation.z);
             h.f32(state.crate_rotation.w);
+            h.u64(state.throw_charges);
+            h.u64(state.throw_cooldown);
+            h.u64(state.target_score);
+            h.vec3(state.player_facing);
+        });
+    readable.query<ThrownProjectile>().for_each(
+        [&](ecs::Entity, const ThrownProjectile& projectile) {
+            h.vec3(projectile.position);
+            h.vec3(projectile.velocity);
+            h.u64(projectile.age);
         });
     return h.value();
 }
@@ -456,6 +717,8 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
     // the reader having to notice.
     const render::MeshId player_mesh =
         ctx.meshes.add(render::make_uv_sphere(kPlayerRadius, 16, 24), "player");
+    const render::MeshId projectile_mesh =
+        ctx.meshes.add(render::make_uv_sphere(0.12f, 12, 16), "projectile");
 
     render::PbrMaterialDesc m{};
     m.base_color[0] = 0.32f;
@@ -484,6 +747,10 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
     m.metallic = 0.0f;
     m.roughness = 0.4f;
     const render::MaterialId player_mat = ctx.materials.add(m);
+    m.base_color[0] = 0.96f;
+    m.base_color[1] = 0.65f;
+    m.base_color[2] = 0.18f;
+    const render::MaterialId projectile_mat = ctx.materials.add(m);
 
     // The visual floor plane sits at y = 0 — the slab's TOP — while the collider is centred half a
     // slab lower. Its own entity because a plane mesh and a box collider do not share a centre, and
@@ -515,6 +782,13 @@ void HelloGame::present_setup(app::PresentSetupContext& ctx) {
     }
     camera_ =
         world.spawn_with(ecs::WorldTransform{chase_camera(player_position())}, render::Camera{});
+    // A single render proxy follows the predicted projectile, then its adopted roster identity.
+    // It starts outside the arena so no device work is needed when the Throw is absent.
+    core::Transform hidden{};
+    hidden.translation.y = -1000.0f;
+    projectile_visual_ = world.spawn_with(ecs::WorldTransform{hidden},
+                                          render::MeshRef{projectile_mesh},
+                                          render::MaterialRef{projectile_mat});
 }
 
 void HelloGame::present_frame(app::PresentFrameContext& ctx) {
@@ -522,6 +796,26 @@ void HelloGame::present_frame(app::PresentFrameContext& ctx) {
     if (auto* wt = ctx.world.get<ecs::WorldTransform>(camera_)) {
         wt->value = chase_camera(player_position());
     }
+    present_projectile(ctx.world, ctx.world);
+}
+
+void HelloGame::present_prediction(app::PresentFrameContext& ctx, ecs::World& prediction_world) {
+    // This second pose pass wins over the mirror in connected play, including the first local
+    // tick before the authoritative projectile exists. The proxy itself never multiplies.
+    present_projectile(ctx.world, prediction_world);
+}
+
+void HelloGame::present_projectile(ecs::World& render_world, ecs::World& source_world) {
+    auto* visual = render_world.get<ecs::WorldTransform>(projectile_visual_);
+    if (!visual)
+        return;
+    core::Vec3 position{0.0f, -1000.0f, 0.0f};
+    source_world.query<ThrownProjectile>().for_each(
+        [&](ecs::Entity, const ThrownProjectile& projectile) {
+            if (projectile.age < 45)
+                position = projectile.position;
+        });
+    visual->value.translation = position;
 }
 
 bool HelloGame::bind_remote_world(ecs::World& world) {
@@ -537,8 +831,14 @@ bool HelloGame::bind_remote_world(ecs::World& world) {
             if (collider.sensor)
                 pickups_.push_back(Pickup{entity, physics::BodyId{}});
         });
+    // At MOST kPickupCount, not exactly: a client joining a session already in progress mirrors
+    // only the pickups nobody has collected (the server despawned the rest), and demanding all four
+    // kept every later client waiting for an initial world that could never arrive (measured:
+    // owner's second session after collecting three, "timed out waiting for ownership and initial
+    // world"). The client only dresses the live ones with a mesh; collection is the server's
+    // arithmetic.
     return world.is_alive(player_) && world.is_alive(state_entity_) && world.is_alive(crate_) &&
-           pickups_.size() == kPickupCount;
+           pickups_.size() <= kPickupCount;
 }
 
 // ── The content ───────────────────────────────────────────────────────────────────────────────
@@ -552,15 +852,15 @@ void build_arena(ecs::World& world) {
     physics::register_physics_components(world);
     core::Transform tf{};
     tf.translation = {0.0f, -kFloorHalfY, 0.0f};
-    (void)world.spawn_with(ecs::LocalTransform{tf},
-                           physics::RigidBody{.motion = kStatic},
-                           box_collider(kArenaHalf, kFloorHalfY, kArenaHalf));
+    (void)world.spawn_with(ecs::LocalTransform{tf}, kFloorRigidBody, floor_collider());
 }
 
 void register_components(ecs::World& world) {
     ecs::register_transform_components(world);
     physics::register_physics_components(world);
     (void)world.register_component<ReplicatedGameState>();
+    (void)world.register_component<ThrownProjectile>();
+    (void)world.register_component<CrateBody>(); // last: earlier component ids do not move
 }
 
 ecs::Entity owned_player(ecs::World& world) {
@@ -573,13 +873,19 @@ ecs::Entity owned_player(ecs::World& world) {
     return result;
 }
 
-replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity player) {
+replication::PredictionHooks prediction_hooks_impl(ecs::World& world,
+                                                   ecs::Entity player,
+                                                   std::shared_ptr<ClientSpawnState> spawns) {
     ecs::Entity state_entity{};
     world.query<ReplicatedGameState>().for_each(
         [&](ecs::Entity entity, const ReplicatedGameState&) { state_entity = entity; });
     auto* bound = &world;
     replication::PredictionHooks hooks{};
-    hooks.capture = [bound, state_entity](replication::PredictedEntityId) {
+    hooks.capture = [bound, state_entity, spawns](replication::PredictedEntityId id) {
+        if (spawns && spawns->entity_for(id) != ecs::kNullEntity) {
+            const auto* projectile = bound->get<ThrownProjectile>(spawns->entity_for(id));
+            return projectile ? encode_projectile(*projectile) : std::vector<std::byte>{};
+        }
         std::vector<std::byte> bytes;
         const auto* state = bound->get<ReplicatedGameState>(state_entity);
         if (!state)
@@ -598,8 +904,12 @@ replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity pla
         append(state->player_velocity.z);
         return bytes;
     };
-    hooks.restore = [bound, state_entity, player](replication::PredictedEntityId,
-                                                  std::span<const std::byte> bytes) {
+    hooks.restore = [bound, state_entity, player, spawns](replication::PredictedEntityId id,
+                                                          std::span<const std::byte> bytes) {
+        if (spawns && spawns->entity_for(id) != ecs::kNullEntity) {
+            restore_projectile(*bound, spawns->entity_for(id), bytes);
+            return;
+        }
         if (bytes.size() != 24)
             return;
         auto* state = bound->get<ReplicatedGameState>(state_entity);
@@ -621,13 +931,47 @@ replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity pla
             bound->mark_changed<ecs::LocalTransform>(player);
         }
     };
-    // The locomotion controller has no RNG or hidden timer. Keep an explicit empty group so
-    // later interaction prediction cannot silently inherit this assumption.
-    hooks.capture_group = [] { return std::vector<std::byte>{}; };
-    hooks.restore_group = [](std::span<const std::byte>) {};
-    hooks.simulate = [bound, state_entity, player](std::span<const replication::PredictedEntityId>,
-                                                   const replication::InputCommand& command,
-                                                   const replication::PredictionStep& step) {
+    // Charges, cooldown and facing form the owner's GROUP state: a checkpoint must restore them
+    // atomically with the player and the projectile, or replay could launch using old resources.
+    hooks.capture_group = [bound, state_entity] {
+        std::vector<std::byte> bytes;
+        const auto* state = bound->get<ReplicatedGameState>(state_entity);
+        if (!state)
+            return bytes;
+        const auto append = [&](std::uint32_t value) {
+            for (unsigned shift = 0; shift < 32; shift += 8)
+                bytes.push_back(std::byte{static_cast<std::uint8_t>(value >> shift)});
+        };
+        append(state->throw_charges);
+        append(state->throw_cooldown);
+        append(std::bit_cast<std::uint32_t>(state->player_facing.x));
+        append(std::bit_cast<std::uint32_t>(state->player_facing.y));
+        append(std::bit_cast<std::uint32_t>(state->player_facing.z));
+        return bytes;
+    };
+    hooks.restore_group = [bound, state_entity](std::span<const std::byte> bytes) {
+        if (bytes.size() != 20)
+            return;
+        auto* state = bound->get<ReplicatedGameState>(state_entity);
+        if (!state)
+            return;
+        const auto read = [&](std::size_t offset) {
+            std::uint32_t value = 0;
+            for (unsigned i = 0; i < 4; ++i)
+                value |= std::to_integer<std::uint32_t>(bytes[offset + i]) << (8 * i);
+            return value;
+        };
+        state->throw_charges = read(0);
+        state->throw_cooldown = read(4);
+        state->player_facing = {std::bit_cast<float>(read(8)),
+                                std::bit_cast<float>(read(12)),
+                                std::bit_cast<float>(read(16))};
+        bound->mark_changed<ReplicatedGameState>(state_entity);
+    };
+    hooks.simulate = [bound, state_entity, player, spawns](
+                         std::span<const replication::PredictedEntityId> members,
+                         const replication::InputCommand& command,
+                         const replication::PredictionStep& step) {
         auto* state = bound->get<ReplicatedGameState>(state_entity);
         if (!state)
             return;
@@ -635,6 +979,62 @@ replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity pla
         actions.axes[kAxisMoveX] = command.move_x;
         actions.axes[kAxisMoveZ] = command.move_y;
         integrate_player(*state, intent_from(actions), static_cast<float>(step.fixed_dt));
+        if (state->throw_cooldown > 0)
+            --state->throw_cooldown;
+        const core::Vec3 wished{command.move_x, 0.0f, command.move_y};
+        if (core::length(wished) > 1e-4f)
+            state->player_facing = wished * (1.0f / core::length(wished));
+        // "At most one live projectile" asks about THIS step's simulated set, as the server asks
+        // about its own `projectile_`. A guess the reconciler has dropped for replay is still an
+        // entity in this world, holding its pre-replay age, until the replay recreates or
+        // discards it; querying the whole world would let that leftover veto its own recreation,
+        // and the guess would be lost under the very replay meant to make it again (measured:
+        // `spawn_not_recreated` 1 and `spawn_adopted` 0 whenever a replay preceded the verdict).
+        bool live_projectile = false;
+        if (spawns) {
+            for (const auto id : members) {
+                const auto* p = bound->get<ThrownProjectile>(spawns->entity_for(id));
+                live_projectile |= p != nullptr && p->age < 45;
+            }
+        } else {
+            bound->query<ThrownProjectile>().for_each(
+                [&](ecs::Entity, const ThrownProjectile& p) { live_projectile |= p.age < 45; });
+        }
+        if ((command.pressed & (1u << kButtonThrow)) != 0 && state->throw_charges > 0 &&
+            state->throw_cooldown == 0 && !live_projectile) {
+            bool launched = true;
+            if (spawns) {
+                const core::Vec3 start = state->player_position + core::Vec3{0.0f, 0.12f, 0.0f};
+                const ThrownProjectile projectile{start, state->player_facing * kThrowSpeed, 0};
+                const auto bytes = encode_projectile(projectile);
+                // This is a step-context provisional overlay request. The reconciler owns the
+                // replay-stable id; the game spends a charge only when it grants the guess.
+                launched =
+                    spawns->request({spawns->incarnation, command.sequence, 0}, bytes).has_value();
+            }
+            if (launched) {
+                --state->throw_charges;
+                state->throw_cooldown = 60;
+            }
+        }
+        if (spawns) {
+            // The supplied set contains both authoritative roster and provisional overlay members.
+            // Flight is predicted, while hit tests and scoring remain in fixed_tick alone.
+            for (const auto id : members) {
+                const auto entity = spawns->entity_for(id);
+                auto* projectile = bound->get<ThrownProjectile>(entity);
+                if (!projectile || projectile->age >= 45)
+                    continue;
+                const float dt = static_cast<float>(step.fixed_dt);
+                projectile->velocity.y += kThrowGravity * dt;
+                projectile->position = projectile->position + projectile->velocity * dt;
+                ++projectile->age;
+                if (auto* wt = bound->get<ecs::WorldTransform>(entity))
+                    wt->value.translation = projectile->position;
+                if (auto* local = bound->get<ecs::LocalTransform>(entity))
+                    local->value.translation = projectile->position;
+            }
+        }
         bound->mark_changed<ReplicatedGameState>(state_entity);
         if (auto* transform = bound->get<ecs::WorldTransform>(player))
             transform->value.translation = state->player_position;
@@ -645,6 +1045,356 @@ replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity pla
     };
     return hooks;
 }
+
+replication::PredictionHooks prediction_hooks(ecs::World& world, ecs::Entity player) {
+    return prediction_hooks_impl(world, player, {});
+}
+
+app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile::ClientHooks
+client_spawn_hooks(ecs::World& world,
+                   ecs::Entity player,
+                   std::uint32_t incarnation,
+                   SpawnRequest request) {
+    auto state = std::make_shared<ClientSpawnState>();
+    state->world = &world;
+    state->incarnation = incarnation;
+    state->request = std::move(request);
+    app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile::ClientHooks hooks{};
+    hooks.prediction = prediction_hooks_impl(world, player, state);
+    hooks.spawn.create = [state](SpawnId id) {
+        if (state->entity_for(id) == ecs::kNullEntity)
+            state->entities.emplace_back(id, state->world->spawn_with(ThrownProjectile{}));
+    };
+    hooks.spawn.destroy = [state](SpawnId id) {
+        const auto it = std::find_if(state->entities.begin(),
+                                     state->entities.end(),
+                                     [id](const auto& member) { return member.first == id; });
+        if (it == state->entities.end())
+            return;
+        state->world->despawn(it->second);
+        state->entities.erase(it);
+    };
+    hooks.spawn.adopt = [state](SpawnId provisional, SpawnId authoritative) {
+        for (auto& [id, entity] : state->entities)
+            if (id == provisional) {
+                id = authoritative;
+                return;
+            }
+    };
+    hooks.entity_for = [state](SpawnId id) { return state->entity_for(id); };
+    hooks.is_live = [state](SpawnId id) {
+        const auto* projectile = state->world->get<ThrownProjectile>(state->entity_for(id));
+        return projectile && projectile->age < 45;
+    };
+    return hooks;
+}
+
+// ── The interaction group (m20.6b, ADR-0106) ────────────────────────────────────────────────
+//
+// The crate is predicted while the server says it is near. Server side, the engine's membership
+// policy reads `interaction_sample` each tick and captures `capture_crate` into the owner
+// checkpoint; client side, `interaction_client_hooks` gives the prediction a physics world.
+
+namespace {
+
+using InteractionProfile = app::GameDefinition::RemotePlayProfile::InteractionProfile;
+
+void append_f32(std::vector<std::byte>& bytes, float value) {
+    const auto bits = std::bit_cast<std::uint32_t>(value);
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        bytes.push_back(std::byte{static_cast<std::uint8_t>(bits >> shift)});
+}
+
+std::vector<std::byte> encode_crate(const physics::BodyState& body) {
+    std::vector<std::byte> bytes;
+    bytes.reserve(kCrateStateBytes);
+    for (const float value : {body.position.x,
+                              body.position.y,
+                              body.position.z,
+                              body.orientation.x,
+                              body.orientation.y,
+                              body.orientation.z,
+                              body.orientation.w,
+                              body.linear_velocity.x,
+                              body.linear_velocity.y,
+                              body.linear_velocity.z,
+                              body.angular_velocity.x,
+                              body.angular_velocity.y,
+                              body.angular_velocity.z})
+        append_f32(bytes, value);
+    return bytes;
+}
+
+std::optional<physics::BodyState> decode_crate(std::span<const std::byte> bytes) {
+    if (bytes.size() != kCrateStateBytes)
+        return std::nullopt;
+    const auto read = [&](std::size_t index) {
+        std::uint32_t bits = 0;
+        for (unsigned i = 0; i < 4; ++i)
+            bits |= std::to_integer<std::uint32_t>(bytes[index * 4 + i]) << (8 * i);
+        return std::bit_cast<float>(bits);
+    };
+    physics::BodyState body{};
+    body.position = {read(0), read(1), read(2)};
+    body.orientation = {read(3), read(4), read(5), read(6)};
+    body.linear_velocity = {read(7), read(8), read(9)};
+    body.angular_velocity = {read(10), read(11), read(12)};
+    return body;
+}
+
+ecs::Entity interaction_object(ecs::World& world) {
+    ecs::Entity result{};
+    world.query<physics::RigidBody, physics::Collider>().for_each(
+        [&](ecs::Entity entity, const physics::RigidBody& body, const physics::Collider& collider) {
+            if (body.motion == kDynamic && !collider.sensor)
+                result = entity;
+        });
+    return result;
+}
+
+// Distance on the FLOOR PLANE between centres: the capsule's centre sits higher than the crate's,
+// and a vertical offset that never changes is not distance the player could close.
+replication::InteractionSample
+interaction_sample(const ecs::World& world, ecs::Entity player, ecs::Entity object) {
+    replication::InteractionSample sample{};
+    const auto* player_pose = world.get<ecs::WorldTransform>(player);
+    const auto* crate = world.get<CrateBody>(object);
+    if (!player_pose || !crate) {
+        // No facts: report "far, still, untouched" so a member drifts out through the normal
+        // leave rule rather than staying forever on a broken sample.
+        sample.distance = std::numeric_limits<float>::max();
+        return sample;
+    }
+    const core::Vec3 offset = crate->position - player_pose->value.translation;
+    sample.distance = std::sqrt(offset.x * offset.x + offset.z * offset.z);
+    sample.speed = core::length(crate->linear_velocity);
+    sample.touching = crate->touching_player != 0;
+    return sample;
+}
+
+std::vector<std::byte> capture_crate(const ecs::World& world, ecs::Entity object) {
+    const auto* crate = world.get<CrateBody>(object);
+    if (!crate)
+        return {};
+    return encode_crate(physics::BodyState{
+        crate->position, crate->orientation, crate->linear_velocity, crate->angular_velocity});
+}
+
+physics::BodyDesc body_desc(const physics::RigidBody& rb,
+                            const physics::Collider& col,
+                            const physics::BodyState& state) {
+    // PhysicsSync::reconcile's conversion, field for field, so a prediction body and the
+    // authoritative one are the same body.
+    physics::BodyDesc d{};
+    d.motion = static_cast<physics::MotionType>(rb.motion);
+    d.shape.type = static_cast<physics::ShapeType>(col.shape_type);
+    d.shape.radius = col.radius;
+    d.shape.half_extents = {col.half_x, col.half_y, col.half_z};
+    d.shape.half_height = col.half_height;
+    d.mass = rb.mass;
+    d.friction = rb.friction;
+    d.restitution = rb.restitution;
+    d.linear_damping = rb.linear_damping;
+    d.angular_damping = rb.angular_damping;
+    d.gravity_factor = rb.gravity_factor;
+    d.sensor = col.sensor;
+    d.position = state.position;
+    d.orientation = state.orientation;
+    d.linear_velocity = state.linear_velocity;
+    d.angular_velocity = state.angular_velocity;
+    return d;
+}
+
+// The client's PREDICTION PHYSICS WORLD (ADR-0106 §3): a separate, tiny PhysicsWorld -- floor,
+// kinematic player, crate; no sensors, so prediction can never collect a pickup -- because the
+// authoritative world can only be stepped whole. Three rules make a replay a pure function of
+// (checkpoint, commands):
+//
+//   1. REBUILT ON EVERY RESTORE. Restoring the crate makes a FRESH world and creates its bodies in
+//      a fixed order from the checkpoint bytes. A teleport (`set_body_state`) would keep the
+//      warm-start contact cache and the solver state of the timeline the correction just threw
+//      away, and replaying from "the same" checkpoint would then depend on what happened before.
+//   2. DIRECT KINEMATIC DRIVE. The player body is set with `set_body_state` from the predicted
+//      controller state each step -- position, and the velocity the controller already computed
+//      as actual displacement / dt (`integrate_player`), which is exactly what PhysicsSync derives
+//      on the server. Never `PhysicsSync::push_in`: it differentiates against a private
+//      last-pushed pose, so after a restore it would invent a velocity the size of the correction
+//      and fire the crate off.
+//   3. SLEEPING OFF. A sleeping body is state no checkpoint carries.
+//
+// Accepted consequence: the server's world keeps a warm cache this one never has, so the two
+// crates are not bit-identical even with nothing disturbing them. That residual is measured.
+struct InteractionPhysics {
+    ecs::World* world = nullptr;
+    ecs::Entity player{}; // the predicted player, which also holds its ReplicatedGameState
+    replication::PredictedEntityId object{};
+    bool rebuild_on_restore = true;
+    // The `stale-restore` control and the bytes it restores from.
+    bool stale_restore = false;
+    std::vector<std::byte> previous_bytes;
+    std::unique_ptr<physics::PhysicsWorld> physics;
+    physics::BodyId player_body{};
+    physics::BodyId crate_body{};
+    bool touching = false;
+
+    void rebuild(const physics::BodyState& crate) {
+        physics = std::make_unique<physics::PhysicsWorld>();
+        physics->set_sleeping_enabled(false);
+        physics::BodyState floor{};
+        floor.position = {0.0f, -kFloorHalfY, 0.0f};
+        (void)physics->create_body(body_desc(kFloorRigidBody, floor_collider(), floor));
+        physics::BodyState player_state{};
+        if (const auto* state = world->get<ReplicatedGameState>(player)) {
+            player_state.position = state->player_position;
+            player_state.linear_velocity = state->player_velocity;
+        }
+        player_body =
+            physics->create_body(body_desc(kPlayerRigidBody, player_collider(), player_state));
+        crate_body = physics->create_body(body_desc(kCrateRigidBody, crate_collider(), crate));
+        touching = false;
+    }
+
+    void restore(std::span<const std::byte> bytes) {
+        // The control restores from the PREVIOUS restore's bytes: one checkpoint old, so every
+        // replay starts from a state the server has already left.
+        std::vector<std::byte> current(bytes.begin(), bytes.end());
+        const auto crate =
+            decode_crate(stale_restore && !previous_bytes.empty() ? previous_bytes : current);
+        previous_bytes = std::move(current);
+        if (!crate)
+            return;
+        if (rebuild_on_restore || !physics)
+            rebuild(*crate);
+        else
+            (void)physics->set_body_state(crate_body, *crate); // the control: cache survives
+    }
+
+    void step(float dt) {
+        const auto* state = world->get<ReplicatedGameState>(player);
+        if (!physics || !state)
+            return;
+        physics::BodyState drive{};
+        drive.position = state->player_position;
+        drive.linear_velocity = state->player_velocity;
+        (void)physics->set_body_state(player_body, drive);
+        physics->step(dt);
+        touching = false;
+        for (const physics::ContactEvent& ev : physics->contact_events())
+            if (((ev.a == player_body && ev.b == crate_body) ||
+                 (ev.a == crate_body && ev.b == player_body)) &&
+                ev.phase != physics::ContactPhase::Ended)
+                touching = true;
+    }
+};
+
+InteractionProfile::ClientHooks interaction_client_hooks(
+    ecs::World& world,
+    ecs::Entity player,
+    replication::PredictedEntityId object,
+    app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile::ClientHooks inner,
+    InteractionProfile::ClientOptions options) {
+    auto state = std::make_shared<InteractionPhysics>();
+    state->world = &world;
+    state->player = player;
+    state->object = object;
+    state->rebuild_on_restore = options.rebuild_on_restore;
+    state->stale_restore = options.stale_restore;
+    InteractionProfile::ClientHooks out{};
+    out.hooks = inner;
+    auto& prediction = out.hooks.prediction;
+    auto& spawn = out.hooks.spawn;
+    prediction.capture = [state,
+                          next = inner.prediction.capture](replication::PredictedEntityId id) {
+        if (!(id == state->object))
+            return next(id);
+        physics::BodyState body{};
+        if (!state->physics || !state->physics->get_body_state(state->crate_body, body))
+            return std::vector<std::byte>{};
+        return encode_crate(body);
+    };
+    prediction.restore = [state, next = inner.prediction.restore](
+                             replication::PredictedEntityId id, std::span<const std::byte> bytes) {
+        if (id == state->object)
+            state->restore(bytes);
+        else
+            next(id, bytes);
+    };
+    // The crate steps AFTER the player's controller, in the same order the server's fixed_tick
+    // uses (move the player, then step physics), and only while the crate is in the set.
+    prediction.simulate = [state, next = inner.prediction.simulate](
+                              std::span<const replication::PredictedEntityId> members,
+                              const replication::InputCommand& command,
+                              const replication::PredictionStep& step) {
+        next(members, command, step);
+        state->touching = false;
+        if (std::find(members.begin(), members.end(), state->object) != members.end())
+            state->step(static_cast<float>(step.fixed_dt));
+    };
+    // Joining needs no work of its own: PredictionHooks::restore follows `create` at once and
+    // rebuilds the world. Leaving drops the world, so a non-member costs nothing.
+    spawn.create = [state, next = inner.spawn.create](replication::PredictedEntityId id) {
+        if (!(id == state->object))
+            next(id);
+    };
+    spawn.destroy = [state, next = inner.spawn.destroy](replication::PredictedEntityId id) {
+        if (id == state->object) {
+            state->physics.reset();
+            state->previous_bytes.clear();
+            state->touching = false;
+        } else {
+            next(id);
+        }
+    };
+    out.hooks.entity_for = [state, next = inner.entity_for](replication::PredictedEntityId id) {
+        return id == state->object ? ecs::Entity{} : next(id);
+    };
+    out.hooks.is_live = [state, next = inner.is_live](replication::PredictedEntityId id) {
+        return !(id == state->object) && next(id);
+    };
+    out.object_pose = [state]() -> std::optional<core::Transform> {
+        physics::BodyState body{};
+        if (!state->physics || !state->physics->get_body_state(state->crate_body, body))
+            return std::nullopt;
+        core::Transform pose{};
+        pose.translation = body.position;
+        pose.rotation = body.orientation;
+        return pose;
+    };
+    out.touching = [state] { return state->touching; };
+    return out;
+}
+
+// The push tape (`--input-tape-push`), in client ticks. Walking is 4 m/s = 1/15 m per tick, +z is
+// "toward the camera / away from the crate", which rests at z = -2.5 (join radius 5.117 m, leave
+// radius 6.117 m, centre to centre on the floor plane). The sequence is what m20.6c's proof needs
+// to see, in this order (arithmetic for the nominal timing; the proof gates what ACTUALLY
+// happened):
+//
+//    1-10   stand            crate is a member from the first server tick (2.5 m < 5.117 m)
+//   11-90   retreat 5.33 m   the crate leaves once d > 6.117 m (t ~ 65) -- it has been asleep for
+//                            ages, so the 30-tick quiet window is already met
+//   91-100  stand
+//  101-245  walk back -z     joins at d <= 5.117 m (t ~ 142), touches at d ~ 0.85 m (t ~ 206) and
+//                            pushes it ~2.7 m for the last 40 ticks: the crate moves at 4 m/s
+//  246-275  retreat 2 m      back to ~3.3 m away, still a member (inside 6.117 m)
+//  276-315  stand            the crate rests; KICK #1 lands here, the crate being a member
+//  316-405  retreat 6 m      beyond 6.117 m, at rest: leaves (t ~ 358)
+//  406-425  stand
+//  426-520  walk back -z     KICK #2 lands ~15 ticks before the unkicked join (t ~ 501): the crate
+//                            slides toward the player (0.41 m, ~24 ticks at mu 0.5) and the
+//                            player's closing speed drags the join inside that window -- a JOIN
+//                            WHILE SLIDING
+//  521-600  stand            the crate comes to rest as a member
+app::ActionState push_tape(std::uint64_t tick) {
+    app::ActionState actions{};
+    if ((tick >= 11 && tick <= 90) || (tick >= 246 && tick <= 275) || (tick >= 316 && tick <= 405))
+        actions.axes[kAxisMoveZ] = 1.0f;
+    else if ((tick >= 101 && tick <= 245) || (tick >= 426 && tick <= 520))
+        actions.axes[kAxisMoveZ] = -1.0f;
+    return actions;
+}
+
+} // namespace
 
 // ── The definition ────────────────────────────────────────────────────────────────────────────
 //
@@ -661,7 +1411,8 @@ app::GameDefinition definition() {
         {platform::Key::A, kAxisMoveX, -1.0f},
         {platform::Key::D, kAxisMoveX, +1.0f},
     };
-    def.input.buttons = {{platform::Key::Escape, kButtonQuit}};
+    def.input.buttons = {{platform::Key::Escape, kButtonQuit},
+                         {platform::Key::Space, kButtonThrow}};
     // InputCommand's x/y plane becomes this game's x/z plane: W is negative z, D positive x.
     // Keep held and pressed in the same button positions as the keyboard's Escape binding.
     def.network_input = app::GameDefinition::NetworkInputProfile{
@@ -669,8 +1420,12 @@ app::GameDefinition definition() {
             app::ActionState state{};
             state.axes[kAxisMoveX] = command.move_x;
             state.axes[kAxisMoveZ] = command.move_y;
-            state.held = command.held;
-            state.pressed = command.pressed;
+            // A remote player cannot quit the server: their Escape ends their own client
+            // (RemotePlayProfile::local_quit), and a command that carries the bit anyway -- an
+            // old or hostile client -- has it dropped here, where the server reads commands.
+            constexpr std::uint32_t kQuitBit = 1u << kButtonQuit;
+            state.held = command.held & ~kQuitBit;
+            state.pressed = command.pressed & ~kQuitBit;
             return state;
         }};
     def.create = [] { return std::make_unique<HelloGame>(); };
@@ -689,8 +1444,10 @@ app::GameDefinition definition() {
             replication::InputCommand command{};
             command.move_x = actions.axis(kAxisMoveX);
             command.move_y = actions.axis(kAxisMoveZ);
-            command.held = actions.held;
-            command.pressed = actions.pressed;
+            // The quit button never rides the wire; the client acted on it locally.
+            constexpr std::uint32_t kQuitBit = 1u << kButtonQuit;
+            command.held = actions.held & ~kQuitBit;
+            command.pressed = actions.pressed & ~kQuitBit;
             return command;
         },
         [](ecs::World& mirror, ecs::World& prediction, ecs::Entity mirror_player) {
@@ -714,12 +1471,63 @@ app::GameDefinition definition() {
             // resulting net drift stays inside the arena for this 300-tick proof.
             actions.axes[kAxisMoveX] = ((tick - 1) % 3) < 2 ? 1.0f : -1.0f;
             return actions;
-        }};
+        },
+        {},
+        {}};
+    // Escape leaves the connected client; it is never a command (RemotePlayProfile::local_quit).
+    def.remote_play->local_quit = [](const app::ActionState& actions) {
+        return actions.was_pressed(kButtonQuit);
+    };
+    def.remote_play->spawn_prediction =
+        app::GameDefinition::RemotePlayProfile::SpawnPredictionProfile{
+            1,
+            [](const ecs::World& world, ecs::Entity entity) {
+                const auto* projectile = world.get<ThrownProjectile>(entity);
+                return projectile ? encode_projectile(*projectile) : std::vector<std::byte>{};
+            },
+            client_spawn_hooks,
+            [](std::uint64_t tick) {
+                app::ActionState actions{};
+                actions.axes[kAxisMoveX] = ((tick - 1) % 3) < 2 ? 1.0f : -1.0f;
+                if (tick == 12)
+                    actions.pressed = 1u << kButtonThrow;
+                return actions;
+            }};
     def.entry_scene = std::string{kEntryScene};
 #if defined(RIME_GAME_CONTENT_DIR) && defined(RIME_GAME_BINARY_DIR)
     def.dev_content_dir = RIME_GAME_CONTENT_DIR;
     def.dev_binary_dir = RIME_GAME_BINARY_DIR;
 #endif
+    return def;
+}
+
+// The shipped executable's definition: `definition()` plus the m20.6 interaction group.
+//
+// A SEPARATE function rather than folded into `definition()`, because `definition()` is also the
+// m20.5 game that existing in-process proofs pin -- one asserts its roster is exactly {player,
+// projectile} at epoch 2 -- and an always-on crate member would change that roster, not the code
+// it tests. Both processes of a connected run use this one (main.cpp and the net proof), so they
+// agree on the folded schema identity.
+app::GameDefinition definition_with_interaction() {
+    app::GameDefinition def = definition();
+    // The interaction group (ADR-0106): join within contact reach plus the distance the player
+    // covers in the 64-tick replay budget -- 0.85 + 4 m/s * 64/60 s = 5.12 m -- so the crate is
+    // already predicted before the player can reach it; leave 1 m further out, and only after
+    // 30 quiet ticks. Contact reach is capsule radius + crate half-extent, centre to centre.
+    replication::InteractionParams interaction{};
+    interaction.contact_distance = HelloGame::kPlayerRadius + kCrateHalf;
+    interaction.player_max_speed = HelloGame::kPlayerSpeed;
+    interaction.replay_ticks = 64;
+    interaction.fixed_dt = 1.0 / 60.0;
+    def.remote_play->interaction = InteractionProfile{1,
+                                                      interaction,
+                                                      interaction_object,
+                                                      interaction_sample,
+                                                      capture_crate,
+                                                      interaction_client_hooks,
+                                                      push_tape,
+                                                      HelloGame::kCrateKickImpulse,
+                                                      kCrateRigidBody.mass};
     return def;
 }
 

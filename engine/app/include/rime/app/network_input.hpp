@@ -4,7 +4,10 @@
 
 #include <cstdint>
 #include <memory>
+#include <optional>
+#include <span>
 #include <string>
+#include <vector>
 
 #include "rime/app/launch.hpp"
 #include "rime/replication/snapshot.hpp"
@@ -20,6 +23,10 @@ namespace rime::app {
 inline constexpr std::uint8_t kRemoteWorldStateStream = replication::kStreamDelta;
 inline constexpr std::uint8_t kRemoteInputResultStream = replication::kStreamInputAck;
 inline constexpr std::uint8_t kRemoteOwnerCheckpointStream = 2;
+// m20.7: the adaptive buffer's pacing report. Streams 0 and 1 are the replication ones, 2 is the
+// checkpoint; 3 is the next free (Session carries 16). Its own stream, because a newer pacing
+// report says nothing about a checkpoint or an input result and must not supersede either.
+inline constexpr std::uint8_t kRemoteInputPacingStream = 3;
 inline constexpr std::uint8_t kRemoteBaselineAckStream = replication::kStreamBaselineAck;
 inline constexpr std::uint8_t kRemoteInputCommandsStream = replication::kStreamInputCommands;
 
@@ -34,7 +41,11 @@ public:
          const GameDefinition::NetworkInputProfile& profile,
          ecs::World& world,
          const GameDefinition::RemotePlayProfile* remote_play,
-         std::string& error);
+         std::string& error,
+         SpawnFault fault = SpawnFault::None,
+         std::uint32_t fault_ticks = 0,
+         std::uint32_t input_slack = 1,
+         bool adaptive_input = false);
     // A caller-owned link and clock let deterministic tests drive the exact production pump.
     static std::unique_ptr<NetworkInputServer>
     on_link(net::Link& link,
@@ -42,14 +53,27 @@ public:
             const GameDefinition::NetworkInputProfile& profile,
             ecs::World& world,
             const GameDefinition::RemotePlayProfile* remote_play,
-            std::string& error);
+            std::string& error,
+            bool adaptive_input = false);
     ~NetworkInputServer();
 
     [[nodiscard]] std::uint16_t local_port() const noexcept;
     [[nodiscard]] ActionState before_tick(std::uint64_t server_tick);
     [[nodiscard]] ActionState before_tick(std::uint64_t server_tick, std::uint64_t now_ms);
     [[nodiscard]] bool last_applied() const noexcept;
-    void after_tick(std::uint64_t server_tick);
+    [[nodiscard]] bool refuse_spawn() const noexcept;
+    // m20.6c `--interaction-fault kick@T`: the server ticks at which to kick the interaction
+    // object. `interaction_kick(tick)` is asked once per tick before the game runs; it counts the
+    // kick and records whether the object was a member at that moment.
+    void set_interaction_kicks(std::vector<std::uint64_t> ticks);
+    // `kick@cmd:N`: fire once, on the first tick whose input step retires command sequence >= N.
+    // A stall or a pre-start tick retires nothing, so it never fires; asked after `before_tick`.
+    void set_interaction_kick_commands(std::vector<std::uint32_t> sequences);
+    [[nodiscard]] bool interaction_kick(std::uint64_t server_tick);
+    [[nodiscard]] std::optional<CommandProvenance> command_provenance() const noexcept;
+    void after_tick(std::uint64_t server_tick,
+                    std::span<const SpawnReport> spawns = {},
+                    std::span<const ecs::Entity> despawns = {});
     void linger(std::uint64_t final_tick, std::uint32_t duration_ms);
     [[nodiscard]] RunReport::NetworkInputCounters counters() const noexcept;
 

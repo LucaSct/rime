@@ -456,3 +456,67 @@ TEST_CASE("support removal respects stale generations and sensor-only neighbors"
     w.destroy_body(replacement);
     CHECK_FALSE(w.is_asleep(sleeper));
 }
+
+// A MOVING KINEMATIC BODY WAKES WHAT IT TOUCHES (m20.6b). Kinematic bodies are anchors, not island
+// members, so before this rule nothing a kinematic body did could reactivate a sleeping island: a
+// player capsule walked straight through hello-game's settled crate. The pusher is driven the way
+// PhysicsSync drives one -- pose stepped by hand, velocity set to the step it took -- because a
+// kinematic body's pose is never integrated from its velocity.
+TEST_CASE(
+    "m20.6b: a moving kinematic body wakes the sleeping body it touches; a parked one does not") {
+    const auto settle = [](physics::PhysicsWorld& w, physics::BodyId b) {
+        for (int i = 0; i < 300 && !w.is_asleep(b); ++i) {
+            w.step(kDt);
+        }
+    };
+    const auto add_kinematic = [](physics::PhysicsWorld& w, core::Vec3 pos) {
+        physics::BodyDesc d;
+        d.motion = physics::MotionType::Kinematic;
+        d.shape = box({0.25f, 0.5f, 0.25f});
+        d.position = pos;
+        return w.create_body(d);
+    };
+
+    SUBCASE("moving: the crate wakes and is pushed") {
+        physics::PhysicsWorld w;
+        add_ground(w);
+        const physics::BodyId crate = add_dynamic(w, box({0.5f, 0.5f, 0.5f}), {0.0f, 0.5f, 0.0f});
+        settle(w, crate);
+        REQUIRE(w.is_asleep(crate));
+        physics::BodyState before{};
+        REQUIRE(w.get_body_state(crate, before));
+
+        const physics::BodyId pusher = add_kinematic(w, {-1.25f, 0.5f, 0.0f});
+        const core::Vec3 v{1.0f, 0.0f, 0.0f};
+        core::Vec3 p{-1.25f, 0.5f, 0.0f};
+        bool woke = false;
+        for (int i = 0; i < 60; ++i) { // 1 s at 1 m/s: contact after ~0.5 s, then 0.5 m of push
+            p = p + v * kDt;
+            physics::BodyState s{};
+            s.position = p;
+            s.linear_velocity = v;
+            REQUIRE(w.set_body_state(pusher, s));
+            w.step(kDt);
+            woke = woke || !w.is_asleep(crate);
+        }
+        physics::BodyState after{};
+        REQUIRE(w.get_body_state(crate, after));
+        CHECK(woke);
+        CHECK(after.position.x > before.position.x + 0.2f); // pushed, not passed through
+    }
+
+    SUBCASE("parked: a touching kinematic body at rest leaves the sleeper asleep") {
+        physics::PhysicsWorld w;
+        add_ground(w);
+        const physics::BodyId crate = add_dynamic(w, box({0.5f, 0.5f, 0.5f}), {0.0f, 0.5f, 0.0f});
+        settle(w, crate);
+        REQUIRE(w.is_asleep(crate));
+        static_cast<void>(add_kinematic(w, {-0.76f, 0.5f, 0.0f})); // touching (within the margin)
+        bool woke = false;
+        for (int i = 0; i < 60; ++i) {
+            w.step(kDt);
+            woke = woke || !w.is_asleep(crate);
+        }
+        CHECK_FALSE(woke); // a resting pile leaning on a parked platform still costs nothing
+    }
+}

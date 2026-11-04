@@ -46,12 +46,15 @@ inline constexpr std::size_t kInputV2HeaderBytes = 4;
 inline constexpr std::size_t kInputHelloBytes = 11;
 inline constexpr std::size_t kInputHelloReplyBytes = 3;
 inline constexpr std::size_t kInputResultBytes = 30;
+inline constexpr std::size_t kInputPacingBytes = 14;
 
 // These four tags are private to V2; the old input sender and receiver keep their own wire format.
 inline constexpr std::uint8_t kInputV2Tag = 0xE0;
 inline constexpr std::uint8_t kInputHelloTag = 0xE1;
 inline constexpr std::uint8_t kInputHelloReplyTag = 0xE2;
 inline constexpr std::uint8_t kInputResultTag = 0xE3;
+// m20.7 (ADR-0107): the server's per-tick report of how deep its input buffer is.
+inline constexpr std::uint8_t kInputPacingTag = 0xE7;
 
 enum class InputV2Refusal {
     None,
@@ -117,7 +120,14 @@ struct ScheduledInput {
     bool applied = false;
     bool synthesized = true;
     bool started = false;
+    // Adaptive mode only: the buffer was empty, a neutral stand-in ran, and NOTHING was retired.
+    bool stalled = false;
 };
+
+// ADR-0107. Fixed is ADR-0103's schedule: one sequence retires per tick whatever happened.
+// Adaptive STALLS when the buffer is empty instead of retiring: a playout buffer that grows on
+// underrun, so a late command is applied rather than discarded.
+enum class InputBufferMode : std::uint8_t { Fixed, Adaptive };
 
 struct InputResult {
     std::uint64_t server_tick = 0;
@@ -129,11 +139,23 @@ struct InputResult {
 [[nodiscard]] std::size_t encode_input_result(const InputResult& result, std::span<std::byte> out);
 [[nodiscard]] bool decode_input_result(std::span<const std::byte> in, InputResult& out);
 
+// The server's buffer depth, sent to the client every tick on its own unreliable stream so the
+// client can drain surplus by dilating its own tick (see input_pacing.hpp).
+struct InputPacing {
+    std::uint64_t server_tick = 0;
+    std::uint8_t margin = 0;  // contiguous commands still held after this tick's step
+    std::uint32_t stalls = 0; // running stall count (truncated to 32 bits)
+};
+
+[[nodiscard]] std::size_t encode_input_pacing(const InputPacing& pacing, std::span<std::byte> out);
+[[nodiscard]] bool decode_input_pacing(std::span<const std::byte> in, InputPacing& out);
+
 class InputSchedule {
 public:
     // Six ticks are 100 ms at 60 Hz; after that much silence, repeating held movement is stale.
     explicit InputSchedule(std::uint32_t slack_ticks = 1,
-                           std::uint32_t neutral_after_ticks = 6) noexcept;
+                           std::uint32_t neutral_after_ticks = 6,
+                           InputBufferMode mode = InputBufferMode::Fixed) noexcept;
 
     // The first accepted sequence fixes next_: client sequence numbers do not locate server time.
     void offer(std::span<const InputCommand> commands);
@@ -142,9 +164,11 @@ public:
     // retires nothing and sets no mask bit -- those ticks count toward `synthesized()` too, so "the
     // server ran a stand-in" has one counter whichever reason it had. Once started, every call
     // retires exactly one sequence, applied or synthesized, which is what makes `retired_through`
-    // advance with server time even when the client goes silent.
+    // advance with server time in Fixed mode. Adaptive mode stalls on an empty ring and may
+    // retire a skipped range when a distant command arrives after that stall.
     [[nodiscard]] ScheduledInput step() noexcept;
     [[nodiscard]] InputResult result(std::uint64_t server_tick) const noexcept;
+    [[nodiscard]] InputPacing pacing(std::uint64_t server_tick) const noexcept;
 
     [[nodiscard]] std::uint64_t accepted() const noexcept { return accepted_; }
 
@@ -160,7 +184,36 @@ public:
 
     [[nodiscard]] std::uint64_t neutralized() const noexcept { return neutralized_; }
 
+    // A late command whose retired slot ran a stand-in: input that genuinely missed its tick.
+    // `late()` also counts the harmless redundant copies every packet carries; this does not.
+    [[nodiscard]] std::uint64_t late_missed() const noexcept { return late_missed_; }
+
+    // Late commands whose slot is older than the 128-bit mask (or was never retired): neither
+    // redundant nor missed can be proven.
+    [[nodiscard]] std::uint64_t late_unclassified() const noexcept { return late_unclassified_; }
+
+    [[nodiscard]] std::uint64_t stalls() const noexcept { return stalls_; }
+
+    [[nodiscard]] std::uint64_t resyncs() const noexcept { return resyncs_; }
+
+    // Sequences skipped without a simulation step when an empty adaptive ring resynchronizes.
+    [[nodiscard]] std::uint64_t resync_retired() const noexcept { return resync_retired_; }
+
+    // Gaps retired as synthesized in adaptive mode (a later command was held, so waiting is
+    // futile).
+    [[nodiscard]] std::uint64_t gaps_retired() const noexcept { return gaps_retired_; }
+
+    // Contiguous held commands at next_ after the latest step, capped at 255; and its high-water
+    // mark.
+    [[nodiscard]] std::uint8_t margin() const noexcept { return margin_; }
+
+    [[nodiscard]] std::uint8_t max_margin() const noexcept { return max_margin_; }
+
+    [[nodiscard]] InputBufferMode mode() const noexcept { return mode_; }
+
 private:
+    void record_margin() noexcept;
+
     static constexpr std::size_t kRing = 64;
     std::array<InputCommand, kRing> commands_{};
     std::array<bool, kRing> held_{};
@@ -181,6 +234,16 @@ private:
     std::uint64_t applied_ = 0;
     std::uint64_t synthesized_ = 0;
     std::uint64_t neutralized_ = 0;
+    std::uint64_t late_missed_ = 0;
+    std::uint64_t late_unclassified_ = 0;
+    std::uint64_t stalls_ = 0;
+    std::uint64_t resyncs_ = 0;
+    std::uint64_t resync_retired_ = 0;
+    std::uint64_t gaps_retired_ = 0;
+    std::uint64_t retired_count_ = 0;
+    InputBufferMode mode_ = InputBufferMode::Fixed;
+    std::uint8_t margin_ = 0;
+    std::uint8_t max_margin_ = 0;
 };
 
 class InputWindow {

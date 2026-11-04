@@ -11,6 +11,7 @@
 #include <cmath>
 #include <cstdio>
 #include <optional>
+#include <random>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -22,6 +23,7 @@
 #include "rime/platform/socket.hpp"
 #include "rime/replication/input_v2.hpp"
 #include "rime/replication/server_replicator.hpp"
+#include "rime/replication/spawn_prediction.hpp"
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -186,18 +188,40 @@ void count_refusal(RunReport::NetworkInputCounters& counts, InputV2Refusal reaso
     }
 }
 
+// An ACTIVE interaction profile must name its object and both server hooks; an inactive one
+// (no spawn profile beside it) is inert and is not checked.
+bool interaction_complete(const GameDefinition::RemotePlayProfile& remote_play) {
+    const auto* interaction = remote_play.active_interaction();
+    return interaction == nullptr ||
+           (interaction->object && interaction->sample && interaction->capture);
+}
+
 } // namespace
+
+// The default one-command input buffer plus the one send period a single lost datagram costs.
+constexpr std::uint32_t kLoseOneSlack = 2;
 
 struct NetworkInputServer::Impl {
     Impl(ListenerLink supplied_link,
          double tick_hz,
          const GameDefinition::NetworkInputProfile& profile,
          ecs::World& world,
-         const GameDefinition::RemotePlayProfile* remote_play)
-        : link(std::move(supplied_link)), driver(link, driver_config()), profile(profile),
+         const GameDefinition::RemotePlayProfile* remote_play,
+         SpawnFault fault = SpawnFault::None,
+         std::uint32_t fault_ticks = 0,
+         std::uint32_t input_slack = 1,
+         bool adaptive_input = false,
+         bool production_link = false)
+        : link(std::move(supplied_link)), driver(link, driver_config(production_link)),
+          profile(profile), world(world), fault(fault), fault_ticks(fault_ticks),
+          input_slack(input_slack), adaptive_input(adaptive_input),
           neutral_after_ticks(static_cast<std::uint32_t>(std::max(1.0, std::ceil(tick_hz * 0.1)))) {
         driver.listen();
         schema_hash = input_schema_identity(profile, remote_play);
+        if (remote_play && remote_play->spawn_prediction)
+            spawn_profile = &*remote_play->spawn_prediction;
+        if (remote_play)
+            interaction = remote_play->active_interaction();
         if (remote_play) {
             owner = remote_play->owned_player(world);
             hooks = remote_play->prediction_hooks(world, owner);
@@ -211,12 +235,24 @@ struct NetworkInputServer::Impl {
                 });
             if (const auto mapped = replicator->map().net_id_of(owner))
                 owner_net_id = *mapped;
+            if (interaction && interaction->object) {
+                object = interaction->object(world);
+                if (const auto mapped = replicator->map().net_id_of(object))
+                    object_id = PredictedEntityId{mapped->index, mapped->generation};
+                policy.emplace(interaction->params);
+            }
             replicator->set_budget(Budget{.max_bytes_per_tick = 1024});
         }
     }
 
-    static net::NetDriver::Config driver_config() {
+    static net::NetDriver::Config driver_config(bool production_link) {
         net::NetDriver::Config config{};
+        if (production_link) {
+            // Salt entropy is a transport input chosen by the app; scripted links keep the
+            // driver's fixed seed so their incarnation proofs stay reproducible.
+            std::random_device entropy;
+            config.salt_seed = (std::uint64_t{entropy()} << 32) | std::uint64_t{entropy()};
+        }
         // Two transport sessions let a second peer receive an explicit profile-level `full`
         // refusal while the simulation still admits exactly one input source.
         config.max_sessions = 2;
@@ -235,6 +271,14 @@ struct NetworkInputServer::Impl {
         totals.applied += schedule->applied();
         totals.synthesized += schedule->synthesized();
         totals.neutralized += schedule->neutralized();
+        totals.stalls += schedule->stalls();
+        totals.resyncs += schedule->resyncs();
+        totals.resync_retired += schedule->resync_retired();
+        totals.gaps_retired += schedule->gaps_retired();
+        totals.late_missed += schedule->late_missed();
+        totals.late_unclassified += schedule->late_unclassified();
+        totals.max_margin = std::max<std::uint64_t>(totals.max_margin, schedule->max_margin());
+        totals.final_margin = schedule->margin();
         schedule.reset();
     }
 
@@ -293,6 +337,12 @@ struct NetworkInputServer::Impl {
                 event(fmt::format("{{\"event\":\"client_left\",\"reason\":\"{}\"}}", reason));
                 admitted.reset();
                 save_schedule();
+                // Outcomes name one incarnation only; a reconnect cannot acknowledge or bind
+                // the former peer's launches even if it happens to reuse input sequences.
+                pending_outcomes.clear();
+                live_spawns.clear();
+                acknowledged_through.reset();
+                newest_outcome.reset();
             }
         }
         for (const auto id : driver.session_ids()) {
@@ -359,7 +409,17 @@ struct NetworkInputServer::Impl {
                         }
                         // The leaf's six-tick default is 100 ms only at 60 Hz. Derive the
                         // silence bound from this game's fixed rate before its first command.
-                        schedule.emplace(1, neutral_after_ticks);
+                        // `lose-one` drops one datagram, so the launch command's next copy -- the
+                        // redundant window of the client's NEXT send -- arrives one send period
+                        // (one client tick) late. A one-command buffer has already retired it
+                        // as synthesized by then (measured: retired_without_launch 1), which
+                        // would test synthesis, not redundancy. One more buffered command
+                        // absorbs exactly that one period; the fault leg alone pays the tick.
+                        schedule.emplace(
+                            std::max(input_slack,
+                                     fault == SpawnFault::LoseOne ? kLoseOneSlack : 1u),
+                            neutral_after_ticks,
+                            adaptive_input ? InputBufferMode::Adaptive : InputBufferMode::Fixed);
                         ++totals.clients_admitted;
                         event(fmt::format("{{\"event\":\"client_connected\",\"peer\":\"{}:{}\"}}",
                                           session->peer().address_string(),
@@ -377,6 +437,37 @@ struct NetworkInputServer::Impl {
                         ++totals.wrong_channel;
                     continue;
                 }
+                if (spawn_profile && bytes[0] == std::byte{kSpawnOutcomeAckTag}) {
+                    if (message.channel != net::Channel::ReliableOrdered) {
+                        ++totals.spawn_ack_wrong_channel;
+                        continue;
+                    }
+                    SpawnOutcomeAck ack{};
+                    if (!decode_spawn_outcome_ack(bytes, ack)) {
+                        ++totals.spawn_ack_malformed;
+                        continue;
+                    }
+                    if (ack.through.incarnation != session->incarnation()) {
+                        ++totals.spawn_ack_wrong_incarnation;
+                        continue;
+                    }
+                    if (!newest_outcome || ack.through > *newest_outcome) {
+                        ++totals.spawn_ack_ahead;
+                        continue;
+                    }
+                    if (acknowledged_through && ack.through <= *acknowledged_through) {
+                        ++totals.spawn_ack_stale;
+                        continue;
+                    }
+                    if (duplicate_window_open()) {
+                        // Validated, then treated as not yet arrived: what a lost-then-resent
+                        // ack looks like to the client. after_tick applies it when the window ends.
+                        fault_held_ack = ack.through;
+                        continue;
+                    }
+                    apply_ack(ack.through);
+                    continue;
+                }
                 if (message.channel != net::Channel::UnreliableSequenced) {
                     ++totals.wrong_channel;
                     continue;
@@ -391,6 +482,28 @@ struct NetworkInputServer::Impl {
                     count_refusal(totals, decoded.refusal);
                     continue;
                 }
+                // Faults cut a decoded command window, after transport and codec admission.
+                if (fault == SpawnFault::LoseOne || fault == SpawnFault::LoseAll) {
+                    for (const auto& command : commands)
+                        if (command.pressed != 0 && !fault_sequence)
+                            fault_sequence = command.sequence;
+                    const bool carries_launch =
+                        fault_sequence &&
+                        std::any_of(commands.begin(), commands.end(), [&](const auto& command) {
+                            return command.sequence == *fault_sequence;
+                        });
+                    const auto result = schedule->result(0);
+                    const bool retired = fault_sequence && result.any_retired &&
+                                         result.retired_through >= *fault_sequence;
+                    if (carries_launch && !retired &&
+                        (fault == SpawnFault::LoseAll || totals.spawn_fault_lose_one == 0)) {
+                        if (fault == SpawnFault::LoseOne)
+                            ++totals.spawn_fault_lose_one;
+                        else
+                            ++totals.spawn_fault_lose_all;
+                        continue;
+                    }
+                }
                 schedule->offer(commands);
             }
         }
@@ -399,6 +512,23 @@ struct NetworkInputServer::Impl {
     ListenerLink link;
     net::NetDriver driver;
     GameDefinition::NetworkInputProfile profile;
+    ecs::World& world;
+    SpawnFault fault = SpawnFault::None;
+    std::uint32_t fault_ticks = 0;
+    // Commands the server buffers before executing one (InputSchedule's slack). 1 is m20.3's
+    // contract; `--input-slack` raises it for a run whose client cannot keep up with one tick of
+    // slack (a starved CI VM) -- a fixed knob until the buffer adapts on its own.
+    std::uint32_t input_slack = 1;
+    // m20.7 (ADR-0107): `dedicated --input-buffer adaptive`.
+    bool adaptive_input = false;
+    std::optional<std::uint32_t> fault_sequence;
+    // `duplicate` holds the client's ack for its window, so the verdict rides every checkpoint in
+    // it -- a repeated confirmation the client must recognise -- and applies it afterwards.
+    std::optional<SpawnKey> fault_held_ack;
+    std::optional<std::uint64_t> fault_launch_tick;
+    std::uint32_t fault_prior_epoch = 0;
+    std::uint64_t current_server_tick = 0;
+    bool selected_refuse = false;
     std::uint64_t schema_hash = 0;
     std::uint32_t neutral_after_ticks = 6;
     std::optional<net::SessionId> admitted;
@@ -406,6 +536,39 @@ struct NetworkInputServer::Impl {
     std::optional<InputSchedule> schedule;
     std::unique_ptr<ServerReplicator> replicator;
     PredictionHooks hooks;
+    const GameDefinition::RemotePlayProfile::SpawnPredictionProfile* spawn_profile = nullptr;
+    // m20.6b: the active interaction profile (ADR-0106 §2), its one object, that object's roster
+    // id, and the leaf that decides its membership. SERVER-DECLARED MEMBERSHIP WITH HYSTERESIS:
+    // the client never decides what it predicts; it learns it from the roster and the epoch.
+    const GameDefinition::RemotePlayProfile::InteractionProfile* interaction = nullptr;
+    ecs::Entity object{};
+    PredictedEntityId object_id{};
+    std::optional<InteractionMembershipPolicy> policy;
+    // The last tick the policy ran. `linger` re-offers the final tick's checkpoint many times;
+    // counting each re-offer as another quiet tick would let the object leave during the drain.
+    std::optional<std::uint64_t> interaction_tick;
+    // Interaction epoch advances when a spawn fault started hiding its answer (see after_tick).
+    std::uint64_t fault_prior_interaction_epochs = 0;
+    // m20.6c: server ticks at which the interaction object is kicked (diagnostic, empty = never).
+    std::vector<std::uint64_t> kick_ticks;
+    // `kick@cmd:N` items and whether each has fired; `retired_now` is the sequence THIS tick's
+    // input step retired (nullopt on a stall, before start, or with no schedule).
+    std::vector<std::uint32_t> kick_commands;
+    std::vector<bool> kick_command_fired;
+    std::optional<std::uint32_t> retired_now;
+
+    struct LiveSpawn {
+        SpawnKey key{};
+        ecs::Entity entity{};
+        PredictedEntityId id{};
+        std::uint64_t launch_tick = 0;
+    };
+
+    std::vector<LiveSpawn> live_spawns;
+    std::vector<SpawnOutcome> pending_outcomes;
+    std::optional<SpawnKey> acknowledged_through;
+    std::optional<SpawnKey> newest_outcome;
+    std::optional<CommandProvenance> selected_provenance;
     ecs::Entity owner{};
     NetId owner_net_id{};
     std::uint32_t membership_epoch = 0;
@@ -416,15 +579,155 @@ struct NetworkInputServer::Impl {
     std::vector<net::Received> messages;
     std::vector<InputCommand> commands;
 
+    [[nodiscard]] bool duplicate_window_open() const noexcept {
+        return fault == SpawnFault::Duplicate && fault_launch_tick &&
+               current_server_tick < *fault_launch_tick + fault_ticks;
+    }
+
+    void apply_ack(const SpawnKey& through) {
+        // A frontier is a claim of APPLIED verdicts, not of sent packets. Only the client's
+        // reliable ack can retire durable outcomes (ADR-0105 guardrail 5).
+        acknowledged_through = through;
+        std::erase_if(pending_outcomes,
+                      [&](const SpawnOutcome& outcome) { return outcome.key <= through; });
+        ++totals.spawn_acks_applied;
+    }
+
     [[nodiscard]] ActionState select_actions() {
         last_applied = false;
+        selected_refuse = false;
+        selected_provenance.reset();
+        retired_now.reset();
         if (!schedule) {
             ++totals.synthesized;
             return {};
         }
         const ScheduledInput selected = schedule->step();
         last_applied = selected.applied;
+        // The step's own command carries sequence 0 when a retirement was synthesized with a
+        // neutral stand-in, so ask the schedule what it retired instead of trusting the command.
+        if (selected.started && !selected.stalled)
+            retired_now = schedule->result(0).retired_through;
+        if (fault_sequence && selected.applied && selected.command.sequence == *fault_sequence &&
+            fault == SpawnFault::LoseOne && totals.spawn_fault_lose_one > 0)
+            ++totals.launch_recovered_by_redundancy;
+        if (fault == SpawnFault::Refuse && selected.applied && selected.command.pressed != 0 &&
+            totals.spawn_fault_refuse == 0) {
+            selected_refuse = true;
+            ++totals.spawn_fault_refuse;
+        }
+        if (admitted) {
+            if (const auto* session = driver.session(*admitted))
+                selected_provenance = CommandProvenance{
+                    session->incarnation(), selected.command.sequence, selected.applied};
+        }
         return profile.to_actions(selected.command);
+    }
+
+    // One policy step per server tick, from the state the tick just produced. A join or a leave
+    // changes the roster the next checkpoint carries, so it advances the epoch -- the server's
+    // statement that the set changed -- exactly as an accepted or ended spawn does.
+    void update_interaction(std::uint64_t server_tick) {
+        if (!interaction || !policy || (interaction_tick && *interaction_tick == server_tick))
+            return;
+        interaction_tick = server_tick;
+        const auto sample = interaction->sample(world, owner, object);
+        const auto decision = policy->update(sample);
+        // A join taken while the object still moves: the sliding re-join the proof schedules. The
+        // leaf cannot tell this apart from a resting join, and the proof must be able to.
+        if (decision == MembershipDecision::Join && sample.speed > policy->params().rest_speed)
+            ++totals.interaction_joined_sliding;
+        if (decision != MembershipDecision::Stay) {
+            ++membership_epoch;
+            ++totals.interaction_epoch_advances;
+        }
+        if (policy->member())
+            ++totals.interaction_member_ticks;
+    }
+
+    void receive_spawns(std::span<const SpawnReport> reports) {
+        if (!spawn_profile)
+            return;
+        for (const SpawnReport& report : reports) {
+            if (!fault_launch_tick && report.kind == SpawnReport::Kind::Launched) {
+                fault_launch_tick = current_server_tick;
+                fault_prior_epoch = membership_epoch;
+                fault_prior_interaction_epochs = totals.interaction_epoch_advances;
+            }
+            if (!admitted) {
+                ++totals.spawn_without_client;
+                continue;
+            }
+            const auto* session = driver.session(*admitted);
+            if (!session || report.key.incarnation != session->incarnation()) {
+                ++totals.spawn_foreign_key;
+                continue;
+            }
+            if (report.kind == SpawnReport::Kind::Ended) {
+                const auto live = std::find_if(
+                    live_spawns.begin(), live_spawns.end(), [&](const LiveSpawn& entry) {
+                        return entry.key == report.key && entry.entity == report.entity;
+                    });
+                if (live == live_spawns.end()) {
+                    // A launch this pump never adopted (refused on roster grounds, or forgotten by
+                    // a reconnect) still left an entity in the world, and the game hands its
+                    // despawn to whoever listens for reports. Despawn it here, or it outlives its
+                    // flight forever on the server.
+                    ++totals.spawn_end_unknown;
+                    if (world.is_alive(report.entity))
+                        replicator->despawn(report.entity);
+                    continue;
+                }
+                // End the world-stream identity before publication. If the verdict has not
+                // been acknowledged, its Accepted becomes AcceptedEnded, with no stale binding.
+                if (const auto outcome = std::find_if(
+                        pending_outcomes.begin(),
+                        pending_outcomes.end(),
+                        [&](const SpawnOutcome& entry) { return entry.key == report.key; });
+                    outcome != pending_outcomes.end()) {
+                    outcome->kind = SpawnOutcomeKind::AcceptedEnded;
+                    outcome->id = {};
+                    ++totals.spawn_accepted_ended;
+                }
+                // Flight length is the game-agnostic trace of HOW it ended: a fixed-life
+                // projectile that ran its full life missed, one that ended sooner hit.
+                totals.spawn_last_flight_ticks = current_server_tick - live->launch_tick;
+                replicator->despawn(live->entity);
+                live_spawns.erase(live);
+                ++membership_epoch;
+                ++totals.spawn_epoch_advances;
+                continue;
+            }
+            if (newest_outcome && report.key <= *newest_outcome) {
+                ++totals.spawn_out_of_order;
+                continue;
+            }
+            SpawnOutcome outcome{};
+            outcome.key = report.key;
+            if (report.kind == SpawnReport::Kind::Refused) {
+                outcome.kind = SpawnOutcomeKind::Rejected;
+                outcome.reason = report.reason;
+                ++totals.spawn_rejected;
+            } else {
+                const NetId net_id = replicator->replicate(report.entity);
+                if (net_id == kNullNetId || (net_id.index & kProvisionalIndexBit) != 0) {
+                    if (net_id != kNullNetId)
+                        replicator->despawn(report.entity);
+                    ++totals.spawn_roster_refused;
+                    continue;
+                }
+                outcome.kind = SpawnOutcomeKind::Accepted;
+                outcome.id = {net_id.index, net_id.generation};
+                live_spawns.push_back({report.key, report.entity, outcome.id, current_server_tick});
+                ++membership_epoch;
+                ++totals.spawn_epoch_advances;
+                ++totals.spawn_accepted;
+            }
+            newest_outcome = report.key;
+            // The wire has a 16-verdict limit, not the durable store: refusing or forgetting
+            // a game-allowed launch because of transport pressure would lie to the client.
+            pending_outcomes.push_back(outcome);
+        }
     }
 };
 
@@ -440,7 +743,11 @@ NetworkInputServer::bind(const std::string& host,
                          const GameDefinition::NetworkInputProfile& profile,
                          ecs::World& world,
                          const GameDefinition::RemotePlayProfile* remote_play,
-                         std::string& error) {
+                         std::string& error,
+                         SpawnFault fault,
+                         std::uint32_t fault_ticks,
+                         std::uint32_t input_slack,
+                         bool adaptive_input) {
     const auto local = platform::Endpoint::from_string(host, port);
     if (!local) {
         error = "EINVAL";
@@ -451,7 +758,10 @@ NetworkInputServer::bind(const std::string& host,
         error = error_name();
         return nullptr;
     }
-    if (remote_play && (!remote_play->owned_player || !remote_play->prediction_hooks)) {
+    if (remote_play &&
+        (!remote_play->owned_player || !remote_play->prediction_hooks ||
+         (remote_play->spawn_prediction && !remote_play->spawn_prediction->capture_spawned) ||
+         !interaction_complete(*remote_play))) {
         error = "remote play profile is incomplete";
         return nullptr;
     }
@@ -459,12 +769,24 @@ NetworkInputServer::bind(const std::string& host,
         error = "owned player is not alive";
         return nullptr;
     }
-    auto impl = std::make_unique<Impl>(
-        ListenerLink{std::move(*socket)}, tick_hz, profile, world, remote_play);
+    auto impl = std::make_unique<Impl>(ListenerLink{std::move(*socket)},
+                                       tick_hz,
+                                       profile,
+                                       world,
+                                       remote_play,
+                                       fault,
+                                       fault_ticks,
+                                       input_slack,
+                                       adaptive_input,
+                                       true);
     if (remote_play &&
         (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
          !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {
         error = "remote play prediction hooks are incomplete";
+        return nullptr;
+    }
+    if (impl->interaction && impl->object_id == PredictedEntityId{}) {
+        error = "interaction object is not replicated";
         return nullptr;
     }
     return std::unique_ptr<NetworkInputServer>(new NetworkInputServer(std::move(impl)));
@@ -476,17 +798,33 @@ NetworkInputServer::on_link(net::Link& link,
                             const GameDefinition::NetworkInputProfile& profile,
                             ecs::World& world,
                             const GameDefinition::RemotePlayProfile* remote_play,
-                            std::string& error) {
-    if (remote_play && (!remote_play->owned_player || !remote_play->prediction_hooks ||
-                        !world.is_alive(remote_play->owned_player(world)))) {
+                            std::string& error,
+                            bool adaptive_input) {
+    if (remote_play &&
+        (!remote_play->owned_player || !remote_play->prediction_hooks ||
+         !world.is_alive(remote_play->owned_player(world)) ||
+         (remote_play->spawn_prediction && !remote_play->spawn_prediction->capture_spawned) ||
+         !interaction_complete(*remote_play))) {
         error = "remote play profile has no live owned player";
         return nullptr;
     }
-    auto impl = std::make_unique<Impl>(ListenerLink{link}, tick_hz, profile, world, remote_play);
+    auto impl = std::make_unique<Impl>(ListenerLink{link},
+                                       tick_hz,
+                                       profile,
+                                       world,
+                                       remote_play,
+                                       SpawnFault::None,
+                                       0,
+                                       1,
+                                       adaptive_input);
     if (remote_play &&
         (impl->owner_net_id == kNullNetId || !impl->hooks.capture || !impl->hooks.restore ||
          !impl->hooks.capture_group || !impl->hooks.restore_group || !impl->hooks.simulate)) {
         error = "remote play prediction hooks are incomplete";
+        return nullptr;
+    }
+    if (impl->interaction && impl->object_id == PredictedEntityId{}) {
+        error = "interaction object is not replicated";
         return nullptr;
     }
     return std::unique_ptr<NetworkInputServer>(new NetworkInputServer(std::move(impl)));
@@ -510,7 +848,80 @@ bool NetworkInputServer::last_applied() const noexcept {
     return impl_->last_applied;
 }
 
-void NetworkInputServer::after_tick(std::uint64_t server_tick) {
+bool NetworkInputServer::refuse_spawn() const noexcept {
+    return impl_->selected_refuse;
+}
+
+void NetworkInputServer::set_interaction_kicks(std::vector<std::uint64_t> ticks) {
+    impl_->kick_ticks = std::move(ticks);
+}
+
+void NetworkInputServer::set_interaction_kick_commands(std::vector<std::uint32_t> sequences) {
+    impl_->kick_commands = std::move(sequences);
+    impl_->kick_command_fired.assign(impl_->kick_commands.size(), false);
+}
+
+bool NetworkInputServer::interaction_kick(std::uint64_t server_tick) {
+    if (!impl_->interaction || !impl_->policy)
+        return false;
+    const bool by_tick =
+        std::find(impl_->kick_ticks.begin(), impl_->kick_ticks.end(), server_tick) !=
+        impl_->kick_ticks.end();
+    // Event-driven: an item fires on the first tick that retires its sequence or a later one, so
+    // the kick follows the CLIENT's tape (command N is the tape's tick N) however far the server
+    // clock has drifted from it. Every unfired item that is due fires now; one tick kicks once.
+    bool by_command = false;
+    if (impl_->retired_now) {
+        for (std::size_t i = 0; i < impl_->kick_commands.size(); ++i) {
+            if (!impl_->kick_command_fired[i] && *impl_->retired_now >= impl_->kick_commands[i]) {
+                impl_->kick_command_fired[i] = true;
+                by_command = true;
+            }
+        }
+    }
+    if (!by_tick && !by_command)
+        return false;
+    ++impl_->totals.interaction_kicks;
+    if (impl_->totals.interaction_kicks == 1)
+        impl_->totals.interaction_kick1_tick = server_tick;
+    else if (impl_->totals.interaction_kicks == 2)
+        impl_->totals.interaction_kick2_tick = server_tick;
+    if (by_command)
+        ++impl_->totals.interaction_kicks_by_command;
+    // Membership as of the previous tick's policy step: the state the client's roster reflects.
+    ++(impl_->policy->member() ? impl_->totals.interaction_kicks_member
+                               : impl_->totals.interaction_kicks_nonmember);
+    return true;
+}
+
+std::optional<CommandProvenance> NetworkInputServer::command_provenance() const noexcept {
+    return impl_->selected_provenance;
+}
+
+void NetworkInputServer::after_tick(std::uint64_t server_tick,
+                                    std::span<const SpawnReport> spawns,
+                                    std::span<const ecs::Entity> despawns) {
+    impl_->current_server_tick = server_tick;
+    // Game-ended entities go BEFORE publication, so the retraction rides this tick's records
+    // instead of the orphan backstop repairing it a tick late. Through the replicator when there
+    // is one (it retracts the NetId first), else a plain world despawn.
+    for (const ecs::Entity entity : despawns) {
+        if (!impl_->world.is_alive(entity)) {
+            ++impl_->totals.game_despawns_dead;
+            continue;
+        }
+        if (impl_->replicator)
+            impl_->replicator->despawn(entity);
+        else
+            impl_->world.despawn(entity);
+        ++impl_->totals.game_despawns;
+    }
+    impl_->receive_spawns(spawns);
+    impl_->update_interaction(server_tick);
+    if (impl_->fault_held_ack && !impl_->duplicate_window_open()) {
+        impl_->apply_ack(*impl_->fault_held_ack);
+        impl_->fault_held_ack.reset();
+    }
     if (!impl_->admitted || !impl_->schedule)
         return;
     net::Session* session = impl_->driver.session(*impl_->admitted);
@@ -523,6 +934,17 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick) {
     const auto n = encode_input_result(result, bytes);
     if (!session->send_unreliable(std::span(bytes).first(n), impl_->now, kRemoteInputResultStream))
         ++impl_->totals.input_result_send_refused;
+    if (impl_->adaptive_input) {
+        // After the result, on its own stream: the client's pacer reads the margin AFTER this
+        // tick's step. Unreliable like the result -- the next tick's report replaces a lost one.
+        std::array<std::byte, kInputPacingBytes> pacing_bytes{};
+        const auto pn = encode_input_pacing(impl_->schedule->pacing(server_tick), pacing_bytes);
+        if (session->send_unreliable(
+                std::span(pacing_bytes).first(pn), impl_->now, kRemoteInputPacingStream))
+            ++impl_->totals.pacing_sent;
+        else
+            ++impl_->totals.pacing_send_refused;
+    }
     if (!impl_->replicator)
         return;
     impl_->replicator->publish(impl_->driver, impl_->now);
@@ -530,6 +952,7 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick) {
     checkpoint.server_tick = server_tick;
     checkpoint.membership_epoch = impl_->membership_epoch;
     checkpoint.result = result;
+    checkpoint.input_stalls = static_cast<std::uint32_t>(impl_->schedule->stalls() & 0xFFFFFFFFu);
     // The client resolves this replicated NetId through its map to find its own mirror.
     const PredictedEntityId id{impl_->owner_net_id.index, impl_->owner_net_id.generation};
     auto state = impl_->hooks.capture(id);
@@ -538,17 +961,90 @@ void NetworkInputServer::after_tick(std::uint64_t server_tick) {
         return;
     }
     checkpoint.entities.push_back(PredictedEntityState{id, std::move(state)});
+    if (impl_->policy && impl_->policy->member()) {
+        // The member's FULL state, velocity included: the client seeds its prediction physics
+        // from these bytes on the join tick and on every correction, never from the mirror.
+        auto object_state = impl_->interaction->capture(impl_->world, impl_->object);
+        if (object_state.empty()) {
+            ++impl_->totals.interaction_capture_refused;
+            ++impl_->totals.checkpoint_capture_refused;
+            return;
+        }
+        checkpoint.entities.push_back(
+            PredictedEntityState{impl_->object_id, std::move(object_state)});
+    }
+    SpawnCheckpointExtension extension{};
+    if (impl_->spawn_profile) {
+        // A delayed answer is redacted as a coherent older roster. Publishing the new entity
+        // without its binding would make two visible identities for one key on the client.
+        const bool hide_spawn =
+            impl_->fault_launch_tick &&
+            (impl_->fault == SpawnFault::LateAlive || impl_->fault == SpawnFault::LateEnded) &&
+            server_tick < *impl_->fault_launch_tick + impl_->fault_ticks;
+        if (hide_spawn) {
+            // The redacted roster still carries the interaction object's CURRENT membership, so
+            // its epoch moves on by every interaction change since the fault began. Known limit
+            // (diagnostic only): if the object joined or left inside the window, that number may
+            // also name a roster the client saw before, and the client counts the mismatch.
+            checkpoint.membership_epoch =
+                impl_->fault_prior_epoch +
+                static_cast<std::uint32_t>(impl_->totals.interaction_epoch_advances -
+                                           impl_->fault_prior_interaction_epochs);
+            if (impl_->fault == SpawnFault::LateAlive)
+                ++impl_->totals.spawn_fault_late_alive;
+            else
+                ++impl_->totals.spawn_fault_late_ended;
+        }
+        extension.acknowledged_through = impl_->acknowledged_through;
+        for (const auto& live : impl_->live_spawns) {
+            if (hide_spawn)
+                continue;
+            const auto spawned_state =
+                impl_->spawn_profile->capture_spawned(impl_->world, live.entity);
+            if (spawned_state.empty()) {
+                ++impl_->totals.checkpoint_capture_refused;
+                return;
+            }
+            checkpoint.entities.push_back({live.id, spawned_state});
+            extension.bindings.push_back({live.key, live.id});
+        }
+        if (!hide_spawn) {
+            const auto count = std::min(impl_->pending_outcomes.size(), kSpawnExtensionMaxOutcomes);
+            extension.outcomes.assign(impl_->pending_outcomes.begin(),
+                                      impl_->pending_outcomes.begin() + count);
+            impl_->totals.spawn_outcomes_deferred += impl_->pending_outcomes.size() - count;
+        }
+    }
     checkpoint.group_state = impl_->hooks.capture_group();
     std::array<std::byte, kCheckpointMaxMessageBytes> checkpoint_bytes{};
-    const auto encoded = encode_owner_checkpoint(checkpoint, checkpoint_bytes);
-    if (!encoded) {
+    std::size_t encoded_size = 0;
+    if (impl_->spawn_profile) {
+        const auto encoded = encode_spawn_checkpoint(checkpoint, extension, checkpoint_bytes);
+        if (!encoded)
+            ++impl_->totals.spawn_extension_refused;
+        else
+            encoded_size = encoded.bytes_written;
+    } else {
+        const auto encoded = encode_owner_checkpoint(checkpoint, checkpoint_bytes);
+        if (encoded)
+            encoded_size = encoded.bytes_written;
+    }
+    if (encoded_size == 0) {
         ++impl_->totals.checkpoint_encode_refused;
-    } else if (!session->send_unreliable(std::span(checkpoint_bytes).first(encoded.bytes_written),
+    } else if (!session->send_unreliable(std::span(checkpoint_bytes).first(encoded_size),
                                          impl_->now,
                                          kRemoteOwnerCheckpointStream)) {
         ++impl_->totals.checkpoint_send_refused;
     } else {
         ++impl_->totals.checkpoint_encoded;
+        if (impl_->fault == SpawnFault::Duplicate && impl_->fault_launch_tick &&
+            server_tick >= *impl_->fault_launch_tick &&
+            server_tick < *impl_->fault_launch_tick + impl_->fault_ticks) {
+            if (session->send_unreliable(std::span(checkpoint_bytes).first(encoded_size),
+                                         impl_->now,
+                                         kRemoteOwnerCheckpointStream))
+                ++impl_->totals.spawn_fault_duplicate;
+        }
     }
 }
 
@@ -582,6 +1078,25 @@ RunReport::NetworkInputCounters NetworkInputServer::counters() const noexcept {
         counts.applied += impl_->schedule->applied();
         counts.synthesized += impl_->schedule->synthesized();
         counts.neutralized += impl_->schedule->neutralized();
+        counts.stalls += impl_->schedule->stalls();
+        counts.resyncs += impl_->schedule->resyncs();
+        counts.resync_retired += impl_->schedule->resync_retired();
+        counts.gaps_retired += impl_->schedule->gaps_retired();
+        counts.late_missed += impl_->schedule->late_missed();
+        counts.late_unclassified += impl_->schedule->late_unclassified();
+        counts.max_margin =
+            std::max<std::uint64_t>(counts.max_margin, impl_->schedule->max_margin());
+        counts.final_margin = impl_->schedule->margin();
+    }
+    counts.input_buffer_adaptive = impl_->adaptive_input;
+    if (impl_->policy) {
+        const auto& policy = impl_->policy->counters();
+        counts.interaction_joins = policy.joins;
+        counts.interaction_leaves = policy.leaves;
+        counts.interaction_joined_in_contact = policy.joined_in_contact;
+        counts.interaction_leave_deferred_moving = policy.leave_deferred_moving;
+        counts.interaction_leave_deferred_touching = policy.leave_deferred_touching;
+        counts.interaction_leave_deferred_quiet = policy.leave_deferred_quiet;
     }
     counts.amplification_blocked = impl_->link.amplification_blocked();
     counts.driver_dropped = impl_->driver.datagrams_dropped();
