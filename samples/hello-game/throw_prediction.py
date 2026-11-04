@@ -52,6 +52,7 @@ TICK BUDGET per leg, in server ticks (the server starts ticking before the clien
 
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -159,7 +160,15 @@ def run_leg_once(server_extra=(), client_extra=(), throw=True, one_way=1, hold=0
                 process.communicate()
 
 
-def gate(name, ok, detail):
+# Hosted macOS measured 11.5 ms for sleep_for(1ms), so timing cannot gate there;
+# Linux/Windows remain enforced even if report flag set.
+REPORT_ONLY_TIMING = os.environ.get("RIME_REALTIME_GATES") == "report" and sys.platform == "darwin"
+
+
+def gate(name, ok, detail, timing=False):
+    if timing and REPORT_ONLY_TIMING and not ok:
+        print("REPORT " + name + " (not enforced on this runner): " + detail, flush=True)
+        return
     print(("PASS " if ok else "FAIL ") + name + ": " + detail, flush=True)
     if not ok:
         sys.exit(1)
@@ -204,9 +213,17 @@ gate("response predicted", on["spawn_response_ticks"] <= 1 and accepted_once(s) 
      f"{on['spawn_response_ticks']} <= 1 tick after the press; {read}")
 s, off = run_leg(client_extra=["--no-prediction", *IMPAIR], one_way=ONE_WAY)
 ok, read = presentation(off)
+# Missing the press is timing; duplicating an identity or effect is always a logic failure.
+gate("response without prediction invariants",
+     off["live_presentations_max"] <= 1 and off["presentation_launch"] <= 1 and
+     off["presentation_end"] <= 1 and off["presentation_resumed"] == 0 and
+     off["ledger_duplicate_adoptions"] == 0 and off["spawn_contradictory_outcomes"] == 0 and
+     s["spawn_accepted"] <= 1 and s["spawn_rejected"] == 0 and
+     (s["spawn_accepted"] == 0 or s["spawn_last_flight_ticks"] == FULL_FLIGHT), read)
 gate("response without prediction",
      off["spawn_response_ticks"] >= ROUND_TRIP and accepted_once(s) and ok,
-     f"{off['spawn_response_ticks']} >= {ROUND_TRIP}; {read}")
+     f"{off['spawn_response_ticks']} >= {ROUND_TRIP}; {read}",
+     timing=True)
 s, authority = run_leg(
     client_extra=["--spawn-debug-break", "authority-presentation", *IMPAIR], one_way=ONE_WAY)
 ok, read = presentation(authority)
