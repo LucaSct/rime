@@ -49,10 +49,15 @@ pub struct MaterialImport {
 /// Import and cook every material in `document`, cooking each referenced texture from the already-
 /// decoded `images` (so this works for `.glb` and embedded data-URI images, not just external files).
 /// `stem` names the cooked files deterministically (`<stem>.img<N>.<srgb|lin>.rtex`).
+///
+/// `block_compress` BC7-compresses every cooked image. It changes only the encoding: each map's
+/// colour space is still chosen by its usage below, and BC7 has an sRGB and a UNORM variant so the
+/// choice survives compression.
 pub fn import_materials(
     document: &gltf::Document,
     images: &[gltf::image::Data],
     stem: &str,
+    block_compress: bool,
 ) -> Result<MaterialImport, PipelineError> {
     let mut cache: HashMap<(usize, ColorSpace), u64> = HashMap::new();
     let mut textures: Vec<CookedTexture> = Vec::new();
@@ -68,6 +73,7 @@ pub fn import_materials(
             ColorSpace::Srgb,
             images,
             stem,
+            block_compress,
             &mut cache,
             &mut textures,
         )?;
@@ -77,6 +83,7 @@ pub fn import_materials(
             ColorSpace::Linear,
             images,
             stem,
+            block_compress,
             &mut cache,
             &mut textures,
         )?;
@@ -85,6 +92,7 @@ pub fn import_materials(
             ColorSpace::Linear,
             images,
             stem,
+            block_compress,
             &mut cache,
             &mut textures,
         )?;
@@ -94,6 +102,7 @@ pub fn import_materials(
             ColorSpace::Linear,
             images,
             stem,
+            block_compress,
             &mut cache,
             &mut textures,
         )?;
@@ -102,6 +111,7 @@ pub fn import_materials(
             ColorSpace::Srgb,
             images,
             stem,
+            block_compress,
             &mut cache,
             &mut textures,
         )?;
@@ -161,6 +171,7 @@ fn cook_slot(
     color_space: ColorSpace,
     images: &[gltf::image::Data],
     stem: &str,
+    block_compress: bool,
     cache: &mut HashMap<(usize, ColorSpace), u64>,
     textures: &mut Vec<CookedTexture>,
 ) -> Result<u64, PipelineError> {
@@ -175,7 +186,8 @@ fn cook_slot(
         PipelineError::Unsupported(format!("material references missing image {image_index}"))
     })?;
     let rgba = to_rgba8(data)?;
-    let (bytes, id) = Texture::from_rgba8(data.width, data.height, color_space, rgba).cook();
+    let (bytes, id) =
+        Texture::from_rgba8(data.width, data.height, color_space, rgba).cook_with(block_compress);
 
     // "srgb"/"lin" tags the cooked file, so the two colour-space cooks of one image don't collide.
     let tag = match color_space {

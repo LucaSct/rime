@@ -132,7 +132,7 @@ M16 changed several of these. The column that matters is "today".
 | Masked cards at distance | **works** (m16.6) | mip alpha preserves coverage, so cards stop thinning out |
 | Double-sided | **works** (m16.5) | glTF `doubleSided` is cooked and honoured |
 | Texture wrap / clamp | **works** (m16.5) | set the sampler's wrap mode in Blender; atlases stop bleeding |
-| Block compression | **works** (m16.7) | `--bc`, BC7. See the caveat below |
+| Block compression | **works** (m16.7) | `--bc`, BC7, for standalone textures and for the images inside a glTF. Colour space still follows each map's use. Byte-identical textures in one cook (e.g. the same atlas in several glTFs) are written once and shared. See the caveat below |
 | Alpha **blend** | **NO** | glTF `Blend` draws as **Opaque**. There is no transparency pass. Do not author for it |
 | Skinned / animated meshes | **NO** | cooks, does not render |
 | Terrain splat / material blending | **NO** | split by material at the object level instead |
@@ -273,13 +273,9 @@ In the editor host (`editor-gui` and headless smoke `ed2.png`):
   ```
 
 #### 5. Runtime note: registering material sets (`set_material_sets`)
-In `samples/99-the-block/main.cpp:2462-2464`, `run_play` settles the asset server but omits
-the call to `visuals->renderer.set_material_sets(bridge->material_sets());`. As specified in
-`engine/render/include/rime/render/scene_renderer.hpp:583-584`, the renderer defaults to null
-material sets (falling back to entity-level `MaterialRef`). Consequently, props render with correct
-geometry and transforms but draw untextured white (`game-as-is.png`). Adding that single line
-supplies the `MaterialSetRegistry` and restores full PBR texturing in the standalone game
-(`game-one-line.png`).
+When M16.9 was first measured, `run_play` in `samples/99-the-block/main.cpp` settled the asset
+server without calling `visuals->renderer.set_material_sets(bridge->material_sets());`, so imported
+props drew untextured white until that call landed (now at `samples/99-the-block/main.cpp:2577`).
 
 ## 8. The first thing to make
 
