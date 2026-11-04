@@ -66,6 +66,7 @@ rime_install_module(rime_app_game)
 find_package(doctest CONFIG REQUIRED)
 add_executable(rime_remote_play_tests
     ../../tests/app/remote_play_test.cpp
+    ../../tests/app/interaction_wiring_test.cpp
     ../../samples/hello-game/game.cpp)
 target_include_directories(rime_remote_play_tests PRIVATE ../../samples/hello-game)
 target_link_libraries(rime_remote_play_tests PRIVATE
