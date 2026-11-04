@@ -331,6 +331,11 @@ for seed in SEEDS:
 # ── Sensitivity: each control removes one defence, and its gate must see it ───────────────────
 impair = ["--net-impair", f"{IMPAIR_BASE},seed={SEEDS[0]}"]
 s, off, k1, _ = run_leg(client_extra=[*impair, "--no-prediction"], impaired=True)
+gate("response without prediction roster history",
+     off["crate_leaves_seen"] == s["interaction_leaves"] and
+     off["crate_joins_seen"] == s["interaction_joins"] - 1,
+     f"joins seen {off['crate_joins_seen']} == {s['interaction_joins'] - 1}; "
+     f"leaves seen {off['crate_leaves_seen']} == {s['interaction_leaves']}")
 gate("response without prediction",
      off["crate_push_tick"] > 0 and off["crate_response_ticks"] >= ROUND_TRIP and
      membership_ok(s, off),
