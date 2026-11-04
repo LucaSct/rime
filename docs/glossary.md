@@ -849,6 +849,14 @@ See also **Determinism / replication** under *Physics & destruction*.
   rather than waiting a round trip, then corrects when the server's answer arrives. Reconciliation
   must compare resulting **state**, never a diff of command lists — a command leaving the un-acked
   list means "the server will never act on it", which is not the same as "the server acted on it".
+- **Speculative spawn, SpawnKey and the presentation ledger** (m20.5, ADR-0105). Predicting an entity
+  the server has not yet said exists — a projectile launched on the tick the button goes down. The
+  client names its guess with a **SpawnKey** (session incarnation, input sequence, slot), which a replay
+  of the same command recreates and the server echoes with a durable verdict (accepted → its NetId,
+  rejected → a reason, accepted-and-ended). Confirmation **adopts** the guess as the replica rather than
+  spawning a second copy. The **presentation ledger** remembers which (key, event, ordinal) effects have
+  played *outside* rewindable state, so no restore or replay can play a launch sound twice — and only an
+  authoritative verdict may cancel one.
 - **Intent vs. device events.** What a client sends upstream. *Device events* are raw
   key/mouse input; *intent* is "move this direction, look here, these buttons are held". Rime sends
   intent: keybinds are client policy, raw events are unbounded per tick, and shipping devices

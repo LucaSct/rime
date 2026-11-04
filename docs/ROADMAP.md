@@ -1961,6 +1961,33 @@ acceptance of the captured case, not a claim that all lighting artifacts are gon
 > refusals. Prediction scope is the local player only, behind a predicted-SET contract (m20.5: own
 > weapon + one projectile; m20.6: one bounded interaction group). Damage is never predicted. Not yet:
 > multiple clients, `host`, a process-level stale-incarnation gate, Windows coverage of the proofs.
+>
+> **m20.5 (2026-10-25)** — speculative spawn and one predicted projectile ([ADR-0105](adr/0105-m20.5-speculative-spawn-and-a-predicted-projectile.md)).
+> hello-game's Throw (3 charges, 60-tick cooldown, one live projectile, 45-tick life, server-only swept hit
+> on a fixed target) launches on the client the tick the button goes down, under a `SpawnKey` (incarnation,
+> input sequence, slot) the server echoes with a durable outcome (Accepted → NetId, Rejected → reason,
+> AcceptedEnded) carried in a negotiated owner-checkpoint extension until the client acknowledges APPLYING
+> it. The client's `SpawnReconciler` keeps guesses as an overlay that never moves the epoch, adopts the
+> replica's identity on confirmation, and a `PresentationLedger` outside rewindable state plays each
+> (key, event, ordinal) once. `hello_game_play_throw` (two processes) measured: launch response 0 ticks
+> predicted vs 15 without (and 15 for an authority-presenting control), and through every fault case —
+> server refusal, one lost copy (recovered by redundancy), every copy lost (no launch, no resurrection),
+> duplicated confirmations, verdicts after local expiry with the replica alive and ended — at most one
+> live projectile per key and exactly one Launch; disabling the ledger plays Launch 88 times and disabling
+> adoption shows two live copies, both failing their gates. An Opus review of the leaf, with mutation tests,
+> found two cases where a server-accepted projectile was silenced; fixed before wiring. Not yet: predicted
+> hits/damage (never), more than one projectile type, interaction groups (m20.6), Windows runs of the proofs (#351).
+>
+> **m20.6 (2026-10-25)** — one bounded interaction group: the player pushes the crate ([ADR-0106](adr/0106-m20.6-one-bounded-interaction-group.md)).
+> The server declares membership with hysteresis (join within contact + top speed × the 64-tick replay budget,
+> leave beyond it + 1 m only after 30 quiet ticks) and carries the crate's pose and velocities in the owner
+> checkpoint; the client predicts it in its own prediction physics world, rebuilt on every restore, the player
+> driven directly, sleep off; presentation smooths corrections (τ 100 ms, snap > 1 m) outside rewindable state.
+> Found and fixed on the way: a moving kinematic body never woke a sleeping one (the player walked through a
+> settled crate). `hello_game_play_interaction` measured response 0 ticks vs 17 without prediction, undisturbed
+> residual 0.1 mm loopback / 1.3 mm impaired where the player agreed, a server-only kick corrected and back under
+> 1 cm within two checkpoints, membership exactly as scripted, and stale-restore / no-rebuild / mirror controls
+> seen. Owner kept this order (2026-10-25); multi-client (default 16 clients) and `host` are designed for next.
 
 ### Detail
 

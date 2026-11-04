@@ -12,15 +12,19 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "rime/app/seat_table.hpp"
 #include "rime/core/jobs/job_system.hpp"
 #include "rime/ecs/transform.hpp"
 #include "rime/ecs/world.hpp"
 #include "rime/platform/event.hpp"
 #include "rime/platform/keyboard.hpp"
 #include "rime/replication/input_v2.hpp"
+#include "rime/replication/interaction.hpp"
 #include "rime/replication/prediction.hpp"
+#include "rime/replication/spawn_prediction.hpp"
 
 // `GameDefinition` — what a GAME supplies to the engine, as opposed to what the engine owns (m20.1,
 // ADR-0056-m20.1).
@@ -160,6 +164,15 @@ private:
 // (a network session, an asset bridge) without touching every game's signature.
 
 struct SetupContext {
+    // A constructor for the m20.1/m20.2 fields, for TickContext's reason: every host and proof
+    // brace-initialises `{world, jobs, fixed_dt, content_root}`, and a trailing field that list
+    // omits would be a -Wmissing-field-initializers error at each of them. `seats` is set by name.
+    SetupContext(ecs::World& world_,
+                 core::JobSystem& jobs_,
+                 double fixed_dt_,
+                 std::filesystem::path content_root_ = {})
+        : world(world_), jobs(jobs_), fixed_dt(fixed_dt_), content_root(std::move(content_root_)) {}
+
     ecs::World& world;
     core::JobSystem& jobs;
     // The constant every tick advances by — the fixed-tick contract, available before the first
@@ -168,9 +181,79 @@ struct SetupContext {
     // Where this run's content lives (m20.2) — the root the entry scene was loaded from, for a game
     // that reads more files than its entry scene. Empty when the game declares no content.
     std::filesystem::path content_root{};
+    // m20.8b2: how many players THIS RUN may seat -- `min(--max-clients, max_players)` on a
+    // listening server, 1 everywhere else (local play, offline, the autopilot). It is the one fact
+    // a game cannot learn later: with 1, the game builds its single player here, before anyone
+    // connects, exactly as every game before m20.8 did (and the one-seat server binds that body);
+    // above 1, every player arrives through `on_player_joined`, so setup must build none -- an
+    // unowned body in the world would be simulated, digested and replicated as a ghost. A game
+    // with `max_players == 1` never sees anything but 1.
+    std::uint16_t seats = 1;
+};
+
+// COMMAND PROVENANCE (m20.5b, ADR-0105 Consequences): which client command a server tick executed.
+// A game that predicts a spawn names it with a SpawnKey built from these numbers -- (incarnation,
+// sequence, slot) -- and the client builds the same key from the command it predicted, which is
+// what lets the server's verdict find the client's guess (spawn_prediction.hpp, technique 1).
+struct CommandProvenance {
+    // The admitted session's incarnation (`net::Session::incarnation()`): a reconnect is a new
+    // incarnation, so its keys can never collide with the old session's. 0 with no client.
+    std::uint32_t incarnation = 0;
+    // The InputV2 sequence this tick retired. 0 means "no command" (InputCommand's convention):
+    // before a client's schedule has started, nothing retires.
+    std::uint32_t sequence = 0;
+    // True only when the client's own command ran. False for a SYNTHESIZED stand-in (a late or
+    // lost command, held keys repeated with `pressed` cleared) and for a tick with no client: a
+    // stand-in is the server's guess at what the player meant, and a guess must never spend a
+    // charge or launch anything the client did not ask for -- the client could not predict it.
+    bool applied = false;
+};
+
+// What a game tells its host about one speculative spawn during a tick (m20.5b). The host --
+// today the dedicated server's pump, when the game declares `SpawnPredictionProfile` -- turns each
+// report into a durable outcome for the client, gives a launched entity a network identity, and
+// retracts that identity when the entity ends. A game reports only keyed spawns (a command with
+// provenance); local play has no host listening and no key to report.
+struct SpawnReport {
+    enum class Kind : std::uint8_t {
+        Launched, // `entity` was created for `key` this tick
+        Refused,  // the game said no to `key`; `reason` is the game's own code (never 0)
+        Ended,    // `entity`, launched for `key`, ended this tick (the game has despawned it)
+    };
+
+    Kind kind = Kind::Launched;
+    replication::SpawnKey key{};
+    ecs::Entity entity{};
+    std::uint8_t reason = 0;
+    // m20.8b: WHOSE command this spawn answers -- the seat the host routes the outcome to, so one
+    // player's verdict can never land in another's checkpoint. Read only when the game declares
+    // `max_players > 1`; a one-player game leaves it default and the host routes to its one seat,
+    // whatever generation that seat is on.
+    PlayerSlot owner{};
+};
+
+// One seated player's wish for this tick (m20.8b, ADR-0108 §2). The PER-SEAT twin of the
+// single-player fields on TickContext (`input`, `command`, `refuse_spawn`): a game that seats
+// several players reads its inputs from here, keyed by the engine's seat, never by a session (a
+// transport fact the host's own player will not have) and never by an entity (a respawn is a new
+// entity in the same seat).
+struct PlayerInput {
+    PlayerSlot slot{};
+    ActionState actions{};
+    // As TickContext::command, for this seat's client: which of ITS commands this tick retired.
+    std::optional<CommandProvenance> command;
+    bool refuse_spawn = false;
 };
 
 struct TickContext {
+    // A constructor, not aggregate initialisation, for the m20.1 fields: every game and proof
+    // brace-initialises `{world, dt, tick, input}`, and with -Wextra a trailing field that brace
+    // list omits is a -Wmissing-field-initializers warning (an error under RIME_WARNINGS_AS_ERRORS)
+    // at every one of those sites. The fields after `input` are set by name by the hosts that have
+    // them.
+    TickContext(ecs::World& world_, double dt_, std::uint64_t tick_, ActionState input_ = {})
+        : world(world_), dt(dt_), tick(tick_), input(input_) {}
+
     ecs::World& world;
     // ALWAYS the fixed dt — the same number every tick for the life of the run. A game that
     // integrates against anything else is not deterministic, and the dedicated/play digest proof
@@ -181,6 +264,33 @@ struct TickContext {
     std::uint64_t tick = 0;
     // The player's, autopilot's, or admitted network client's wish for this tick.
     ActionState input{};
+    // Set by a network server for every tick it drives (applied or not); `nullopt` for local play,
+    // the autopilot and offline runs. A game that launches only on `applied` commands when this is
+    // set, and freely when it is not, behaves the same alone and authoritative.
+    std::optional<CommandProvenance> command;
+    // A decoded-command diagnostic asks the game to refuse this one otherwise valid launch.
+    bool refuse_spawn = false;
+    // m20.6c diagnostic: the server asks the game to apply its declared server-only impulse
+    // (`InteractionProfile::j_max`) to the interaction object this tick. Never set otherwise.
+    bool interaction_kick = false;
+    // Where to report keyed spawns this tick; null when nobody is listening (local play, or a game
+    // without `SpawnPredictionProfile`). Non-owning; valid for the duration of `fixed_tick`.
+    std::vector<SpawnReport>* spawns = nullptr;
+    // m20.8b (ADR-0108 §2): one entry per seated player, in ASCENDING seat index, for a host that
+    // seats players (a listening dedicated server). Empty for local play and before anyone is
+    // seated. With `max_players == 1` it holds the one seat's entry and `input`/`command`/
+    // `refuse_spawn` above keep exactly their m20.3-m20.7 values (`input == players[0].actions`),
+    // so no one-player game has to read it. With `max_players > 1` those three are neutral and
+    // this is the only input: there is no "the" player to put in them. Non-owning; valid for the
+    // duration of `fixed_tick` (and of the join/leave hooks).
+    std::span<const PlayerInput> players;
+    // Entities this tick ENDED that the HOST must remove; null when the game owns removal (local
+    // play). Why a seam rather than `world.despawn`: on a listening server a replicated entity
+    // carries a NetId, and only the replicator's `despawn` retracts it in the same tick -- a bare
+    // despawn is repaired a tick late by the orphan backstop, loudly. A game pushes here instead
+    // and the host despawns at the end of the tick. Non-owning; valid for the duration of
+    // `fixed_tick`.
+    std::vector<ecs::Entity>* despawns = nullptr;
 };
 
 // Presentation is a separate world from simulation, and these contexts exist only in a mode that
@@ -235,10 +345,40 @@ public:
 
     [[nodiscard]] virtual ActionState autopilot() const { return {}; }
 
+    // ── Seats (m20.8b, ADR-0108 §2) -- called only when the definition's `max_players > 1` ────
+    // The engine decides WHO sits where (admission, a generational seat); the game decides what a
+    // seat MEANS (a body, a team, a spawn point). So at the START of a tick, before any input,
+    // in ascending seat index: every seat vacated since the last tick gets `on_player_left` (with
+    // the slot it held, now stale -- the handle the game keyed the body by), then every newly
+    // seated player gets `on_player_joined`, where the game spawns that player's body. Return
+    // false to refuse the player: the seat is released (its generation bumped) and the client is
+    // told `game_refused`, counted as `game_refused_join`. A one-player game is never called --
+    // it spawned its one player in `setup`, before anyone connected, and keeps doing so.
+    [[nodiscard]] virtual bool on_player_joined(TickContext& ctx, PlayerSlot slot) {
+        (void)ctx;
+        (void)slot;
+        return true;
+    }
+
+    virtual void on_player_left(TickContext& ctx, PlayerSlot slot) {
+        (void)ctx;
+        (void)slot;
+    }
+
     // Remote play binds a newly replicated mirror after its initial world is complete. A game
     // keeps its own entity handles; binding them here lets its normal presentation and autopilot
     // read that mirror without simulating or duplicating it.
     [[nodiscard]] virtual bool bind_remote_world(ecs::World&) { return false; }
+
+    // m20.8b2: the same, on a multi-seat server, for the client seated at `seat`. The mirror then
+    // holds several players and only the seat says which one is "mine" (the one the camera
+    // follows, the one presentation dresses as the local player). A distinct name rather than an
+    // overload of the one above, so a game overriding one does not hide the other. The default
+    // ignores the seat, which is right for a game whose presentation has no "own player".
+    [[nodiscard]] virtual bool bind_remote_seat(ecs::World& world, PlayerSlot seat) {
+        (void)seat;
+        return bind_remote_world(world);
+    }
 
     // A hash of the game's SIMULATED state — what a dedicated server and a player must agree on.
     // Game-defined because only the game knows which state is authoritative (a camera pose is not,
@@ -257,6 +397,13 @@ public:
 
     // Once per frame, before the scene is drawn: presentation-only state such as a camera.
     virtual void present_frame(PresentFrameContext& ctx) { (void)ctx; }
+
+    // Connected play may have a projectile in its prediction world before the mirror has one.
+    // The game copies only its visual pose into the render world; no prediction state is changed.
+    virtual void present_prediction(PresentFrameContext& ctx, ecs::World& prediction_world) {
+        (void)ctx;
+        (void)prediction_world;
+    }
 };
 
 // Register a game's component set into a world. The same shape as `ComponentRegistrar` on the
@@ -328,9 +475,169 @@ struct GameDefinition {
         core::Transform (*player_pose)(const ecs::World&, ecs::Entity) = nullptr;
         // A fixed command tape keeps the process proof independent of replicated-state timing.
         ActionState (*diagnostic_input_tape)(std::uint64_t) = nullptr;
+
+        // m20.5b (ADR-0105): opt into SPECULATIVE SPAWN -- the game launches entities from
+        // commands, reports them through `TickContext::spawns`, and the server answers each key
+        // with a durable outcome in the owner checkpoint's spawn extension. Absent, nothing about
+        // remote play changes: the same input identity, the m20.4 checkpoint bytes, the same
+        // counters.
+        //
+        // NEGOTIATED THROUGH THE SCHEMA IDENTITY, not a new hello field: `input_schema_identity`
+        // folds the profile's presence and `version` in, so a client and a server that disagree
+        // about it are refused at the hello as `Schema` before either can send the other a
+        // checkpoint it would refuse (an m20.4 decoder treats the extension as trailing bytes).
+        struct SpawnPredictionProfile {
+            std::uint32_t version = 1;
+            // Server: the state bytes of one SPAWNED roster member, as the owner checkpoint
+            // carries it (the player still goes through `prediction_hooks`' capture). Bound to
+            // an entity rather than a PredictedEntityId because the server knows its own entity;
+            // the id on the wire is that entity's NetId. Empty bytes refuse the checkpoint.
+            std::vector<std::byte> (*capture_spawned)(const ecs::World&, ecs::Entity) = nullptr;
+
+            // The game owns projectile rules and ECS storage. The client supplies only the
+            // step-context request: SpawnReconciler alone can give a replay the same provisional
+            // identity, while these hooks keep the m20.4 PredictionHooks contract intact.
+            struct ClientHooks {
+                replication::PredictionHooks prediction;
+                replication::SpawnHooks spawn;
+                std::function<ecs::Entity(replication::PredictedEntityId)> entity_for;
+                std::function<bool(replication::PredictedEntityId)> is_live;
+            };
+
+            ClientHooks (*client_hooks)(ecs::World&,
+                                        ecs::Entity,
+                                        std::uint32_t,
+                                        std::function<std::optional<replication::PredictedEntityId>(
+                                            const replication::SpawnKey&,
+                                            std::span<const std::byte>)>) = nullptr;
+            // A second diagnostic tape keeps the older movement tape bit-for-bit throw-free.
+            ActionState (*diagnostic_throw_input)(std::uint64_t) = nullptr;
+        };
+
+        std::optional<SpawnPredictionProfile> spawn_prediction;
+
+        // m20.6b (ADR-0106): opt into ONE BOUNDED INTERACTION GROUP -- one dynamic object the
+        // owner can push, predicted while the server says it is near. The split follows what each
+        // side can know:
+        //
+        //   * The SERVER owns membership (ADR-0104 §1). The engine runs the m20.6a leaf
+        //     (`InteractionMembershipPolicy`, server-declared membership with hysteresis) once per
+        //     tick from facts only the game can measure -- `sample` -- and on a join puts the
+        //     object's `capture` bytes into the owner checkpoint's roster and advances the epoch.
+        //     The bytes must carry velocity as well as pose: the world-stream mirror has none, and
+        //     a crate seeded at rest while it is sliding is a correction on the very first replay.
+        //   * The CLIENT owns a prediction physics world, and only the game knows its shapes, so
+        //     the engine asks the game to DECORATE its spawn hooks (`client_hooks`): the decorated
+        //     hooks answer for the object's id and forward every other id untouched.
+        //
+        // It rides the SPAWN path rather than adding a second one: SpawnReconciler already
+        // installs a server roster atomically and tells the game when a member appears or goes
+        // (`SpawnHooks::create`/`destroy`), which is exactly what a join and a leave are. So this
+        // profile is INERT unless `spawn_prediction` is also declared -- the identity, the
+        // checkpoint bytes and every counter of a game without both stay what they were -- and a
+        // game that predicts no projectile can declare a spawn profile that never launches one.
+        // Negotiated through the schema identity like spawn prediction: presence and `version`
+        // are folded into `input_schema_identity`.
+        struct InteractionProfile {
+            std::uint32_t version = 1;
+            // Join/leave radii, rest run and speed (the leaf's), in the game's units.
+            replication::InteractionParams params{};
+            // The one candidate object, found in ANY world built from the game's components --
+            // the server's own, or the client's mirror -- as `owned_player` finds the player.
+            ecs::Entity (*object)(ecs::World&) = nullptr;
+            // Server, once per tick after `fixed_tick`: the facts the policy decides on.
+            replication::InteractionSample (*sample)(const ecs::World&,
+                                                     ecs::Entity player,
+                                                     ecs::Entity object) = nullptr;
+            // Server: the object's roster state bytes. Empty bytes refuse the checkpoint.
+            std::vector<std::byte> (*capture)(const ecs::World&, ecs::Entity) = nullptr;
+
+            // Client switches. `rebuild_on_restore = false` is a SENSITIVITY CONTROL only (the
+            // replay-twice test, m20.6c's `no-rebuild`): it keeps the prediction physics world
+            // across a restore, so the contact cache of a discarded timeline leaks into replay.
+            struct ClientOptions {
+                bool rebuild_on_restore = true;
+                // The `stale-restore` control: restore the object from the previous restore's
+                // bytes, i.e. one checkpoint old, so every replay starts from a stale state.
+                bool stale_restore = false;
+            };
+
+            struct ClientHooks {
+                // The spawn hooks, decorated: the object's id is answered by the game's
+                // prediction physics world, every other id is forwarded unchanged.
+                SpawnPredictionProfile::ClientHooks hooks;
+                // The object's SIMULATED pose in the prediction world, or nothing while it is not
+                // a member. Presentation adds the smoother's offset to it.
+                std::function<std::optional<core::Transform>()> object_pose;
+                // Whether the predicted player touched the object in the most recent step: the
+                // client's "push started" for its response diagnostic.
+                std::function<bool()> touching;
+            };
+
+            ClientHooks (*client_hooks)(ecs::World& prediction,
+                                        ecs::Entity predicted_player,
+                                        replication::PredictedEntityId object,
+                                        SpawnPredictionProfile::ClientHooks inner,
+                                        ClientOptions options) = nullptr;
+            // A diagnostic tape that walks the player into the object (`--input-tape-push`).
+            ActionState (*diagnostic_push_input)(std::uint64_t) = nullptr;
+            // The largest server-only impulse the game applies on `TickContext::interaction_kick`
+            // (N*s) and the object's mass (kg), declared ONCE here so the game's kick and the
+            // proof's raw-correction bound (`interaction_raw_bound`) share the number. 0 = none.
+            float j_max = 0.0f;
+            float object_mass = 0.0f;
+        };
+
+        std::optional<InteractionProfile> interaction;
+
+        // Whether this tick's local actions ask the CONNECTED CLIENT to leave (hello-game: Escape).
+        // Quitting is a local decision about the player's own process, never a command: a quit bit
+        // that rode the wire would let any client end a dedicated server for everyone (measured in
+        // the m20.6 play test's code path: Escape -> pressed bit -> the server game's
+        // `finished()`). So the client asks this before building the command and leaves with a
+        // goodbye; the game keeps the bit out of `to_command`, and its server-side mapper ignores
+        // it as well. Absent, a connected client is closed only by its window or a `--frames`
+        // bound, as before.
+        bool (*local_quit)(const ActionState&) = nullptr;
+
+        // m20.8b: ADR-0108 §2's `owned_player(World&, PlayerSlot)` -- the body a SEAT controls,
+        // resolved by the server right after the game's `on_player_joined` so each seat's owner
+        // checkpoint captures its own player. A function-pointer member cannot be overloaded,
+        // hence the name; it is LAST because games brace-initialise this struct positionally.
+        // Required when `max_players > 1`; a one-player game leaves it null and its one
+        // `owned_player` serves every occupant of its one seat, as before.
+        ecs::Entity (*seat_player)(ecs::World&, PlayerSlot) = nullptr;
+
+        // A two-seat process diagnostic can choose each seat's path without teaching the host
+        // the game's axes or spawn geometry.
+        ActionState (*diagnostic_collision_input)(std::uint64_t, std::uint16_t) = nullptr;
+        // A separate per-seat path keeps a network-isolation proof clear of physical contact.
+        ActionState (*diagnostic_isolation_input)(std::uint64_t, std::uint16_t) = nullptr;
+
+        // Whether the interaction profile is ACTIVE: declared, and riding a declared spawn
+        // profile (see InteractionProfile). One predicate so the server, the client and the
+        // identity cannot disagree about it.
+        [[nodiscard]] const InteractionProfile* active_interaction() const noexcept {
+            return spawn_prediction && interaction ? &*interaction : nullptr;
+        }
     };
 
     std::optional<RemotePlayProfile> remote_play;
+
+    // m20.8b (ADR-0108): how many players this GAME can seat at once. 1 (the default) is every
+    // game before m20.8 and keeps every byte of m20.3-m20.7: codec 2, the 3-byte hello reply, no
+    // seat hooks, the same identity. Above 1, a listening server seats up to
+    // `min(this, dedicated --max-clients)` players, speaks input codec 3, and drives the game
+    // through `TickContext::players` and the seat hooks. The operator may lower the cap at launch,
+    // never raise it: a game that was not written for 64 players must not be handed 64.
+    std::uint16_t max_players = 1;
+
+    // m20.8b2: the seat count a listening server uses when the operator names none (`dedicated
+    // --listen` without `--max-clients`). 0 means ADR-0108 §5's default, `min(16, max_players)`.
+    // A game may ask for less -- hello-game asks for 1, because every m20.3-m20.7 proof runs it
+    // as ONE seat with one-seat diagnostics -- and the operator may still raise it up to
+    // `max_players` with `--max-clients`. Clamped to `max_players`; never a ceiling of its own.
+    std::uint16_t default_max_clients = 0;
 
     // Make a fresh game. Required.
     std::function<std::unique_ptr<Game>()> create;
@@ -342,8 +649,16 @@ struct GameDefinition {
 // the rule changed. A remote-playable game's identity includes its fixed timestep: a client
 // predicting at 1/30 s against a 1/60 s server would replay every command at the wrong dt and
 // read as a stream of corrections, so it is refused at the hello as a schema mismatch instead.
+// The same holds for speculative spawn (m20.5b): a declared `spawn_prediction` folds a marker and
+// its version in after the m20.4 hash, and an absent one leaves the m20.4 value bit for bit. An
+// ACTIVE interaction profile (m20.6b) folds a second marker and its version in after that one; an
+// inactive or absent one leaves the m20.5 value bit for bit. A game that seats more than one
+// player (m20.8b) folds a third marker last -- presence only, not the count: the count is server
+// policy (`--max-clients` may lower it), while "a client must expect a seat" is a contract.
+// `max_players <= 1` leaves the m20.7 value bit for bit.
 [[nodiscard]] std::uint64_t
 input_schema_identity(const GameDefinition::NetworkInputProfile& input,
-                      const GameDefinition::RemotePlayProfile* remote_play);
+                      const GameDefinition::RemotePlayProfile* remote_play,
+                      std::uint16_t max_players = 1);
 
 } // namespace rime::app
