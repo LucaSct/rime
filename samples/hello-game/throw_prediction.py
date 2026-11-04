@@ -242,10 +242,22 @@ gate("refuse", s["spawn_fault_refuse"] == 1 and s["spawn_rejected"] == 1 and
 
 s, c = run_leg(server_extra=["--spawn-fault", "lose-one"])
 ok, read = presentation(c)
+# Redundant copies can all miss the real-time input window. Even then, the fault must not
+# create duplicate entities/effects, a second acceptance, or an impossible recovery count.
+gate("lose-one invariants",
+     c["live_presentations_max"] <= 1 and c["presentation_launch"] <= 1 and
+     c["presentation_end"] <= 1 and c["presentation_resumed"] == 0 and
+     c["ledger_duplicate_adoptions"] == 0 and c["spawn_contradictory_outcomes"] == 0 and
+     s["spawn_fault_lose_one"] <= 1 and
+     s["launch_recovered_by_redundancy"] <= s["spawn_fault_lose_one"] and
+     s["launch_recovered_by_redundancy"] <= s["spawn_accepted"] <= 1 and
+     s["spawn_rejected"] == 0 and
+     (s["spawn_accepted"] == 0 or s["spawn_last_flight_ticks"] == FULL_FLIGHT) and
+     c["spawn_adopted"] + c["spawn_retired_without_launch"] <= 1, read)
 gate("lose-one", s["spawn_fault_lose_one"] == 1 and s["launch_recovered_by_redundancy"] == 1 and
      accepted_once(s) and c["spawn_adopted"] == 1 and c["spawn_retired_without_launch"] == 0 and ok,
      f"dropped {s['spawn_fault_lose_one']}, recovered {s['launch_recovered_by_redundancy']}, "
-     f"accepted {s['spawn_accepted']}, adopted {c['spawn_adopted']}; {read}")
+     f"accepted {s['spawn_accepted']}, adopted {c['spawn_adopted']}; {read}", timing=True)
 
 s, c = run_leg(server_extra=["--spawn-fault", "lose-all"])
 ok, read = presentation(c, end=0)
