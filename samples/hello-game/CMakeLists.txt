@@ -107,10 +107,55 @@ set_tests_properties(hello_game_listen_bind_conflict PROPERTIES TIMEOUT 15)
 # Child, and connect_prediction.py uses only portable Python. The hosted Windows job is the only
 # Windows evidence there is, so these two-process proofs are what exercises the Win32 socket
 # backend end to end. The game rules are compiled into net_proof so its replay uses the same code.
+# python3 is what the other tests here already use on Windows (setup-python provides it).
 # The production executable on both sides, with a real loopback UDP port.
 add_test(NAME hello_game_play_connect COMMAND ${Python3_EXECUTABLE}
     ${CMAKE_CURRENT_SOURCE_DIR}/connect_prediction.py $<TARGET_FILE:hello_game>)
 set_tests_properties(hello_game_play_connect PROPERTIES TIMEOUT 120 LABELS "hello_game")
+# m20.5c2: the Throw's two-process proof -- faults, response, and the sensitivity controls that
+# must fail. 13 sequential legs; RUN_SERIAL because two real-time processes whose press must land
+# inside the server's input buffer are exactly what a parallel suite starves.
+add_test(NAME hello_game_play_throw COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/throw_prediction.py $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_play_throw PROPERTIES TIMEOUT 300 RUN_SERIAL TRUE LABELS "hello_game")
+# m20.6c: the interaction group's two-process proof -- scripted membership, a server-only kick,
+# and the controls that must fail. RUN_SERIAL for the same reason as the throw proof.
+add_test(NAME hello_game_play_interaction COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/interaction_prediction.py $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_play_interaction PROPERTIES TIMEOUT 400 RUN_SERIAL TRUE LABELS "hello_game")
+# m20.7c (ADR-0107): the adaptive input buffer's two-process proof -- a scripted client hitch,
+# loopback and impaired, plus a fixed-buffer control that must lose the hitch's commands.
+# RUN_SERIAL for the same reason as the proofs above. Measured ~43 s; TIMEOUT is 3x that.
+add_test(NAME hello_game_play_adaptive COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/adaptive_input.py $<TARGET_FILE:hello_game>)
+set_tests_properties(hello_game_play_adaptive PROPERTIES TIMEOUT 130 RUN_SERIAL TRUE LABELS "hello_game")
+# m20.8b2: two real seats, two different tapes, and a third peer refused full. The swapped second
+# run checks which body each tape moved; equal mirror digests alone cannot detect seat aliasing.
+# POSIX only, like hello_game_multi_client below: both wait on the server's stdout pipe with
+# select(), which Windows supports for sockets but not for pipes (WinError 10093 on windows-latest).
+if(UNIX)
+    add_test(NAME hello_game_multi_client_smoke COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/multi_client_smoke.py $<TARGET_FILE:hello_game>)
+    set_tests_properties(hello_game_multi_client_smoke PROPERTIES
+        TIMEOUT 60 RUN_SERIAL TRUE LABELS "hello_game")
+endif()
+# m20.9c: two seats predict ONE crate (ADR-0109 §9): a scripted remote push-and-reverse, and three
+# sensitivity controls (no-proxies, stale-proxies, proxy-raw). Measured ~24 s; TIMEOUT is 3x.
+if(UNIX)
+    add_test(NAME hello_game_contention_proof COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/contention_proof.py $<TARGET_FILE:hello_game>)
+    set_tests_properties(hello_game_contention_proof PROPERTIES
+        TIMEOUT 75 RUN_SERIAL TRUE LABELS "hello_game")
+endif()
+# m20.8c: three independent UDP processes, a swapped-routing sensitivity run, a measured
+# no-blackout envelope and churn. Its runtime is measured by the direct proof gate; keep CTest
+# serial so host scheduling noise cannot masquerade as another seat's correction.
+if(UNIX)
+    add_test(NAME hello_game_multi_client COMMAND ${Python3_EXECUTABLE}
+        ${CMAKE_CURRENT_SOURCE_DIR}/multi_client_proof.py $<TARGET_FILE:hello_game>)
+    set_tests_properties(hello_game_multi_client PROPERTIES
+        TIMEOUT 273 RUN_SERIAL TRUE LABELS "hello_game")
+endif()
 endif()
 add_executable(hello_game_net_proof net_proof.cpp game.cpp)
 target_link_libraries(hello_game_net_proof

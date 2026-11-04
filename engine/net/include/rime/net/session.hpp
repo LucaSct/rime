@@ -107,6 +107,13 @@ public:
 
     [[nodiscard]] SessionState state() const noexcept { return state_; }
 
+    // This session's incarnation: the folded salt both ends stamp on every datagram once
+    // Connected (before that, on a client, it is still the client salt). Exposed read-only (m20.5b)
+    // because a layer above needs a per-session name that a reconnect is guaranteed to change and
+    // that both peers already agree on without another message -- a speculative spawn's key
+    // (ADR-0105 §1). It is an identifier, not a secret: it is on the wire in every frame.
+    [[nodiscard]] std::uint32_t incarnation() const noexcept { return link_.salt(); }
+
     // Liveness introspection for diagnostics and tests — the timeout proof reads these to show
     // heartbeats really flowed before the peer died; a proof that proves nothing if it was idle.
     [[nodiscard]] std::uint64_t last_recv_ms() const noexcept { return last_recv_ms_; }

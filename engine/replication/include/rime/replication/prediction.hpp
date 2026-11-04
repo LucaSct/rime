@@ -19,7 +19,7 @@
 // retransmission path and may be newer than the state being restored here.
 namespace rime::replication {
 
-inline constexpr std::uint8_t kOwnerCheckpointTag = 0xE4;
+inline constexpr std::uint8_t kOwnerCheckpointTag = 0xE8;
 inline constexpr std::size_t kCheckpointMaxEntities = 16;
 inline constexpr std::size_t kCheckpointMaxStateBytes = 512;
 inline constexpr std::size_t kCheckpointMaxGroupBytes = 512;
@@ -40,6 +40,9 @@ struct OwnerCheckpoint {
     std::uint64_t server_tick = 0;
     std::uint32_t membership_epoch = 0;
     InputResult result{};
+    // Cumulative stand-in ticks for this seat. A checkpoint carries its own count so a lost or
+    // reordered pacing report cannot make a stall look like an undisturbed physics correction.
+    std::uint32_t input_stalls = 0;
     std::vector<PredictedEntityState> entities;
     std::vector<std::byte> group_state;
 };
@@ -73,6 +76,13 @@ struct CheckpointEncode {
                                                        std::span<std::byte> out);
 [[nodiscard]] CheckpointRefusal decode_owner_checkpoint(std::span<const std::byte> in,
                                                         OwnerCheckpoint& out);
+// Decodes one checkpoint from the FRONT of `in` and reports how many bytes it used, leaving any
+// trailing bytes to the caller (m20.5's negotiated spawn extension, ADR-0105 §2). Every bound and
+// refusal is decode_owner_checkpoint's -- including the 1200-byte bound on the whole of `in` --
+// except that trailing bytes are not a BadLength. `out` and `consumed` change only on success.
+[[nodiscard]] CheckpointRefusal decode_owner_checkpoint_prefix(std::span<const std::byte> in,
+                                                               OwnerCheckpoint& out,
+                                                               std::size_t& consumed);
 
 // What one predicted step is told, beyond the command (ADR-0104 §1). Bundled so a later brick can
 // add a field without breaking every game's hook.
@@ -95,7 +105,10 @@ struct PredictionStep {
 
 struct PredictionHooks {
     // Capture/restore must cover all simulation state, including hidden per-entity and group state.
-    // Hooks are synchronous and must not throw; restore is called only after complete validation.
+    // Hooks are synchronous and must not throw. A game with typed payloads uses the optional
+    // validate-then-commit hooks: prepare examines the COMPLETE checkpoint and may stage a new
+    // prediction world without changing the live one; commit installs it after entity restores.
+    // Absent hooks retain the original restore path for games without typed validation.
     std::function<std::vector<std::byte>(PredictedEntityId)> capture;
     std::function<void(PredictedEntityId, std::span<const std::byte>)> restore;
     std::function<std::vector<std::byte>()> capture_group;
@@ -104,6 +117,8 @@ struct PredictionHooks {
     std::function<
         void(std::span<const PredictedEntityId>, const InputCommand&, const PredictionStep&)>
         simulate;
+    std::function<bool(const OwnerCheckpoint&)> prepare_checkpoint = {};
+    std::function<void()> commit_checkpoint = {};
 };
 
 struct ReconcilerBudget {
@@ -155,6 +170,14 @@ public:
 
     [[nodiscard]] std::uint64_t reseeds() const noexcept { return reseeds_; }
 
+    [[nodiscard]] std::uint64_t checkpoints_refused_invalid() const noexcept {
+        return checkpoints_refused_invalid_;
+    }
+
+    [[nodiscard]] std::size_t history_size() const noexcept { return history_.size(); }
+
+    [[nodiscard]] std::uint64_t last_checkpoint_tick() const noexcept { return last_server_tick_; }
+
 private:
     PredictionHooks hooks_;
     ReconcilerBudget budget_;
@@ -175,6 +198,7 @@ private:
     std::uint64_t history_overflow_ = 0;
     std::uint64_t replay_budget_exceeded_ = 0;
     std::uint64_t reseeds_ = 0;
+    std::uint64_t checkpoints_refused_invalid_ = 0;
 };
 
 } // namespace rime::replication

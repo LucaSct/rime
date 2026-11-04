@@ -75,6 +75,49 @@ template <typename T> [[nodiscard]] bool parse_uint(std::string_view text, T& ou
     return r;
 }
 
+// ADR-0108 §5: the owner's default client cap (2026-10-25), before the game's own ceiling.
+constexpr std::uint16_t kDefaultMaxClients = 16;
+
+// m20.8b: the seat counters, APPENDED to the `finished` line so every field an m20.7 reader looks
+// for keeps its place and value. `seats` is one record per seat index, accumulated over everyone
+// who sat there; the totals before it are their sums.
+std::string seat_fields(const RunReport::NetworkInputCounters& n) {
+    std::string out = fmt::format(",\"max_clients\":{},\"hello_full\":{},\"duplicate_endpoint\":{},"
+                                  "\"join_rate_limited\":{},\"game_refused_join\":{},"
+                                  "\"seats_abandoned\":{},\"seat_owner_refused\":{},"
+                                  "\"seat_owner_shared\":{},\"seats\":[",
+                                  n.max_clients,
+                                  n.hello_full,
+                                  n.duplicate_endpoint,
+                                  n.join_rate_limited,
+                                  n.game_refused_join,
+                                  n.seats_abandoned,
+                                  n.seat_owner_refused,
+                                  n.seat_owner_shared);
+    for (std::size_t i = 0; i < n.seats.size(); ++i) {
+        const auto& seat = n.seats[i];
+        out += fmt::format("{}{{\"seat\":{},\"gen\":{},\"seated\":{},\"joins\":{},\"leaves\":{},"
+                           "\"accepted\":{},\"applied\":{},\"synthesized\":{},\"late\":{},"
+                           "\"stalls\":{},\"resyncs\":{},\"checkpoints\":{},\"epoch\":{}}}",
+                           i == 0 ? "" : ",",
+                           seat.index,
+                           seat.generation,
+                           seat.seated ? "true" : "false",
+                           seat.joins,
+                           seat.leaves,
+                           seat.accepted,
+                           seat.applied,
+                           seat.synthesized,
+                           seat.late,
+                           seat.stalls,
+                           seat.resyncs,
+                           seat.checkpoints,
+                           seat.membership_epoch);
+    }
+    out += "]";
+    return out;
+}
+
 } // namespace
 
 std::string_view to_string(LaunchMode mode) noexcept {
@@ -114,7 +157,34 @@ std::string launch_usage(std::string_view program) {
         "  --profile-version-override N  connected schema refusal diagnostic\n"
         "  --fixed-dt-override S  advertise a different connected timestep\n"
         "  --client-port N  connected local UDP port diagnostic\n"
-        "  --input-tape  connected fixed input for process diagnostics\n"
+        "  --input-tape  connected fixed input for process diagnostics (no Throw)\n"
+        "  --input-tape-throw  same tape, with one Throw on tick 12\n"
+        "  --input-tape-push  connected interaction tape: walk into the crate, push, retreat\n"
+        "  --input-tape-collision  connected two-seat collision diagnostic\n"
+        "  --input-tape-stand  connected observer tape: all-neutral (contention proof)\n"
+        "  --input-tape-reversal  connected remote tape: push the crate, then reverse\n"
+        "  --input-tape-isolation  connected separated-seat isolation diagnostic\n"
+        "  --spawn-fault CASE  dedicated Throw diagnostic (refuse, lose-one, lose-all, duplicate, "
+        "late-alive, late-ended)\n"
+        "  --spawn-debug-break CASE  connected sensitivity control (no-ledger, no-adopt, "
+        "authority-presentation)\n"
+        "  --interaction-fault kick@T|kick@cmd:N[,...]  dedicated: kick the crate at server tick "
+        "T,\n"
+        "                     or on the tick that retires client command N (cmd:N, N >= 1)\n"
+        "  --interaction-debug-break CASE  connected control (present-mirror, no-rebuild, "
+        "stale-restore, no-proxies, stale-proxies, proxy-raw)\n"
+        "  --interaction-trace  connected: list every crate checkpoint correction\n"
+        "  --spawn-fault-ticks N  window of duplicate / late-alive / late-ended, in server ticks\n"
+        "  --input-slack N    dedicated: commands buffered before one executes (1..8, default 1)\n"
+        "  --input-buffer M   dedicated --listen: adaptive (default: stall on an empty buffer\n"
+        "                     instead of discarding the late command; pacing reports let the\n"
+        "                     client drain the surplus) or fixed (retire on schedule)\n"
+        "  --max-clients N    dedicated --listen: seat at most N players (1..128; default\n"
+        "                     the game's default, else min(16, its max players); may lower\n"
+        "                     the game's max players, never raise it; 1 = one-seat server)\n"
+        "  --seat-debug-break swap  dedicated --max-clients > 1: exchange two seats' commands\n"
+        "  --debug-hitch T:MS play --connect, diagnostic: sleep MS ms (1..2000) at client tick T\n"
+        "  --spawn-unresolved-bound N  connected diagnostic expiry in input sequences\n"
         "  --linger-ms N  bounded dedicated: drain network after the final tick\n"
         "  --workers N   job-system worker threads (0 = one per core, less one)\n"
         "  --listen ADDR:PORT  dedicated: bind IPv4 address and port (0 = OS chosen)\n"
@@ -163,6 +233,156 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
             result.options.no_prediction = true;
         } else if (arg == "--input-tape") {
             result.options.input_tape = true;
+        } else if (arg == "--input-tape-throw") {
+            result.options.input_tape = true;
+            result.options.input_tape_throw = true;
+        } else if (arg == "--input-tape-push") {
+            result.options.input_tape = true;
+            result.options.input_tape_push = true;
+        } else if (arg == "--input-tape-collision") {
+            result.options.input_tape = true;
+            result.options.input_tape_collision = true;
+        } else if (arg == "--input-tape-stand") {
+            result.options.input_tape = true;
+            result.options.input_tape_stand = true;
+        } else if (arg == "--input-tape-reversal") {
+            result.options.input_tape = true;
+            result.options.input_tape_reversal = true;
+        } else if (arg == "--input-tape-isolation") {
+            // This proof needs movement without the collision tape's intentional contacts.
+            result.options.input_tape = true;
+            result.options.input_tape_isolation = true;
+        } else if (arg == "--spawn-fault") {
+            if (!has_value || result.options.spawn_fault != SpawnFault::None)
+                return fail("--spawn-fault needs one case");
+            const auto value = args[++i];
+            if (value == "refuse")
+                result.options.spawn_fault = SpawnFault::Refuse;
+            else if (value == "lose-one")
+                result.options.spawn_fault = SpawnFault::LoseOne;
+            else if (value == "lose-all")
+                result.options.spawn_fault = SpawnFault::LoseAll;
+            else if (value == "duplicate")
+                result.options.spawn_fault = SpawnFault::Duplicate;
+            else if (value == "late-alive")
+                result.options.spawn_fault = SpawnFault::LateAlive;
+            else if (value == "late-ended")
+                result.options.spawn_fault = SpawnFault::LateEnded;
+            else
+                return fail("--spawn-fault needs a known case");
+        } else if (arg == "--spawn-debug-break") {
+            if (!has_value || result.options.spawn_debug_break != SpawnDebugBreak::None)
+                return fail("--spawn-debug-break needs one case");
+            const auto value = args[++i];
+            if (value == "no-ledger")
+                result.options.spawn_debug_break = SpawnDebugBreak::NoLedger;
+            else if (value == "no-adopt")
+                result.options.spawn_debug_break = SpawnDebugBreak::NoAdopt;
+            else if (value == "authority-presentation")
+                result.options.spawn_debug_break = SpawnDebugBreak::AuthorityPresentation;
+            else
+                return fail("--spawn-debug-break needs a known case");
+        } else if (arg == "--interaction-fault") {
+            if (!has_value || !result.options.interaction_kicks.empty() ||
+                !result.options.interaction_kick_commands.empty())
+                return fail("--interaction-fault needs one kick@T|kick@cmd:N list");
+            std::string_view rest = args[++i];
+            while (!rest.empty()) {
+                const auto comma = rest.find(',');
+                const auto item = rest.substr(0, comma);
+                std::uint64_t tick = 0;
+                if (item.starts_with("kick@cmd:")) {
+                    // A command sequence starts at 1 (the client's `++sequence`) and is 32-bit on
+                    // the wire, so 0 can never retire and a wider number can never be reached.
+                    if (!parse_uint(item.substr(9), tick) || tick == 0 ||
+                        tick > std::numeric_limits<std::uint32_t>::max())
+                        return fail("--interaction-fault needs kick@cmd:N with N >= 1");
+                    result.options.interaction_kick_commands.push_back(
+                        static_cast<std::uint32_t>(tick));
+                } else if (item.starts_with("kick@") && parse_uint(item.substr(5), tick)) {
+                    result.options.interaction_kicks.push_back(tick);
+                } else {
+                    return fail("--interaction-fault needs kick@T or kick@cmd:N");
+                }
+                if (comma != std::string_view::npos && comma + 1 == rest.size())
+                    return fail("--interaction-fault needs kick@T or kick@cmd:N"); // trailing comma
+                rest =
+                    comma == std::string_view::npos ? std::string_view{} : rest.substr(comma + 1);
+            }
+            if (result.options.interaction_kicks.empty() &&
+                result.options.interaction_kick_commands.empty())
+                return fail("--interaction-fault needs kick@T or kick@cmd:N");
+        } else if (arg == "--interaction-debug-break") {
+            if (!has_value || result.options.interaction_debug_break != InteractionDebugBreak::None)
+                return fail("--interaction-debug-break needs one case");
+            const auto value = args[++i];
+            if (value == "present-mirror")
+                result.options.interaction_debug_break = InteractionDebugBreak::PresentMirror;
+            else if (value == "no-rebuild")
+                result.options.interaction_debug_break = InteractionDebugBreak::NoRebuild;
+            else if (value == "stale-restore")
+                result.options.interaction_debug_break = InteractionDebugBreak::StaleRestore;
+            else if (value == "no-proxies")
+                result.options.interaction_debug_break = InteractionDebugBreak::NoProxies;
+            else if (value == "stale-proxies")
+                result.options.interaction_debug_break = InteractionDebugBreak::StaleProxies;
+            else if (value == "proxy-raw")
+                result.options.interaction_debug_break = InteractionDebugBreak::ProxyRaw;
+            else
+                return fail("--interaction-debug-break needs a known case");
+        } else if (arg == "--interaction-trace") {
+            result.options.interaction_trace = true;
+        } else if (arg == "--input-slack") {
+            if (!has_value || result.options.input_slack != 0 ||
+                !parse_uint(args[++i], result.options.input_slack) ||
+                result.options.input_slack == 0 || result.options.input_slack > 8)
+                return fail("--input-slack needs an integer 1..8 once");
+        } else if (arg == "--input-buffer") {
+            if (!has_value || result.options.input_buffer_given)
+                return fail("--input-buffer needs fixed or adaptive, once");
+            const auto value = args[++i];
+            if (value == "adaptive")
+                result.options.input_buffer_adaptive = true;
+            else if (value == "fixed")
+                result.options.input_buffer_adaptive = false;
+            else
+                return fail("--input-buffer needs fixed or adaptive, once");
+            result.options.input_buffer_given = true;
+        } else if (arg == "--max-clients") {
+            // The range check that needs no game; the game's own ceiling is checked by the
+            // runner, which knows `max_players`.
+            if (!has_value || result.options.max_clients != 0 ||
+                !parse_uint(args[++i], result.options.max_clients) ||
+                result.options.max_clients == 0 ||
+                result.options.max_clients > SeatTable::kMaxSeatsLimit)
+                return fail("--max-clients needs an integer 1..128 once");
+        } else if (arg == "--seat-debug-break") {
+            if (!has_value || result.options.seat_debug_break_swap || args[++i] != "swap")
+                return fail("--seat-debug-break needs swap once");
+            result.options.seat_debug_break_swap = true;
+        } else if (arg == "--debug-hitch") {
+            // T:MS -- a client frame hitch of MS milliseconds at client tick T (diagnostic).
+            if (!has_value || result.options.debug_hitch_tick != 0)
+                return fail("--debug-hitch needs T:MS once (T >= 1, MS 1..2000)");
+            const auto value = args[++i];
+            const auto colon = value.find(':');
+            std::uint64_t tick = 0;
+            std::uint32_t ms = 0;
+            if (colon == std::string_view::npos || !parse_uint(value.substr(0, colon), tick) ||
+                !parse_uint(value.substr(colon + 1), ms) || tick == 0 || ms == 0 || ms > 2000)
+                return fail("--debug-hitch needs T:MS once (T >= 1, MS 1..2000)");
+            result.options.debug_hitch_tick = tick;
+            result.options.debug_hitch_ms = ms;
+        } else if (arg == "--spawn-fault-ticks") {
+            if (!has_value || result.options.spawn_fault_ticks != 0 ||
+                !parse_uint(args[++i], result.options.spawn_fault_ticks) ||
+                result.options.spawn_fault_ticks == 0)
+                return fail("--spawn-fault-ticks needs a positive integer once");
+        } else if (arg == "--spawn-unresolved-bound") {
+            if (!has_value || result.options.spawn_unresolved_bound != 0 ||
+                !parse_uint(args[++i], result.options.spawn_unresolved_bound) ||
+                result.options.spawn_unresolved_bound == 0)
+                return fail("--spawn-unresolved-bound needs a positive integer once");
         } else if (arg == "--snap-bound") {
             if (!has_value || result.options.has_snap_bound)
                 return fail("--snap-bound needs a non-negative finite number once");
@@ -340,6 +560,40 @@ ParseResult parse_launch(std::span<const std::string_view> args) {
         (result.options.mode != LaunchMode::Dedicated || result.options.offline)) {
         return fail("--input-trace requires listening dedicated mode");
     }
+    if (result.options.spawn_fault != SpawnFault::None &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline))
+        return fail("--spawn-fault requires listening dedicated mode");
+    {
+        const auto fault = result.options.spawn_fault;
+        const bool timed = fault == SpawnFault::Duplicate || fault == SpawnFault::LateAlive ||
+                           fault == SpawnFault::LateEnded;
+        if (timed != (result.options.spawn_fault_ticks != 0))
+            return fail("--spawn-fault-ticks goes with duplicate, late-alive or late-ended only");
+    }
+    if ((!result.options.interaction_kicks.empty() ||
+         !result.options.interaction_kick_commands.empty()) &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline))
+        return fail("--interaction-fault requires listening dedicated mode");
+    if (result.options.input_buffer_given &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline))
+        return fail("--input-buffer requires listening dedicated mode");
+    if (result.options.max_clients != 0 &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline))
+        return fail("--max-clients requires listening dedicated mode");
+    if (result.options.seat_debug_break_swap &&
+        (result.options.mode != LaunchMode::Dedicated || result.options.offline ||
+         result.options.max_clients <= 1))
+        return fail("--seat-debug-break swap requires dedicated --max-clients > 1");
+    if (result.options.debug_hitch_tick != 0 && result.options.connect_host.empty())
+        return fail("--debug-hitch requires --connect");
+    if ((result.options.interaction_debug_break != InteractionDebugBreak::None ||
+         result.options.interaction_trace) &&
+        result.options.connect_host.empty())
+        return fail("interaction client diagnostics require --connect");
+    if ((result.options.spawn_debug_break != SpawnDebugBreak::None ||
+         result.options.spawn_unresolved_bound != 0) &&
+        result.options.connect_host.empty())
+        return fail("spawn client diagnostics require --connect");
     if (!result.options.connect_host.empty() && result.options.mode != LaunchMode::Play)
         return fail("--connect requires play mode");
     if (!result.options.connect_host.empty() &&
@@ -402,6 +656,48 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (!options.input_trace.empty() && !listening) {
         report.usage_error = true;
         return refuse(report, RunStatus::Failed, "--input-trace requires listening dedicated mode");
+    }
+    // m20.8b (ADR-0108 §5): the seat count. The game sets the ceiling, the operator may only
+    // lower it -- a game written for 4 players must not be handed 16 because a flag said so.
+    const std::uint16_t max_players = std::max<std::uint16_t>(definition.max_players, 1);
+    if (listening && options.max_clients > max_players) {
+        report.usage_error = true;
+        return refuse(report,
+                      RunStatus::Failed,
+                      fmt::format("--max-clients {} exceeds this game's max players ({}); the "
+                                  "launcher may lower the seat count, never raise it",
+                                  options.max_clients,
+                                  max_players));
+    }
+    // The operator's number, else the game's own default (m20.8b2: hello-game asks for 1), else
+    // ADR-0108 §5's min(16, max_players). Never above max_players: a game default is a default.
+    const std::uint16_t default_clients =
+        definition.default_max_clients != 0 ? definition.default_max_clients : kDefaultMaxClients;
+    const SeatConfig seat_config{.max_players = max_players,
+                                 .max_clients =
+                                     options.max_clients != 0
+                                         ? options.max_clients
+                                         : std::min<std::uint16_t>(default_clients, max_players)};
+    // m20.8b2: THE ONE-SEAT / MULTI-SEAT SELECTION. What decides the server's path is the seat
+    // count this run can actually fill, not the game's ceiling: a 16-player game started with
+    // `--max-clients 1` has one seat, and one seat is m20.7's server -- codec 2, the 3-byte hello
+    // reply, the player built in `setup`, and every one-seat diagnostic available. Only the
+    // IDENTITY keeps the game's ceiling (input_schema_identity's "rime.seats" marker is a fact
+    // about the game, not the run), and the client learns which path it is on from the codec the
+    // server picks (network_client.cpp), so the two ends cannot disagree about it.
+    const std::uint16_t run_seats = listening ? std::min(seat_config.max_clients, max_players) : 1;
+    // The one-seat diagnostics: each names ONE client (its trace line, its spawn fault, its
+    // crate kick). On a multi-seat server they would mix players, so they are refused there until
+    // a per-seat form exists (m20.8c's per-seat applied trace).
+    if (listening && run_seats > 1 &&
+        (!options.input_trace.empty() || options.spawn_fault != SpawnFault::None ||
+         !options.interaction_kicks.empty())) {
+        report.usage_error = true;
+        return refuse(report,
+                      RunStatus::Failed,
+                      "--input-trace, --spawn-fault and --interaction-fault are one-seat "
+                      "diagnostics; this run seats more than one player (--max-clients 1 "
+                      "runs one seat)");
     }
 
     // ── 1b. The content root, before anything is constructed (m20.2) ─────────────────────────────
@@ -502,6 +798,7 @@ RunReport run_game_mode(const LaunchOptions& options,
                       fmt::format("--autopilot: '{}' ships no autopilot", definition.name));
     }
     SetupContext setup{app.world(), app.jobs(), app.fixed_dt(), report.content.dir};
+    setup.seats = run_seats;
     if (!game->setup(setup)) {
         return refuse(report, RunStatus::Failed, "the game's setup() refused to start");
     }
@@ -528,7 +825,12 @@ RunReport run_game_mode(const LaunchOptions& options,
                                      *definition.network_input,
                                      app.world(),
                                      definition.remote_play ? &*definition.remote_play : nullptr,
-                                     report.bind_error);
+                                     report.bind_error,
+                                     options.spawn_fault,
+                                     options.spawn_fault_ticks,
+                                     options.input_slack == 0 ? 1u : options.input_slack,
+                                     options.input_buffer_adaptive,
+                                     seat_config);
         if (!network) {
             report.bind_failed = report.bind_error.starts_with('E');
             return refuse(report,
@@ -536,10 +838,23 @@ RunReport run_game_mode(const LaunchOptions& options,
                           (report.bind_failed ? "UDP bind failed: " : "remote play refused: ") +
                               report.bind_error);
         }
-        fmt::print("{{\"event\":\"ready\",\"transport\":\"udp\",\"bind\":\"{}:{}\",\"codec\":2,"
+        network->set_seat_debug_break_swap(options.seat_debug_break_swap);
+        if (!options.interaction_kicks.empty() || !options.interaction_kick_commands.empty()) {
+            if (!definition.remote_play || !definition.remote_play->active_interaction() ||
+                definition.remote_play->active_interaction()->j_max <= 0.0f)
+                return refuse(report,
+                              RunStatus::Failed,
+                              "--interaction-fault needs an interaction profile with a j_max");
+            network->set_interaction_kicks(options.interaction_kicks);
+            network->set_interaction_kick_commands(options.interaction_kick_commands);
+        }
+        // The codec this server speaks: 2, or 3 (a seat in the hello reply) for a multi-seat
+        // game. The m20.3 line is unchanged for every one-player game.
+        fmt::print("{{\"event\":\"ready\",\"transport\":\"udp\",\"bind\":\"{}:{}\",\"codec\":{},"
                    "\"auth\":\"none\"}}\n",
                    options.listen_host,
-                   network->local_port());
+                   network->local_port(),
+                   run_seats > 1 ? 3 : 2);
         std::fflush(stdout);
         fmt::print(stderr,
                    "{}: unauthenticated server reachable on {}:{}\n",
@@ -590,6 +905,8 @@ RunReport run_game_mode(const LaunchOptions& options,
     // ── 6. The tick — the same body in every mode ──────────────────────────────────────────────
     bool game_finished = false;
     std::uint64_t game_ticks = 0;
+    std::vector<SpawnReport> spawn_reports;
+    std::vector<ecs::Entity> despawn_requests;
     app.on_fixed_tick([&](ecs::World& world, double dt) {
         if (game_finished) {
             // A real-clock frame can owe several ticks and the game can finish on the first; the
@@ -604,6 +921,22 @@ RunReport run_game_mode(const LaunchOptions& options,
                                        : ActionState{};
         if (network) {
             tick.input = network->before_tick(game_ticks);
+            tick.command = network->command_provenance();
+            tick.refuse_spawn = network->refuse_spawn();
+            tick.interaction_kick = network->interaction_kick(game_ticks);
+            // The report list lives through publication, so a keyed launch and its first
+            // checkpoint describe the same tick rather than disagreeing for one frame.
+            tick.spawns = definition.remote_play && definition.remote_play->spawn_prediction
+                              ? &spawn_reports
+                              : nullptr;
+            // A listening host owns removal so a replicated entity's NetId is retracted on the
+            // tick it ends; local play leaves this null and the game despawns itself.
+            tick.despawns = &despawn_requests;
+            // m20.8b: the seat changes (multi-seat: the game's leave/join hooks, run here at the
+            // start of the tick, before it sees any input) and every seat's input. After the
+            // report seams are set, so a hook that ends a replicated body can hand it to
+            // `despawns` and have its NetId retracted this tick.
+            network->begin_seat_tick(*game, tick);
             if (input_trace) {
                 // One line per committed tick: tick, applied(1)/synthesized(0), four axes,
                 // held and pressed. max_digits10 preserves the exact float for replay.
@@ -618,7 +951,9 @@ RunReport run_game_mode(const LaunchOptions& options,
         }
         game->fixed_tick(tick);
         if (network) {
-            network->after_tick(game_ticks);
+            network->after_tick(game_ticks, spawn_reports, despawn_requests);
+            spawn_reports.clear();
+            despawn_requests.clear();
         }
         ++game_ticks;
         if (game->finished()) {
@@ -701,6 +1036,103 @@ RunReport run_game_mode(const LaunchOptions& options,
     if (network) {
         report.network_input = network->counters();
         if (options.ticks > 0) {
+            // Keep the m20.4 event byte-identical for games without the profile. An opted-in
+            // server names every refusal and skip beside the existing input counters.
+            std::string spawn_counters =
+                definition.remote_play && definition.remote_play->spawn_prediction
+                    ? fmt::format(",\"spawn_accepted\":{},\"spawn_rejected\":{},"
+                                  "\"spawn_accepted_ended\":{},\"spawn_epoch_advances\":{},"
+                                  "\"spawn_outcomes_deferred\":{},\"spawn_outcomes_dropped\":{},"
+                                  "\"spawn_foreign_key\":{},\"spawn_out_of_order\":{},"
+                                  "\"spawn_end_unknown\":{},\"spawn_roster_refused\":{},"
+                                  "\"spawn_without_client\":{},"
+                                  "\"spawns_ended_after_owner_left\":{},"
+                                  "\"spawn_extension_refused\":{},"
+                                  "\"spawn_acks_applied\":{},\"spawn_ack_malformed\":{},"
+                                  "\"spawn_ack_wrong_channel\":{},"
+                                  "\"spawn_ack_wrong_incarnation\":{},\"spawn_ack_ahead\":{},"
+                                  "\"spawn_ack_stale\":{}",
+                                  report.network_input.spawn_accepted,
+                                  report.network_input.spawn_rejected,
+                                  report.network_input.spawn_accepted_ended,
+                                  report.network_input.spawn_epoch_advances,
+                                  report.network_input.spawn_outcomes_deferred,
+                                  report.network_input.spawn_outcomes_dropped,
+                                  report.network_input.spawn_foreign_key,
+                                  report.network_input.spawn_out_of_order,
+                                  report.network_input.spawn_end_unknown,
+                                  report.network_input.spawn_roster_refused,
+                                  report.network_input.spawn_without_client,
+                                  report.network_input.spawns_ended_after_owner_left,
+                                  report.network_input.spawn_extension_refused,
+                                  report.network_input.spawn_acks_applied,
+                                  report.network_input.spawn_ack_malformed,
+                                  report.network_input.spawn_ack_wrong_channel,
+                                  report.network_input.spawn_ack_wrong_incarnation,
+                                  report.network_input.spawn_ack_ahead,
+                                  report.network_input.spawn_ack_stale)
+                    : std::string{};
+            if (definition.remote_play && definition.remote_play->spawn_prediction)
+                spawn_counters += fmt::format(
+                    ",\"spawn_fault_refuse\":{},\"spawn_fault_lose_one\":{},"
+                    "\"spawn_fault_lose_all\":{},\"spawn_fault_duplicate\":{},"
+                    "\"spawn_fault_late_alive\":{},\"spawn_fault_late_ended\":{},"
+                    "\"launch_recovered_by_redundancy\":{},\"spawn_last_flight_ticks\":{}",
+                    report.network_input.spawn_fault_refuse,
+                    report.network_input.spawn_fault_lose_one,
+                    report.network_input.spawn_fault_lose_all,
+                    report.network_input.spawn_fault_duplicate,
+                    report.network_input.spawn_fault_late_alive,
+                    report.network_input.spawn_fault_late_ended,
+                    report.network_input.launch_recovered_by_redundancy,
+                    report.network_input.spawn_last_flight_ticks);
+            if (definition.remote_play && definition.remote_play->active_interaction()) {
+                // The proof's raw-correction bound from the leaf's one function, so the script
+                // reads the code's arithmetic instead of redoing it (ADR-0106 §4).
+                const auto* interaction = definition.remote_play->active_interaction();
+                const float raw_bound =
+                    interaction->object_mass > 0.0f
+                        ? replication::interaction_raw_bound(interaction->params.player_max_speed,
+                                                             interaction->j_max,
+                                                             interaction->object_mass,
+                                                             interaction->params.replay_ticks,
+                                                             interaction->params.fixed_dt)
+                        : 0.0f;
+                spawn_counters +=
+                    fmt::format(",\"interaction_joins\":{},\"interaction_leaves\":{},"
+                                "\"interaction_joined_in_contact\":{},"
+                                "\"interaction_leave_deferred_moving\":{},"
+                                "\"interaction_leave_deferred_touching\":{},"
+                                "\"interaction_epoch_advances\":{},\"interaction_member_ticks\":{},"
+                                "\"interaction_capture_refused\":{},"
+                                "\"interaction_contention_unsupported\":{},"
+                                "\"interaction_leave_deferred_quiet\":{},"
+                                "\"interaction_joined_sliding\":{},\"interaction_kicks\":{},"
+                                "\"interaction_kicks_by_command\":{},\"interaction_kick1_tick\":{},"
+                                "\"interaction_kick2_tick\":{},\"interaction_kicks_member\":{},"
+                                "\"interaction_kicks_nonmember\":{},"
+                                "\"interaction_j_max\":{:.3f},"
+                                "\"interaction_raw_bound\":{:.6f}",
+                                report.network_input.interaction_joins,
+                                report.network_input.interaction_leaves,
+                                report.network_input.interaction_joined_in_contact,
+                                report.network_input.interaction_leave_deferred_moving,
+                                report.network_input.interaction_leave_deferred_touching,
+                                report.network_input.interaction_epoch_advances,
+                                report.network_input.interaction_member_ticks,
+                                report.network_input.interaction_capture_refused,
+                                report.network_input.interaction_contention_unsupported,
+                                report.network_input.interaction_leave_deferred_quiet,
+                                report.network_input.interaction_joined_sliding,
+                                report.network_input.interaction_kicks,
+                                report.network_input.interaction_kicks_by_command,
+                                report.network_input.interaction_kick1_tick,
+                                report.network_input.interaction_kick2_tick,
+                                report.network_input.interaction_kicks_member,
+                                report.network_input.interaction_kicks_nonmember,
+                                static_cast<double>(interaction->j_max),
+                                static_cast<double>(raw_bound));
+            }
             fmt::print("{{\"event\":\"finished\",\"ticks\":{},\"digest\":\"0x{:016x}\","
                        "\"applied\":{},\"synthesized\":{},\"neutralized\":{},"
                        "\"late\":{},\"duplicate\":{},\"future\":{},"
@@ -718,7 +1150,13 @@ RunReport run_game_mode(const LaunchOptions& options,
                        "\"checkpoint_encoded\":{},\"checkpoint_encode_refused\":{},"
                        "\"checkpoint_send_refused\":{},\"input_result_send_refused\":{},"
                        "\"replication_registration_refused\":{},\"publish_missing_session\":{},"
-                       "\"checkpoint_capture_refused\":{}}}\n",
+                       "\"checkpoint_capture_refused\":{},"
+                       "\"game_despawns\":{},\"game_despawns_dead\":{}{},"
+                       "\"input_buffer\":\"{}\",\"stalls\":{},\"resyncs\":{},"
+                       "\"resync_retired\":{},\"gaps_retired\":{},"
+                       "\"late_missed\":{},\"late_unclassified\":{},\"max_margin\":{},"
+                       "\"final_margin\":{},\"pacing_sent\":{},\"pacing_send_refused\":{},"
+                       "\"accepted\":{}{}}}\n",
                        report.ticks,
                        report.state_digest,
                        report.network_input.applied,
@@ -758,7 +1196,23 @@ RunReport run_game_mode(const LaunchOptions& options,
                        report.network_input.input_result_send_refused,
                        report.network_input.replication_registration_refused,
                        report.network_input.publish_missing_session,
-                       report.network_input.checkpoint_capture_refused);
+                       report.network_input.checkpoint_capture_refused,
+                       report.network_input.game_despawns,
+                       report.network_input.game_despawns_dead,
+                       spawn_counters,
+                       report.network_input.input_buffer_adaptive ? "adaptive" : "fixed",
+                       report.network_input.stalls,
+                       report.network_input.resyncs,
+                       report.network_input.resync_retired,
+                       report.network_input.gaps_retired,
+                       report.network_input.late_missed,
+                       report.network_input.late_unclassified,
+                       report.network_input.max_margin,
+                       report.network_input.final_margin,
+                       report.network_input.pacing_sent,
+                       report.network_input.pacing_send_refused,
+                       report.network_input.accepted,
+                       seat_fields(report.network_input));
             std::fflush(stdout);
         }
     }

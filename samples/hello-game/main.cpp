@@ -19,8 +19,9 @@
 // the engine as a `rime::app::GameDefinition`. This file is everything about RUNNING it that is not
 // the engine's job: this sample's own self-checks. The loop, the device, the window, the key
 // mapping and the launch mode are the engine's (`rime/app/launch.hpp`), and a shipped game's whole
-// `main` is `return rime::app::run_game(argc, argv, hello_game::definition());` — which is exactly
-// what the mode words below do.
+// `main` is `return rime::app::run_game(argc, argv, hello_game::definition_with_interaction());` —
+// which is exactly what the mode words below do (m20.6b: the shipped CLI predicts the crate; the
+// offline self-checks run `definition()`, whose simulation is the same).
 //
 //   build/<preset>/bin/hello_game                    # the self-check: GPU-free, silent, exit 0
 //   build/<preset>/bin/hello_game --verbose          # the same, with a report
@@ -327,7 +328,7 @@ ScenarioOutcome run_crate_scenario(const ScenarioSpec& spec) {
             [&](ecs::Entity, const hello_game::ReplicatedGameState& s) {
                 outcome.crate_end_x = s.crate_position.x;
                 outcome.crate_end_z = s.crate_position.z;
-                const core::Vec3 d = s.player_position - s.crate_position;
+                const core::Vec3 d = game.player_position() - s.crate_position;
                 const core::Vec3 local = core::rotate(core::conjugate(s.crate_rotation), d);
                 const core::Vec3 clamped{
                     std::clamp(local.x, -kCrateHalf, kCrateHalf),
@@ -682,7 +683,7 @@ int main(int argc, char** argv) {
     // A mode word first means the shipped-game CLI: hand the whole command line to the engine.
     // This is the entire `main` a game exported under M20 would have.
     if (argc > 1 && argv[1][0] != '-') {
-        return app::run_game(argc, argv, hello_game::definition());
+        return app::run_game(argc, argv, hello_game::definition_with_interaction());
     }
 
     bool verbose = false;
