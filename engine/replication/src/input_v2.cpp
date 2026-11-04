@@ -168,18 +168,27 @@ bool decode_input_hello(std::span<const std::byte> in, InputHello& out) {
 }
 
 std::size_t encode_input_hello_reply(const InputHelloReply& reply, std::span<std::byte> out) {
-    if (out.size() < kInputHelloReplyBytes) {
+    const bool with_seat =
+        reply.codec == kInputCodecV3 && reply.refusal == InputHelloRefusal::None && reply.seated;
+    const std::size_t size = with_seat ? kInputHelloReplyV3Bytes : kInputHelloReplyBytes;
+    if (out.size() < size) {
         return 0;
     }
     Writer writer{out};
     writer.u8(kInputHelloReplyTag);
     writer.u8(reply.codec);
     writer.u8(static_cast<std::uint8_t>(reply.refusal));
+    if (with_seat) {
+        writer.u8(static_cast<std::uint8_t>(reply.seat));
+        writer.u8(static_cast<std::uint8_t>(reply.seat >> 8));
+        writer.u8(static_cast<std::uint8_t>(reply.seat_generation));
+        writer.u8(static_cast<std::uint8_t>(reply.seat_generation >> 8));
+    }
     return writer.at;
 }
 
 bool decode_input_hello_reply(std::span<const std::byte> in, InputHelloReply& out) {
-    if (in.size() != kInputHelloReplyBytes ||
+    if ((in.size() != kInputHelloReplyBytes && in.size() != kInputHelloReplyV3Bytes) ||
         std::to_integer<std::uint8_t>(in[0]) != kInputHelloReplyTag) {
         return false;
     }
@@ -188,18 +197,33 @@ bool decode_input_hello_reply(std::span<const std::byte> in, InputHelloReply& ou
     InputHelloReply decoded{};
     decoded.codec = reader.u8();
     const std::uint8_t refusal = reader.u8();
-    if (refusal > static_cast<std::uint8_t>(InputHelloRefusal::Full)) {
+    if (refusal > static_cast<std::uint8_t>(InputHelloRefusal::GameRefused)) {
         return false;
     }
     decoded.refusal = static_cast<InputHelloRefusal>(refusal);
+    if (in.size() == kInputHelloReplyV3Bytes) {
+        // The seat exists only on a codec-3 acceptance; any other 7-byte shape is malformed
+        // rather than "a reply with a seat we ignore", so the two ends cannot half-agree.
+        if (decoded.codec != kInputCodecV3 || decoded.refusal != InputHelloRefusal::None) {
+            return false;
+        }
+        const auto u16 = [&reader] {
+            const std::uint16_t low = reader.u8();
+            return static_cast<std::uint16_t>(low | (std::uint16_t{reader.u8()} << 8));
+        };
+        decoded.seated = true;
+        decoded.seat = u16();
+        decoded.seat_generation = u16();
+    }
     out = decoded;
     return true;
 }
 
 InputHelloReply select_input_codec(const InputHello& hello,
                                    std::uint64_t server_schema_hash,
-                                   bool server_full) noexcept {
-    if (hello.codec_min > kInputCodecV2 || hello.codec_max < kInputCodecV2) {
+                                   bool server_full,
+                                   std::uint8_t server_codec) noexcept {
+    if (hello.codec_min > server_codec || hello.codec_max < server_codec) {
         return {0, InputHelloRefusal::Version};
     }
     if (hello.schema_hash != server_schema_hash) {
@@ -208,7 +232,7 @@ InputHelloReply select_input_codec(const InputHello& hello,
     if (server_full) {
         return {0, InputHelloRefusal::Full};
     }
-    return {kInputCodecV2, InputHelloRefusal::None};
+    return {server_codec, InputHelloRefusal::None};
 }
 
 std::uint64_t input_schema_hash(std::string_view profile_id,
@@ -272,8 +296,47 @@ bool decode_input_result(std::span<const std::byte> in, InputResult& out) {
     return true;
 }
 
-InputSchedule::InputSchedule(std::uint32_t slack_ticks, std::uint32_t neutral_after_ticks) noexcept
-    : slack_ticks_(slack_ticks), neutral_after_ticks_(neutral_after_ticks) {}
+std::size_t encode_input_pacing(const InputPacing& pacing, std::span<std::byte> out) {
+    if (out.size() < kInputPacingBytes) {
+        return 0;
+    }
+    Writer writer{out};
+    writer.u8(kInputPacingTag);
+    writer.u64(pacing.server_tick);
+    writer.u8(pacing.margin);
+    writer.u32(pacing.stalls);
+    return writer.at;
+}
+
+bool decode_input_pacing(std::span<const std::byte> in, InputPacing& out) {
+    if (in.size() != kInputPacingBytes || std::to_integer<std::uint8_t>(in[0]) != kInputPacingTag) {
+        return false;
+    }
+    Reader reader{in};
+    (void)reader.u8();
+    InputPacing decoded{};
+    decoded.server_tick = reader.u64();
+    decoded.margin = reader.u8();
+    decoded.stalls = reader.u32();
+    out = decoded;
+    return true;
+}
+
+InputSchedule::InputSchedule(std::uint32_t slack_ticks,
+                             std::uint32_t neutral_after_ticks,
+                             InputBufferMode mode) noexcept
+    : slack_ticks_(slack_ticks), neutral_after_ticks_(neutral_after_ticks), mode_(mode) {}
+
+void InputSchedule::record_margin() noexcept {
+    // Walk the ring from next_ while slots are held. held_ is only true for sequences in
+    // [next_, next_ + kRing), so the walk is bounded by the ring and the 255 cap never binds.
+    std::size_t run = 0;
+    while (run < kRing && held_[static_cast<std::size_t>((next_ + run) % kRing)]) {
+        ++run;
+    }
+    margin_ = static_cast<std::uint8_t>(std::min<std::size_t>(run, 255));
+    max_margin_ = std::max(max_margin_, margin_);
+}
 
 void InputSchedule::offer(std::span<const InputCommand> commands) {
     for (const InputCommand& command : commands) {
@@ -283,8 +346,44 @@ void InputSchedule::offer(std::span<const InputCommand> commands) {
         }
         if (std::uint64_t{command.sequence} < next_) {
             ++late_;
+            // Classify with the execution mask: if the slot this command belonged to ran a
+            // stand-in (bit 0), the command truly missed its tick; if it was applied, this is just
+            // one of the two redundant copies every packet carries. A slot older than the mask, or
+            // one that was never retired (it precedes the first accepted sequence), cannot be told.
+            const std::uint64_t offset = next_ - 1 - std::uint64_t{command.sequence};
+            if (offset >= 128 || offset >= retired_count_) {
+                ++late_unclassified_;
+            } else if ((applied_mask_[offset / 64] & (std::uint64_t{1} << (offset % 64))) == 0) {
+                ++late_missed_;
+            }
         } else if (std::uint64_t{command.sequence} >= next_ + kRing) {
-            ++future_;
+            if (mode_ == InputBufferMode::Adaptive &&
+                std::none_of(held_.begin(), held_.end(), [](bool held) { return held; })) {
+                // Nothing can advance an empty adaptive ring. Retire the blackout as unapplied
+                // so the next command has a truthful execution frontier and can run next tick.
+                const std::uint64_t skipped = std::uint64_t{command.sequence} - next_;
+                if (skipped >= 128) {
+                    applied_mask_ = {};
+                } else if (skipped >= 64) {
+                    applied_mask_[1] = applied_mask_[0] << (skipped - 64);
+                    applied_mask_[0] = 0;
+                } else {
+                    applied_mask_[1] =
+                        (applied_mask_[1] << skipped) | (applied_mask_[0] >> (64 - skipped));
+                    applied_mask_[0] <<= skipped;
+                }
+                retired_count_ += skipped;
+                resync_retired_ += skipped;
+                ++resyncs_;
+                any_retired_ = true;
+                next_ = command.sequence;
+                const std::size_t slot = command.sequence % kRing;
+                commands_[slot] = command;
+                held_[slot] = true;
+                ++accepted_;
+            } else {
+                ++future_;
+            }
         } else {
             const std::size_t slot = command.sequence % kRing;
             if (held_[slot]) {
@@ -301,6 +400,7 @@ void InputSchedule::offer(std::span<const InputCommand> commands) {
 ScheduledInput InputSchedule::step() noexcept {
     if (!has_first_ || (!started_ && accepted_ < slack_ticks_)) {
         ++synthesized_;
+        record_margin();
         return {};
     }
     started_ = true;
@@ -308,6 +408,28 @@ ScheduledInput InputSchedule::step() noexcept {
     scheduled.started = true;
     scheduled.command.sequence = static_cast<std::uint32_t>(next_);
     const std::size_t slot = static_cast<std::size_t>(next_ % kRing);
+    bool gap = false;
+    if (!held_[slot] && mode_ == InputBufferMode::Adaptive) {
+        gap = false;
+        for (std::size_t i = 1; i < kRing; ++i) {
+            if (held_[static_cast<std::size_t>((next_ + i) % kRing)]) {
+                gap = true;
+                break;
+            }
+        }
+        if (!gap) {
+            // STALL. Nothing at or after next_ is here: the client is behind or silent. Retiring
+            // now would doom the command to arrive "late", so run a NEUTRAL stand-in (not the held
+            // axes: the player's path then stays a function of the command sequence alone) and
+            // leave next_, the mask, silence_ticks_ and any_retired_ untouched.
+            scheduled.stalled = true;
+            ++synthesized_;
+            ++stalls_;
+            record_margin();
+            return scheduled;
+        }
+        ++gaps_retired_;
+    }
     if (held_[slot]) {
         scheduled.command = commands_[slot];
         scheduled.applied = true;
@@ -334,8 +456,14 @@ ScheduledInput InputSchedule::step() noexcept {
     applied_mask_[1] = (applied_mask_[1] << 1) | (applied_mask_[0] >> 63);
     applied_mask_[0] = (applied_mask_[0] << 1) | (scheduled.applied ? 1u : 0u);
     any_retired_ = true;
+    ++retired_count_;
     ++next_;
+    record_margin();
     return scheduled;
+}
+
+InputPacing InputSchedule::pacing(std::uint64_t server_tick) const noexcept {
+    return {server_tick, margin_, static_cast<std::uint32_t>(stalls_ & 0xFFFFFFFFu)};
 }
 
 InputResult InputSchedule::result(std::uint64_t server_tick) const noexcept {

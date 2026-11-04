@@ -9,7 +9,7 @@
 namespace rime::replication {
 namespace {
 
-constexpr std::size_t kOwnerCheckpointHeaderBytes = 1 + 8 + 4 + 1 + 2 + kInputResultBytes;
+constexpr std::size_t kOwnerCheckpointHeaderBytes = 1 + 8 + 4 + 1 + 2 + kInputResultBytes + 4;
 
 struct Writer {
     std::span<std::byte> bytes;
@@ -126,6 +126,7 @@ CheckpointEncode encode_owner_checkpoint(const OwnerCheckpoint& checkpoint,
     if (encode_input_result(checkpoint.result, result_bytes) != result_bytes.size())
         return {0, CheckpointRefusal::InvalidInputResult};
     writer.blob(result_bytes);
+    writer.u32(checkpoint.input_stalls);
     for (const auto& entity : checkpoint.entities) {
         writer.u32(entity.id.index);
         writer.u32(entity.id.generation);
@@ -136,7 +137,9 @@ CheckpointEncode encode_owner_checkpoint(const OwnerCheckpoint& checkpoint,
     return {writer.at, CheckpointRefusal::None};
 }
 
-CheckpointRefusal decode_owner_checkpoint(std::span<const std::byte> in, OwnerCheckpoint& out) {
+CheckpointRefusal decode_owner_checkpoint_prefix(std::span<const std::byte> in,
+                                                 OwnerCheckpoint& out,
+                                                 std::size_t& consumed) {
     if (in.size() > kCheckpointMaxMessageBytes)
         return CheckpointRefusal::MessageTooLarge;
     if (in.size() < kOwnerCheckpointHeaderBytes)
@@ -157,6 +160,7 @@ CheckpointRefusal decode_owner_checkpoint(std::span<const std::byte> in, OwnerCh
         return CheckpointRefusal::InvalidInputResult;
     if (decoded.result.server_tick != decoded.server_tick)
         return CheckpointRefusal::TickMismatch;
+    decoded.input_stalls = reader.u32();
     decoded.entities.reserve(count);
     for (std::size_t i = 0; i < count; ++i) {
         if (!reader.has(10))
@@ -180,7 +184,21 @@ CheckpointRefusal decode_owner_checkpoint(std::span<const std::byte> in, OwnerCh
         return CheckpointRefusal::Truncated;
     const auto group = reader.blob(group_size);
     decoded.group_state.assign(group.begin(), group.end());
-    if (reader.at != in.size())
+    consumed = reader.at;
+    out = std::move(decoded);
+    return CheckpointRefusal::None;
+}
+
+CheckpointRefusal decode_owner_checkpoint(std::span<const std::byte> in, OwnerCheckpoint& out) {
+    // The m20.4 contract, unchanged: the checkpoint must be the WHOLE message. Trailing bytes are a
+    // BadLength refusal and `out` is untouched -- which is also why ADR-0105's spawn extension has
+    // to be negotiated rather than merely appended (spawn_prediction.hpp).
+    OwnerCheckpoint decoded{};
+    std::size_t consumed = 0;
+    const auto refusal = decode_owner_checkpoint_prefix(in, decoded, consumed);
+    if (refusal != CheckpointRefusal::None)
+        return refusal;
+    if (consumed != in.size())
         return CheckpointRefusal::BadLength;
     out = std::move(decoded);
     return CheckpointRefusal::None;
@@ -218,6 +236,7 @@ ReconcileOutcome Reconciler::apply_checkpoint(const OwnerCheckpoint& checkpoint)
     if (checkpoint.result.server_tick != checkpoint.server_tick ||
         checkpoint.entities.size() != members_.size() || duplicate_id(checkpoint.entities)) {
         ++incomplete_checkpoints_;
+        ++checkpoints_refused_invalid_;
         return outcome;
     }
     for (const auto& member : members_) {
@@ -225,8 +244,14 @@ ReconcileOutcome Reconciler::apply_checkpoint(const OwnerCheckpoint& checkpoint)
                           checkpoint.entities.end(),
                           [&](const auto& entity) { return entity.id == member; }) != 1) {
             ++incomplete_checkpoints_;
+            ++checkpoints_refused_invalid_;
             return outcome;
         }
+    }
+    // Two-phase restore: a refusal happens before capture, history pruning or any game mutation.
+    if (hooks_.prepare_checkpoint && !hooks_.prepare_checkpoint(checkpoint)) {
+        ++checkpoints_refused_invalid_;
+        return outcome;
     }
     if (needs_reseed_) {
         // A checkpoint IS the predicted set's full authoritative state, which is exactly what a
@@ -237,6 +262,8 @@ ReconcileOutcome Reconciler::apply_checkpoint(const OwnerCheckpoint& checkpoint)
         hooks_.restore_group(checkpoint.group_state);
         for (const auto& entity : checkpoint.entities)
             hooks_.restore(entity.id, entity.state);
+        if (hooks_.commit_checkpoint)
+            hooks_.commit_checkpoint();
         history_.clear();
         needs_reseed_ = false;
         ++reseeds_;
@@ -256,6 +283,8 @@ ReconcileOutcome Reconciler::apply_checkpoint(const OwnerCheckpoint& checkpoint)
     hooks_.restore_group(checkpoint.group_state);
     for (const auto& entity : checkpoint.entities)
         hooks_.restore(entity.id, entity.state);
+    if (hooks_.commit_checkpoint)
+        hooks_.commit_checkpoint();
     if (checkpoint.result.any_retired) {
         const auto first_live =
             std::find_if(history_.begin(), history_.end(), [&](const auto& cmd) {
