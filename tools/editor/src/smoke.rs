@@ -16,7 +16,12 @@
 use std::process::ExitCode;
 
 /// Run the smoke and turn its result into a process exit code (0 = pass).
-#[cfg(unix)]
+///
+/// Runs on all three platforms as of the Windows transport port: the socket type now comes from
+/// `crate::local_socket`, which is std's `LocalStream` on Unix and `uds_windows`' on Windows. This
+/// used to carry a `#[cfg(not(unix))]` stub that exited 2 with "Unix-only for now", because the
+/// only Windows obstacle was `std::os::unix`'s module path -- never the wire, which has been
+/// `AF_UNIX` on Windows since the s1.4 backend landed.
 pub fn run(args: &[String]) -> ExitCode {
     match imp::run(args) {
         Ok(summary) => {
@@ -30,25 +35,13 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 }
 
-/// Non-Unix stub: the smoke drives an `AF_UNIX` socket through `std::os::unix`, which Windows std
-/// does not expose. The engine's local wire *is* `AF_UNIX` on Windows too (s1.4), so a Windows smoke
-/// is a small follow-up; the cross-platform egui shell will carry it. Keeps the crate compiling
-/// everywhere (the CI build matrix includes Windows).
-#[cfg(not(unix))]
-pub fn run(_args: &[String]) -> ExitCode {
-    eprintln!(
-        "editor --smoke is Unix-only for now (it drives an AF_UNIX socket via std::os::unix)."
-    );
-    ExitCode::from(2)
-}
-
-#[cfg(unix)]
 mod imp {
     use std::io::ErrorKind;
-    use std::os::unix::net::UnixStream;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use crate::local_socket::LocalStream;
 
     use rime_protocol::{
         decode_value, encode_value, AssetKind, AssetList, ComponentRef, Connection, EditorMessage,
@@ -102,10 +95,10 @@ mod imp {
     /// Connect to the engine's socket, retrying while it does not yet exist / is not yet listening —
     /// the engine binds a moment after we spawn it, so a bounded retry replaces a fragile readiness
     /// handshake.
-    fn connect_retry(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
+    fn connect_retry(path: &Path, timeout: Duration) -> std::io::Result<LocalStream> {
         let start = Instant::now();
         loop {
-            match UnixStream::connect(path) {
+            match LocalStream::connect(path) {
                 Ok(stream) => return Ok(stream),
                 Err(e)
                     if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) =>
@@ -122,7 +115,7 @@ mod imp {
 
     /// Receive one message and require it to be the given editor-channel type.
     fn expect_editor(
-        conn: &mut Connection<UnixStream>,
+        conn: &mut Connection<LocalStream>,
         want: EditorMessage,
     ) -> Result<Vec<u8>, String> {
         let (ty, payload) = conn.recv().map_err(|e| format!("recv: {e}"))?;
@@ -214,7 +207,7 @@ mod imp {
 
     /// Read messages until the engine's snapshot reply arrives (channel mode carries nothing else, but
     /// skip anything unexpected rather than mis-handle it).
-    fn recv_snapshot(conn: &mut Connection<UnixStream>) -> Result<Snapshot, String> {
+    fn recv_snapshot(conn: &mut Connection<LocalStream>) -> Result<Snapshot, String> {
         loop {
             let (ty, payload) = conn.recv().map_err(|e| format!("recv snapshot: {e}"))?;
             if ty == MessageType::Other(EditorMessage::Snapshot.to_code()) {
@@ -228,7 +221,7 @@ mod imp {
     /// Read messages until a SaveResult arrives (m14.3). A REFUSAL is a normal outcome here, not a
     /// transport error — the engine declines to save a world whose load skipped component types it
     /// does not register — so this returns the result and lets the caller decide.
-    fn recv_save_result(conn: &mut Connection<UnixStream>) -> Result<SaveResult, String> {
+    fn recv_save_result(conn: &mut Connection<LocalStream>) -> Result<SaveResult, String> {
         loop {
             let (ty, payload) = conn.recv().map_err(|e| format!("recv save result: {e}"))?;
             if ty == MessageType::Other(EditorMessage::SaveResult.to_code()) {
@@ -237,7 +230,7 @@ mod imp {
         }
     }
 
-    fn recv_pick(conn: &mut Connection<UnixStream>) -> Result<PickResult, String> {
+    fn recv_pick(conn: &mut Connection<LocalStream>) -> Result<PickResult, String> {
         loop {
             let (ty, payload) = conn.recv().map_err(|e| format!("recv pick result: {e}"))?;
             if ty == MessageType::Other(EditorMessage::PickResult.to_code()) {
@@ -248,7 +241,7 @@ mod imp {
 
     /// Read messages until a ViewportCamera arrives (m9.6b) — the engine sends the frame's exact
     /// render lens alongside every frame; the gizmo's hover/drag math unprojects through it.
-    fn recv_viewport_camera(conn: &mut Connection<UnixStream>) -> Result<ViewportCamera, String> {
+    fn recv_viewport_camera(conn: &mut Connection<LocalStream>) -> Result<ViewportCamera, String> {
         loop {
             let (ty, payload) = conn
                 .recv()
@@ -829,7 +822,7 @@ mod imp {
             .ok_or_else(|| format!("thermal component {hash} missing from {id}"))
     }
     fn thermal_apply(
-        conn: &mut Connection<UnixStream>,
+        conn: &mut Connection<LocalStream>,
         id: u64,
         hash: u64,
         blob: &[u8],
@@ -852,7 +845,7 @@ mod imp {
         Ok(())
     }
     fn thermal_message(
-        conn: &mut Connection<UnixStream>,
+        conn: &mut Connection<LocalStream>,
         tick: u64,
         minimum_revision: u64,
     ) -> Result<rime_protocol::ThermalPreview, String> {
@@ -872,7 +865,7 @@ mod imp {
     // A saved demo uses three preauthored stations, so verify it without spawning a second
     // graph or assuming the generic two-cell diagnostic fixture describes the whole world.
     fn verify_courtyard_preview(
-        conn: &mut Connection<UnixStream>,
+        conn: &mut Connection<LocalStream>,
         schema: &Schema,
         snapshot: &Snapshot,
     ) -> Result<(), String> {
@@ -993,7 +986,7 @@ mod imp {
     }
 
     fn verify_thermal_sources(
-        conn: &mut Connection<UnixStream>,
+        conn: &mut Connection<LocalStream>,
         schema: &Schema,
         _snapshot: &Snapshot,
         viewport: bool,
@@ -1307,7 +1300,7 @@ mod imp {
     }
 
     fn verify_effect_sources(
-        conn: &mut Connection<UnixStream>,
+        conn: &mut Connection<LocalStream>,
         schema: &Schema,
         snapshot: &Snapshot,
         viewport: bool,
@@ -1432,7 +1425,7 @@ mod imp {
     }
 
     fn wait_play_state(
-        conn: &mut Connection<UnixStream>,
+        conn: &mut Connection<LocalStream>,
         phase: PlayPhase,
         tick: u64,
     ) -> Result<(), String> {
@@ -1458,7 +1451,7 @@ mod imp {
     /// messages arriving interleaved are ignored. Returns (frames, width, height, last frame's
     /// RGBA) — the pixels feed the self-locating pick that follows.
     fn receive_frames(
-        conn: &mut Connection<UnixStream>,
+        conn: &mut Connection<LocalStream>,
         n: u32,
     ) -> Result<(u32, u32, u32, Vec<u8>), String> {
         let mut got = 0u32;
@@ -1577,7 +1570,7 @@ mod imp {
 
     /// Read and discard messages until the engine closes, so its frame-sender never blocks on a full
     /// socket buffer once we stop consuming (which would wedge the engine's clean shutdown).
-    fn drain_until_closed(conn: &mut Connection<UnixStream>) {
+    fn drain_until_closed(conn: &mut Connection<LocalStream>) {
         while conn.recv().is_ok() {}
     }
 }

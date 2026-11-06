@@ -9,9 +9,47 @@
 //! serialization, scene/schema wire and inspector (ADR-0038); a display-only alias here would
 //! disappear on reload. Existing game roles and readable engine roles provide useful labels
 //! without pretending that persistent user naming or rendered asset thumbnails already exist.
-use super::{Command, EntityId};
+use super::{Command, ComponentSet, EntityId};
 use eframe::egui;
 use rime_protocol::{decode_value, Schema, SnapshotEntity, Value};
+
+/// The component combinations worth a single click, named by SCHEMA TYPE NAME rather than by hash.
+///
+/// Names, because a hash is a build detail and a name is the contract the wire already speaks: the
+/// menu resolves each against the live schema and offers the archetype only when the host it
+/// launched registers every member. So `rime-engine` offers the engine ones, a game host offers
+/// its own on top, and neither has to be taught about the other — the same reason m15.2 took
+/// blockkit out of the engine binary (ADR-0038).
+///
+/// Deliberately short. This is not a prefab system: a prefab carries authored VALUES, and these
+/// carry only the set of components, each defaulted by the engine. The place to get a fully
+/// authored object is Clone, which copies real bytes from a real entity.
+const ARCHETYPES: &[(&str, &[&str])] = &[
+    (
+        "Dynamic rigid body (transform + body + collider)",
+        &[
+            "rime::ecs::LocalTransform",
+            "rime::physics::RigidBody",
+            "rime::physics::Collider",
+        ],
+    ),
+    (
+        "Static collider (transform + collider)",
+        &["rime::ecs::LocalTransform", "rime::physics::Collider"],
+    ),
+    (
+        "Mesh instance (transform + mesh)",
+        &["rime::ecs::LocalTransform", "rime::render::MeshAsset"],
+    ),
+    (
+        "Point light (transform + light)",
+        &["rime::ecs::LocalTransform", "rime::render::PointLight"],
+    ),
+    (
+        "Camera (transform + camera)",
+        &["rime::ecs::LocalTransform", "rime::render::Camera"],
+    ),
+];
 
 #[derive(Default, PartialEq)]
 enum Filter {
@@ -342,6 +380,78 @@ fn icon(ui: &mut egui::Ui, kind: Icon, size: f32, selected: bool, label: &str) -
     response
 }
 
+/// The right-click menu on an outliner row: the whole-entity operations.
+///
+/// Clone and Paste are both a `SpawnEntity` carrying a component set copied VERBATIM, which is the
+/// property that matters: a clone reproduces every feature of its source, including component types
+/// this editor build has no schema entry for. The editor never interprets those bytes, so it cannot
+/// silently drop a component it does not understand — which is exactly what a clone assembled from
+/// the inspector's known-type list would do when a game host registers more than the engine does.
+///
+/// Both go through `Command::SpawnEntity { id: 0, exact: false }`, so both are undoable by the
+/// machinery that already serves the asset browser's "place" (`gui.rs`'s `step_for`) — no new wire
+/// message and no new history case.
+fn row_context_menu(
+    ui: &mut egui::Ui,
+    entity: &SnapshotEntity,
+    selected: &mut Option<EntityId>,
+    actions: &mut Vec<Command>,
+    clipboard: &mut Option<ComponentSet>,
+) {
+    let set: ComponentSet = entity
+        .components
+        .iter()
+        .map(|c| (c.type_hash, c.data.clone()))
+        .collect();
+    let n = set.len();
+    if ui
+        .button("Clone")
+        .on_hover_text(format!(
+            "A new entity with all {n} of this one's components"
+        ))
+        .clicked()
+    {
+        actions.push(Command::SpawnEntity {
+            id: 0,
+            exact: false,
+            components: set.clone(),
+        });
+        ui.close_menu();
+    }
+    if ui.button("Copy").clicked() {
+        *clipboard = Some(set);
+        ui.close_menu();
+    }
+    // Paste makes a NEW entity from the clipboard rather than overwriting this row: an outliner row
+    // names a thing that exists, and silently replacing its component set would be a destructive
+    // edit behind an innocuous verb. Pasting ONTO something is per-component, in the inspector.
+    let held = clipboard.as_ref().map_or(0, Vec::len);
+    let paste = ui
+        .add_enabled(held > 0, egui::Button::new("Paste as new entity"))
+        .on_hover_text(format!("{held} copied components"));
+    if paste.clicked() {
+        if let Some(components) = clipboard.clone() {
+            actions.push(Command::SpawnEntity {
+                id: 0,
+                exact: false,
+                components,
+            });
+        }
+        ui.close_menu();
+    }
+    ui.separator();
+    if ui.button("Despawn").clicked() {
+        actions.push(Command::Despawn {
+            id: entity.editor_id,
+        });
+        if *selected == Some(entity.editor_id) {
+            *selected = None;
+        }
+        ui.close_menu();
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // the world view, the edit sinks, and now the paste buffer
 pub(super) fn ui(
     ui: &mut egui::Ui,
     schema: &Schema,
@@ -349,12 +459,69 @@ pub(super) fn ui(
     selected: &mut Option<EntityId>,
     actions: &mut Vec<Command>,
     options: &mut Options,
+    clipboard: &mut Option<ComponentSet>,
+    addable: &[(u64, String)],
+    archetype: &mut Option<Vec<u64>>,
 ) {
     ui.horizontal(|ui| {
-        if ui.button("+ spawn").clicked() {
-            *selected = None;
-            actions.push(Command::Spawn { id: 0 });
-        }
+        // A menu rather than a bare button as of the archetype work: "+ spawn" alone could only
+        // ever make a bare entity, so building anything meant adding each component by hand in the
+        // inspector. An archetype spawns the entity and then asks the ENGINE to add each component,
+        // so every one arrives with the engine's own default rather than bytes the editor invented.
+        ui.menu_button("+ spawn", |ui| {
+            if ui.button("Empty entity").clicked() {
+                *selected = None;
+                actions.push(Command::Spawn { id: 0 });
+                ui.close_menu();
+            }
+            if let Some(components) = clipboard.clone() {
+                if ui
+                    .button(format!("From clipboard ({} components)", components.len()))
+                    .clicked()
+                {
+                    actions.push(Command::SpawnEntity {
+                        id: 0,
+                        exact: false,
+                        components,
+                    });
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            // The combinations worth one click. Each is a plain list of type NAMES resolved against
+            // the live schema, so a host that does not register one simply does not offer it.
+            for (label, wanted) in ARCHETYPES {
+                let types: Vec<u64> = wanted
+                    .iter()
+                    .filter_map(|w| addable.iter().find(|(_, n)| n == w).map(|(h, _)| *h))
+                    .collect();
+                if types.len() == wanted.len() && ui.button(*label).clicked() {
+                    *archetype = Some(types);
+                    ui.close_menu();
+                }
+            }
+            ui.separator();
+            // Then EVERY registered component the host offers, so nothing is unreachable from
+            // here: the named archetypes above are shortcuts, not the limit. This is the same list
+            // the inspector's "+ add component" uses, so what can be spawned and what can be added
+            // are the same set by construction — there is no second list to fall behind.
+            //
+            // Flat, inside the one menu, rather than a nested submenu: egui opens a submenu on
+            // HOVER, which a click test addressing widgets by name cannot drive (it clicked the
+            // submenu title and the contents never appeared). A scroll area keeps 30-odd entries
+            // from running off the screen.
+            ui.weak("with one component:");
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for (hash, name) in addable {
+                        if ui.button(name).clicked() {
+                            *archetype = Some(vec![*hash]);
+                            ui.close_menu();
+                        }
+                    }
+                });
+        });
         ui.menu_button("Filter", |ui| {
             ui.selectable_value(&mut options.filter, Filter::All, "All entities");
             ui.selectable_value(
@@ -430,6 +597,13 @@ pub(super) fn ui(
                 let text_response = ui.selectable_label(chosen, label(schema, i, e));
                 if icon_response.clicked() || text_response.clicked() {
                     *selected = Some(e.editor_id);
+                }
+                // Right-click for the whole-entity operations. Attached to BOTH halves so the menu
+                // is wherever the row looks like it is: the text in List view, the icon in Tiles.
+                // The viewport deliberately has no equivalent — a secondary drag there is the
+                // fly-camera's look (`gui.rs`'s `navigating`), and a menu would eat it.
+                for r in [&icon_response, &text_response] {
+                    r.context_menu(|ui| row_context_menu(ui, e, selected, actions, clipboard));
                 }
                 let components = e
                     .components
@@ -512,6 +686,9 @@ mod tests {
                     &mut state.1,
                     &mut vec![],
                     &mut state.0,
+                    &mut None,
+                    &[],
+                    &mut None,
                 );
             },
             (Options::default(), None),

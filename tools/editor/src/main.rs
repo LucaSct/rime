@@ -13,6 +13,10 @@
 //!     windowed FrostEd. The windowing stack (eframe → wgpu/winit) is feature-gated so the headless
 //!     smoke stays a light build; per ADR-0031 the live UI is Mac-eyeballed, not CI-run.
 
+// One name for the engine socket, backed by std on Unix and by `uds_windows` on Windows. Both are
+// the same AF_UNIX wire the engine already serves on all three platforms; see the module header.
+mod local_socket;
+
 mod smoke;
 
 // Gizmo math (m9.6b) is pure — no egui, no wire — and deliberately NOT feature-gated: its unit

@@ -8,7 +8,6 @@
 //! same wire the headless smoke proves — so only what appears on screen is Mac-eyeballed.
 
 use std::io::ErrorKind;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::mpsc::Receiver;
@@ -21,6 +20,8 @@ use rime_protocol::{
     InputKind, MessageType, PickResult, PlayState, SaveResult, SceneLoadReport, Schema, Snapshot,
     SnapshotComponent, ViewportCamera,
 };
+
+use crate::local_socket::LocalStream;
 
 use super::protocol_input::Input;
 
@@ -228,10 +229,10 @@ fn unique_socket_path() -> PathBuf {
     ))
 }
 
-fn connect_retry(path: &Path, timeout: Duration) -> std::io::Result<UnixStream> {
+fn connect_retry(path: &Path, timeout: Duration) -> std::io::Result<LocalStream> {
     let start = Instant::now();
     loop {
-        match UnixStream::connect(path) {
+        match LocalStream::connect(path) {
             Ok(stream) => return Ok(stream),
             Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
                 if start.elapsed() >= timeout {
@@ -398,7 +399,7 @@ fn handle_message(shared: &Shared, ty: MessageType, payload: &[u8]) {
     }
 }
 
-fn run_sender(mut conn: Connection<UnixStream>, out_rx: Receiver<Outbound>) {
+fn run_sender(mut conn: Connection<LocalStream>, out_rx: Receiver<Outbound>) {
     while let Ok(out) = out_rx.recv() {
         let sent = match out {
             Outbound::Input(input) => conn.send_input(&to_input_event(input)),

@@ -39,6 +39,15 @@ use rime_protocol::{
 /// nothing — it is the wire's null reference, and a [`Command::Spawn`]'s "give me a fresh one".
 pub type EntityId = u64;
 
+/// A whole component set: `(type_hash, reflection-serialized bytes)` pairs.
+///
+/// One shape serves four callers — the asset browser's "place", the outliner's Clone and Paste, and
+/// the undo of a despawn — because all four are the same operation: "make an entity that has
+/// exactly these components". Copying the bytes verbatim is what makes a clone carry EVERY feature
+/// of its source, including component types this editor build has no schema entry for: it never
+/// interprets them, so it cannot drop one it does not understand.
+pub type ComponentSet = Vec<(u64, Vec<u8>)>;
+
 /// One mutation of the world, as the editor sees it. Turned into a wire message by [`Command::to_wire`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -56,12 +65,13 @@ pub enum Command {
     /// Spawn an entity with the engine's default placement. `id: 0` asks for a fresh id; a
     /// previously issued id respawns under it (the redo of a spawn).
     Spawn { id: EntityId },
-    /// Spawn an entity with an initial component set — the asset browser's "place" (m9.5), or with
-    /// `exact` the undo of a despawn. Each component is `(type_hash, reflection-serialized bytes)`.
+    /// Spawn an entity with an initial component set — the asset browser's "place" (m9.5), the
+    /// outliner's Clone/Paste, or with `exact` the undo of a despawn. Each component is
+    /// `(type_hash, reflection-serialized bytes)`.
     SpawnEntity {
         id: EntityId,
         exact: bool,
-        components: Vec<(u64, Vec<u8>)>,
+        components: ComponentSet,
     },
     /// Despawn an entity. The engine nulls every reference other entities hold to it.
     Despawn { id: EntityId },

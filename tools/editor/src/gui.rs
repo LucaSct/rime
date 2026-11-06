@@ -37,15 +37,18 @@ use crate::gizmo::{self, DragSession, Snapping};
 #[cfg(test)]
 mod click_tests;
 mod commands;
+// The same widgets as `click_tests`, against the real engine process instead of a fake host.
 mod entity_picker;
 mod game_run;
 mod outliner;
+#[cfg(test)]
+mod pipeline_tests;
 mod player;
 #[cfg(test)]
 use outliner::label as outliner_label;
 mod session;
 
-use commands::{Awaiting, Command, CommandStack, Edit, EntityId, PendingStep};
+use commands::{Awaiting, Command, CommandStack, ComponentSet, Edit, EntityId, PendingStep};
 use session::{EngineSession, Outbound, Shared, SharedState};
 
 // Snap increments when snapping is engaged (Ctrl, or the toolbar toggle): a quarter unit and 15°,
@@ -382,6 +385,20 @@ struct EditorApp {
     active_edit: Option<ActiveEdit>,
     // Asset browser (m9.5) filter state.
     asset_search: String,
+    /// The last copied component set, for Paste / Paste component. Blobs verbatim, exactly the
+    /// shape `Command::SpawnEntity` takes — so a paste is a spawn of what was copied, and needs no
+    /// new wire message. Editor-local on purpose: it is not world state, so it survives Play/Stop
+    /// and is not something the engine should be asked to remember.
+    clipboard: Option<ComponentSet>,
+    /// Components to ask the engine to add to the entity its next `Spawn` creates — the archetype
+    /// menu's second half. It has to wait: the new entity's `EditorId` exists only in the spawn's
+    /// `EditResult`, so the adds cannot ride along with the spawn itself.
+    ///
+    /// Asking the engine to add each component, rather than sending bytes with the spawn, is the
+    /// point. The editor does not know a component's default — only the engine's reflection does —
+    /// and a zero-filled blob is not a default (a `RigidBody` of mass 0 is not a resting body, it
+    /// is an invalid one). So an archetype is exactly "spawn, then add these, defaulted by you".
+    pending_archetype: Option<Vec<u64>>,
     outliner_options: outliner::Options,
     asset_kind_filter: Option<AssetKind>,
     // Gizmo interaction state (m9.6b). `gizmo_mode` None = hidden. `gizmo_hover` is the axis the
@@ -461,6 +478,8 @@ impl EditorApp {
             stack: CommandStack::default(),
             active_edit: None,
             asset_search: String::new(),
+            clipboard: None,
+            pending_archetype: None,
             outliner_options: outliner::Options::default(),
             asset_kind_filter: None,
             gizmo_mode: None,
@@ -900,7 +919,26 @@ impl eframe::App for EditorApp {
             }
         }
         self.stack.set_frozen(!editing);
+        // An archetype spawn's follow-up adds, held until `actions` exists a few lines below.
+        let mut archetype_adds: Vec<Command> = Vec::new();
         for result in edit_results {
+            let (ok, new_id) = (result.ok, result.editor_id);
+            // The archetype's second half. Consumed on the first accepted result carrying an id,
+            // which is the spawn we just sent: a menu click issues that spawn alone, and the engine
+            // answers edits in the order it received them. A REFUSED spawn drops the archetype
+            // rather than attaching it to whatever answers next.
+            if let Some(types) = self.pending_archetype.take() {
+                if ok && new_id != 0 {
+                    archetype_adds.extend(types.into_iter().map(|type_hash| {
+                        Command::AddComponent {
+                            id: new_id,
+                            type_hash,
+                        }
+                    }));
+                    // Select it, so the inspector is already showing what was just made.
+                    self.selected = Some(new_id);
+                }
+            }
             if let Some(refusal) = self.stack.acknowledge(result) {
                 // Shown where a refused save is: the status line. A refused edit changed nothing,
                 // and the user has to be told rather than left to wonder why undo skipped it.
@@ -916,6 +954,7 @@ impl eframe::App for EditorApp {
 
         // Every mutation the panels/menu produce this frame lands here, then is dispatched once.
         let mut actions: Vec<Command> = Vec::new();
+        actions.append(&mut archetype_adds);
         // Undo/redo output: commands whose history is already settled (see `replay`).
         let mut replayed: Vec<Command> = Vec::new();
 
@@ -1381,6 +1420,7 @@ impl eframe::App for EditorApp {
         });
 
         let saving_now = self.save_pending.is_some() || self.pending_open.is_some();
+        let mut spawn_archetype: Option<Vec<u64>> = None;
         let mut viewer = EditorTabs {
             editing_enabled: !saving_now && !player_active,
             frame_tex: self.frame_tex.as_ref(),
@@ -1395,6 +1435,8 @@ impl eframe::App for EditorApp {
             assets: &assets,
             mesh_asset_hash,
             asset_search: &mut self.asset_search,
+            clipboard: &mut self.clipboard,
+            spawn_archetype: &mut spawn_archetype,
             outliner_options: &mut self.outliner_options,
             asset_kind_filter: &mut self.asset_kind_filter,
             selected: &mut self.selected,
@@ -1414,6 +1456,14 @@ impl eframe::App for EditorApp {
         DockArea::new(&mut self.dock)
             .style(Style::from_egui(ctx.style().as_ref()))
             .show(ctx, &mut viewer);
+
+        // The archetype menu's first half: spawn now, remember what to add when the engine names
+        // the entity. Issued here rather than inside the panel because the panel only gets an
+        // `actions` sink, and this needs to set app state (`pending_archetype`) as well.
+        if let Some(types) = spawn_archetype.take() {
+            self.pending_archetype = Some(types);
+            actions.push(Command::Spawn { id: 0 });
+        }
 
         self.replay(replayed);
         self.dispatch(actions);
@@ -1480,6 +1530,9 @@ struct EditorTabs<'a> {
     assets: &'a [AssetEntry],
     mesh_asset_hash: Option<u64>,
     asset_search: &'a mut String,
+    clipboard: &'a mut Option<ComponentSet>,
+    /// Set by the outliner's archetype menu; turned into a spawn after the dock has run.
+    spawn_archetype: &'a mut Option<Vec<u64>>,
     outliner_options: &'a mut outliner::Options,
     asset_kind_filter: &'a mut Option<AssetKind>,
     selected: &'a mut Option<EntityId>,
@@ -1565,6 +1618,9 @@ impl TabViewer for EditorTabs<'_> {
                 self.selected,
                 self.actions,
                 self.outliner_options,
+                self.clipboard,
+                self.addable,
+                self.spawn_archetype,
             ),
             Tab::Inspector => {
                 thermal_preview_ui(ui, self.thermal, *self.selected);
@@ -1577,6 +1633,7 @@ impl TabViewer for EditorTabs<'_> {
                     self.actions,
                     self.active_edit,
                     self.stack,
+                    self.clipboard,
                 );
             }
             Tab::Assets => assets_ui(
@@ -2112,6 +2169,7 @@ fn inspector_ui(
     actions: &mut Vec<Command>,
     active_edit: &mut Option<ActiveEdit>,
     stack: &mut CommandStack,
+    clipboard: &mut Option<ComponentSet>,
 ) {
     let Some(id) = selected else {
         ui.weak("select an entity in the Outliner");
@@ -2125,7 +2183,47 @@ fn inspector_ui(
     let key: EntityId = entity.editor_id;
 
     ui.horizontal(|ui| {
-        ui.heading(format!("entity {idx}"));
+        let heading = ui.heading(format!("entity {idx}"));
+        // Right-click the heading for the whole-entity operations, the same set the outliner row
+        // offers — so whichever panel the user happens to be in answers the same gesture.
+        heading.context_menu(|ui| {
+            let set: ComponentSet = entity
+                .components
+                .iter()
+                .map(|c| (c.type_hash, c.data.clone()))
+                .collect();
+            if ui.button("Clone").clicked() {
+                actions.push(Command::SpawnEntity {
+                    id: 0,
+                    exact: false,
+                    components: set.clone(),
+                });
+                ui.close_menu();
+            }
+            if ui.button("Copy all components").clicked() {
+                *clipboard = Some(set);
+                ui.close_menu();
+            }
+            // Pasting ONTO an entity is additive-or-overwriting per component, never a wholesale
+            // replacement: nothing here removes a component the clipboard happens not to carry.
+            // `SetComponent` on a type the entity lacks is what `AddComponent` + a value would be,
+            // and the engine already accepts it that way (the undo of a remove is exactly this).
+            let held = clipboard.clone().unwrap_or_default();
+            if ui
+                .add_enabled(!held.is_empty(), egui::Button::new("Paste components here"))
+                .on_hover_text(format!("{} copied components", held.len()))
+                .clicked()
+            {
+                for (type_hash, blob) in held {
+                    actions.push(Command::SetComponent {
+                        id: key,
+                        type_hash,
+                        blob,
+                    });
+                }
+                ui.close_menu();
+            }
+        });
         if ui.button("✖ despawn").clicked() {
             actions.push(Command::Despawn { id: key });
         }
@@ -2161,7 +2259,7 @@ fn inspector_ui(
                 .type_by_hash(comp.type_hash)
                 .map(|t| t.name.clone())
                 .unwrap_or_else(|| format!("type 0x{:016x}", comp.type_hash));
-            egui::CollapsingHeader::new(name)
+            let section = egui::CollapsingHeader::new(name)
                 .default_open(true)
                 .show(ui, |ui| {
                     if ui.button("remove").clicked() {
@@ -2181,6 +2279,44 @@ fn inspector_ui(
                         stack,
                     );
                 });
+            // Right-click one component: the per-component clipboard. Copying a single component
+            // and pasting it onto another entity is the move this panel was missing — it is how a
+            // tuned RigidBody or a light's settings get reused without retyping every field.
+            section.header_response.context_menu(|ui| {
+                if ui.button("Copy component").clicked() {
+                    *clipboard = Some(vec![(comp.type_hash, comp.data.clone())]);
+                    ui.close_menu();
+                }
+                // Only a component of the SAME type may be pasted here. The blobs are opaque
+                // reflection bytes, so pasting a Transform's bytes into a RigidBody would not be a
+                // conversion — it would be a reinterpretation, and the engine would accept it.
+                let same = clipboard.as_ref().and_then(|held| {
+                    held.iter()
+                        .find(|(hash, _)| *hash == comp.type_hash)
+                        .cloned()
+                });
+                if ui
+                    .add_enabled(same.is_some(), egui::Button::new("Paste component"))
+                    .clicked()
+                {
+                    if let Some((type_hash, blob)) = same {
+                        actions.push(Command::SetComponent {
+                            id: key,
+                            type_hash,
+                            blob,
+                        });
+                    }
+                    ui.close_menu();
+                }
+                ui.separator();
+                if ui.button("Remove component").clicked() {
+                    actions.push(Command::RemoveComponent {
+                        id: key,
+                        type_hash: comp.type_hash,
+                    });
+                    ui.close_menu();
+                }
+            });
         }
     });
 }
