@@ -130,6 +130,24 @@ if (-not $RustOnly) {
         Say 'C++: ctest'
         Run ctest --test-dir "build/$Preset" --output-on-failure
     }
+    else {
+        # The cook is a CTest fixture, so skipping tests used to leave sample content
+        # unbuilt and samples unable to run. -L '^cook$' runs only the cook fixtures
+        # so cooked assets are generated without executing the test suite. Cooking is
+        # skipped under -CppOnly because the cooker is a Rust binary built by cargo run.
+        if ((-not $CppOnly) -and (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            Say 'C++: cook sample content (ctest -L cook)'
+            Run ctest --test-dir "build/$Preset" -L '^cook$' --output-on-failure
+        }
+        else {
+            if ($CppOnly) {
+                Write-Warning '-CppOnly skips cooking sample content (cooker requires Rust tools)'
+            }
+            else {
+                Write-Warning 'cargo not found; sample content not cooked'
+            }
+        }
+    }
 }
 
 if (-not $CppOnly) {

@@ -121,6 +121,25 @@ if [ "$do_cpp" -eq 1 ]; then
     if [ "$run_tests" -eq 1 ]; then
         say "C++: ctest"
         ctest --test-dir "build/$preset" --output-on-failure
+    else
+        # The cook is a CTest fixture, so skipping tests used to leave sample content
+        # unbuilt and samples unable to run. -L '^cook$' runs only the cook fixtures
+        # so cooked assets are generated without executing the test suite. Cooking is
+        # skipped under --cpp-only because the cooker is a Rust binary built by cargo run.
+        if [ "$do_rust" -eq 1 ]; then
+            if ! command -v cargo >/dev/null 2>&1; then
+                # shellcheck disable=SC1091
+                . "$HOME/.cargo/env" 2>/dev/null || true
+            fi
+            if command -v cargo >/dev/null 2>&1; then
+                say "C++: cook sample content (ctest -L cook)"
+                ctest --test-dir "build/$preset" -L '^cook$' --output-on-failure
+            else
+                echo "build.sh: warning: cargo not found; sample content not cooked" >&2
+            fi
+        else
+            echo "build.sh: warning: --cpp-only skips cooking sample content" >&2
+        fi
     fi
 fi
 

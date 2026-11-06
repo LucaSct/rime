@@ -25,7 +25,7 @@ add_test(NAME destructible_wall_cook
     COMMAND cargo run --quiet --manifest-path tools/Cargo.toml --bin rime --
             fracture --size 4 3 0.3 --parts 60 --seed 11 --out "${WALL_COOKED_DIR}" --name wall
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
-set_tests_properties(destructible_wall_cook PROPERTIES FIXTURES_SETUP wall_cook)
+set_tests_properties(destructible_wall_cook PROPERTIES FIXTURES_SETUP wall_cook LABELS cook)
 
 # M8's "done when," in CI: hit the wall and self-check that parts die, an island detaches, the debris
 # settles, all three fan-out consumers fire, and the whole run is bit-reproducible across physics
