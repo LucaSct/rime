@@ -499,6 +499,12 @@ fn run_cook(input: &Path, out: &Path, color_space: ColorSpace, bc: bool) -> Exit
                 result.sources_cooked,
                 result.sources_cached
             );
+            // Always printed, even at 0, so a script scraping the summary never has to guess
+            // whether the line is missing or the count is zero.
+            println!(
+                "{} texture(s) shared, not rewritten",
+                result.textures_shared
+            );
             ExitCode::SUCCESS
         }
         Err(e) => {
