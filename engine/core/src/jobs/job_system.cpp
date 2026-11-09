@@ -84,7 +84,7 @@ constexpr std::size_t kJobSegmentSize = 1u << 14; // 16384 jobs per segment (pow
 // run() without a matching wait(), i.e. a submission leak. Trip well past any sane frame so the
 // engine bug is caught in checked builds, while unchecked builds degrade to memory pressure
 // rather than corruption.
-constexpr std::size_t kMaxJobSegments = 256; // 4M jobs in flight from one thread
+[[maybe_unused]] constexpr std::size_t kMaxJobSegments = 256; // 4M jobs in flight from one thread
 
 // WHICH DEQUE THIS THREAD SUBMITS TO, PER JOB SYSTEM. A worker's index, or num_workers for the
 // system's own submitting thread. Absent (-1) means "not a participant in THIS system" —
